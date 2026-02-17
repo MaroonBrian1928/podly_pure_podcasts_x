@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
 
+from flask import current_app
 from sqlalchemy import func
 from sqlalchemy.orm import Query
 
@@ -20,14 +21,70 @@ from shared import defaults as DEFAULTS
 logger = logging.getLogger("global_logger")
 
 
+def _get_most_recent_posts_per_feed(post_guids: Sequence[str]) -> set[str]:
+    """Return GUIDs of the most recent post for each feed.
+
+    For feeds with multiple posts in the candidate list, returns only the
+    most recent one (determined by latest completion timestamp or file mtime).
+    These posts should never be cleaned up to ensure each feed has at least
+    one processed episode available.
+    """
+    if not post_guids:
+        return set()
+
+    # Get posts with their feed_id and processed timestamp info
+    posts = Post.query.filter(Post.guid.in_(post_guids)).all()
+
+    # Build map of completion timestamps
+    latest_completed = _load_latest_completed_map(post_guids)
+
+    # Group by feed and find most recent per feed
+    feed_posts: dict[int, tuple[str, datetime | None]] = {}
+
+    for post in posts:
+        timestamp = _get_post_timestamp(post, latest_completed)
+
+        if post.feed_id not in feed_posts:
+            feed_posts[post.feed_id] = (post.guid, timestamp)
+        else:
+            _, current_timestamp = feed_posts[post.feed_id]
+            # Keep the post with the latest timestamp
+            if timestamp and current_timestamp:
+                if timestamp > current_timestamp:
+                    feed_posts[post.feed_id] = (post.guid, timestamp)
+            elif timestamp:  # Only new post has timestamp
+                feed_posts[post.feed_id] = (post.guid, timestamp)
+            # If neither has timestamp, keep current
+
+    return {guid for guid, _ in feed_posts.values()}
+
+
+def _get_post_timestamp(
+    post: Post, latest_completed: dict[str, datetime | None]
+) -> datetime | None:
+    """Get the most recent timestamp for a post (file or job completion)."""
+    file_timestamp = _get_processed_file_timestamp(post)
+    job_timestamp = latest_completed.get(post.guid)
+
+    if file_timestamp and job_timestamp:
+        return max(file_timestamp, job_timestamp)
+    return file_timestamp or job_timestamp
+
+
 def _build_cleanup_query(
-    retention_days: Optional[int],
-) -> Tuple[Optional[Query["Post"]], Optional[datetime]]:
+    retention_days: int | None,
+) -> tuple[Query[Post] | None, datetime | None]:
     """Construct the base query for posts eligible for cleanup."""
-    if retention_days is None or retention_days <= 0:
+    if retention_days is None:
         return None, None
 
-    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    # In developer mode, allow retention_days=0 for testing (cutoff = now)
+    # In production, require retention_days > 0
+    developer_mode = current_app.config.get("developer_mode", False)
+    if retention_days <= 0 and not developer_mode:
+        return None, None
+
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
 
     active_jobs_exists = (
         db.session.query(ProcessingJob.id)
@@ -44,32 +101,38 @@ def _build_cleanup_query(
 
 
 def count_cleanup_candidates(
-    retention_days: Optional[int],
-) -> Tuple[int, Optional[datetime]]:
+    retention_days: int | None,
+) -> tuple[int, datetime | None]:
     """Return how many posts would currently be removed along with the cutoff."""
     posts_query, cutoff = _build_cleanup_query(retention_days)
     if posts_query is None or cutoff is None:
         return 0, None
 
     posts = posts_query.all()
-    latest_completed = _load_latest_completed_map([post.guid for post in posts])
+    post_guids = [post.guid for post in posts]
+    latest_completed = _load_latest_completed_map(post_guids)
+    most_recent_per_feed = _get_most_recent_posts_per_feed(post_guids)
+
     count = sum(
         1
         for post in posts
-        if _processed_timestamp_before_cutoff(post, cutoff, latest_completed)
+        if post.guid not in most_recent_per_feed
+        and _processed_timestamp_before_cutoff(post, cutoff, latest_completed)
     )
     return count, cutoff
 
 
-def cleanup_processed_posts(retention_days: Optional[int]) -> int:
+def cleanup_processed_posts(retention_days: int | None) -> int:
     """Prune processed posts older than the retention window.
 
     Posts qualify when their processed audio artifact (or, if missing, the
-    latest completed job) is older than the retention window. Eligible posts
-    are un-whitelisted, artifacts are removed, and dependent rows are deleted,
-    but the post row is retained to prevent reprocessing. Returns the number of
-    posts that were cleaned. Callers must ensure an application context is
-    active.
+    latest completed job) is older than the retention window. The most recent
+    post for each feed is always preserved, even if older than the retention
+    window, to ensure each feed has at least one processed episode available.
+    Eligible posts are un-whitelisted, artifacts are removed, and dependent
+    rows are deleted, but the post row is retained to prevent reprocessing.
+    Returns the number of posts that were cleaned. Callers must ensure an
+    application context is active.
     """
     with db_guard("cleanup_processed_posts", db.session, logger):
         posts_query, cutoff = _build_cleanup_query(retention_days)
@@ -77,7 +140,9 @@ def cleanup_processed_posts(retention_days: Optional[int]) -> int:
             return 0
 
         posts: Sequence[Post] = posts_query.all()
-        latest_completed = _load_latest_completed_map([post.guid for post in posts])
+        post_guids = [post.guid for post in posts]
+        latest_completed = _load_latest_completed_map(post_guids)
+        most_recent_per_feed = _get_most_recent_posts_per_feed(post_guids)
 
         if not posts:
             return 0
@@ -85,6 +150,10 @@ def cleanup_processed_posts(retention_days: Optional[int]) -> int:
         removed_posts = 0
 
         for post in posts:
+            # Always preserve the most recent post for each feed
+            if post.guid in most_recent_per_feed:
+                continue
+
             if not _processed_timestamp_before_cutoff(post, cutoff, latest_completed):
                 continue
 
@@ -98,9 +167,9 @@ def cleanup_processed_posts(retention_days: Optional[int]) -> int:
             _remove_associated_files(post)
             try:
                 writer_client.action(
-                    "cleanup_processed_post", {"post_id": post.id}, wait=True
+                    "cleanup_processed_post_files_only", {"post_id": post.id}, wait=True
                 )
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception as exc:
                 logger.error(
                     "Cleanup failed for post %s (guid=%s): %s",
                     post.id,
@@ -130,7 +199,7 @@ def scheduled_cleanup_processed_posts() -> None:
     try:
         with scheduler.app.app_context():
             cleanup_processed_posts(retention)
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:
         logger.error("Scheduled cleanup failed: %s", exc, exc_info=True)
         reset_session(db.session, logger, "scheduled_cleanup_processed_posts", exc)
 
@@ -142,7 +211,7 @@ def _remove_associated_files(post: Post) -> None:
             continue
         try:
             file_path = Path(path_str)
-        except Exception:  # pylint: disable=broad-except
+        except Exception:  # noqa: BLE001
             logger.warning("Cleanup: invalid path for post %s: %s", post.guid, path_str)
             continue
         if not file_path.exists():
@@ -156,7 +225,7 @@ def _remove_associated_files(post: Post) -> None:
 
 def _load_latest_completed_map(
     post_guids: Sequence[str],
-) -> Dict[str, Optional[datetime]]:
+) -> dict[str, datetime | None]:
     if not post_guids:
         return {}
 
@@ -173,12 +242,12 @@ def _load_latest_completed_map(
 
 
 def _processed_timestamp_before_cutoff(
-    post: Post, cutoff: datetime, latest_completed: Dict[str, Optional[datetime]]
+    post: Post, cutoff: datetime, latest_completed: dict[str, datetime | None]
 ) -> bool:
     file_timestamp = _get_processed_file_timestamp(post)
     job_timestamp = latest_completed.get(post.guid)
 
-    candidate: Optional[datetime]
+    candidate: datetime | None
     if file_timestamp and job_timestamp:
         candidate = min(file_timestamp, job_timestamp)
     else:
@@ -187,13 +256,13 @@ def _processed_timestamp_before_cutoff(
     return bool(candidate and candidate < cutoff)
 
 
-def _get_processed_file_timestamp(post: Post) -> Optional[datetime]:
+def _get_processed_file_timestamp(post: Post) -> datetime | None:
     if not post.processed_audio_path:
         return None
 
     try:
         file_path = Path(post.processed_audio_path)
-    except Exception:  # pylint: disable=broad-except
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Cleanup: invalid processed path for post %s: %s",
             post.guid,
@@ -210,4 +279,4 @@ def _get_processed_file_timestamp(post: Post) -> Optional[datetime]:
         logger.warning("Cleanup: unable to stat processed file %s: %s", file_path, exc)
         return None
 
-    return datetime.utcfromtimestamp(mtime)
+    return datetime.fromtimestamp(mtime, tz=UTC).replace(tzinfo=None)

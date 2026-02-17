@@ -1,14 +1,12 @@
-"""Writer action function re-exports.
-
-Mypy runs with `--no-implicit-reexport`, so imports use explicit aliasing.
-"""
-
-# pylint: disable=useless-import-alias
+"""Writer action function re-exports."""
 
 from .cleanup import (
     cleanup_missing_audio_paths_action as cleanup_missing_audio_paths_action,
 )
 from .cleanup import cleanup_processed_post_action as cleanup_processed_post_action
+from .cleanup import (
+    cleanup_processed_post_files_only_action as cleanup_processed_post_files_only_action,
+)
 from .cleanup import (
     clear_post_processing_data_action as clear_post_processing_data_action,
 )

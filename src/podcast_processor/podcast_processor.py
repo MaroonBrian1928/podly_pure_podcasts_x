@@ -2,8 +2,9 @@ import logging
 import os
 import shutil
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import litellm
 from jinja2 import Template
@@ -13,7 +14,14 @@ from app.extensions import db
 from app.models import Post, ProcessingJob, TranscriptSegment
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
+from podcast_processor.audio import clip_segments_exact
 from podcast_processor.audio_processor import AudioProcessor
+from podcast_processor.chapter_ad_detector import (
+    ChapterAdDetector,
+    ChapterDetectionError,
+)
+from podcast_processor.chapter_filter import parse_filter_strings
+from podcast_processor.chapter_writer import write_adjusted_chapters
 from podcast_processor.podcast_downloader import PodcastDownloader, sanitize_title
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from podcast_processor.prompt import (
@@ -32,7 +40,7 @@ from shared.processing_paths import (
 logger = logging.getLogger("global_logger")
 
 
-def get_post_processed_audio_path(post: Post) -> Optional[ProcessingPaths]:
+def get_post_processed_audio_path(post: Post) -> ProcessingPaths | None:
     """
     Generate the processed audio path based on the post's unprocessed audio path.
     Returns None if unprocessed_audio_path is not set.
@@ -52,7 +60,7 @@ def get_post_processed_audio_path(post: Post) -> Optional[ProcessingPaths]:
 
 def get_post_processed_audio_path_cached(
     post: Post, feed_title: str
-) -> Optional[ProcessingPaths]:
+) -> ProcessingPaths | None:
     """
     Generate the processed audio path using cached feed title to avoid ORM access.
     Returns None if unprocessed_audio_path is not set.
@@ -76,18 +84,18 @@ class PodcastProcessor:
     """
 
     lock_lock = threading.Lock()
-    locks: Dict[str, threading.Lock] = {}  # Now keyed by post GUID instead of file path
+    locks: dict[str, threading.Lock] = {}  # Now keyed by post GUID instead of file path
 
     def __init__(
         self,
         config: Config,
-        logger: Optional[logging.Logger] = None,
-        transcription_manager: Optional[TranscriptionManager] = None,
-        ad_classifier: Optional[AdClassifier] = None,
-        audio_processor: Optional[AudioProcessor] = None,
-        status_manager: Optional[ProcessingStatusManager] = None,
-        db_session: Optional[Any] = None,
-        downloader: Optional[PodcastDownloader] = None,
+        logger: logging.Logger | None = None,
+        transcription_manager: TranscriptionManager | None = None,
+        ad_classifier: AdClassifier | None = None,
+        audio_processor: AudioProcessor | None = None,
+        status_manager: ProcessingStatusManager | None = None,
+        db_session: Any | None = None,
+        downloader: PodcastDownloader | None = None,
     ) -> None:
         super().__init__()
         self.logger = logger or logging.getLogger("global_logger")
@@ -122,12 +130,11 @@ class PodcastProcessor:
         else:
             self.audio_processor = audio_processor
 
-    # pylint: disable=too-many-branches, too-many-statements
-    def process(
+    def process(  # noqa: PLR0912
         self,
         post: Post,
         job_id: str,
-        cancel_callback: Optional[Callable[[], bool]] = None,
+        cancel_callback: Callable[[], bool] | None = None,
     ) -> str:
         """
         Process a podcast by downloading, transcribing, identifying ads, and removing ad segments.
@@ -152,6 +159,12 @@ class PodcastProcessor:
         cached_feed_title = post.feed.title
         cached_job_id = job.id
         cached_current_step = job.current_step
+        cached_ad_detection_strategy = getattr(
+            post.feed, "ad_detection_strategy", "llm"
+        )
+        cached_chapter_filter_strings = getattr(
+            post.feed, "chapter_filter_strings", None
+        )
 
         try:
             self.logger.debug(
@@ -225,7 +238,12 @@ class PodcastProcessor:
 
                 # Perform the main processing steps
                 self._perform_processing_steps(
-                    post, job, processed_audio_path, cancel_callback
+                    post,
+                    job,
+                    processed_audio_path,
+                    cancel_callback,
+                    cached_ad_detection_strategy,
+                    cached_chapter_filter_strings,
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
@@ -237,7 +255,7 @@ class PodcastProcessor:
                         lock = PodcastProcessor.locks.get(cached_post_guid)
                         if lock is not None and lock.locked():
                             lock.release()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     # Best-effort lock release; avoid masking original exceptions
                     pass
 
@@ -264,7 +282,7 @@ class PodcastProcessor:
                 exc_info=True,
             )
             self.status_manager.update_job_status(
-                job, "failed", cached_current_step, f"Unexpected error: {str(e)}"
+                job, "failed", cached_current_step, f"Unexpected error: {e!s}"
             )
             raise
 
@@ -325,15 +343,39 @@ class PodcastProcessor:
         post: Post,
         job: ProcessingJob,
         processed_audio_path: str,
-        cancel_callback: Optional[Callable[[], bool]] = None,
+        cancel_callback: Callable[[], bool] | None = None,
+        ad_detection_strategy: str = "llm",
+        chapter_filter_strings: str | None = None,
     ) -> None:
         """
-        Perform the main processing steps: transcription, ad classification, and audio processing.
+        Perform the main processing steps based on the ad detection strategy.
 
         Args:
             post: The Post object to process
             job: The ProcessingJob for tracking
             processed_audio_path: Path where the processed audio will be saved
+            cancel_callback: Optional callback to check for cancellation
+            ad_detection_strategy: "llm" or "chapter"
+            chapter_filter_strings: Comma-separated filter strings for chapter strategy
+        """
+        if ad_detection_strategy == "chapter":
+            self._perform_chapter_based_processing(
+                post, job, processed_audio_path, cancel_callback, chapter_filter_strings
+            )
+        else:
+            self._perform_llm_based_processing(
+                post, job, processed_audio_path, cancel_callback
+            )
+
+    def _perform_llm_based_processing(
+        self,
+        post: Post,
+        job: ProcessingJob,
+        processed_audio_path: str,
+        cancel_callback: Callable[[], bool] | None = None,
+    ) -> None:
+        """
+        Perform LLM-based ad detection: transcription, classification, and audio processing.
         """
         # Step 2: Transcribe audio
         self.status_manager.update_job_status(
@@ -352,15 +394,122 @@ class PodcastProcessor:
         )
         self.audio_processor.process_audio(post, processed_audio_path)
 
+        self._finalize_processing(post, job, processed_audio_path)
+
+    def _perform_chapter_based_processing(
+        self,
+        post: Post,
+        job: ProcessingJob,
+        processed_audio_path: str,
+        cancel_callback: Callable[[], bool] | None = None,
+        chapter_filter_strings: str | None = None,
+    ) -> None:
+        """
+        Perform chapter-based ad detection: read chapters, filter by title, remove ads.
+        Skips transcription and LLM classification.
+        """
+        from shared import defaults as DEFAULTS
+
+        # Step 2: Read and filter chapters (skipping transcription)
+        self.status_manager.update_job_status(
+            job, "running", 2, "Reading chapters", 50.0
+        )
+
+        # Get filter strings (per-feed or global default)
+        filter_csv = chapter_filter_strings or DEFAULTS.CHAPTER_FILTER_DEFAULT_STRINGS
+        filter_strings = parse_filter_strings(filter_csv)
+
+        detector = ChapterAdDetector(filter_strings=filter_strings, logger=self.logger)
+
+        try:
+            ad_segments, chapters_to_keep, chapters_to_remove = detector.detect(
+                str(post.unprocessed_audio_path)
+            )
+        except ChapterDetectionError as e:
+            raise ProcessorException(str(e)) from e
+
+        self._raise_if_cancelled(job, 2, cancel_callback)
+
+        # Step 3: Skip LLM classification (chapters already filtered)
+        self.status_manager.update_job_status(
+            job, "running", 3, "Chapters filtered", 75.0
+        )
+        self._raise_if_cancelled(job, 3, cancel_callback)
+
+        # Step 4: Process audio (remove ad segments)
+        self.status_manager.update_job_status(
+            job, "running", 4, "Processing audio", 90.0
+        )
+
+        # Convert ad segments to milliseconds for audio processing
+        ad_segments_ms = [(int(s * 1000), int(e * 1000)) for s, e in ad_segments]
+
+        if ad_segments_ms:
+            clip_segments_exact(
+                ad_segments_ms=ad_segments_ms,
+                in_path=str(post.unprocessed_audio_path),
+                out_path=processed_audio_path,
+            )
+        else:
+            # No ads found, copy the original file
+            shutil.copyfile(str(post.unprocessed_audio_path), processed_audio_path)
+
+        # Write adjusted chapters to the processed file
+        write_adjusted_chapters(
+            audio_path=processed_audio_path,
+            chapters_to_keep=chapters_to_keep,
+            removed_segments=ad_segments,
+        )
+
+        # Build chapter data for stats
+        import json
+
+        chapter_data = {
+            "filter_strings": filter_strings,
+            "chapters_kept": [
+                {
+                    "title": ch.title,
+                    "start_time": round(ch.start_time_ms / 1000.0, 1),
+                    "end_time": round(ch.end_time_ms / 1000.0, 1),
+                }
+                for ch in chapters_to_keep
+            ],
+            "chapters_removed": [
+                {
+                    "title": ch.title,
+                    "start_time": round(ch.start_time_ms / 1000.0, 1),
+                    "end_time": round(ch.end_time_ms / 1000.0, 1),
+                }
+                for ch in chapters_to_remove
+            ],
+        }
+
+        self._finalize_processing(
+            post, job, processed_audio_path, chapter_data=json.dumps(chapter_data)
+        )
+
+    def _finalize_processing(
+        self,
+        post: Post,
+        job: ProcessingJob,
+        processed_audio_path: str,
+        chapter_data: str | None = None,
+    ) -> None:
+        """
+        Finalize processing: update database and mark job complete.
+        """
         # Update the database with the processed audio path
         self._remove_unprocessed_audio(post)
+        update_data = {
+            "processed_audio_path": processed_audio_path,
+            "unprocessed_audio_path": None,
+        }
+        if chapter_data is not None:
+            update_data["chapter_data"] = chapter_data
         result = writer_client.update(
             "Post",
             post.id,
-            {
-                "processed_audio_path": processed_audio_path,
-                "unprocessed_audio_path": None,
-            },
+            update_data,
             wait=True,
         )
         if not result or not result.success:
@@ -375,7 +524,7 @@ class PodcastProcessor:
         self,
         job: ProcessingJob,
         current_step: int,
-        cancel_callback: Optional[Callable[[], bool]],
+        cancel_callback: Callable[[], bool] | None,
     ) -> None:
         """Helper to centralize cancellation checking and update job state."""
         if cancel_callback and cancel_callback():
@@ -388,7 +537,7 @@ class PodcastProcessor:
         self,
         post: Post,
         job: ProcessingJob,
-        transcript_segments: List[TranscriptSegment],
+        transcript_segments: list[TranscriptSegment],
     ) -> None:
         """
         Classify ad segments in the transcript.
@@ -420,7 +569,7 @@ class PodcastProcessor:
         post_title: str,
         feed_title: str,
         job_id: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Short-circuit processing for developer-mode test feeds.
 
         When developer mode is enabled and a post comes from a synthetic test feed
@@ -576,15 +725,15 @@ class PodcastProcessor:
 
     def get_system_prompt(self, system_prompt_path: str) -> str:
         """Load the system prompt from a file."""
-        with open(system_prompt_path, "r") as f:
+        with open(system_prompt_path) as f:
             return f.read()
 
     def get_user_prompt_template(self, prompt_template_path: str) -> Template:
         """Load the user prompt template from a file."""
-        with open(prompt_template_path, "r") as f:
+        with open(prompt_template_path) as f:
             return Template(f.read())
 
-    def remove_audio_files_and_reset_db(self, post_id: Optional[int]) -> None:
+    def remove_audio_files_and_reset_db(self, post_id: int | None) -> None:
         """
         Removes unprocessed/processed audio for the given post from disk,
         and resets the DB fields so the next run will re-download the files.

@@ -1,4 +1,5 @@
 .worktrees/*
+railway_scripts/
 
 __pycache__/
 *.py[cod]
@@ -60,3 +61,16 @@ frontend-build.log
 # Claude Code local notes (not committed)
 .claude-notes/
 CLAUDE_NOTES.md
+
+# Railway command script with credentials
+scripts/railway_command.sh
+
+# Virtual environment (uv creates .venv/ by default)
+.venv/
+
+# Linter / type checker caches
+.ruff_cache/
+
+# Claude local files
+.claude/
+CLAUDE.md
