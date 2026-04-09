@@ -25,7 +25,10 @@ from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
 )
-from podcast_processor.prompt import transcript_excerpt_for_prompt
+from podcast_processor.prompt import (
+    build_speaker_context_for_prompt,
+    transcript_excerpt_for_prompt,
+)
 from podcast_processor.token_rate_limiter import (
     TokenRateLimiter,
     configure_rate_limiter_for_model,
@@ -375,6 +378,7 @@ class AdClassifier:
 
             user_prompt_str = self._generate_user_prompt(
                 current_chunk_db_segments=chunk_segments,
+                all_transcript_segments=total_segments,
                 post=post,
                 user_prompt_template=user_prompt_template,
                 includes_start=includes_start,
@@ -662,6 +666,7 @@ class AdClassifier:
         self,
         *,
         current_chunk_db_segments: list[TranscriptSegment],
+        all_transcript_segments: list[TranscriptSegment],
         post: Post,
         user_prompt_template: Template,
         includes_start: bool,
@@ -669,13 +674,28 @@ class AdClassifier:
     ) -> str:
         """Generate the user prompt string for the LLM."""
         temp_pydantic_segments_for_prompt = [
-            Segment(start=db_seg.start_time, end=db_seg.end_time, text=db_seg.text)
+            Segment(
+                start=db_seg.start_time,
+                end=db_seg.end_time,
+                text=db_seg.text,
+                speaker_label=getattr(db_seg, "speaker_label", None),
+            )
             for db_seg in current_chunk_db_segments
+        ]
+        all_prompt_segments = [
+            Segment(
+                start=db_seg.start_time,
+                end=db_seg.end_time,
+                text=db_seg.text,
+                speaker_label=getattr(db_seg, "speaker_label", None),
+            )
+            for db_seg in all_transcript_segments
         ]
 
         return user_prompt_template.render(
             podcast_title=post.title,
             podcast_topic=post.description if post.description else "",
+            speaker_context=build_speaker_context_for_prompt(all_prompt_segments),
             transcript=transcript_excerpt_for_prompt(
                 segments=temp_pydantic_segments_for_prompt,
                 includes_start=includes_start,

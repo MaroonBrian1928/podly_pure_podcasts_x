@@ -132,6 +132,8 @@ export type WhisperConfig =
     language: string;
     timeout_sec: number;
     chunksize_mb: number;
+    diarize: boolean;
+    speaker_embeddings: boolean;
   }
   | {
     whisper_type: 'groq';

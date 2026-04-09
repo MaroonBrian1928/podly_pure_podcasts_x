@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import ModalShell from './ModalShell';
+import ProcessingStageLogs from './ProcessingStageLogs';
 
 interface LLMProcessingStatsProps {
   episodeGuid: string;
@@ -8,7 +10,7 @@ interface LLMProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'model-calls' | 'transcript' | 'identifications';
+type TabId = 'overview' | 'model-calls' | 'transcript' | 'identifications' | 'logs';
 
 export default function LLMProcessingStats({
   episodeGuid,
@@ -70,6 +72,31 @@ export default function LLMProcessingStats({
     setExpandedModelCalls(newExpanded);
   };
 
+  const getAdConfidence = (segment: {
+    identifications?: Array<{ label: string; confidence: number | null }>;
+  }) => {
+    const adConfidences = (segment.identifications || [])
+      .filter((identification) => identification.label === 'ad' && identification.confidence !== null)
+      .map((identification) => identification.confidence as number);
+
+    if (!adConfidences.length) {
+      return null;
+    }
+
+    return Math.max(...adConfidences);
+  };
+
+  const hasSpeakerLabels = (stats?.transcript_segments || []).some(
+    (segment) => Boolean(segment.speaker_label)
+  );
+  const contentViewKey = isLoading
+    ? 'loading'
+    : error
+      ? 'error'
+      : stats
+        ? activeTab
+        : 'empty';
+
   if (!hasProcessedAudio) {
     return null;
   }
@@ -83,9 +110,11 @@ export default function LLMProcessingStats({
         Stats
       </button>
 
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-6xl w-full max-h-[90vh] overflow-hidden">
+      <ModalShell
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        panelClassName="bg-white rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
+      >
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-xl font-bold text-gray-900 text-left">Processing Statistics & Debug</h2>
               <button
@@ -98,13 +127,14 @@ export default function LLMProcessingStats({
               </button>
             </div>
 
-            <div className="border-b">
-              <nav className="flex space-x-8 px-6">
+            <div className="border-b overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+              <nav className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
                   { id: 'model-calls', label: 'Model Calls' },
                   { id: 'transcript', label: 'Transcript Segments' },
-                  { id: 'identifications', label: 'Identifications' }
+                  { id: 'identifications', label: 'Identifications' },
+                  { id: 'logs', label: 'Related Logs' }
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -113,25 +143,30 @@ export default function LLMProcessingStats({
                       activeTab === tab.id
                         ? 'border-blue-500 text-blue-600'
                         : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
+                    } shrink-0 whitespace-nowrap`}
                   >
                     {tab.label}
                     {stats && tab.id === 'model-calls' && stats.model_calls && ` (${stats.model_calls.length})`}
                     {stats && tab.id === 'transcript' && stats.transcript_segments && ` (${stats.transcript_segments.length})`}
                     {stats && tab.id === 'identifications' && stats.identifications && ` (${stats.identifications.length})`}
+                    {stats && tab.id === 'logs' && stats.related_logs && ` (${stats.related_logs.entries.length})`}
                   </button>
                 ))}
               </nav>
             </div>
 
-            <div className="p-6 overflow-y-auto max-h-[calc(90vh-200px)]">
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              <div
+                key={contentViewKey}
+                className="podly-tab-panel-enter min-h-full"
+              >
               {isLoading ? (
-                <div className="flex items-center justify-center py-12">
+                <div className="flex min-h-full items-center justify-center py-12">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
                   <span className="ml-3 text-gray-600">Loading stats...</span>
                 </div>
               ) : error ? (
-                <div className="text-center py-12">
+                <div className="flex min-h-full items-center justify-center text-center py-12">
                   <p className="text-red-600">Failed to load processing statistics</p>
                 </div>
               ) : stats ? (
@@ -454,7 +489,7 @@ export default function LLMProcessingStats({
                                       </span>
                                     </td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
-                                    <td className="px-4 py-3 text-sm text-gray-600">{call.retry_attempts}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
                                     <td className="px-4 py-3">
                                       <button
                                         onClick={() => toggleModelCallDetails(call.id)}
@@ -515,37 +550,59 @@ export default function LLMProcessingStats({
                               <tr>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Seq #</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                {hasSpeakerLabels && (
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
+                                )}
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ad Confidence</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Text</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {(stats.transcript_segments || []).map((segment) => (
-                                <tr key={segment.id} className={`hover:bg-gray-50 ${
-                                  segment.primary_label === 'ad' ? 'bg-red-50' : ''
-                                }`}>
-                                  <td className="px-4 py-3 text-sm text-gray-900">{segment.sequence_num}</td>
-                                  <td className="px-4 py-3 text-sm text-gray-600">
-                                    {segment.start_time}s - {segment.end_time}s
-                                  </td>
-                                  <td className="px-4 py-3">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                      segment.primary_label === 'ad'
-                                        ? 'bg-red-100 text-red-800'
-                                        : 'bg-green-100 text-green-800'
-                                    }`}>
-                                      {segment.primary_label === 'ad'
-                                        ? (segment.mixed ? 'Ad (mixed)' : 'Ad')
-                                        : 'Content'}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3 text-sm text-gray-900 max-w-md">
-                                    <div className="truncate text-left" title={segment.text}>
-                                      {segment.text}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
+                              {(stats.transcript_segments || []).map((segment) => {
+                                const adConfidence = getAdConfidence(segment);
+
+                                return (
+                                  <tr key={segment.id} className={`hover:bg-gray-50 ${
+                                    segment.primary_label === 'ad' ? 'bg-red-50' : ''
+                                  }`}>
+                                    <td className="px-4 py-3 text-sm text-gray-900">{segment.sequence_num}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                      {segment.start_time}s - {segment.end_time}s
+                                    </td>
+                                    {hasSpeakerLabels && (
+                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                        {segment.speaker_label ? (
+                                          <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-700">
+                                            {segment.speaker_label}
+                                          </span>
+                                        ) : (
+                                          <span className="text-gray-400">-</span>
+                                        )}
+                                      </td>
+                                    )}
+                                    <td className="px-4 py-3">
+                                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                        segment.primary_label === 'ad'
+                                          ? 'bg-red-100 text-red-800'
+                                          : 'bg-green-100 text-green-800'
+                                      }`}>
+                                        {segment.primary_label === 'ad'
+                                          ? (segment.mixed ? 'Ad (mixed)' : 'Ad')
+                                          : 'Content'}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                      {adConfidence !== null ? adConfidence.toFixed(2) : '-'}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900 min-w-[28rem] max-w-4xl">
+                                      <div className="whitespace-pre-wrap break-words text-left leading-6">
+                                        {segment.text}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -608,12 +665,18 @@ export default function LLMProcessingStats({
                       </div>
                     </div>
                   )}
+
+                  {activeTab === 'logs' && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Related Logs ({stats.related_logs?.entries.length || 0})</h3>
+                      <ProcessingStageLogs relatedLogs={stats.related_logs} />
+                    </div>
+                  )}
                 </>
               ) : null}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+      </ModalShell>
     </>
   );
 }

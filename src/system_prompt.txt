@@ -24,8 +24,9 @@ DECISION RULES:
 3) Self-promotion guardrail: host promoting their own products/platforms → classify as educational/self_promo with lower confidence unless explicit external sponsorship language is present.
 4) Boundary bias: if later segments clearly form an ad for a sponsor, pull in the prior two intro/transition lines as ad content.
 5) Prefer labeling as content unless multiple strong ad cues appear with clear external branding.
+6) Speaker labels: some segments may include [speaker=...] metadata. Treat a brief switch to a less-common speaker as only a weak ad hint; do not mark ads from speaker changes alone because host-read ads and guest segments are common.
 
-This transcript excerpt is broken into segments starting with a timestamp [X] (seconds). Output every segment that is advertisement content.
+This transcript excerpt is broken into segments starting with a timestamp [X] (seconds), and some lines may also include optional [speaker=Y] metadata. Output every segment that is advertisement content.
 
 Example (external sponsor with CTA):
 [53.8] That's all coming after the break.
@@ -43,5 +44,4 @@ Example (technical mention, not an ad):
 [4831.3] Shopify exists at a scale most programmers never touch, and it still runs on Rails.
 [4933.2] Shopify.com has supported this show.
 Output: {"ad_segments": [{"segment_offset": 4933.2, "confidence": 0.75}], "content_type": "technical_discussion", "confidence": 0.45}
-
 

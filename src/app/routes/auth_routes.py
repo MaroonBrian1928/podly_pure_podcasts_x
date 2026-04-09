@@ -26,6 +26,7 @@ from app.auth.state import failure_rate_limiter
 from app.extensions import db
 from app.models import User
 from app.runtime_config import config as runtime_config
+from app.ui_features import show_discord_integration, show_report_issue_button
 
 logger = logging.getLogger("global_logger")
 
@@ -46,7 +47,12 @@ def _auth_enabled() -> bool:
 def auth_status() -> Response:
     landing_enabled = bool(getattr(runtime_config, "enable_public_landing_page", False))
     return jsonify(
-        {"require_auth": _auth_enabled(), "landing_page_enabled": landing_enabled}
+        {
+            "require_auth": _auth_enabled(),
+            "landing_page_enabled": landing_enabled,
+            "show_discord_integration": show_discord_integration(),
+            "show_report_issue_button": show_report_issue_button(),
+        }
     )
 
 

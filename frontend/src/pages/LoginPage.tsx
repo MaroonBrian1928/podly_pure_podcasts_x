@@ -1,13 +1,14 @@
 import type { FormEvent } from 'react';
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { discordApi } from '../services/api';
 import ThemeToggle from '../components/ThemeToggle';
 
 export default function LoginPage() {
-  const { login, landingPageEnabled } = useAuth();
+  const { login, landingPageEnabled, showDiscordIntegration } = useAuth();
+  const navigate = useNavigate();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -38,6 +39,12 @@ export default function LoginPage() {
 
   // Check if Discord SSO is enabled
   useEffect(() => {
+    if (!showDiscordIntegration) {
+      setDiscordEnabled(false);
+      setShowPasswordLogin(true);
+      return;
+    }
+
     discordApi.getStatus()
       .then((status) => {
         setDiscordEnabled(status.enabled);
@@ -47,7 +54,7 @@ export default function LoginPage() {
         setDiscordEnabled(false);
         setShowPasswordLogin(true);
       });
-  }, []);
+  }, [showDiscordIntegration]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -58,6 +65,7 @@ export default function LoginPage() {
       await login(username, password);
       setUsername('');
       setPassword('');
+      navigate('/', { replace: true, state: { fromPath: '/login' } });
     } catch (err) {
       if (axios.isAxiosError(err)) {
         const message = err.response?.data?.error ?? 'Invalid username or password.';
@@ -183,9 +191,11 @@ export default function LoginPage() {
         )}
 
         <div className="mt-4 flex flex-col items-center gap-3">
-          <a href="https://discord.gg/FRB98GtF6N" target="_blank" rel="noopener noreferrer">
-            <img src="https://img.shields.io/badge/discord-join-blue.svg?logo=discord&logoColor=white" alt="Discord" />
-          </a>
+          {showDiscordIntegration && (
+            <a href="https://discord.gg/FRB98GtF6N" target="_blank" rel="noopener noreferrer">
+              <img src="https://img.shields.io/badge/discord-join-blue.svg?logo=discord&logoColor=white" alt="Discord" />
+            </a>
+          )}
           {landingPageEnabled && (
             <Link to="/" className="text-sm text-gray-500 hover:text-gray-700 transition-colors">
               ← Back to home

@@ -187,6 +187,10 @@ def _overlay_remote_whisper_fields(target: dict[str, Any], source: Any) -> None:
     target["chunksize_mb"] = _get_attr_or_value(
         source, "chunksize_mb", target.get("chunksize_mb")
     )
+    target["diarize"] = _get_attr_or_value(source, "diarize", target.get("diarize"))
+    target["speaker_embeddings"] = _get_attr_or_value(
+        source, "speaker_embeddings", target.get("speaker_embeddings")
+    )
 
 
 def _overlay_groq_whisper_fields(target: dict[str, Any], source: Any) -> None:
@@ -329,6 +333,24 @@ def _register_remote_whisper_overrides(overrides: dict[str, Any]) -> None:
             remote_chunksize,
         )
 
+    remote_diarize = os.environ.get("WHISPER_REMOTE_DIARIZE")
+    if remote_diarize:
+        _register_override(
+            overrides,
+            "whisper.diarize",
+            "WHISPER_REMOTE_DIARIZE",
+            remote_diarize,
+        )
+
+    remote_speaker_embeddings = os.environ.get("WHISPER_REMOTE_SPEAKER_EMBEDDINGS")
+    if remote_speaker_embeddings:
+        _register_override(
+            overrides,
+            "whisper.speaker_embeddings",
+            "WHISPER_REMOTE_SPEAKER_EMBEDDINGS",
+            remote_speaker_embeddings,
+        )
+
 
 def _register_groq_whisper_overrides(overrides: dict[str, Any]) -> None:
     """Register groq whisper environment overrides."""
@@ -443,6 +465,10 @@ def _get_whisper_overridden_fields() -> set[str]:
         overridden.add("whisper.timeout_sec")
     if os.environ.get("WHISPER_REMOTE_CHUNKSIZE_MB"):
         overridden.add("whisper.chunksize_mb")
+    if os.environ.get("WHISPER_REMOTE_DIARIZE"):
+        overridden.add("whisper.diarize")
+    if os.environ.get("WHISPER_REMOTE_SPEAKER_EMBEDDINGS"):
+        overridden.add("whisper.speaker_embeddings")
 
     # Groq whisper
     if os.environ.get("GROQ_API_KEY"):
@@ -498,6 +524,8 @@ def _strip_env_overridden_fields(
             "whisper.model",
             "whisper.timeout_sec",
             "whisper.chunksize_mb",
+            "whisper.diarize",
+            "whisper.speaker_embeddings",
             "whisper.max_retries",
         ]
         for field_path in whisper_field_paths:

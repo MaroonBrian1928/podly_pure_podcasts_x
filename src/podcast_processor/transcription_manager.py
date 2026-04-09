@@ -193,6 +193,7 @@ class TranscriptionManager:
                     "start_time": round(seg.start, 1),
                     "end_time": round(seg.end, 1),
                     "text": seg.text,
+                    "speaker_label": seg.speaker_label,
                 }
                 for i, seg in enumerate(pydantic_segments or [])
             ]

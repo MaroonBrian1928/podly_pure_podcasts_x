@@ -1,10 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import ModalShell from './ModalShell';
 import type { FeedSubscriber } from '../types';
 
 interface FeedSubscribersModalProps {
   feedId: number;
   feedTitle: string;
+  isOpen: boolean;
   onClose: () => void;
 }
 
@@ -26,20 +28,23 @@ function StatusBadge({ status }: { status: string }) {
 export default function FeedSubscribersModal({
   feedId,
   feedTitle,
+  isOpen,
   onClose,
 }: FeedSubscribersModalProps) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['feed-subscribers', feedId],
     queryFn: () => feedsApi.getSubscribers(feedId),
+    enabled: isOpen,
   });
 
   const subscribers: FeedSubscriber[] = data?.subscribers ?? [];
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-
-      <div className="relative w-full max-w-md bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden">
+    <ModalShell
+      isOpen={isOpen}
+      onClose={onClose}
+      panelClassName="w-full max-w-md bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden"
+    >
         {/* Header */}
         <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-200">
           <div>
@@ -96,7 +101,6 @@ export default function FeedSubscribersModal({
         <div className="px-5 py-3 border-t border-gray-200 bg-gray-50 text-xs text-gray-500">
           {subscribers.length} subscriber{subscribers.length !== 1 ? 's' : ''}
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }

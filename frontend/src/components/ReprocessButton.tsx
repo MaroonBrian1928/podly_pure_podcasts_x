@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import ModalShell from './ModalShell';
 
 type ReprocessMode = 'full' | 'keep-transcript';
 
@@ -117,9 +118,11 @@ export default function ReprocessButton({
       )}
 
       {/* Confirmation Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-md w-full overflow-hidden">
+      <ModalShell
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        panelClassName="bg-white rounded-lg max-w-md w-full overflow-hidden"
+      >
             {/* Header */}
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-xl font-bold text-gray-900">Confirm Reprocess</h2>
@@ -180,9 +183,7 @@ export default function ReprocessButton({
                 </button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+      </ModalShell>
     </div>
   );
 }

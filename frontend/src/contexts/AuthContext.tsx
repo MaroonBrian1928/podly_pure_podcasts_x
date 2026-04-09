@@ -11,6 +11,8 @@ interface AuthContextValue {
   isAuthenticated: boolean;
   user: AuthUser | null;
   landingPageEnabled: boolean;
+  showDiscordIntegration: boolean;
+  showReportIssueButton: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => void;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
@@ -24,6 +26,8 @@ interface InternalState {
   requireAuth: boolean;
   user: AuthUser | null;
   landingPageEnabled: boolean;
+  showDiscordIntegration: boolean;
+  showReportIssueButton: boolean;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -32,6 +36,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     requireAuth: false,
     user: null,
     landingPageEnabled: false,
+    showDiscordIntegration: true,
+    showReportIssueButton: true,
   });
 
   const bootstrapAuth = useCallback(async () => {
@@ -39,6 +45,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const statusResponse = await authApi.getStatus();
       const requireAuth = Boolean(statusResponse.require_auth);
       const landingPageEnabled = Boolean(statusResponse.landing_page_enabled);
+      const showDiscordIntegration =
+        statusResponse.show_discord_integration !== false;
+      const showReportIssueButton =
+        statusResponse.show_report_issue_button !== false;
 
       if (!requireAuth) {
         setState({
@@ -46,6 +56,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           requireAuth: false,
           user: null,
           landingPageEnabled,
+          showDiscordIntegration,
+          showReportIssueButton,
         });
         return;
       }
@@ -57,6 +69,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           requireAuth: true,
           user: me.user,
           landingPageEnabled,
+          showDiscordIntegration,
+          showReportIssueButton,
         });
       } catch (error) {
         setState({
@@ -64,6 +78,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           requireAuth: true,
           user: null,
           landingPageEnabled,
+          showDiscordIntegration,
+          showReportIssueButton,
         });
       }
     } catch (error) {
@@ -73,6 +89,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         requireAuth: false,
         user: null,
         landingPageEnabled: false,
+        showDiscordIntegration: true,
+        showReportIssueButton: true,
       });
     }
   }, []);
@@ -93,6 +111,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       requireAuth: true,
       user: response.user,
       landingPageEnabled: prev.landingPageEnabled,
+      showDiscordIntegration: prev.showDiscordIntegration,
+      showReportIssueButton: prev.showReportIssueButton,
     }));
   }, []);
 
@@ -105,6 +125,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       requireAuth: prev.requireAuth,
       user: prev.requireAuth ? null : prev.user,
       landingPageEnabled: prev.landingPageEnabled,
+      showDiscordIntegration: prev.showDiscordIntegration,
+      showReportIssueButton: prev.showReportIssueButton,
     }));
   }, []);
 
@@ -145,12 +167,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated,
       user: state.user,
       landingPageEnabled: state.landingPageEnabled,
+      showDiscordIntegration: state.showDiscordIntegration,
+      showReportIssueButton: state.showReportIssueButton,
       login,
       logout,
       changePassword,
       refreshUser,
     };
-  }, [changePassword, login, logout, refreshUser, state.requireAuth, state.status, state.user]);
+  }, [
+    changePassword,
+    login,
+    logout,
+    refreshUser,
+    state.landingPageEnabled,
+    state.requireAuth,
+    state.showDiscordIntegration,
+    state.showReportIssueButton,
+    state.status,
+    state.user,
+  ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

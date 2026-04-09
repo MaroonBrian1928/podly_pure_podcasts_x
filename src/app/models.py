@@ -137,6 +137,7 @@ class TranscriptSegment(db.Model):  # type: ignore[name-defined, misc]
     start_time = db.Column(db.Float, nullable=False)
     end_time = db.Column(db.Float, nullable=False)
     text = db.Column(db.Text, nullable=False)
+    speaker_label = db.Column(db.Text, nullable=True)
 
     identifications = db.relationship(
         "Identification", backref="transcript_segment", lazy="dynamic"
@@ -435,6 +436,14 @@ class WhisperSettings(db.Model):  # type: ignore[name-defined, misc]
     )
     remote_chunksize_mb = db.Column(
         db.Integer, nullable=False, default=DEFAULTS.WHISPER_REMOTE_CHUNKSIZE_MB
+    )
+    remote_diarize = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.WHISPER_REMOTE_DIARIZE
+    )
+    remote_speaker_embeddings = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS,
     )
 
     # Groq

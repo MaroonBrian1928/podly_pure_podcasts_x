@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -14,6 +15,7 @@ from app.auth.state import failure_rate_limiter
 from app.extensions import db
 from app.models import Feed, Post, User
 from app.routes.auth_routes import auth_bp
+from app.routes.discord_routes import discord_bp
 from app.routes.feed_routes import feed_bp
 
 
@@ -34,6 +36,7 @@ def auth_app() -> Generator[Flask, None, None]:
     )
     app.config["AUTH_SETTINGS"] = settings
     app.config["REQUIRE_AUTH"] = True
+    app.config["DISCORD_SETTINGS"] = SimpleNamespace(enabled=True)
 
     db.init_app(app)
     with app.app_context():
@@ -47,6 +50,7 @@ def auth_app() -> Generator[Flask, None, None]:
 
     init_auth_middleware(app)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(discord_bp)
     app.register_blueprint(feed_bp)
 
     @app.route("/api/protected", methods=["GET"])
@@ -118,6 +122,33 @@ def test_logout_clears_session(auth_app: Flask) -> None:
     protected = client.get("/api/protected")
     assert protected.status_code == 401
     assert protected.headers.get("WWW-Authenticate") is None
+
+
+def test_auth_status_includes_ui_feature_flags(
+    auth_app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PODLY_HIDE_DISCORD_INTEGRATION", "true")
+    monkeypatch.setenv("PODLY_HIDE_REPORT_ISSUE_BUTTON", "1")
+
+    client = auth_app.test_client()
+    response = client.get("/api/auth/status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["show_discord_integration"] is False
+    assert payload["show_report_issue_button"] is False
+
+
+def test_discord_status_is_disabled_when_integration_hidden(
+    auth_app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PODLY_HIDE_DISCORD_INTEGRATION", "true")
+
+    client = auth_app.test_client()
+    response = client.get("/api/auth/discord/status")
+
+    assert response.status_code == 200
+    assert response.get_json()["enabled"] is False
 
 
 def test_protected_route_without_session_returns_json_401(auth_app: Flask) -> None:

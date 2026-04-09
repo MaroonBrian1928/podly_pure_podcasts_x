@@ -50,6 +50,8 @@ def _create_default_settings() -> None:
             remote_language=DEFAULTS.WHISPER_REMOTE_LANGUAGE,
             remote_timeout_sec=DEFAULTS.WHISPER_REMOTE_TIMEOUT_SEC,
             remote_chunksize_mb=DEFAULTS.WHISPER_REMOTE_CHUNKSIZE_MB,
+            remote_diarize=DEFAULTS.WHISPER_REMOTE_DIARIZE,
+            remote_speaker_embeddings=DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS,
             groq_model=DEFAULTS.WHISPER_GROQ_MODEL,
             groq_language=DEFAULTS.WHISPER_GROQ_LANGUAGE,
             groq_max_retries=DEFAULTS.WHISPER_GROQ_MAX_RETRIES,
@@ -228,6 +230,28 @@ class TestEnvOverrideMetadata:
                 assert field_path in metadata, f"{field_path} missing from metadata"
                 assert metadata[field_path]["read_only"] is True
 
+    def test_env_override_metadata_for_remote_whisper_boolean_fields(
+        self, app: Any, monkeypatch: Any
+    ) -> None:
+        """Verify remote whisper boolean env vars surface as read-only metadata."""
+        monkeypatch.setenv("WHISPER_REMOTE_DIARIZE", "true")
+        monkeypatch.setenv("WHISPER_REMOTE_SPEAKER_EMBEDDINGS", "false")
+
+        with app.app_context():
+            from app.routes.config_routes import _build_env_override_metadata
+
+            metadata = _build_env_override_metadata(
+                {
+                    "llm": {},
+                    "whisper": {"whisper_type": "remote"},
+                }
+            )
+
+            assert metadata["whisper.diarize"]["env_var"] == "WHISPER_REMOTE_DIARIZE"
+            assert metadata["whisper.speaker_embeddings"]["env_var"] == (
+                "WHISPER_REMOTE_SPEAKER_EMBEDDINGS"
+            )
+
 
 class TestEnvOverriddenFieldStripping:
     """Test that PUT /api/config strips env-overridden fields."""
@@ -269,6 +293,8 @@ class TestEnvOverriddenFieldStripping:
         """Verify that whisper env-overridden fields are stripped."""
         monkeypatch.setenv("WHISPER_REMOTE_TIMEOUT_SEC", "120")
         monkeypatch.setenv("WHISPER_REMOTE_CHUNKSIZE_MB", "48")
+        monkeypatch.setenv("WHISPER_REMOTE_DIARIZE", "false")
+        monkeypatch.setenv("WHISPER_REMOTE_SPEAKER_EMBEDDINGS", "true")
 
         from app.routes.config_routes import _strip_env_overridden_fields
 
@@ -277,6 +303,8 @@ class TestEnvOverriddenFieldStripping:
                 "whisper_type": "remote",
                 "timeout_sec": 600,  # Should be stripped
                 "chunksize_mb": 24,  # Should be stripped
+                "diarize": True,  # Should be stripped
+                "speaker_embeddings": True,  # Should be stripped
                 "model": "whisper-1",  # Should be kept
             },
         }
@@ -285,8 +313,12 @@ class TestEnvOverriddenFieldStripping:
 
         assert "whisper.timeout_sec" in stripped
         assert "whisper.chunksize_mb" in stripped
+        assert "whisper.diarize" in stripped
+        assert "whisper.speaker_embeddings" in stripped
         assert "timeout_sec" not in cleaned["whisper"]
         assert "chunksize_mb" not in cleaned["whisper"]
+        assert "diarize" not in cleaned["whisper"]
+        assert "speaker_embeddings" not in cleaned["whisper"]
         assert cleaned["whisper"]["model"] == "whisper-1"
 
     def test_no_stripping_when_no_env_vars(self, monkeypatch: Any) -> None:
@@ -369,6 +401,8 @@ class TestWhisperRuntimeOverlay:
         monkeypatch.setenv("WHISPER_REMOTE_API_KEY", "env-remote-key")
         monkeypatch.setenv("WHISPER_REMOTE_TIMEOUT_SEC", "120")
         monkeypatch.setenv("WHISPER_REMOTE_CHUNKSIZE_MB", "48")
+        monkeypatch.setenv("WHISPER_REMOTE_DIARIZE", "true")
+        monkeypatch.setenv("WHISPER_REMOTE_SPEAKER_EMBEDDINGS", "true")
 
         with app.app_context():
             from app.config_store import hydrate_runtime_config_inplace
@@ -384,6 +418,8 @@ class TestWhisperRuntimeOverlay:
                 assert runtime_config.whisper.api_key == "env-remote-key"
                 assert runtime_config.whisper.timeout_sec == 120
                 assert runtime_config.whisper.chunksize_mb == 48
+                assert runtime_config.whisper.diarize is True
+                assert runtime_config.whisper.speaker_embeddings is True
             finally:
                 runtime_config.whisper = original_whisper
 

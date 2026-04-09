@@ -120,6 +120,8 @@ def ensure_defaults() -> None:
             "remote_language": DEFAULTS.WHISPER_REMOTE_LANGUAGE,
             "remote_timeout_sec": DEFAULTS.WHISPER_REMOTE_TIMEOUT_SEC,
             "remote_chunksize_mb": DEFAULTS.WHISPER_REMOTE_CHUNKSIZE_MB,
+            "remote_diarize": DEFAULTS.WHISPER_REMOTE_DIARIZE,
+            "remote_speaker_embeddings": DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS,
             "groq_model": DEFAULTS.WHISPER_GROQ_MODEL,
             "groq_language": DEFAULTS.WHISPER_GROQ_LANGUAGE,
             "groq_max_retries": DEFAULTS.WHISPER_GROQ_MAX_RETRIES,
@@ -181,6 +183,8 @@ def read_combined() -> dict[str, Any]:
                 "language": whisper.remote_language,
                 "timeout_sec": whisper.remote_timeout_sec,
                 "chunksize_mb": whisper.remote_chunksize_mb,
+                "diarize": whisper.remote_diarize,
+                "speaker_embeddings": whisper.remote_speaker_embeddings,
             }
         )
     elif whisper.whisper_type == "groq":
@@ -286,6 +290,8 @@ def _update_section_whisper(data: dict[str, Any]) -> None:
             ("language", "remote_language"),
             ("timeout_sec", "remote_timeout_sec"),
             ("chunksize_mb", "remote_chunksize_mb"),
+            ("diarize", "remote_diarize"),
+            ("speaker_embeddings", "remote_speaker_embeddings"),
         ]:
             src, dst = key_map
             if src in data:
@@ -468,6 +474,13 @@ def to_pydantic_config() -> PydanticConfig:
             language=w.get("language", "en"),
             timeout_sec=w.get("timeout_sec", 600),
             chunksize_mb=w.get("chunksize_mb", 24),
+            diarize=bool(w.get("diarize", DEFAULTS.WHISPER_REMOTE_DIARIZE)),
+            speaker_embeddings=bool(
+                w.get(
+                    "speaker_embeddings",
+                    DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS,
+                )
+            ),
         )
     elif wtype == "groq":
         whisper_obj = GroqWhisperConfig(
@@ -699,6 +712,22 @@ def _apply_remote_whisper_runtime_overrides(whisper: RemoteWhisperConfig) -> Non
     )
     if remote_chunksize is not None:
         whisper.chunksize_mb = remote_chunksize
+    remote_diarize = _parse_bool(
+        os.environ.get("WHISPER_REMOTE_DIARIZE"),
+        env_name="WHISPER_REMOTE_DIARIZE",
+    )
+    if remote_diarize is not None:
+        whisper.diarize = remote_diarize
+    remote_speaker_embeddings = _parse_bool(
+        os.environ.get("WHISPER_REMOTE_SPEAKER_EMBEDDINGS"),
+        env_name="WHISPER_REMOTE_SPEAKER_EMBEDDINGS",
+    )
+    if remote_speaker_embeddings is not None:
+        whisper.speaker_embeddings = remote_speaker_embeddings
+
+    validated_whisper = RemoteWhisperConfig(**whisper.model_dump())
+    for field_name in validated_whisper.__class__.model_fields.keys():
+        setattr(whisper, field_name, getattr(validated_whisper, field_name))
 
 
 def _apply_groq_whisper_runtime_overrides(whisper: GroqWhisperConfig) -> None:
@@ -830,6 +859,38 @@ def _configure_remote_whisper(cfg: PydanticConfig) -> None:
         else int(getattr(cfg.whisper, "chunksize_mb", 24))
     )
 
+    existing_diarize_any = getattr(
+        cfg.whisper, "diarize", DEFAULTS.WHISPER_REMOTE_DIARIZE
+    )
+    diarize: bool = (
+        existing_diarize_any
+        if isinstance(existing_diarize_any, bool)
+        else DEFAULTS.WHISPER_REMOTE_DIARIZE
+    )
+    parsed_diarize = _parse_bool(
+        os.environ.get("WHISPER_REMOTE_DIARIZE"),
+        env_name="WHISPER_REMOTE_DIARIZE",
+    )
+    if parsed_diarize is not None:
+        diarize = parsed_diarize
+
+    existing_speaker_embeddings_any = getattr(
+        cfg.whisper,
+        "speaker_embeddings",
+        DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS,
+    )
+    speaker_embeddings: bool = (
+        existing_speaker_embeddings_any
+        if isinstance(existing_speaker_embeddings_any, bool)
+        else DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS
+    )
+    parsed_speaker_embeddings = _parse_bool(
+        os.environ.get("WHISPER_REMOTE_SPEAKER_EMBEDDINGS"),
+        env_name="WHISPER_REMOTE_SPEAKER_EMBEDDINGS",
+    )
+    if parsed_speaker_embeddings is not None:
+        speaker_embeddings = parsed_speaker_embeddings
+
     cfg.whisper = RemoteWhisperConfig(
         model=rem_model,
         api_key=rem_api_key,
@@ -837,6 +898,8 @@ def _configure_remote_whisper(cfg: PydanticConfig) -> None:
         language=lang,
         timeout_sec=timeout_sec,
         chunksize_mb=chunksize_mb,
+        diarize=diarize,
+        speaker_embeddings=speaker_embeddings,
     )
 
 

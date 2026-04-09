@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import ModalShell from './ModalShell';
 import type { Feed, FeedSettingsUpdate } from '../types';
 
 interface FeedSettingsModalProps {
@@ -140,13 +141,12 @@ export default function FeedSettingsModal({
         : 'Off';
   const isChapterFallbackLocked = strategy === 'chapter_insert';
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-
-      <div className="relative w-full max-w-md bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden">
+    <ModalShell
+      isOpen={isOpen}
+      onClose={onClose}
+      panelClassName="w-full max-w-md bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden"
+    >
         <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Feed Settings</h2>
@@ -316,7 +316,6 @@ export default function FeedSettingsModal({
             {updateMutation.isPending ? 'Saving...' : 'Save'}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }

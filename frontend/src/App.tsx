@@ -16,6 +16,7 @@ import { billingApi } from './services/api';
 import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsContext';
 import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
+import PageTransitionFrame from './components/PageTransitionFrame';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
 import './App.css';
 
@@ -31,13 +32,26 @@ const queryClient = new QueryClient({
   },
 });
 
+function isHomeRoute(pathname: string): boolean {
+  return pathname === '/' || pathname.startsWith('/feeds/');
+}
+
 function AppShell() {
-  const { status, requireAuth, isAuthenticated, user, logout, landingPageEnabled } = useAuth();
+  const {
+    status,
+    requireAuth,
+    isAuthenticated,
+    user,
+    logout,
+    landingPageEnabled,
+    showReportIssueButton,
+  } = useAuth();
   const { open: openDiagnostics } = useDiagnostics();
   const { isDark } = useTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
+  const previousPathnameRef = useRef<string | null>(null);
   const { data: billingSummary } = useQuery({
     queryKey: ['billing', 'summary'],
     queryFn: billingApi.getSummary,
@@ -48,6 +62,10 @@ function AppShell() {
   // Close mobile menu on route change
   useEffect(() => {
     setMobileMenuOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    previousPathnameRef.current = location.pathname;
   }, [location.pathname]);
 
   // Close mobile menu when clicking outside
@@ -96,6 +114,25 @@ function AppShell() {
   const showConfigLink = !requireAuth || isAdmin;
   const showJobsLink = !requireAuth || isAdmin;
   const showBillingLink = requireAuth && !isAdmin;
+  const previousPathname = previousPathnameRef.current;
+  const locationState = location.state as { fromPath?: string } | null;
+  const homeNavigationState = { fromPath: location.pathname };
+  const homeTransitionSources = ['/login', '/jobs', '/config', '/billing'];
+  const homeTransitionSource = locationState?.fromPath ?? previousPathname;
+  const shouldAnimateHomePage =
+    isHomeRoute(location.pathname) &&
+    Boolean(homeTransitionSource && homeTransitionSources.includes(homeTransitionSource));
+  const homeTransitionKey = shouldAnimateHomePage
+    ? `home-enter-${homeTransitionSource ?? 'unknown'}`
+    : 'home';
+  const homeRouteElement = (
+    <PageTransitionFrame
+      transitionKey={homeTransitionKey}
+      animateOnMount={shouldAnimateHomePage}
+    >
+      <HomePage />
+    </PageTransitionFrame>
+  );
 
   return (
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
@@ -103,7 +140,7 @@ function AppShell() {
         <div className="px-2 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-12">
             <div className="flex items-center">
-              <Link to="/" className="flex items-center">
+              <Link to="/" state={homeNavigationState} className="flex items-center">
                 <img 
                   src="/images/logos/logo.webp" 
                   alt="Podly" 
@@ -117,7 +154,7 @@ function AppShell() {
 
             {/* Desktop Navigation */}
             <nav className="hidden md:flex items-center space-x-4">
-              <Link to="/" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+              <Link to="/" state={homeNavigationState} className="text-sm font-medium text-gray-700 hover:text-gray-900">
                 Home
               </Link>
               {showBillingLink && (
@@ -131,17 +168,22 @@ function AppShell() {
                 </Link>
               )}
               {showConfigLink && (
-                <Link to="/config" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <Link
+                  to="/config"
+                  className="text-sm font-medium text-gray-700 hover:text-gray-900"
+                >
                   Config
                 </Link>
               )}
-              <button
-                type="button"
-                onClick={() => openDiagnostics()}
-                className="text-sm font-medium text-gray-700 hover:text-gray-900"
-              >
-                Report issue
-              </button>
+              {showReportIssueButton && (
+                <button
+                  type="button"
+                  onClick={() => openDiagnostics()}
+                  className="text-sm font-medium text-gray-700 hover:text-gray-900"
+                >
+                  Report issue
+                </button>
+              )}
               <ThemeToggle />
               {requireAuth && user && (
                 <div className="flex items-center gap-3 text-sm text-gray-600 flex-shrink-0">
@@ -216,6 +258,7 @@ function AppShell() {
                   <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-2 z-50">
                     <Link
                       to="/"
+                      state={homeNavigationState}
                       className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
                     >
                       Home
@@ -244,16 +287,18 @@ function AppShell() {
                         Config
                       </Link>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        openDiagnostics();
-                        setMobileMenuOpen(false);
-                      }}
-                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                    >
-                      Report issue
-                    </button>
+                    {showReportIssueButton && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openDiagnostics();
+                          setMobileMenuOpen(false);
+                        }}
+                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                      >
+                        Report issue
+                      </button>
+                    )}
                     {requireAuth && user && (
                       <>
                         <div className="border-t border-gray-100 my-2" />
@@ -281,11 +326,38 @@ function AppShell() {
 
       <main className="flex-1 px-2 sm:px-4 lg:px-6 py-4 overflow-auto">
         <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/feeds/:feedId" element={<HomePage />} />
-          {showBillingLink && <Route path="/billing" element={<BillingPage />} />}
-          {showJobsLink && <Route path="/jobs" element={<JobsPage />} />}
-          {showConfigLink && <Route path="/config" element={<ConfigPage />} />}
+          <Route path="/" element={homeRouteElement} />
+          <Route path="/feeds/:feedId" element={homeRouteElement} />
+          {showBillingLink && (
+            <Route
+              path="/billing"
+              element={
+                <PageTransitionFrame key="billing" transitionKey="billing">
+                  <BillingPage />
+                </PageTransitionFrame>
+              }
+            />
+          )}
+          {showJobsLink && (
+            <Route
+              path="/jobs"
+              element={
+                <PageTransitionFrame key="jobs" transitionKey="jobs">
+                  <JobsPage />
+                </PageTransitionFrame>
+              }
+            />
+          )}
+          {showConfigLink && (
+            <Route
+              path="/config"
+              element={
+                <PageTransitionFrame key="config" transitionKey="config">
+                  <ConfigPage />
+                </PageTransitionFrame>
+              }
+            />
+          )}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

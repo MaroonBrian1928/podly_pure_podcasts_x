@@ -20,7 +20,7 @@ const TABS: { id: ConfigTabId; label: string; adminOnly?: boolean }[] = [
 
 export default function ConfigTabs() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { user, requireAuth } = useAuth();
+  const { user, requireAuth, showDiscordIntegration } = useAuth();
   const configState = useConfigState();
 
   const showSecurityControls = requireAuth && !!user;
@@ -35,13 +35,16 @@ export default function ConfigTabs() {
       if (tab?.adminOnly && !isAdmin) {
         return 'default';
       }
+      if (urlTab === 'discord' && !showDiscordIntegration) {
+        return 'default';
+      }
       if (urlTab === 'users' && !requireAuth) {
         return 'default';
       }
       return urlTab;
     }
     return 'default';
-  }, [searchParams, isAdmin, requireAuth]);
+  }, [searchParams, isAdmin, requireAuth, showDiscordIntegration]);
 
   const activeSubtab = useMemo<AdvancedSubtab>(() => {
     const urlSubtab = searchParams.get('section') as AdvancedSubtab | null;
@@ -93,6 +96,7 @@ export default function ConfigTabs() {
 
   const visibleTabs = TABS.filter((tab) => {
     if (tab.id === 'users' && !requireAuth) return false;
+    if (tab.id === 'discord' && !showDiscordIntegration) return false;
     return !tab.adminOnly || isAdmin;
   });
 
@@ -131,7 +135,7 @@ export default function ConfigTabs() {
           {activeTab === 'default' && <DefaultTab />}
           {activeTab === 'advanced' && <AdvancedTab />}
           {activeTab === 'users' && isAdmin && <UserManagementTab />}
-          {activeTab === 'discord' && isAdmin && <DiscordTab />}
+          {activeTab === 'discord' && isAdmin && showDiscordIntegration && <DiscordTab />}
           {activeTab === 'costs' && isAdmin && <CostsTab />}
         </div>
 

@@ -41,6 +41,37 @@ You have a few options to get started:
 - Podly removes the ad segments
 - Podly delivers the ad-free version of the podcast to you
 
+## Whisper Configuration
+
+If you are using `WHISPER_TYPE=remote`, Podly also supports OpenAI-compatible
+transcription flags for diarization:
+
+```env
+WHISPER_REMOTE_DIARIZE=false
+WHISPER_REMOTE_SPEAKER_EMBEDDINGS=false
+```
+
+Set `WHISPER_REMOTE_DIARIZE=true` to request speaker diarization from a
+compatible remote Whisper endpoint. `WHISPER_REMOTE_SPEAKER_EMBEDDINGS=true`
+adds speaker embeddings to the diarization payload and requires diarization to
+be enabled. See [.env.local.example](.env.local.example) for the full set of
+environment variables.
+
+## Optional UI Flags
+
+These environment variables let you hide specific UI surfaces without changing
+the rest of the application behavior:
+
+```env
+PODLY_HIDE_DISCORD_INTEGRATION=false
+PODLY_HIDE_REPORT_ISSUE_BUTTON=false
+```
+
+- `PODLY_HIDE_DISCORD_INTEGRATION=true` hides the Discord SSO/config integration
+  UI, including the login button and the admin Discord config tab.
+- `PODLY_HIDE_REPORT_ISSUE_BUTTON=true` hides the `Report issue` button from the
+  desktop nav and mobile menu.
+
 ### Cost Breakdown
 *Monthly cost breakdown for 5 podcasts*
 

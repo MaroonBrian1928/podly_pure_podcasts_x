@@ -29,6 +29,8 @@ const DEFAULT_ENV_HINTS: Record<string, EnvOverrideEntry> = {
   'whisper.model': { env_var: 'WHISPER_REMOTE_MODEL' },
   'whisper.timeout_sec': { env_var: 'WHISPER_REMOTE_TIMEOUT_SEC' },
   'whisper.chunksize_mb': { env_var: 'WHISPER_REMOTE_CHUNKSIZE_MB' },
+  'whisper.diarize': { env_var: 'WHISPER_REMOTE_DIARIZE' },
+  'whisper.speaker_embeddings': { env_var: 'WHISPER_REMOTE_SPEAKER_EMBEDDINGS' },
   'whisper.max_retries': { env_var: 'GROQ_MAX_RETRIES' },
 };
 
@@ -455,6 +457,12 @@ export function useConfigState(): UseConfigStateReturn {
       } else if (nextType === 'remote') {
         nextWhisper.model = nextModel ?? 'whisper-1';
         nextWhisper.language = (prevWhisper.language as string | undefined) || 'en';
+        nextWhisper.diarize =
+          typeof prevWhisper.diarize === 'boolean' ? prevWhisper.diarize : false;
+        nextWhisper.speaker_embeddings =
+          nextWhisper.diarize && typeof prevWhisper.speaker_embeddings === 'boolean'
+            ? prevWhisper.speaker_embeddings
+            : false;
       } else if (nextType === 'local') {
         nextWhisper.model = nextModel ?? 'base.en';
         delete nextWhisper.api_key;

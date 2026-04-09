@@ -1,10 +1,11 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
-import { feedsApi, configApi, billingApi } from '../services/api';
+import { useEffect, useRef, useState } from 'react';
+import { feedsApi, billingApi } from '../services/api';
 import FeedList from '../components/FeedList';
 import FeedDetail from '../components/FeedDetail';
 import AddFeedForm from '../components/AddFeedForm';
-import type { Feed, ConfigResponse } from '../types';
+import ModalShell from '../components/ModalShell';
+import type { Feed } from '../types';
 import {
   loadFeedListSortPreference,
   persistFeedListSortPreference,
@@ -17,32 +18,64 @@ import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
 
+const MOBILE_FEED_DETAIL_TRANSITION_MS = 380;
+const HOME_ROUTE_QUERY_GC_TIME_MS = 5 * 60 * 1000;
+
+type MobileFeedTransitionState = 'idle' | 'entering' | 'exiting';
+
+interface MobileTransitionViewport {
+  height: number;
+  top: number;
+}
+
+function isMobileFeedViewport(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches;
+}
+
+function captureMobileTransitionViewport(
+  container: HTMLDivElement | null
+): MobileTransitionViewport | null {
+  const mainElement = container?.closest('main');
+  if (!(mainElement instanceof HTMLElement)) {
+    return null;
+  }
+
+  return {
+    top: mainElement.scrollTop,
+    height: mainElement.clientHeight,
+  };
+}
+
 export default function HomePage() {
   const navigate = useNavigate();
   const { feedId } = useParams();
   const location = useLocation();
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedFeed, setSelectedFeed] = useState<Feed | null>(null);
+  const [mobileFeedTransitionState, setMobileFeedTransitionState] =
+    useState<MobileFeedTransitionState>('idle');
+  const [mobileTransitionFeed, setMobileTransitionFeed] = useState<Feed | null>(null);
+  const [mobileTransitionViewport, setMobileTransitionViewport] =
+    useState<MobileTransitionViewport | null>(null);
   const [feedSortBy, setFeedSortBy] = useState<FeedSortOption>(() =>
     loadFeedListSortPreference()
   );
+  const pageContainerRef = useRef<HTMLDivElement>(null);
+  const previousSelectedFeedRef = useRef<Feed | null>(null);
+  const mobileFeedTransitionTimeoutRef = useRef<number | null>(null);
   const { requireAuth, user } = useAuth();
 
   const { data: feeds, isLoading, error, refetch } = useQuery({
     queryKey: ['feeds'],
     queryFn: feedsApi.getFeeds,
+    gcTime: HOME_ROUTE_QUERY_GC_TIME_MS,
   });
 
   const { data: billingSummary, refetch: refetchBilling } = useQuery({
     queryKey: ['billing', 'summary'],
     queryFn: billingApi.getSummary,
     enabled: requireAuth && !!user,
-  });
-
-  useQuery<ConfigResponse>({
-    queryKey: ['config'],
-    queryFn: configApi.getConfig,
-    enabled: !requireAuth || user?.role === 'admin',
+    gcTime: HOME_ROUTE_QUERY_GC_TIME_MS,
   });
   const canRefreshAll = !requireAuth || user?.role === 'admin';
   const refreshAllMutation = useMutation({
@@ -69,18 +102,6 @@ export default function HomePage() {
   });
 
   useEffect(() => {
-    if (!showAddForm || typeof document === 'undefined') {
-      return;
-    }
-
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = originalOverflow;
-    };
-  }, [showAddForm]);
-
-  useEffect(() => {
     if (!feeds || !feedId) {
       if (location.pathname === '/' && selectedFeed !== null) {
         setSelectedFeed(null);
@@ -101,6 +122,82 @@ export default function HomePage() {
       setSelectedFeed(matchingFeed);
     }
   }, [feeds, feedId, location.pathname, selectedFeed]);
+
+  useEffect(() => {
+    const previousSelectedFeed = previousSelectedFeedRef.current;
+    const previousSelectedFeedId = previousSelectedFeed?.id ?? null;
+    const nextSelectedFeedId = selectedFeed?.id ?? null;
+
+    if (mobileFeedTransitionTimeoutRef.current !== null) {
+      window.clearTimeout(mobileFeedTransitionTimeoutRef.current);
+      mobileFeedTransitionTimeoutRef.current = null;
+    }
+
+    if (!isMobileFeedViewport()) {
+      setMobileFeedTransitionState('idle');
+      setMobileTransitionFeed(null);
+      setMobileTransitionViewport(null);
+      previousSelectedFeedRef.current = selectedFeed;
+      return;
+    }
+
+    if (previousSelectedFeedId === null && nextSelectedFeedId !== null && selectedFeed) {
+      setMobileTransitionViewport(
+        captureMobileTransitionViewport(pageContainerRef.current)
+      );
+      setMobileTransitionFeed(selectedFeed);
+      setMobileFeedTransitionState('entering');
+      mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
+        setMobileFeedTransitionState('idle');
+        setMobileTransitionFeed(null);
+        setMobileTransitionViewport(null);
+        mobileFeedTransitionTimeoutRef.current = null;
+      }, MOBILE_FEED_DETAIL_TRANSITION_MS);
+    } else if (previousSelectedFeedId !== null && nextSelectedFeedId === null && previousSelectedFeed) {
+      setMobileTransitionViewport(
+        captureMobileTransitionViewport(pageContainerRef.current)
+      );
+      setMobileTransitionFeed(previousSelectedFeed);
+      setMobileFeedTransitionState('exiting');
+      mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
+        setMobileFeedTransitionState('idle');
+        setMobileTransitionFeed(null);
+        setMobileTransitionViewport(null);
+        mobileFeedTransitionTimeoutRef.current = null;
+      }, MOBILE_FEED_DETAIL_TRANSITION_MS);
+    } else if (
+      previousSelectedFeedId !== null &&
+      nextSelectedFeedId !== null &&
+      previousSelectedFeedId !== nextSelectedFeedId &&
+      selectedFeed
+    ) {
+      setMobileTransitionViewport(
+        captureMobileTransitionViewport(pageContainerRef.current)
+      );
+      setMobileTransitionFeed(selectedFeed);
+      setMobileFeedTransitionState('entering');
+      mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
+        setMobileFeedTransitionState('idle');
+        setMobileTransitionFeed(null);
+        setMobileTransitionViewport(null);
+        mobileFeedTransitionTimeoutRef.current = null;
+      }, MOBILE_FEED_DETAIL_TRANSITION_MS);
+    } else {
+      setMobileFeedTransitionState('idle');
+      setMobileTransitionFeed(null);
+      setMobileTransitionViewport(null);
+    }
+
+    previousSelectedFeedRef.current = selectedFeed;
+  }, [selectedFeed]);
+
+  useEffect(() => {
+    return () => {
+      if (mobileFeedTransitionTimeoutRef.current !== null) {
+        window.clearTimeout(mobileFeedTransitionTimeoutRef.current);
+      }
+    };
+  }, []);
 
   if (isLoading) {
     return (
@@ -130,6 +227,21 @@ export default function HomePage() {
   const parsedFeedId = feedId ? Number(feedId) : null;
   const feedIdIsValid = parsedFeedId !== null && Number.isFinite(parsedFeedId);
   const feedNotFound = feedIdIsValid && !selectedFeed;
+  const detailFeed = selectedFeed ?? mobileTransitionFeed;
+  const isMobileFeedTransitioning = mobileFeedTransitionState !== 'idle';
+  const mobileFeedDetailAnimationClass =
+    mobileFeedTransitionState === 'entering'
+      ? 'podly-mobile-feed-detail-enter'
+      : mobileFeedTransitionState === 'exiting'
+        ? 'podly-mobile-feed-detail-exit'
+        : '';
+  const mobileFeedTransitionStyle =
+    isMobileFeedTransitioning && mobileTransitionViewport
+      ? {
+          top: mobileTransitionViewport.top,
+          height: mobileTransitionViewport.height,
+        }
+      : undefined;
 
   const handleCopyAggregateLink = async () => {
     try {
@@ -147,10 +259,10 @@ export default function HomePage() {
   };
 
   return (
-    <div className="h-full flex flex-col lg:flex-row gap-6">
+    <div ref={pageContainerRef} className="relative h-full flex flex-col lg:flex-row gap-6">
       {/* Left Panel - Feed List (hidden on mobile when feed is selected) */}
       <div className={`flex-1 lg:max-w-md xl:max-w-lg flex flex-col ${
-        selectedFeed ? 'hidden lg:flex' : 'flex'
+        selectedFeed && !isMobileFeedTransitioning ? 'hidden lg:flex' : 'flex'
       }`}>
         <div className="mb-6 flex min-w-0 items-center gap-3">
           <h2 className="shrink-0 text-2xl font-bold text-gray-900">
@@ -242,19 +354,27 @@ export default function HomePage() {
               setSelectedFeed(feed);
               navigate(`/feeds/${feed.id}`);
             }}
-            selectedFeedId={selectedFeed?.id}
+            selectedFeedId={
+              selectedFeed?.id ??
+              (mobileFeedTransitionState === 'exiting' ? mobileTransitionFeed?.id : undefined)
+            }
             sortBy={feedSortBy}
           />
         </div>
       </div>
 
       {/* Right Panel - Feed Detail */}
-      {selectedFeed && (
-        <div className={`flex-1 lg:flex-[2] ${
-          selectedFeed ? 'flex' : 'hidden lg:flex'
-        } flex-col bg-white rounded-lg shadow border overflow-hidden`}>
+      {detailFeed && (
+        <div
+          className={`${mobileFeedDetailAnimationClass} flex flex-1 flex-col bg-white rounded-lg shadow border overflow-hidden lg:flex-[2] ${
+            isMobileFeedTransitioning
+              ? 'absolute left-0 right-0 z-10 lg:static lg:z-auto'
+              : ''
+          }`}
+          style={mobileFeedTransitionStyle}
+        >
           <FeedDetail 
-            feed={selectedFeed} 
+            feed={detailFeed}
             onClose={() => {
               setSelectedFeed(null);
               navigate('/');
@@ -293,15 +413,12 @@ export default function HomePage() {
         </div>
       )}
 
-      {showAddForm && (
-        <div
-          className="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4 sm:p-6"
-          onClick={() => setShowAddForm(false)}
-        >
-          <div
-            className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col max-h-[90vh]"
-            onClick={(event) => event.stopPropagation()}
-          >
+      <ModalShell
+        isOpen={showAddForm}
+        onClose={() => setShowAddForm(false)}
+        containerClassName="items-start p-4 sm:items-center sm:p-6"
+        panelClassName="w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col max-h-[90vh]"
+      >
             <div className="flex items-center justify-between border-b border-gray-200 px-4 sm:px-6 py-4">
               <div>
                 <h2 className="text-xl sm:text-2xl font-semibold text-gray-900">Add a Podcast Feed</h2>
@@ -331,9 +448,7 @@ export default function HomePage() {
                 planLimitReached={planLimitReached}
               />
             </div>
-          </div>
-        </div>
-      )}
+      </ModalShell>
     </div>
   );
 }

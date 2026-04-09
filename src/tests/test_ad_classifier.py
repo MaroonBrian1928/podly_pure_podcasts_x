@@ -210,6 +210,7 @@ def test_process_chunk(test_config: Config, app: Flask) -> None:
 
         user_prompt = classifier._generate_user_prompt(
             current_chunk_db_segments=segments,
+            all_transcript_segments=segments,
             post=post,
             user_prompt_template=user_template,
             includes_start=True,
@@ -246,6 +247,85 @@ def test_process_chunk(test_config: Config, app: Flask) -> None:
             mock_get_model_call.assert_called_once()
             mock_process_response.assert_called_once()
             assert result == segments
+
+
+def test_generate_user_prompt_includes_optional_speaker_hints(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    post = Post(id=1, title="Test Post")
+    segments = [
+        TranscriptSegment(
+            id=1,
+            post_id=1,
+            sequence_num=0,
+            start_time=0.0,
+            end_time=10.0,
+            text="Host intro",
+            speaker_label="SPEAKER_00",
+        ),
+        TranscriptSegment(
+            id=2,
+            post_id=1,
+            sequence_num=1,
+            start_time=10.0,
+            end_time=20.0,
+            text="Promo read",
+            speaker_label="SPEAKER_01",
+        ),
+        TranscriptSegment(
+            id=3,
+            post_id=1,
+            sequence_num=2,
+            start_time=20.0,
+            end_time=30.0,
+            text="Back to the show",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+
+    user_prompt = classifier._generate_user_prompt(
+        current_chunk_db_segments=segments,
+        all_transcript_segments=segments,
+        post=post,
+        user_prompt_template=Template("{{ speaker_context }}\n{{ transcript }}"),
+        includes_start=False,
+        includes_end=False,
+    )
+
+    assert "Speaker context:" in user_prompt
+    assert "SPEAKER_00" in user_prompt
+    assert "SPEAKER_01" in user_prompt
+    assert "[0.0][speaker=SPEAKER_00] Host intro" in user_prompt
+
+
+def test_generate_user_prompt_omits_speaker_hints_when_labels_missing(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    post = Post(id=1, title="Test Post")
+    segments = [
+        TranscriptSegment(
+            id=1,
+            post_id=1,
+            sequence_num=0,
+            start_time=0.0,
+            end_time=10.0,
+            text="Host intro",
+        ),
+    ]
+
+    user_prompt = classifier._generate_user_prompt(
+        current_chunk_db_segments=segments,
+        all_transcript_segments=segments,
+        post=post,
+        user_prompt_template=Template("{{ speaker_context }}\n{{ transcript }}"),
+        includes_start=False,
+        includes_end=False,
+    )
+
+    assert "Speaker context:" not in user_prompt
+    assert "[0.0] Host intro" in user_prompt
 
 
 def test_compute_next_overlap_segments_includes_context(

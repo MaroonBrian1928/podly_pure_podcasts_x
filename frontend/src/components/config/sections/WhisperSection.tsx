@@ -25,6 +25,8 @@ export default function WhisperSection() {
   const whisperBaseUrlReadOnly = isFieldReadOnly('whisper.base_url');
   const whisperTimeoutReadOnly = isFieldReadOnly('whisper.timeout_sec');
   const whisperChunksizeReadOnly = isFieldReadOnly('whisper.chunksize_mb');
+  const whisperDiarizeReadOnly = isFieldReadOnly('whisper.diarize');
+  const whisperSpeakerEmbeddingsReadOnly = isFieldReadOnly('whisper.speaker_embeddings');
   const whisperMaxRetriesReadOnly = isFieldReadOnly('whisper.max_retries');
 
   const whisperApiKeyPreview =
@@ -70,6 +72,11 @@ export default function WhisperSection() {
   };
 
   const whisperType = pending?.whisper?.whisper_type ?? (localWhisperAvailable === false ? 'remote' : 'local');
+  const remoteWhisper =
+    pending?.whisper?.whisper_type === 'remote'
+      ? (pending.whisper as Extract<WhisperConfig, { whisper_type: 'remote' }>)
+      : null;
+  const diarizeEnabled = remoteWhisper?.diarize ?? false;
 
   return (
     <div className="space-y-6">
@@ -166,6 +173,41 @@ export default function WhisperSection() {
                 onChange={(e) => setField(['whisper', 'chunksize_mb'], Number(e.target.value))}
                 disabled={whisperChunksizeReadOnly}
               />
+            </Field>
+            <Field label="Diarize" envMeta={getEnvHint('whisper.diarize')}>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={diarizeEnabled}
+                  onChange={(e) => {
+                    const nextChecked = e.target.checked;
+                    setField(['whisper', 'diarize'], nextChecked);
+                    if (!nextChecked) {
+                      setField(['whisper', 'speaker_embeddings'], false);
+                    }
+                  }}
+                  disabled={whisperDiarizeReadOnly}
+                />
+                <span>Include speaker diarization in the remote request.</span>
+              </label>
+            </Field>
+            <Field
+              label="Speaker Embeddings"
+              envMeta={getEnvHint('whisper.speaker_embeddings')}
+            >
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={remoteWhisper?.speaker_embeddings ?? false}
+                  onChange={(e) =>
+                    setField(['whisper', 'speaker_embeddings'], e.target.checked)
+                  }
+                  disabled={
+                    whisperSpeakerEmbeddingsReadOnly || !diarizeEnabled
+                  }
+                />
+                <span>Return speaker embeddings with diarization output.</span>
+              </label>
             </Field>
           </div>
         )}

@@ -54,6 +54,15 @@ class RemoteWhisperConfig(BaseModel):
     model: str = DEFAULTS.WHISPER_REMOTE_MODEL
     timeout_sec: int = DEFAULTS.WHISPER_REMOTE_TIMEOUT_SEC
     chunksize_mb: int = DEFAULTS.WHISPER_REMOTE_CHUNKSIZE_MB
+    diarize: bool = DEFAULTS.WHISPER_REMOTE_DIARIZE
+    speaker_embeddings: bool = DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS
+
+    @model_validator(mode="after")
+    def validate_diarization_options(self) -> RemoteWhisperConfig:
+        assert self.diarize or not self.speaker_embeddings, (
+            "speaker_embeddings requires diarize=true"
+        )
+        return self
 
 
 class GroqWhisperConfig(BaseModel):

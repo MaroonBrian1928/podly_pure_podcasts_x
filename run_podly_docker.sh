@@ -42,13 +42,13 @@ fi
 # Default values
 BUILD_ONLY=false
 TEST_BUILD=false
-FORCE_CPU=false
+FORCE_CPU=true
 FORCE_GPU=false
 DETACHED=false
 PRODUCTION_MODE=true
 REBUILD=false
 BRANCH_SUFFIX="main"
-LITE_BUILD=false
+LITE_BUILD=true
 
 # Detect NVIDIA GPU
 NVIDIA_GPU_AVAILABLE=false

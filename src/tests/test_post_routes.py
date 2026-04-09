@@ -6,7 +6,7 @@ from unittest import mock
 from flask import g
 
 from app.extensions import db
-from app.models import Feed, ModelCall, Post, TranscriptSegment, User
+from app.models import Feed, ModelCall, Post, ProcessingJob, TranscriptSegment, User
 from app.routes.post_routes import post_bp
 from app.runtime_config import config as runtime_config
 from shared.config import LocalWhisperConfig
@@ -733,6 +733,161 @@ def test_post_stats_include_chapters_for_chapter_insert_strategy(app):
             "label": "content",
         },
     ]
+
+
+def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    log_file = tmp_path / "app.log"
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-speaker-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=0.0,
+                end_time=5.0,
+                text="Host intro",
+                speaker_label="SPEAKER_00",
+            )
+        )
+        db.session.add(
+            ProcessingJob(
+                id="job-123",
+                post_guid=post.guid,
+                status="completed",
+                current_step=4,
+                step_name="Processing complete",
+                total_steps=4,
+            )
+        )
+        db.session.commit()
+
+        log_file.write_text(
+            "\n".join(
+                [
+                    "2026-04-05 03:15:38,000 INFO [JOB_STATUS_UPDATE] job_id=job-123 status=running step=2 step_name=Transcribing audio bound=True",
+                    f"2026-04-05 03:15:38,050 INFO [TRANSCRIBE_START] Calling transcriber whisper-1 for post {post.id}, audio: /tmp/audio.mp3",
+                    f"2026-04-05 03:15:39,000 INFO Starting ad classification for post {post.id} with 1 segments.",
+                    "2026-04-05 03:15:40,000 INFO [JOB_STATUS_UPDATE] job_id=job-123 status=running step=4 step_name=Processing audio bound=True",
+                    "2026-04-05 03:15:41,000 INFO unrelated line for another post",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        guid = post.guid
+
+    client = app.test_client()
+
+    with mock.patch("app.routes.post_routes._get_app_log_path", return_value=log_file):
+        response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+
+    assert payload["transcript_segments"][0]["speaker_label"] == "SPEAKER_00"
+    assert payload["related_logs"]["latest_job_id"] == "job-123"
+    assert any(
+        entry["stage"] == "transcription" and entry["step_name"] == "Transcribing audio"
+        for entry in payload["related_logs"]["entries"]
+    )
+    assert any(
+        entry["stage"] == "classification"
+        for entry in payload["related_logs"]["entries"]
+    )
+    assert any(
+        entry["stage"] == "audio" and entry["step_name"] == "Processing audio"
+        for entry in payload["related_logs"]["entries"]
+    )
+
+
+def test_post_stats_exposes_retry_count_separately_from_attempt_count(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-retry-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Retry Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=0,
+                    model_name="gemini/gemini-3.1-flash-lite-preview",
+                    prompt="Prompt",
+                    status="success",
+                    retry_attempts=1,
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=1,
+                    last_segment_sequence_num=1,
+                    model_name="gemini/gemini-3.1-flash-lite-preview",
+                    prompt="Prompt retry",
+                    status="success",
+                    retry_attempts=3,
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=0,
+                    model_name="whisper-1",
+                    prompt="Whisper transcription job",
+                    status="success",
+                    retry_attempts=0,
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    client = app.test_client()
+    response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+
+    retry_counts = {
+        (call["model_name"], call["segment_range"]): (
+            call["retry_attempts"],
+            call["retry_count"],
+        )
+        for call in payload["model_calls"]
+    }
+
+    assert retry_counts[("gemini/gemini-3.1-flash-lite-preview", "0-0")] == (1, 0)
+    assert retry_counts[("gemini/gemini-3.1-flash-lite-preview", "1-1")] == (3, 2)
+    assert retry_counts[("whisper-1", "0-0")] == (0, 0)
 
 
 def test_post_stats_includes_debug_info_when_enabled(app, tmp_path):

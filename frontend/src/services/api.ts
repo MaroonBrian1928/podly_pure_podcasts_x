@@ -299,6 +299,7 @@ export const feedsApi = {
       last_segment_sequence_num: number;
       timestamp: string | null;
       retry_attempts: number;
+      retry_count: number;
       error_message: string | null;
       prompt: string | null;
       response: string | null;
@@ -308,6 +309,7 @@ export const feedsApi = {
       sequence_num: number;
       start_time: number;
       end_time: number;
+      speaker_label?: string | null;
       text: string;
       primary_label: 'ad' | 'content';
       mixed: boolean;
@@ -330,6 +332,17 @@ export const feedsApi = {
       segment_text: string;
       mixed: boolean;
     }>;
+    related_logs: {
+      latest_job_id: string | null;
+      entries: Array<{
+        timestamp: string;
+        level: string;
+        stage: string;
+        message: string;
+        job_id: string | null;
+        step_name: string | null;
+      }>;
+    };
     debug_info?: {
       post_id: number;
       feed_id: number;
@@ -458,6 +471,7 @@ export const feedsApi = {
       last_segment_sequence_num: number;
       timestamp: string | null;
       retry_attempts: number;
+      retry_count: number;
       error_message: string | null;
       prompt: string | null;
       response: string | null;
@@ -467,6 +481,7 @@ export const feedsApi = {
       sequence_num: number;
       start_time: number;
       end_time: number;
+      speaker_label?: string | null;
       text: string;
       primary_label: 'ad' | 'content';
       mixed: boolean;
@@ -489,6 +504,17 @@ export const feedsApi = {
       segment_text: string;
       mixed: boolean;
     }>;
+    related_logs: {
+      latest_job_id: string | null;
+      entries: Array<{
+        timestamp: string;
+        level: string;
+        stage: string;
+        message: string;
+        job_id: string | null;
+        step_name: string | null;
+      }>;
+    };
     debug_info?: {
       post_id: number;
       feed_id: number;
@@ -557,7 +583,12 @@ export const feedsApi = {
 };
 
 export const authApi = {
-  getStatus: async (): Promise<{ require_auth: boolean; landing_page_enabled?: boolean }> => {
+  getStatus: async (): Promise<{
+    require_auth: boolean;
+    landing_page_enabled?: boolean;
+    show_discord_integration?: boolean;
+    show_report_issue_button?: boolean;
+  }> => {
     const response = await api.get('/api/auth/status');
     return response.data;
   },

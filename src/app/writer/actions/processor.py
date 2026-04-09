@@ -142,6 +142,7 @@ def _normalize_segments_payload(
     for seg in segments:
         if not isinstance(seg, dict):
             continue
+        speaker_label = seg.get("speaker_label")
         normalized.append(
             {
                 "post_id": int(seg["post_id"]),
@@ -149,6 +150,9 @@ def _normalize_segments_payload(
                 "start_time": float(seg["start_time"]),
                 "end_time": float(seg["end_time"]),
                 "text": str(seg["text"]),
+                "speaker_label": (
+                    str(speaker_label) if speaker_label is not None else None
+                ),
             }
         )
     return normalized
@@ -185,6 +189,7 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
     for i, seg in enumerate(segments):
         if not isinstance(seg, dict):
             continue
+        speaker_label = seg.get("speaker_label")
         payload.append(
             {
                 "post_id": post_id_i,
@@ -192,6 +197,9 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
                 "start_time": float(seg["start_time"]),
                 "end_time": float(seg["end_time"]),
                 "text": str(seg["text"]),
+                "speaker_label": (
+                    str(speaker_label) if speaker_label is not None else None
+                ),
             }
         )
 

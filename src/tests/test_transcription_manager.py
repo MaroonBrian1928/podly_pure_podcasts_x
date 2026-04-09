@@ -293,3 +293,50 @@ def test_transcribe_reuses_placeholder_model_call(
         assert refreshed_call.id == existing_call.id
         assert refreshed_call.status == "success"
         assert refreshed_call.last_segment_sequence_num == 1
+
+
+def test_transcribe_persists_optional_speaker_labels(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+) -> None:
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-speaker.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-speaker",
+            download_url="http://example.com/audio-speaker.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        transcriber = MockTranscriber(
+            [
+                Segment(
+                    start=0.0,
+                    end=5.0,
+                    text="Host intro",
+                    speaker_label="SPEAKER_00",
+                ),
+                Segment(
+                    start=5.0,
+                    end=10.0,
+                    text="Promo read",
+                    speaker_label="SPEAKER_01",
+                ),
+            ]
+        )
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=transcriber,
+        )
+
+        segments = manager.transcribe(post)
+
+        assert len(segments) == 2
+        assert segments[0].speaker_label == "SPEAKER_00"
+        assert segments[1].speaker_label == "SPEAKER_01"

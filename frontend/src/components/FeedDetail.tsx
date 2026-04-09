@@ -9,6 +9,7 @@ import ProcessingStatsButton from './ProcessingStatsButton';
 import EpisodeProcessingStatus from './EpisodeProcessingStatus';
 import FeedSettingsModal from './FeedSettingsModal';
 import FeedSubscribersModal from './FeedSubscribersModal';
+import ModalShell from './ModalShell';
 import { useAuth } from '../contexts/AuthContext';
 import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
@@ -60,6 +61,7 @@ interface ProcessingEstimate {
 }
 
 const EPISODES_PAGE_SIZE = 25;
+const MIN_FEED_TRANSITION_MS = 320;
 
 export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailProps) {
   const { requireAuth, isAuthenticated, user } = useAuth();
@@ -79,8 +81,10 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [isFeedTransitionActive, setIsFeedTransitionActive] = useState(false);
   const [episodeDescriptionView, setEpisodeDescriptionView] =
     useState<EpisodeDescriptionView>(() => loadEpisodeDescriptionView(feed.id));
+  const feedTransitionStartRef = useRef<number | null>(null);
   const handleEpisodeDescriptionViewChange = (view: EpisodeDescriptionView) => {
     setEpisodeDescriptionView(view);
     persistEpisodeDescriptionView(currentFeed.id, view);
@@ -262,7 +266,14 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         pageSize: EPISODES_PAGE_SIZE,
         whitelistedOnly,
       }),
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previousData, previousQuery) => {
+      const previousFeedId =
+        Array.isArray(previousQuery?.queryKey) &&
+        typeof previousQuery.queryKey[1] === 'number'
+          ? previousQuery.queryKey[1]
+          : null;
+      return previousFeedId === currentFeed.id ? previousData : undefined;
+    },
   });
 
   const whitelistMutation = useMutation({
@@ -389,8 +400,32 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   });
 
   useEffect(() => {
+    if (feed.id !== currentFeed.id) {
+      feedTransitionStartRef.current = Date.now();
+      setIsFeedTransitionActive(true);
+    }
     setCurrentFeed(feed);
-  }, [feed]);
+  }, [feed, currentFeed.id]);
+
+  useEffect(() => {
+    if (!isFeedTransitionActive) {
+      return;
+    }
+
+    if (isLoading || isFetching) {
+      return;
+    }
+
+    const elapsed =
+      Date.now() - (feedTransitionStartRef.current ?? Date.now());
+    const remainingDelay = Math.max(0, MIN_FEED_TRANSITION_MS - elapsed);
+    const timeout = window.setTimeout(() => {
+      setIsFeedTransitionActive(false);
+    }, remainingDelay);
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [isFeedTransitionActive, isFetching, isLoading]);
 
   useEffect(() => {
     setEpisodeDescriptionView(loadEpisodeDescriptionView(currentFeed.id));
@@ -616,59 +651,72 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     }
   };
 
+  const transitionSkeletonClass =
+    'rounded-full bg-gray-200 dark:bg-slate-800';
+  const transitionSkeletonSoftClass =
+    'rounded-full bg-gray-100 dark:bg-slate-900/80';
+
   return (
-    <div className="h-full flex flex-col bg-white relative dark:bg-slate-950/40">
-      {/* Mobile Header */}
-      <div className="flex items-center justify-between p-4 border-b lg:hidden">
-        <h2 className="text-lg font-semibold text-gray-900">Podcast Details</h2>
-        {onClose && (
-          <button
-            onClick={onClose}
-            className="p-2 text-gray-400 hover:text-gray-600"
-          >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        )}
-      </div>
-
-      {/* Sticky Header - appears when scrolling */}
-      <div className={`absolute top-16 lg:top-0 left-0 right-0 z-10 bg-white border-b dark:bg-slate-950/95 dark:border-slate-700 transition-all duration-300 ${
-        showStickyHeader ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'
-      }`}>
-        <div className="p-4">
-          <div className="flex items-center gap-3">
-            {currentFeed.image_url && (
-              <img
-                src={currentFeed.image_url}
-                alt={currentFeed.title}
-                className="w-10 h-10 rounded-lg object-cover"
-              />
-            )}
-            <div className="flex-1 min-w-0">
-              <h2 className="font-semibold text-gray-900 truncate">{currentFeed.title}</h2>
-              {currentFeed.author && (
-                <p className="text-sm text-gray-600 truncate">by {currentFeed.author}</p>
-              )}
-            </div>
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as SortOption)}
-              className="text-sm border border-gray-300 rounded-md px-3 py-1 bg-white"
+    <div
+      className="h-full flex flex-col bg-white relative dark:bg-slate-950/40"
+      aria-busy={isFeedTransitionActive}
+    >
+      <div
+        className={`flex h-full flex-col transition-opacity duration-150 ${
+          isFeedTransitionActive ? 'pointer-events-none opacity-0' : 'opacity-100'
+        }`}
+      >
+        {/* Mobile Header */}
+        <div className="flex items-center justify-between p-4 border-b lg:hidden">
+          <h2 className="text-lg font-semibold text-gray-900">Podcast Details</h2>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-2 text-gray-400 hover:text-gray-600"
             >
-              <option value="newest">Newest First</option>
-              <option value="oldest">Oldest First</option>
-              <option value="title">Title A-Z</option>
-            </select>
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
 
-            {/* do not add addtional controls to sticky headers */}
+        {/* Sticky Header - appears when scrolling */}
+        <div className={`absolute top-16 lg:top-0 left-0 right-0 z-10 bg-white border-b dark:bg-slate-950/95 dark:border-slate-700 transition-all duration-300 ${
+          showStickyHeader ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'
+        }`}>
+          <div className="p-4">
+            <div className="flex items-center gap-3">
+              {currentFeed.image_url && (
+                <img
+                  src={currentFeed.image_url}
+                  alt={currentFeed.title}
+                  className="w-10 h-10 rounded-lg object-cover"
+                />
+              )}
+              <div className="flex-1 min-w-0">
+                <h2 className="font-semibold text-gray-900 truncate">{currentFeed.title}</h2>
+                {currentFeed.author && (
+                  <p className="text-sm text-gray-600 truncate">by {currentFeed.author}</p>
+                )}
+              </div>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortOption)}
+                className="text-sm border border-gray-300 rounded-md px-3 py-1 bg-white"
+              >
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="title">Title A-Z</option>
+              </select>
+
+              {/* do not add addtional controls to sticky headers */}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Scrollable Content */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
+        {/* Scrollable Content */}
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
         {/* Feed Info Header */}
         <div ref={feedHeaderRef} className="p-6 border-b">
           <div className="flex flex-col gap-6">
@@ -996,12 +1044,15 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         )}
 
         {/* Episodes List */}
-        <div>
+        <div className="min-h-[32rem]">
           {isLoading ? (
             <div className="p-6">
               <div className="animate-pulse space-y-4">
                 {[...Array(5)].map((_, i) => (
-                  <div key={i} className="h-20 bg-gray-200 rounded"></div>
+                  <div
+                    key={i}
+                    className="h-28 rounded-xl border border-gray-200 bg-gray-100"
+                  ></div>
                 ))}
               </div>
             </div>
@@ -1241,13 +1292,156 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
           </div>
         )}
       </div>
+      </div>
 
-      {showProcessingModal && pendingEpisode && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={handleCancelProcessing}>
-          <div
-            className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 space-y-4"
-            onClick={(event) => event.stopPropagation()}
-          >
+      <div
+        className={`absolute inset-0 z-20 transition-opacity duration-200 ${
+          isFeedTransitionActive
+            ? 'opacity-100'
+            : 'pointer-events-none opacity-0'
+        }`}
+        aria-hidden={!isFeedTransitionActive}
+      >
+        <div className="absolute inset-0 bg-white/96 backdrop-blur-[3px] dark:bg-slate-950/92" />
+        <div className="absolute inset-0 overflow-hidden">
+          <div className="flex h-full flex-col animate-pulse">
+            <div className="flex items-center justify-between border-b p-4 lg:hidden">
+              <div className={`h-7 w-40 ${transitionSkeletonClass}`} />
+              <div className="h-10 w-10 rounded-lg bg-gray-200 dark:bg-slate-800" />
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              <div className="border-b p-6">
+                <div className="flex flex-col gap-6">
+                  <div className="flex items-end gap-6">
+                    <div className="h-32 w-32 rounded-lg bg-gray-200 shadow-lg dark:bg-slate-800 sm:h-40 sm:w-40" />
+                    <div className="min-w-0 flex-1 pb-2">
+                      <div className={`mb-2 h-8 w-2/3 max-w-xl ${transitionSkeletonClass}`} />
+                      <div className={`mb-3 h-6 w-1/4 min-w-[8rem] ${transitionSkeletonClass}`} />
+                      <div className={`h-5 w-32 ${transitionSkeletonSoftClass}`} />
+                      {requireAuth && isAdmin && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <div className="h-7 w-24 rounded-full bg-gray-200 dark:bg-slate-800" />
+                          <div className="h-7 w-16 rounded-full bg-gray-200 dark:bg-slate-800" />
+                          {isMember && !isActiveSubscription && (
+                            <div className="h-7 w-16 rounded-full bg-gray-200 dark:bg-slate-800" />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+                    {showPodlyRssButton && (
+                      <div className="h-11 w-full rounded-lg bg-gray-200 dark:bg-slate-800 sm:w-72" />
+                    )}
+
+                    <div className="flex w-full items-center gap-3 sm:w-auto sm:flex-1 sm:flex-wrap">
+                      {requireAuth && isAdmin && !isMember && (
+                        <div className="h-11 flex-1 rounded-lg bg-gray-200 dark:bg-slate-800 sm:w-32 sm:flex-none" />
+                      )}
+                      {canModifyEpisodes && (
+                        <div className="h-11 flex-1 rounded-lg bg-gray-200 dark:bg-slate-800 sm:w-40 sm:flex-none" />
+                      )}
+                      {isAdmin && (
+                        <div className="h-11 w-11 rounded-lg bg-gray-200 dark:bg-slate-800" />
+                      )}
+                      <div className="h-11 w-11 rounded-lg bg-gray-200 dark:bg-slate-800" />
+                    </div>
+                  </div>
+
+                  {currentFeed.description && (
+                    <div className="space-y-3">
+                      <div className={`h-4 w-full ${transitionSkeletonSoftClass}`} />
+                      <div className={`h-4 w-11/12 ${transitionSkeletonSoftClass}`} />
+                      <div className={`h-4 w-3/4 ${transitionSkeletonSoftClass}`} />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {currentFeed.is_member && currentFeed.is_active_subscription === false && (
+                <div className="border-b px-6 py-4">
+                  <div className="flex items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-slate-800 dark:bg-slate-900/85">
+                    <div className="mt-0.5 h-5 w-5 rounded-full bg-gray-200 dark:bg-slate-800" />
+                    <div className="flex-1 space-y-2">
+                      <div className={`h-4 w-40 ${transitionSkeletonClass}`} />
+                      <div className={`h-4 w-full ${transitionSkeletonSoftClass}`} />
+                      <div className={`h-4 w-10/12 ${transitionSkeletonSoftClass}`} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="border-b bg-gray-50 p-4">
+                <div className="flex items-center justify-between">
+                  <div className={`h-7 w-24 ${transitionSkeletonClass}`} />
+                  <div className="h-9 w-32 rounded-md bg-gray-200 dark:bg-slate-800" />
+                </div>
+              </div>
+
+              {showHelp && isAdmin && (
+                <div className="border-b px-4 py-4">
+                  <div className="space-y-3">
+                    <div className={`h-4 w-64 ${transitionSkeletonClass}`} />
+                    <div className={`h-4 w-full ${transitionSkeletonSoftClass}`} />
+                    <div className={`h-4 w-11/12 ${transitionSkeletonSoftClass}`} />
+                    <div className={`h-4 w-10/12 ${transitionSkeletonSoftClass}`} />
+                  </div>
+                </div>
+              )}
+
+              <div className="min-h-[32rem] divide-y divide-gray-200">
+                {[0, 1, 2].map((item) => (
+                  <div key={item} className="p-4">
+                    <div className="flex flex-col gap-3">
+                      <div className="flex items-start gap-3">
+                        <div className="h-16 w-16 rounded-lg bg-gray-200 dark:bg-slate-800" />
+                        <div className="min-w-0 flex-1">
+                          <div className={`mb-2 h-5 w-3/5 ${transitionSkeletonClass}`} />
+                          <div className={`h-4 w-1/4 min-w-[8rem] ${transitionSkeletonClass}`} />
+                        </div>
+                      </div>
+                      <div className="space-y-3">
+                        <div className={`h-4 w-full ${transitionSkeletonSoftClass}`} />
+                        <div className={`h-4 w-5/6 ${transitionSkeletonSoftClass}`} />
+                        <div className={`h-4 w-16 ${transitionSkeletonSoftClass}`} />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="h-8 w-24 rounded-full bg-gray-200 dark:bg-slate-800" />
+                        <div className={`h-4 w-32 ${transitionSkeletonSoftClass}`} />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="h-8 w-24 rounded-md bg-gray-200 dark:bg-slate-800" />
+                        <div className="h-8 w-24 rounded-md bg-gray-200 dark:bg-slate-800" />
+                        <div className="h-8 w-16 rounded-md bg-gray-200 dark:bg-slate-800" />
+                        <div className="ml-auto h-10 w-10 rounded-full bg-gray-200 dark:bg-slate-800" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between border-t bg-white px-4 py-3 dark:bg-slate-950/40">
+                <div className={`h-4 w-40 ${transitionSkeletonSoftClass}`} />
+                <div className="flex items-center gap-2">
+                  <div className="h-8 w-20 rounded-md bg-gray-200 dark:bg-slate-800" />
+                  <div className={`h-4 w-20 ${transitionSkeletonSoftClass}`} />
+                  <div className="h-8 w-16 rounded-md bg-gray-200 dark:bg-slate-800" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <ModalShell
+        isOpen={showProcessingModal && pendingEpisode !== null}
+        onClose={handleCancelProcessing}
+        panelClassName="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 space-y-4"
+      >
+        {pendingEpisode && (
+          <>
             <h3 className="text-lg font-semibold text-gray-900">Enable episode</h3>
             <p className="text-sm text-gray-600">{pendingEpisode.title}</p>
             {isEstimating && (
@@ -1290,9 +1484,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                 {whitelistMutation.isPending ? 'Starting…' : 'Confirm & process'}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </ModalShell>
 
       <FeedSettingsModal
         feed={currentFeed}
@@ -1306,13 +1500,12 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         onEpisodeDescriptionViewChange={handleEpisodeDescriptionViewChange}
       />
 
-      {showSubscribersModal && (
-        <FeedSubscribersModal
-          feedId={currentFeed.id}
-          feedTitle={currentFeed.title}
-          onClose={() => setShowSubscribersModal(false)}
-        />
-      )}
+      <FeedSubscribersModal
+        feedId={currentFeed.id}
+        feedTitle={currentFeed.title}
+        isOpen={showSubscribersModal}
+        onClose={() => setShowSubscribersModal(false)}
+      />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from app.models import (
     Identification,
     ModelCall,
     Post,
+    ProcessingJob,
     TranscriptSegment,
 )
 from app.posts import (
@@ -46,6 +48,7 @@ from podcast_processor.transcription_manager import TranscriptionManager
 from shared import defaults as DEFAULTS
 from shared.processing_paths import (
     get_in_root,
+    get_instance_dir,
     get_processed_audio_path_candidates,
     get_srv_root,
 )
@@ -54,6 +57,11 @@ logger = logging.getLogger("global_logger")
 
 
 post_bp = Blueprint("post", __name__)
+
+_LOG_LINE_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
+    r"(?P<level>[A-Z]+)\s+(?P<message>.*)$"
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -105,6 +113,149 @@ def _build_candidate_file_debug(candidates: list[Path]) -> list[dict[str, Any]]:
             detail["error"] = str(exc)
         candidate_details.append(detail)
     return candidate_details
+
+
+def _get_app_log_path() -> Path:
+    instance_candidate = get_instance_dir() / "logs" / "app.log"
+    if "PODLY_INSTANCE_DIR" in os.environ or instance_candidate.exists():
+        return instance_candidate
+
+    project_candidate = (
+        Path(__file__).resolve().parents[2] / "instance" / "logs" / "app.log"
+    )
+    return project_candidate
+
+
+def _tail_log_lines(path: Path, max_bytes: int = 1_000_000) -> list[str]:
+    if not path.exists() or not path.is_file():
+        return []
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            file_size = handle.tell()
+            read_size = min(file_size, max_bytes)
+            handle.seek(max(0, file_size - read_size))
+            payload = handle.read()
+    except OSError:
+        return []
+
+    text = payload.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if read_size < file_size and lines:
+        lines = lines[1:]
+    return lines
+
+
+def _extract_log_field(message: str, field_name: str) -> str | None:
+    match = re.search(rf"\b{re.escape(field_name)}=([^\s]+)", message)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _extract_step_name(message: str) -> str | None:
+    match = re.search(r"\bstep_name=(.*?)(?:\s+\w+=|$)", message)
+    if match is None:
+        return None
+
+    step_name = match.group(1).strip()
+    return step_name or None
+
+
+def _infer_log_stage(message: str, step_name: str | None) -> str:
+    searchable = f"{step_name or ''} {message}".lower()
+
+    if "download" in searchable:
+        return "download"
+    if "transcrib" in searchable or "whisper" in searchable:
+        return "transcription"
+    if "chapter" in searchable:
+        return "chapters"
+    if (
+        "identifying ads" in searchable
+        or "classif" in searchable
+        or "identification" in searchable
+        or "boundary" in searchable
+        or "modelcall" in searchable
+        or "model call" in searchable
+        or "llm" in searchable
+    ):
+        return "classification"
+    if (
+        "processing audio" in searchable
+        or "audio processor" in searchable
+        or "ffmpeg" in searchable
+        or "removed segment" in searchable
+        or "processed audio" in searchable
+    ):
+        return "audio"
+    if (
+        "[job_status" in searchable
+        or "starting processing" in searchable
+        or "processing complete" in searchable
+        or "cancel" in searchable
+        or "unexpected error" in searchable
+        or "failed" in searchable
+    ):
+        return "job"
+    return "general"
+
+
+def _build_related_logs(
+    *,
+    post: Post,
+    recent_jobs: list[ProcessingJob],
+) -> dict[str, Any]:
+    log_path = _get_app_log_path()
+    lines = _tail_log_lines(log_path)
+    if not lines:
+        return {
+            "latest_job_id": recent_jobs[0].id if recent_jobs else None,
+            "entries": [],
+        }
+
+    recent_job_ids = {job.id for job in recent_jobs if job.id}
+    related_entries: list[dict[str, Any]] = []
+    post_id_patterns = (
+        re.compile(rf"\bpost_id={post.id}\b"),
+        re.compile(rf"\bpost {post.id}\b"),
+    )
+
+    for line in lines:
+        match = _LOG_LINE_RE.match(line)
+        if match is None:
+            continue
+
+        message = match.group("message")
+        job_id = _extract_log_field(message, "job_id")
+        post_guid = _extract_log_field(message, "post_guid")
+
+        if not any(
+            [
+                job_id in recent_job_ids if job_id is not None else False,
+                post_guid == post.guid,
+                any(pattern.search(message) for pattern in post_id_patterns),
+            ]
+        ):
+            continue
+
+        step_name = _extract_step_name(message)
+        related_entries.append(
+            {
+                "timestamp": match.group("timestamp"),
+                "level": match.group("level"),
+                "stage": _infer_log_stage(message, step_name),
+                "message": message,
+                "job_id": job_id,
+                "step_name": step_name,
+            }
+        )
+
+    return {
+        "latest_job_id": recent_jobs[0].id if recent_jobs else None,
+        "entries": related_entries[-120:],
+    }
 
 
 @post_bp.route("/api/feeds/<int:feed_id>/posts", methods=["GET"])
@@ -407,6 +558,12 @@ def api_post_stats(p_guid: str) -> flask.Response:
         .order_by(ModelCall.model_name, ModelCall.first_segment_sequence_num)
         .all()
     )
+    recent_jobs = (
+        ProcessingJob.query.filter_by(post_guid=post.guid)
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(3)
+        .all()
+    )
 
     transcript_segments = post.segments.all()
 
@@ -443,6 +600,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
 
     model_call_details = []
     for call in model_calls:
+        recorded_attempts = max(int(call.retry_attempts or 0), 0)
         model_call_details.append(
             {
                 "id": call.id,
@@ -452,7 +610,10 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "first_segment_sequence_num": call.first_segment_sequence_num,
                 "last_segment_sequence_num": call.last_segment_sequence_num,
                 "timestamp": call.timestamp.isoformat() if call.timestamp else None,
-                "retry_attempts": call.retry_attempts,
+                "retry_attempts": recorded_attempts,
+                # Historically, retry_attempts has been used as an attempt counter
+                # for LLM calls, so expose a UI-safe retry count separately.
+                "retry_count": max(recorded_attempts - 1, 0),
                 "error_message": call.error_message,
                 "prompt": call.prompt,
                 "response": call.response,
@@ -483,6 +644,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "sequence_num": segment.sequence_num,
                 "start_time": round(segment.start_time, 1),
                 "end_time": round(segment.end_time, 1),
+                "speaker_label": segment.speaker_label,
                 "text": segment.text,
                 "primary_label": primary_label,
                 "mixed": mixed,
@@ -578,6 +740,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
         "model_calls": model_call_details,
         "transcript_segments": transcript_segments_data,
         "identifications": identifications_data,
+        "related_logs": _build_related_logs(post=post, recent_jobs=recent_jobs),
         "chapters": chapters_data,
     }
 

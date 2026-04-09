@@ -7,7 +7,6 @@ from typing import Any
 
 from groq import Groq
 from openai import OpenAI
-from openai.types.audio.transcription_segment import TranscriptionSegment
 from pydantic import BaseModel
 
 from podcast_processor.audio import split_audio
@@ -18,6 +17,7 @@ class Segment(BaseModel):
     start: float
     end: float
     text: str
+    speaker_label: str | None = None
 
 
 class Transcriber(ABC):
@@ -140,7 +140,7 @@ class OpenAIWhisperTranscriber(Transcriber):
         )
 
         self.logger.info("[WHISPER_REMOTE] Processing %d chunks", len(chunks))
-        all_segments: list[TranscriptionSegment] = []
+        all_segments: list[Segment] = []
 
         for idx, chunk in enumerate(chunks):
             chunk_path, offset = chunk
@@ -164,23 +164,12 @@ class OpenAIWhisperTranscriber(Transcriber):
             "[WHISPER_REMOTE] Transcription complete: %d total segments",
             len(all_segments),
         )
-        return self.convert_segments(all_segments)
-
-    @staticmethod
-    def convert_segments(segments: list[TranscriptionSegment]) -> list[Segment]:
-        return [
-            Segment(
-                start=seg.start,
-                end=seg.end,
-                text=seg.text,
-            )
-            for seg in segments
-        ]
+        return all_segments
 
     @staticmethod
     def add_offset_to_segments(
-        segments: list[TranscriptionSegment], offset_ms: int
-    ) -> list[TranscriptionSegment]:
+        segments: list[Segment], offset_ms: int
+    ) -> list[Segment]:
         offset_sec = float(offset_ms) / 1000.0
         for segment in segments:
             segment.start += offset_sec
@@ -188,28 +177,116 @@ class OpenAIWhisperTranscriber(Transcriber):
 
         return segments
 
-    def get_segments_for_chunk(self, chunk_path: str) -> list[TranscriptionSegment]:
+    def build_transcription_request_kwargs(self, audio_file: Any) -> dict[str, Any]:
+        request_kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "file": audio_file,
+            "timestamp_granularities": ["segment"],
+            "language": self.config.language,
+            "response_format": "verbose_json",
+        }
+
+        if self.config.diarize:
+            extra_body: dict[str, Any] = {
+                "align": True,
+                "diarize": True,
+            }
+            if self.config.speaker_embeddings:
+                extra_body["speaker_embeddings"] = True
+            request_kwargs["extra_body"] = extra_body
+
+        return request_kwargs
+
+    @staticmethod
+    def _get_segment_field(segment: Any, field_name: str) -> Any | None:
+        if isinstance(segment, dict):
+            return segment.get(field_name)
+        return getattr(segment, field_name, None)
+
+    @classmethod
+    def _get_speaker_label(cls, segment: Any) -> str | None:
+        for field_name in ("speaker_label", "speaker", "speaker_id"):
+            value = cls._get_segment_field(segment, field_name)
+            if value is None:
+                continue
+
+            speaker_label = str(value).strip()
+            if speaker_label:
+                return speaker_label
+
+        return None
+
+    @classmethod
+    def _parse_segment(cls, segment: Any) -> Segment:
+        start = cls._get_segment_field(segment, "start")
+        end = cls._get_segment_field(segment, "end")
+        text = cls._get_segment_field(segment, "text")
+
+        if start is None or end is None or text is None:
+            raise ValueError(
+                "Remote transcription segment is missing one of required fields: "
+                "start, end, text"
+            )
+
+        return Segment(
+            start=float(start),
+            end=float(end),
+            text=str(text),
+            speaker_label=cls._get_speaker_label(segment),
+        )
+
+    @classmethod
+    def extract_segments_from_transcription(cls, transcription: Any) -> list[Segment]:
+        segment_payloads: Any | None = None
+        if isinstance(transcription, dict):
+            segment_payloads = transcription.get("segments")
+        else:
+            segment_payloads = getattr(transcription, "segments", None)
+            if segment_payloads is None and hasattr(transcription, "to_dict"):
+                serialized = transcription.to_dict()
+                if isinstance(serialized, dict):
+                    segment_payloads = serialized.get("segments")
+
+        if segment_payloads is None:
+            return []
+
+        if isinstance(segment_payloads, dict):
+            nested_segments = segment_payloads.get("segments")
+            if nested_segments is None:
+                raise ValueError(
+                    "Remote transcription segments dict is missing nested 'segments' list"
+                )
+            segment_payloads = nested_segments
+
+        if not isinstance(segment_payloads, list):
+            raise ValueError(
+                f"Remote transcription segments must be a list, got {type(segment_payloads).__name__}"
+            )
+
+        return [cls._parse_segment(segment) for segment in segment_payloads]
+
+    def get_segments_for_chunk(self, chunk_path: str) -> list[Segment]:
         with open(chunk_path, "rb") as f:
             self.logger.info(
-                "[WHISPER_API_CALL] Sending chunk to API: %s (timeout=%ds)",
+                "[WHISPER_API_CALL] Sending chunk to API: %s (timeout=%ds diarize=%s speaker_embeddings=%s)",
                 chunk_path,
                 self.config.timeout_sec,
+                self.config.diarize,
+                self.config.speaker_embeddings,
             )
 
             transcription = self.openai_client.audio.transcriptions.create(
-                model=self.config.model,
-                file=f,
-                timestamp_granularities=["segment"],
-                language=self.config.language,
-                response_format="verbose_json",
+                **self.build_transcription_request_kwargs(f),
             )
 
-            self.logger.debug("Got transcription")
+            self.logger.debug(
+                "Got transcription response type: %s",
+                type(transcription).__name__,
+            )
 
-            segments = transcription.segments
-            assert segments is not None
+            segments = self.extract_segments_from_transcription(transcription)
 
-            self.logger.debug(f"Got {len(segments)} segments")
+            self.logger.debug("Got %d segments", len(segments))
 
             return segments
 
