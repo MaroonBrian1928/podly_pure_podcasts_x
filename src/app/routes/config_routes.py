@@ -240,6 +240,16 @@ def _hydrate_app_config(data: dict[str, Any]) -> None:
         "feed_tag_override",
         app_cfg.get("feed_tag_override"),
     )
+    app_cfg["notification_apprise_url"] = getattr(
+        runtime_config,
+        "notification_apprise_url",
+        app_cfg.get("notification_apprise_url"),
+    )
+    app_cfg["notification_apprise_key"] = getattr(
+        runtime_config,
+        "notification_apprise_key",
+        app_cfg.get("notification_apprise_key"),
+    )
 
 
 def _first_env(env_names: list[str]) -> tuple[str | None, str | None]:

@@ -173,6 +173,14 @@ class Config(BaseModel):
         default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
         description="When True, the global tag label/position always overrides any per-feed tag settings.",
     )
+    notification_apprise_url: str = Field(
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+        description="Apprise API server base URL (e.g. http://apprise:8000). Leave empty to disable notifications.",
+    )
+    notification_apprise_key: str = Field(
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
+        description="Apprise API config key/tag to notify (e.g. podly). Leave empty to disable notifications.",
+    )
 
     def redacted(self) -> Config:
         return self.model_copy(

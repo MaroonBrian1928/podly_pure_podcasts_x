@@ -54,6 +54,10 @@ APP_FEED_TAG_LABEL = "podly"
 APP_FEED_TAG_POSITION = "prefix"  # "prefix" or "suffix"
 APP_FEED_TAG_OVERRIDE = False  # When True, global tag always wins over per-feed tag
 
+# Notification defaults (Apprise API integration)
+APP_NOTIFICATION_APPRISE_URL = ""
+APP_NOTIFICATION_APPRISE_KEY = ""
+
 # Credits defaults
 MINUTES_PER_CREDIT = 60
 

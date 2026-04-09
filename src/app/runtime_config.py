@@ -52,4 +52,6 @@ else:
         feed_tag_label=DEFAULTS.APP_FEED_TAG_LABEL,
         feed_tag_position=DEFAULTS.APP_FEED_TAG_POSITION,
         feed_tag_override=DEFAULTS.APP_FEED_TAG_OVERRIDE,
+        notification_apprise_url=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+        notification_apprise_key=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
     )

@@ -157,6 +157,8 @@ def ensure_defaults() -> None:
             "feed_tag_label": DEFAULTS.APP_FEED_TAG_LABEL,
             "feed_tag_position": DEFAULTS.APP_FEED_TAG_POSITION,
             "feed_tag_override": DEFAULTS.APP_FEED_TAG_OVERRIDE,
+            "notification_apprise_url": DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+            "notification_apprise_key": DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
         },
     )
 
@@ -236,6 +238,8 @@ def read_combined() -> dict[str, Any]:
             "feed_tag_label": app_s.feed_tag_label,
             "feed_tag_position": app_s.feed_tag_position,
             "feed_tag_override": app_s.feed_tag_override,
+            "notification_apprise_url": app_s.notification_apprise_url,
+            "notification_apprise_key": app_s.notification_apprise_key,
         },
     }
 
@@ -375,6 +379,8 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
         "feed_tag_label",
         "feed_tag_position",
         "feed_tag_override",
+        "notification_apprise_url",
+        "notification_apprise_key",
     ]:
         if key in data:
             setattr(row, key, data[key])
@@ -591,6 +597,20 @@ def to_pydantic_config() -> PydanticConfig:
         ),
         feed_tag_override=bool(
             data["app"].get("feed_tag_override", DEFAULTS.APP_FEED_TAG_OVERRIDE)
+        ),
+        notification_apprise_url=str(
+            data["app"].get(
+                "notification_apprise_url",
+                DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+            )
+            or ""
+        ),
+        notification_apprise_key=str(
+            data["app"].get(
+                "notification_apprise_key",
+                DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
+            )
+            or ""
         ),
     )
 

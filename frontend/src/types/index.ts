@@ -171,6 +171,8 @@ export interface AppConfigUI {
   feed_tag_label: string;
   feed_tag_position: string;
   feed_tag_override: boolean;
+  notification_apprise_url: string;
+  notification_apprise_key: string;
 }
 
 export interface CombinedConfig {
