@@ -164,6 +164,8 @@ export interface AppConfigUI {
   user_limit_total: number | null;
   autoprocess_on_download: boolean;
   cost_rate_per_hour: number;
+  notification_apprise_url: string;
+  notification_apprise_key: string;
 }
 
 export interface CombinedConfig {
