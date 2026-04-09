@@ -161,6 +161,14 @@ class Config(BaseModel):
     user_limit_total: int | None = DEFAULTS.APP_USER_LIMIT_TOTAL
     autoprocess_on_download: bool = DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
+    notification_apprise_url: str = Field(
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+        description="Apprise API server base URL (e.g. http://apprise:8000). Leave empty to disable notifications.",
+    )
+    notification_apprise_key: str = Field(
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
+        description="Apprise API config key/tag to notify (e.g. podly). Leave empty to disable notifications.",
+    )
 
     def redacted(self) -> Config:
         return self.model_copy(

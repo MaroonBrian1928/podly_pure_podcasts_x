@@ -49,6 +49,10 @@ APP_USER_LIMIT_TOTAL: int | None = None
 APP_AUTOPROCESS_ON_DOWNLOAD = False
 APP_COST_RATE_PER_HOUR = 0.04
 
+# Notification defaults (Apprise API integration)
+APP_NOTIFICATION_APPRISE_URL = ""
+APP_NOTIFICATION_APPRISE_KEY = ""
+
 # Credits defaults
 MINUTES_PER_CREDIT = 60
 

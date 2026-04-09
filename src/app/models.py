@@ -533,6 +533,16 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.APP_COST_RATE_PER_HOUR,
     )
+    notification_apprise_url = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+    )
+    notification_apprise_key = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
+    )
 
     # Hash of the environment variables used to seed configuration.
     # Used to detect changes in environment variables between restarts.

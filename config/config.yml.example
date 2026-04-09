@@ -1,0 +1,46 @@
+# Podly Pure Podcasts — example configuration
+#
+# Copy this file to config/config.yml and adjust values as needed.
+# All settings can also be overridden via environment variables.
+# Settings are stored in the database and can be edited in the web UI
+# under Settings → App.
+
+# ---------------------------------------------------------------------------
+# Notifications (Apprise API)
+# ---------------------------------------------------------------------------
+# Podly can send a push notification whenever an episode finishes processing
+# (success or failure) via a self-hosted Apprise API server.
+#
+# Apprise API supports 70+ notification services — Slack, Discord, Telegram,
+# email, Gotify, Ntfy, Pushover, and more.  You configure *which* services to
+# use inside the Apprise API server itself; Podly just POSTs to it.
+#
+# Quickstart with Docker:
+#   docker run -p 8000:8000 caronc/apprise
+#
+# Then add your notification URLs to a config key (e.g. "podly"):
+#   curl -X POST http://localhost:8000/add/podly \
+#     -d '{"urls": "discord://WebhookID/WebhookToken/"}'
+#
+# Full service URL reference: https://github.com/caronc/apprise/wiki
+#
+# Set BOTH values to enable notifications. Leave either empty to disable.
+#
+# notification_apprise_url: http://apprise:8000
+# notification_apprise_key: podly
+#
+# What gets sent
+# ─────────────
+# Success:
+#   Title : [podly] Processed: <podcast name>
+#   Body  : Episode ready: <episode title>
+#   Type  : success
+#
+# Failure:
+#   Title : [podly] Processing failed: <podcast name>
+#   Body  : Episode: <episode title>\nError: <error message>
+#   Type  : failure
+#
+# The notification is fired by the podcast processor worker after the job
+# completes (or fails).  Network errors are logged as warnings and never
+# interrupt processing.

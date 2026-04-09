@@ -41,6 +41,7 @@ from podcast_processor.prompt import (
 )
 from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config
+from shared.notifications import send_episode_notification
 from shared.processing_paths import (
     ProcessingPaths,
     find_existing_processed_audio_path,
@@ -281,15 +282,32 @@ class PodcastProcessor:
         except ProcessorException as e:
             error_msg = str(e)
             if "Processing job in progress" in error_msg:
+                status_msg = "Another processing job is already running for this episode"
                 self.status_manager.update_job_status(
                     job,
                     "failed",
                     cached_current_step,
-                    "Another processing job is already running for this episode",
+                    status_msg,
+                )
+                send_episode_notification(
+                    apprise_url=getattr(self.config, "notification_apprise_url", ""),
+                    apprise_key=getattr(self.config, "notification_apprise_key", ""),
+                    feed_title=cached_feed_title or "",
+                    episode_title=cached_post_title or "",
+                    success=False,
+                    error_message=status_msg,
                 )
             else:
                 self.status_manager.update_job_status(
                     job, "failed", cached_current_step, error_msg
+                )
+                send_episode_notification(
+                    apprise_url=getattr(self.config, "notification_apprise_url", ""),
+                    apprise_key=getattr(self.config, "notification_apprise_key", ""),
+                    feed_title=cached_feed_title or "",
+                    episode_title=cached_post_title or "",
+                    success=False,
+                    error_message=error_msg,
                 )
             raise
 
@@ -302,6 +320,14 @@ class PodcastProcessor:
             )
             self.status_manager.update_job_status(
                 job, "failed", cached_current_step, f"Unexpected error: {e!s}"
+            )
+            send_episode_notification(
+                apprise_url=getattr(self.config, "notification_apprise_url", ""),
+                apprise_key=getattr(self.config, "notification_apprise_key", ""),
+                feed_title=cached_feed_title or "",
+                episode_title=cached_post_title or "",
+                success=False,
+                error_message=f"Unexpected error: {e!s}",
             )
             raise
 
@@ -866,6 +892,13 @@ class PodcastProcessor:
         # Mark job complete
         self.status_manager.update_job_status(
             job, "completed", 4, "Processing complete", 100.0
+        )
+        send_episode_notification(
+            apprise_url=getattr(self.config, "notification_apprise_url", ""),
+            apprise_key=getattr(self.config, "notification_apprise_key", ""),
+            feed_title=getattr(post.feed, "title", "") if post.feed else "",
+            episode_title=post.title or "",
+            success=True,
         )
 
     def _raise_if_cancelled(

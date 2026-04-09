@@ -93,6 +93,24 @@ export default function AppSection() {
               Enable the public landing page
             </label>
           </div>
+          <Field label="Apprise API Server URL">
+            <input
+              className="input"
+              type="text"
+              placeholder="http://apprise:8000"
+              value={pending?.app?.notification_apprise_url ?? ''}
+              onChange={(e) => setField(['app', 'notification_apprise_url'], e.target.value)}
+            />
+          </Field>
+          <Field label="Apprise Config Key">
+            <input
+              className="input"
+              type="text"
+              placeholder="podly"
+              value={pending?.app?.notification_apprise_key ?? ''}
+              onChange={(e) => setField(['app', 'notification_apprise_key'], e.target.value)}
+            />
+          </Field>
         </div>
       </Section>
 
