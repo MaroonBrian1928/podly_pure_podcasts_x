@@ -93,6 +93,26 @@ export default function AppSection() {
               Enable the public landing page
             </label>
           </div>
+          <Field label="Feed Tag Label">
+            <input
+              className="input"
+              type="text"
+              placeholder="podly"
+              value={pending?.app?.feed_tag_label ?? 'podly'}
+              onChange={(e) => setField(['app', 'feed_tag_label'], e.target.value)}
+            />
+            <p className="text-xs text-gray-500 mt-1">Text shown inside brackets on feed titles. Leave empty to omit the tag entirely.</p>
+          </Field>
+          <Field label="Feed Tag Position">
+            <select
+              className="input"
+              value={pending?.app?.feed_tag_position ?? 'prefix'}
+              onChange={(e) => setField(['app', 'feed_tag_position'], e.target.value)}
+            >
+              <option value="prefix">[tag] Feed Title</option>
+              <option value="suffix">Feed Title [tag]</option>
+            </select>
+          </Field>
         </div>
       </Section>
 

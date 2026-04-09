@@ -49,6 +49,10 @@ APP_USER_LIMIT_TOTAL: int | None = None
 APP_AUTOPROCESS_ON_DOWNLOAD = False
 APP_COST_RATE_PER_HOUR = 0.04
 
+# Feed tag defaults
+APP_FEED_TAG_LABEL = "podly"
+APP_FEED_TAG_POSITION = "prefix"  # "prefix" or "suffix"
+
 # Credits defaults
 MINUTES_PER_CREDIT = 60
 

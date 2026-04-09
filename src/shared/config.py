@@ -161,6 +161,14 @@ class Config(BaseModel):
     user_limit_total: int | None = DEFAULTS.APP_USER_LIMIT_TOTAL
     autoprocess_on_download: bool = DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
+    feed_tag_label: str = Field(
+        default=DEFAULTS.APP_FEED_TAG_LABEL,
+        description="Text inside the brackets added to feed titles (e.g. 'podly'). Empty string omits the tag entirely.",
+    )
+    feed_tag_position: str = Field(
+        default=DEFAULTS.APP_FEED_TAG_POSITION,
+        description="Where to place the tag relative to the feed title: 'prefix' or 'suffix'.",
+    )
 
     def redacted(self) -> Config:
         return self.model_copy(

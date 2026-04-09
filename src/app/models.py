@@ -533,6 +533,16 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.APP_COST_RATE_PER_HOUR,
     )
+    feed_tag_label = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_FEED_TAG_LABEL,
+    )
+    feed_tag_position = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_FEED_TAG_POSITION,
+    )
 
     # Hash of the environment variables used to seed configuration.
     # Used to detect changes in environment variables between restarts.

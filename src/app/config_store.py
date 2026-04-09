@@ -154,6 +154,8 @@ def ensure_defaults() -> None:
             "user_limit_total": DEFAULTS.APP_USER_LIMIT_TOTAL,
             "autoprocess_on_download": DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
             "cost_rate_per_hour": DEFAULTS.APP_COST_RATE_PER_HOUR,
+            "feed_tag_label": DEFAULTS.APP_FEED_TAG_LABEL,
+            "feed_tag_position": DEFAULTS.APP_FEED_TAG_POSITION,
         },
     )
 
@@ -230,6 +232,8 @@ def read_combined() -> dict[str, Any]:
             "user_limit_total": app_s.user_limit_total,
             "autoprocess_on_download": app_s.autoprocess_on_download,
             "cost_rate_per_hour": app_s.cost_rate_per_hour,
+            "feed_tag_label": app_s.feed_tag_label,
+            "feed_tag_position": app_s.feed_tag_position,
         },
     }
 
@@ -366,6 +370,8 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
         "user_limit_total",
         "autoprocess_on_download",
         "cost_rate_per_hour",
+        "feed_tag_label",
+        "feed_tag_position",
     ]:
         if key in data:
             setattr(row, key, data[key])
@@ -572,6 +578,13 @@ def to_pydantic_config() -> PydanticConfig:
                 "cost_rate_per_hour",
                 DEFAULTS.APP_COST_RATE_PER_HOUR,
             )
+        ),
+        feed_tag_label=str(
+            data["app"].get("feed_tag_label", DEFAULTS.APP_FEED_TAG_LABEL) or ""
+        ),
+        feed_tag_position=str(
+            data["app"].get("feed_tag_position", DEFAULTS.APP_FEED_TAG_POSITION)
+            or DEFAULTS.APP_FEED_TAG_POSITION
         ),
     )
 

@@ -225,6 +225,16 @@ def _hydrate_app_config(data: dict[str, Any]) -> None:
         "autoprocess_on_download",
         app_cfg.get("autoprocess_on_download"),
     )
+    app_cfg["feed_tag_label"] = getattr(
+        runtime_config,
+        "feed_tag_label",
+        app_cfg.get("feed_tag_label"),
+    )
+    app_cfg["feed_tag_position"] = getattr(
+        runtime_config,
+        "feed_tag_position",
+        app_cfg.get("feed_tag_position"),
+    )
 
 
 def _first_env(env_names: list[str]) -> tuple[str | None, str | None]:

@@ -22,6 +22,25 @@ from podcast_processor.podcast_downloader import find_audio_link
 
 logger = logging.getLogger("global_logger")
 
+
+def _apply_feed_tag(title: str) -> str:
+    """Apply the configurable feed tag to a feed channel title at render time.
+
+    Rules:
+    - If feed_tag_label is empty, return the title unchanged (no brackets).
+    - position "prefix"  →  "[label] title"
+    - position "suffix"  →  "title [label]"
+    - Any other value falls back to prefix.
+    """
+    label = getattr(config, "feed_tag_label", "podly")
+    if not label:
+        return title
+    tag = f"[{label}]"
+    position = getattr(config, "feed_tag_position", "prefix")
+    if position == "suffix":
+        return f"{title} {tag}"
+    return f"{tag} {title}"
+
 _FORWARDED_PROTO_RE = re.compile(
     r"(?:^|[;,])\s*proto=(\"?)(https?|[A-Za-z]+)\1", re.IGNORECASE
 )
@@ -657,7 +676,7 @@ def generate_feed_xml(feed: Feed) -> Any:
     last_build_date = format_datetime(datetime.datetime.now(datetime.UTC))
 
     rss_feed = PyRSS2Gen.RSS2(
-        title="[podly] " + feed.title,
+        title=_apply_feed_tag(feed.title),
         link=link,
         description=_normalize_feed_text(feed.description),
         lastBuildDate=last_build_date,
