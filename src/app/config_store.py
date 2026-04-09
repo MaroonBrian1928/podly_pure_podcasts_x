@@ -156,6 +156,7 @@ def ensure_defaults() -> None:
             "cost_rate_per_hour": DEFAULTS.APP_COST_RATE_PER_HOUR,
             "feed_tag_label": DEFAULTS.APP_FEED_TAG_LABEL,
             "feed_tag_position": DEFAULTS.APP_FEED_TAG_POSITION,
+            "feed_tag_override": DEFAULTS.APP_FEED_TAG_OVERRIDE,
         },
     )
 
@@ -234,6 +235,7 @@ def read_combined() -> dict[str, Any]:
             "cost_rate_per_hour": app_s.cost_rate_per_hour,
             "feed_tag_label": app_s.feed_tag_label,
             "feed_tag_position": app_s.feed_tag_position,
+            "feed_tag_override": app_s.feed_tag_override,
         },
     }
 
@@ -372,6 +374,7 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
         "cost_rate_per_hour",
         "feed_tag_label",
         "feed_tag_position",
+        "feed_tag_override",
     ]:
         if key in data:
             setattr(row, key, data[key])
@@ -585,6 +588,9 @@ def to_pydantic_config() -> PydanticConfig:
         feed_tag_position=str(
             data["app"].get("feed_tag_position", DEFAULTS.APP_FEED_TAG_POSITION)
             or DEFAULTS.APP_FEED_TAG_POSITION
+        ),
+        feed_tag_override=bool(
+            data["app"].get("feed_tag_override", DEFAULTS.APP_FEED_TAG_OVERRIDE)
         ),
     )
 

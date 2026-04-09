@@ -1302,6 +1302,8 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         llmChapterFallbackGlobalDefault={
           configResponse?.config?.llm?.enable_llm_chapter_fallback_tagging
         }
+        globalFeedTagLabel={configResponse?.config?.app?.feed_tag_label ?? 'podly'}
+        globalFeedTagPosition={configResponse?.config?.app?.feed_tag_position ?? 'prefix'}
         episodeDescriptionView={episodeDescriptionView}
         onEpisodeDescriptionViewChange={handleEpisodeDescriptionViewChange}
       />

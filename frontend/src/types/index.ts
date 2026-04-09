@@ -14,6 +14,8 @@ export interface Feed {
   chapter_filter_strings?: string | null;
   enable_llm_chapter_fallback_tagging?: boolean | null;
   auto_whitelist_new_episodes_override?: boolean | null;
+  feed_tag_label?: string | null;
+  feed_tag_position?: string | null;
 }
 
 export interface FeedSettingsUpdate {
@@ -21,6 +23,8 @@ export interface FeedSettingsUpdate {
   chapter_filter_strings?: string | null;
   enable_llm_chapter_fallback_tagging?: boolean | null;
   auto_whitelist_new_episodes_override?: boolean | null;
+  feed_tag_label?: string | null;
+  feed_tag_position?: string | null;
 }
 
 export interface Episode {
@@ -166,6 +170,7 @@ export interface AppConfigUI {
   cost_rate_per_hour: number;
   feed_tag_label: string;
   feed_tag_position: string;
+  feed_tag_override: boolean;
 }
 
 export interface CombinedConfig {

@@ -235,6 +235,11 @@ def _hydrate_app_config(data: dict[str, Any]) -> None:
         "feed_tag_position",
         app_cfg.get("feed_tag_position"),
     )
+    app_cfg["feed_tag_override"] = getattr(
+        runtime_config,
+        "feed_tag_override",
+        app_cfg.get("feed_tag_override"),
+    )
 
 
 def _first_env(env_names: list[str]) -> tuple[str | None, str | None]:

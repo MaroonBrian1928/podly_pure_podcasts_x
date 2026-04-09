@@ -52,6 +52,7 @@ APP_COST_RATE_PER_HOUR = 0.04
 # Feed tag defaults
 APP_FEED_TAG_LABEL = "podly"
 APP_FEED_TAG_POSITION = "prefix"  # "prefix" or "suffix"
+APP_FEED_TAG_OVERRIDE = False  # When True, global tag always wins over per-feed tag
 
 # Credits defaults
 MINUTES_PER_CREDIT = 60

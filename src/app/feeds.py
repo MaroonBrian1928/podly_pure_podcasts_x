@@ -23,20 +23,34 @@ from podcast_processor.podcast_downloader import find_audio_link
 logger = logging.getLogger("global_logger")
 
 
-def _apply_feed_tag(title: str) -> str:
+def _apply_feed_tag(title: str, feed: "Feed | None" = None) -> str:
     """Apply the configurable feed tag to a feed channel title at render time.
 
     Rules:
-    - If feed_tag_label is empty, return the title unchanged (no brackets).
+    - If feed_tag_override is True on global config → always use global label/position.
+    - Otherwise, if the feed has its own label/position set → use them.
+    - Fall back to global label/position for any unset per-feed value.
+    - If the resolved label is empty → return the title unchanged (no brackets).
     - position "prefix"  →  "[label] title"
     - position "suffix"  →  "title [label]"
     - Any other value falls back to prefix.
     """
-    label = getattr(config, "feed_tag_label", "podly")
+    global_label = getattr(config, "feed_tag_label", "podly")
+    global_position = getattr(config, "feed_tag_position", "prefix")
+    feed_tag_override = getattr(config, "feed_tag_override", False)
+
+    if feed is not None and not feed_tag_override:
+        per_label = getattr(feed, "feed_tag_label", None)
+        per_position = getattr(feed, "feed_tag_position", None)
+        label = per_label if per_label is not None else global_label
+        position = per_position if per_position is not None else global_position
+    else:
+        label = global_label
+        position = global_position
+
     if not label:
         return title
     tag = f"[{label}]"
-    position = getattr(config, "feed_tag_position", "prefix")
     if position == "suffix":
         return f"{title} {tag}"
     return f"{tag} {title}"
@@ -676,7 +690,7 @@ def generate_feed_xml(feed: Feed) -> Any:
     last_build_date = format_datetime(datetime.datetime.now(datetime.UTC))
 
     rss_feed = PyRSS2Gen.RSS2(
-        title=_apply_feed_tag(feed.title),
+        title=_apply_feed_tag(feed.title, feed),
         link=link,
         description=_normalize_feed_text(feed.description),
         lastBuildDate=last_build_date,

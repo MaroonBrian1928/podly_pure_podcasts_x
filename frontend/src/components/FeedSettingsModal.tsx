@@ -9,6 +9,8 @@ interface FeedSettingsModalProps {
   onClose: () => void;
   autoWhitelistGlobalDefault?: boolean;
   llmChapterFallbackGlobalDefault?: boolean;
+  globalFeedTagLabel?: string;
+  globalFeedTagPosition?: string;
   episodeDescriptionView?: 'source' | 'podly';
   onEpisodeDescriptionViewChange?: (view: 'source' | 'podly') => void;
 }
@@ -21,6 +23,8 @@ export default function FeedSettingsModal({
   onClose,
   autoWhitelistGlobalDefault,
   llmChapterFallbackGlobalDefault,
+  globalFeedTagLabel = 'podly',
+  globalFeedTagPosition = 'prefix',
   episodeDescriptionView = 'source',
   onEpisodeDescriptionViewChange,
 }: FeedSettingsModalProps) {
@@ -48,6 +52,12 @@ export default function FeedSettingsModal({
         ? 'off'
         : 'inherit'
   );
+  const [feedTagLabel, setFeedTagLabel] = useState<string>(
+    feed.feed_tag_label ?? ''
+  );
+  const [feedTagPosition, setFeedTagPosition] = useState<string>(
+    feed.feed_tag_position ?? ''
+  );
 
   useEffect(() => {
     setStrategy(feed.ad_detection_strategy || 'llm');
@@ -66,6 +76,8 @@ export default function FeedSettingsModal({
           ? 'off'
           : 'inherit'
     );
+    setFeedTagLabel(feed.feed_tag_label ?? '');
+    setFeedTagPosition(feed.feed_tag_position ?? '');
   }, [feed, llmChapterFallbackGlobalDefault]);
 
   const updateMutation = useMutation({
@@ -116,6 +128,19 @@ export default function FeedSettingsModal({
     if (autoWhitelistOverride !== currentAutoWhitelistOverride) {
       settings.auto_whitelist_new_episodes_override =
         autoWhitelistOverride === 'inherit' ? null : autoWhitelistOverride === 'on';
+    }
+
+    // Feed tag: empty string = use global default (send null); non-empty = use that value
+    const normalizedLabel = feedTagLabel.trim();
+    const currentLabel = feed.feed_tag_label ?? '';
+    if (normalizedLabel !== currentLabel) {
+      settings.feed_tag_label = normalizedLabel === '' ? null : normalizedLabel;
+    }
+
+    const normalizedPosition = feedTagPosition || '';
+    const currentPosition = feed.feed_tag_position ?? '';
+    if (normalizedPosition !== currentPosition) {
+      settings.feed_tag_position = normalizedPosition === '' ? null : normalizedPosition;
     }
 
     if (Object.keys(settings).length === 0) {
@@ -229,6 +254,40 @@ export default function FeedSettingsModal({
             </select>
             <p className="text-xs text-gray-500 mt-1">
               Overrides the global setting for this feed.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Feed tag label
+            </label>
+            <input
+              type="text"
+              value={feedTagLabel}
+              onChange={(e) => setFeedTagLabel(e.target.value)}
+              placeholder={`Use global default (${globalFeedTagLabel || 'none'})`}
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Text inside the brackets for this feed. Leave empty to use the global default.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Feed tag position
+            </label>
+            <select
+              value={feedTagPosition}
+              onChange={(e) => setFeedTagPosition(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            >
+              <option value="">Use global default ({globalFeedTagPosition === 'suffix' ? 'Feed Title [tag]' : '[tag] Feed Title'})</option>
+              <option value="prefix">[tag] Feed Title</option>
+              <option value="suffix">Feed Title [tag]</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Where the tag appears relative to the feed title.
             </p>
           </div>
 

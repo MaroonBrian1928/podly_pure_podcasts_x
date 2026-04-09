@@ -169,6 +169,10 @@ class Config(BaseModel):
         default=DEFAULTS.APP_FEED_TAG_POSITION,
         description="Where to place the tag relative to the feed title: 'prefix' or 'suffix'.",
     )
+    feed_tag_override: bool = Field(
+        default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
+        description="When True, the global tag label/position always overrides any per-feed tag settings.",
+    )
 
     def redacted(self) -> Config:
         return self.model_copy(

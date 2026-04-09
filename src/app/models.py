@@ -48,6 +48,9 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     # Per-feed override for LLM chapter fallback tagging, null = use global config
     enable_llm_chapter_fallback_tagging = db.Column(db.Boolean, nullable=True)
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
+    # Per-feed tag label/position overrides, null = use global config
+    feed_tag_label = db.Column(db.Text, nullable=True)
+    feed_tag_position = db.Column(db.Text, nullable=True)
 
     posts = db.relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
@@ -542,6 +545,11 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Text,
         nullable=False,
         default=DEFAULTS.APP_FEED_TAG_POSITION,
+    )
+    feed_tag_override = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
     )
 
     # Hash of the environment variables used to seed configuration.

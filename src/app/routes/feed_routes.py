@@ -137,6 +137,34 @@ def _build_feed_settings_updates(
     if auto_whitelist_override is not _MISSING:
         updates["auto_whitelist_new_episodes_override"] = auto_whitelist_override
 
+    if "feed_tag_label" in payload:
+        tag_label = payload["feed_tag_label"]
+        if tag_label is not None and not isinstance(tag_label, str):
+            return (
+                None,
+                (jsonify({"error": "feed_tag_label must be a string or null"}), 400),
+            )
+        updates["feed_tag_label"] = tag_label
+
+    if "feed_tag_position" in payload:
+        tag_position = payload["feed_tag_position"]
+        if tag_position is not None and not isinstance(tag_position, str):
+            return (
+                None,
+                (jsonify({"error": "feed_tag_position must be a string or null"}), 400),
+            )
+        if tag_position is not None and tag_position not in ("prefix", "suffix"):
+            return (
+                None,
+                (
+                    jsonify(
+                        {"error": "feed_tag_position must be 'prefix', 'suffix', or null"}
+                    ),
+                    400,
+                ),
+            )
+        updates["feed_tag_position"] = tag_position
+
     resolved_strategy = updates.get(
         "ad_detection_strategy",
         getattr(feed, "ad_detection_strategy", "llm"),
@@ -918,5 +946,7 @@ def _serialize_feed(
         "enable_llm_chapter_fallback_tagging": getattr(
             feed, "enable_llm_chapter_fallback_tagging", None
         ),
+        "feed_tag_label": getattr(feed, "feed_tag_label", None),
+        "feed_tag_position": getattr(feed, "feed_tag_position", None),
     }
     return feed_payload

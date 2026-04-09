@@ -113,6 +113,17 @@ export default function AppSection() {
               <option value="suffix">Feed Title [tag]</option>
             </select>
           </Field>
+          <div className="col-span-1 md:col-span-2 flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-gray-700 font-medium">
+              <input
+                type="checkbox"
+                checked={!!pending?.app?.feed_tag_override}
+                onChange={(e) => setField(['app', 'feed_tag_override'], e.target.checked)}
+              />
+              Override per-feed tag settings with global defaults
+            </label>
+            <p className="text-xs text-gray-500">When enabled, the global tag label and position above apply to all feeds, ignoring any per-feed tag customizations.</p>
+          </div>
         </div>
       </Section>
 
