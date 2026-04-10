@@ -127,7 +127,7 @@ export default function AppSection() {
               type="text"
               maxLength={50}
               placeholder="podly"
-              value={pending?.app?.feed_tag_label ?? 'podly'}
+              value={pending?.app?.feed_tag_label ?? ''}
               onChange={(e) => setField(['app', 'feed_tag_label'], e.target.value)}
             />
             <p className="text-xs text-gray-500 mt-1">Text shown inside brackets on feed titles. Leave empty to omit the tag entirely.</p>
@@ -135,7 +135,7 @@ export default function AppSection() {
           <Field label="Feed Tag Position">
             <select
               className="input"
-              value={pending?.app?.feed_tag_position ?? 'prefix'}
+              value={pending?.app?.feed_tag_position ?? 'suffix'}
               onChange={(e) => setField(['app', 'feed_tag_position'], e.target.value)}
             >
               <option value="prefix">[tag] Feed Title</option>
@@ -152,50 +152,6 @@ export default function AppSection() {
               Override per-feed tag settings with global defaults
             </label>
             <p className="text-xs text-gray-500">When enabled, the global tag label and position above apply to all feeds, ignoring any per-feed tag customizations.</p>
-          </div>
-          <div className="col-span-1 md:col-span-2 border-t border-gray-200 pt-4">
-            <p className="text-sm font-medium text-gray-700 mb-3">Episode status indicator</p>
-            <p className="text-xs text-gray-500 mb-3">
-              When enabled, a symbol is appended to each episode title in your podcast app so you can see at a glance whether ads were removed, processing failed, or the episode hasn't been processed yet.
-            </p>
-            <div className="flex items-center gap-3 mb-3">
-              <label className="flex items-center gap-2 text-sm text-gray-700 font-medium">
-                <input
-                  type="checkbox"
-                  checked={!!pending?.app?.episode_status_indicator_enabled}
-                  onChange={(e) => setField(['app', 'episode_status_indicator_enabled'], e.target.checked)}
-                />
-                Enable episode status indicator
-              </label>
-            </div>
-            {!!pending?.app?.episode_status_indicator_enabled && (
-              <div className="grid grid-cols-2 gap-3 ml-6">
-                <div>
-                  <label className="block text-sm text-gray-700 mb-1">Processed symbol</label>
-                  <input
-                    className="input"
-                    type="text"
-                    maxLength={10}
-                    placeholder="✓"
-                    value={pending?.app?.episode_status_processed_symbol ?? '✓'}
-                    onChange={(e) => setField(['app', 'episode_status_processed_symbol'], e.target.value)}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">e.g. "My Episode {pending?.app?.episode_status_processed_symbol || '✓'}"</p>
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-700 mb-1">Error symbol</label>
-                  <input
-                    className="input"
-                    type="text"
-                    maxLength={10}
-                    placeholder="⚠"
-                    value={pending?.app?.episode_status_error_symbol ?? '⚠'}
-                    onChange={(e) => setField(['app', 'episode_status_error_symbol'], e.target.value)}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">e.g. "My Episode {pending?.app?.episode_status_error_symbol || '⚠'}"</p>
-                </div>
-              </div>
-            )}
           </div>
           <Field label="Default episode description view">
             <select
@@ -214,6 +170,44 @@ export default function AppSection() {
               Saved immediately in your browser — no Save button needed. Default for all feeds; can be overridden per feed in Feed Settings.
             </p>
           </Field>
+          <div className="col-span-1 md:col-span-2 border-t border-gray-200 pt-4">
+            <p className="text-sm font-medium text-gray-700 mb-1">Episode status indicator</p>
+            <p className="text-xs text-gray-500 mb-3">
+              When enabled, a symbol is appended to each episode title in your podcast app so you can see at a glance whether ads were removed, processing failed, or the episode hasn't been processed yet.
+            </p>
+            <label className="flex items-center gap-2 text-sm text-gray-700 font-medium">
+              <input
+                type="checkbox"
+                checked={!!pending?.app?.episode_status_indicator_enabled}
+                onChange={(e) => setField(['app', 'episode_status_indicator_enabled'], e.target.checked)}
+              />
+              Enable episode status indicator
+            </label>
+          </div>
+          {!!pending?.app?.episode_status_indicator_enabled && (
+            <>
+              <Field label="Processed symbol" hint={`e.g. "My Episode ${pending?.app?.episode_status_processed_symbol || '✓'}"`}>
+                <input
+                  className="input"
+                  type="text"
+                  maxLength={10}
+                  placeholder="✓"
+                  value={pending?.app?.episode_status_processed_symbol ?? ''}
+                  onChange={(e) => setField(['app', 'episode_status_processed_symbol'], e.target.value)}
+                />
+              </Field>
+              <Field label="Error symbol" hint={`e.g. "My Episode ${pending?.app?.episode_status_error_symbol || '⚠'}"`}>
+                <input
+                  className="input"
+                  type="text"
+                  maxLength={10}
+                  placeholder="⚠"
+                  value={pending?.app?.episode_status_error_symbol ?? ''}
+                  onChange={(e) => setField(['app', 'episode_status_error_symbol'], e.target.value)}
+                />
+              </Field>
+            </>
+          )}
         </div>
       </Section>
 

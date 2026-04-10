@@ -59,7 +59,7 @@ def upgrade():
 
 
 def downgrade():
-    with op.batch_alter_table("app_settings", schema=None) as batch_op:
-        batch_op.drop_column("episode_status_error_symbol")
-        batch_op.drop_column("episode_status_processed_symbol")
-        batch_op.drop_column("episode_status_indicator_enabled")
+    for col in ("episode_status_error_symbol", "episode_status_processed_symbol", "episode_status_indicator_enabled"):
+        if column_exists("app_settings", col):
+            with op.batch_alter_table("app_settings", schema=None) as batch_op:
+                batch_op.drop_column(col)

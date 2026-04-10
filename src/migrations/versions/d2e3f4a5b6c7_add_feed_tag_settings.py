@@ -31,7 +31,7 @@ def upgrade():
                     "feed_tag_label",
                     sa.Text(),
                     nullable=False,
-                    server_default="podly",
+                    server_default="",
                 )
             )
 
@@ -48,6 +48,9 @@ def upgrade():
 
 
 def downgrade():
-    with op.batch_alter_table("app_settings", schema=None) as batch_op:
-        batch_op.drop_column("feed_tag_position")
-        batch_op.drop_column("feed_tag_label")
+    if column_exists("app_settings", "feed_tag_position"):
+        with op.batch_alter_table("app_settings", schema=None) as batch_op:
+            batch_op.drop_column("feed_tag_position")
+    if column_exists("app_settings", "feed_tag_label"):
+        with op.batch_alter_table("app_settings", schema=None) as batch_op:
+            batch_op.drop_column("feed_tag_label")

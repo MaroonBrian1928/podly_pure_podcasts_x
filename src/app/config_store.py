@@ -382,17 +382,44 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
         "user_limit_total",
         "autoprocess_on_download",
         "cost_rate_per_hour",
-        "feed_tag_label",
-        "feed_tag_position",
-        "feed_tag_override",
-        "episode_status_indicator_enabled",
-        "episode_status_processed_symbol",
-        "episode_status_error_symbol",
-        "notification_apprise_url",
-        "notification_apprise_key",
     ]:
         if key in data:
             setattr(row, key, data[key])
+
+    # String fields with explicit validation to avoid null/type errors on nullable=False columns
+    if "feed_tag_label" in data:
+        val = data["feed_tag_label"]
+        if isinstance(val, str):
+            val = val.strip()[:50]
+            setattr(row, "feed_tag_label", val)
+    if "feed_tag_position" in data:
+        val = data["feed_tag_position"]
+        if val in ("prefix", "suffix"):
+            setattr(row, "feed_tag_position", val)
+    if "feed_tag_override" in data and data["feed_tag_override"] is not None:
+        setattr(row, "feed_tag_override", bool(data["feed_tag_override"]))
+    if "episode_status_indicator_enabled" in data and data["episode_status_indicator_enabled"] is not None:
+        setattr(row, "episode_status_indicator_enabled", bool(data["episode_status_indicator_enabled"]))
+    if "episode_status_processed_symbol" in data:
+        val = data["episode_status_processed_symbol"]
+        if isinstance(val, str):
+            setattr(row, "episode_status_processed_symbol", val[:10])
+    if "episode_status_error_symbol" in data:
+        val = data["episode_status_error_symbol"]
+        if isinstance(val, str):
+            setattr(row, "episode_status_error_symbol", val[:10])
+    if "notification_apprise_url" in data:
+        val = data["notification_apprise_url"]
+        if isinstance(val, str):
+            setattr(row, "notification_apprise_url", val.strip())
+        elif val is None:
+            setattr(row, "notification_apprise_url", "")
+    if "notification_apprise_key" in data:
+        val = data["notification_apprise_key"]
+        if isinstance(val, str):
+            setattr(row, "notification_apprise_key", val.strip())
+        elif val is None:
+            setattr(row, "notification_apprise_key", "")
     safe_commit(
         db.session,
         must_succeed=True,

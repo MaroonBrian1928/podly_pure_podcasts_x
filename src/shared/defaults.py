@@ -50,8 +50,10 @@ APP_AUTOPROCESS_ON_DOWNLOAD = False
 APP_COST_RATE_PER_HOUR = 0.04
 
 # Feed tag defaults
-APP_FEED_TAG_LABEL = "podly"
-APP_FEED_TAG_POSITION = "prefix"  # "prefix" or "suffix"
+# Empty string means no tag is applied by default — users must opt-in.
+# This prevents existing feeds from suddenly showing "[podly]" after an upgrade.
+APP_FEED_TAG_LABEL = ""
+APP_FEED_TAG_POSITION = "suffix"  # "prefix" or "suffix"
 APP_FEED_TAG_OVERRIDE = False  # When True, global tag always wins over per-feed tag
 
 # Episode status indicator defaults

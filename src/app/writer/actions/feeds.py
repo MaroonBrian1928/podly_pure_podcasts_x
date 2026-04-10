@@ -139,10 +139,23 @@ def update_feed_settings_action(params: dict[str, Any]) -> dict[str, Any]:
     if not feed:
         raise ValueError(f"Feed {feed_id} not found")
 
+    # Explicit allowlist — only these columns may be updated through this action.
     if "auto_whitelist_new_episodes_override" in params:
         feed.auto_whitelist_new_episodes_override = params.get(
             "auto_whitelist_new_episodes_override"
         )
+    if "ad_detection_strategy" in params:
+        feed.ad_detection_strategy = params["ad_detection_strategy"]
+    if "chapter_filter_strings" in params:
+        feed.chapter_filter_strings = params["chapter_filter_strings"]
+    if "enable_llm_chapter_fallback_tagging" in params:
+        feed.enable_llm_chapter_fallback_tagging = params["enable_llm_chapter_fallback_tagging"]
+    if "feed_tag_label" in params:
+        # None means "inherit global default"; validated + stripped by feed_routes
+        feed.feed_tag_label = params["feed_tag_label"]
+    if "feed_tag_position" in params:
+        # None means "inherit global default"; validated by feed_routes
+        feed.feed_tag_position = params["feed_tag_position"]
 
     db.session.flush()
     return {"feed_id": feed.id}

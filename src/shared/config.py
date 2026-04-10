@@ -166,7 +166,7 @@ class Config(BaseModel):
         max_length=50,
         description="Text inside the brackets added to feed titles (e.g. 'podly'). Empty string omits the tag entirely.",
     )
-    feed_tag_position: str = Field(
+    feed_tag_position: Literal["prefix", "suffix"] = Field(
         default=DEFAULTS.APP_FEED_TAG_POSITION,
         description="Where to place the tag relative to the feed title: 'prefix' or 'suffix'.",
     )

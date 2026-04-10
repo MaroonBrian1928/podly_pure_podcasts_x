@@ -192,8 +192,9 @@ export default function FeedList({
             </p>
           </div>
         ) : (
-          displayedFeeds.map((feed) => (
-            <div 
+          displayedFeeds.map((feed) => {
+            const taggedTitle = isAdmin ? computeTaggedTitle(feed, appCfg) : null;
+            return <div
               key={feed.id} 
               className={`bg-white rounded-lg shadow border cursor-pointer transition-all hover:shadow-md group dark:bg-slate-900/45 dark:border-slate-700/80 dark:hover:border-slate-500/70 dark:hover:bg-slate-900/70 ${
                 selectedFeedId === feed.id ? 'ring-2 ring-blue-500 border-blue-200 dark:ring-1 dark:ring-blue-400/80 dark:border-blue-400/35 dark:bg-slate-900/80' : ''
@@ -222,16 +223,13 @@ export default function FeedList({
                   {/* Feed Info */}
                   <div className="flex-1 min-w-0">
                     <h3 className="font-medium text-gray-900 line-clamp-2">{feed.title}</h3>
-                    {isAdmin && (() => {
-                      const tagged = computeTaggedTitle(feed, appCfg);
-                      return tagged ? (
-                        <p className="text-xs text-gray-400 truncate mt-0.5" title="How this feed appears in your podcast app">
-                          {tagged}
-                        </p>
-                      ) : null;
-                    })()}
                     {feed.author && (
-                      <p className="text-sm text-gray-600 mt-1">by {feed.author}</p>
+                      <p className="text-sm text-gray-600 mt-0.5">by {feed.author}</p>
+                    )}
+                    {taggedTitle && (
+                      <p className="text-xs text-gray-400 truncate mt-0.5" title="How this feed appears in your podcast app">
+                        {taggedTitle}
+                      </p>
                     )}
                     <div className="flex items-center justify-between mt-2">
                       <span className="text-xs text-gray-500">{feed.posts_count} episodes</span>
@@ -257,8 +255,8 @@ export default function FeedList({
                   </div>
                 </div>
               </div>
-            </div>
-          ))
+            </div>;
+          })
         )}
       </div>
     </div>

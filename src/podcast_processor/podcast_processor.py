@@ -287,13 +287,13 @@ class PodcastProcessor:
                 job, "failed", cached_current_step, error_msg
             )
             send_episode_notification(
-                apprise_url=getattr(self.config, "notification_apprise_url", ""),
-                apprise_key=getattr(self.config, "notification_apprise_key", ""),
+                apprise_url=self.config.notification_apprise_url,
+                apprise_key=self.config.notification_apprise_key,
                 feed_title=cached_feed_title or "",
                 episode_title=cached_post_title or "",
                 success=False,
                 error_message=error_msg,
-                tag_label=getattr(self.config, "feed_tag_label", "podly"),
+                tag_label=self.config.feed_tag_label,
             )
             raise
 
@@ -308,13 +308,13 @@ class PodcastProcessor:
                 job, "failed", cached_current_step, f"Unexpected error: {e!s}"
             )
             send_episode_notification(
-                apprise_url=getattr(self.config, "notification_apprise_url", ""),
-                apprise_key=getattr(self.config, "notification_apprise_key", ""),
+                apprise_url=self.config.notification_apprise_url,
+                apprise_key=self.config.notification_apprise_key,
                 feed_title=cached_feed_title or "",
                 episode_title=cached_post_title or "",
                 success=False,
                 error_message=f"Unexpected error: {e!s}",
-                tag_label=getattr(self.config, "feed_tag_label", "podly"),
+                tag_label=self.config.feed_tag_label,
             )
             raise
 
@@ -881,12 +881,12 @@ class PodcastProcessor:
             job, "completed", 4, "Processing complete", 100.0
         )
         send_episode_notification(
-            apprise_url=getattr(self.config, "notification_apprise_url", ""),
-            apprise_key=getattr(self.config, "notification_apprise_key", ""),
-            feed_title=getattr(post.feed, "title", "") if post.feed else "",
-            episode_title=post.title or "",
+            apprise_url=self.config.notification_apprise_url,
+            apprise_key=self.config.notification_apprise_key,
+            feed_title=cached_feed_title or "",
+            episode_title=cached_post_title or "",
             success=True,
-            tag_label=getattr(self.config, "feed_tag_label", "podly"),
+            tag_label=self.config.feed_tag_label,
         )
 
     def _raise_if_cancelled(

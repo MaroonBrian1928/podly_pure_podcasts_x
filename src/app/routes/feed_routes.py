@@ -497,7 +497,8 @@ def update_feed_settings_endpoint(feed_id: int) -> ResponseReturnValue:
     if updates is None:
         return jsonify({"error": "No settings provided."}), 400
 
-    result = writer_client.update("Feed", feed_id, updates, wait=True)
+    action_params = {"feed_id": feed_id, **updates}
+    result = writer_client.action("update_feed_settings", action_params, wait=True)
     if result is None or not result.success:
         return (
             jsonify({"error": getattr(result, "error", "Failed to update feed")}),

@@ -51,9 +51,12 @@ def upgrade():
 
 
 def downgrade():
-    with op.batch_alter_table("app_settings", schema=None) as batch_op:
-        batch_op.drop_column("feed_tag_override")
-
-    with op.batch_alter_table("feed", schema=None) as batch_op:
-        batch_op.drop_column("feed_tag_position")
-        batch_op.drop_column("feed_tag_label")
+    if column_exists("app_settings", "feed_tag_override"):
+        with op.batch_alter_table("app_settings", schema=None) as batch_op:
+            batch_op.drop_column("feed_tag_override")
+    if column_exists("feed", "feed_tag_position"):
+        with op.batch_alter_table("feed", schema=None) as batch_op:
+            batch_op.drop_column("feed_tag_position")
+    if column_exists("feed", "feed_tag_label"):
+        with op.batch_alter_table("feed", schema=None) as batch_op:
+            batch_op.drop_column("feed_tag_label")

@@ -11,8 +11,8 @@ export function computeTaggedTitle(
   feed: Feed,
   appCfg: CombinedConfig['app'] | undefined,
 ): string | null {
-  const globalLabel = (appCfg?.feed_tag_label ?? 'podly').trim();
-  const globalPosition = appCfg?.feed_tag_position ?? 'prefix';
+  const globalLabel = (appCfg?.feed_tag_label ?? '').trim();
+  const globalPosition = appCfg?.feed_tag_position ?? 'suffix';
   const override = appCfg?.feed_tag_override ?? false;
 
   let label: string;
@@ -28,6 +28,5 @@ export function computeTaggedTitle(
 
   if (!label) return null;
   const tag = `[${label}]`;
-  const tagged = position === 'suffix' ? `${feed.title} ${tag}` : `${tag} ${feed.title}`;
-  return tagged === feed.title ? null : tagged;
+  return position === 'suffix' ? `${feed.title} ${tag}` : `${tag} ${feed.title}`;
 }

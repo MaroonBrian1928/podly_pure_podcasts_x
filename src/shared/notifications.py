@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 
-logger = logging.getLogger("global_logger")
+logger = logging.getLogger(__name__)
 
 
 def send_episode_notification(
@@ -27,7 +28,7 @@ def send_episode_notification(
     episode_title: str,
     success: bool,
     error_message: str | None = None,
-    tag_label: str = "podly",
+    tag_label: str,
 ) -> None:
     """Send an episode processing notification via the Apprise API.
 
@@ -38,17 +39,27 @@ def send_episode_notification(
     if not apprise_url or not apprise_key:
         return
 
-    notify_url = apprise_url.rstrip("/") + "/notify/" + apprise_key.strip("/")
+    # Validate scheme to prevent SSRF to internal or non-HTTP targets.
+    parsed = urllib.parse.urlparse(apprise_url)
+    if parsed.scheme not in ("http", "https"):
+        logger.warning(
+            "Apprise URL has disallowed scheme %r; notification skipped", parsed.scheme
+        )
+        return
 
-    label = tag_label.strip() or "podly"
-    prefix = f"[{label}]"
+    # URL-encode the key so path separators / query chars don't rewrite the request.
+    safe_key = urllib.parse.quote(apprise_key.strip(), safe="")
+    notify_url = apprise_url.rstrip("/") + "/notify/" + safe_key
+
+    label = tag_label.strip()
+    prefix = f"[{label}] " if label else ""
 
     if success:
-        title = f"{prefix} Processed: {feed_title}"
+        title = f"{prefix}Processed: {feed_title}"
         body = f"Episode ready: {episode_title}"
         msg_type = "success"
     else:
-        title = f"{prefix} Processing failed: {feed_title}"
+        title = f"{prefix}Processing failed: {feed_title}"
         body = f"Episode: {episode_title}"
         if error_message:
             body += f"\nError: {error_message}"

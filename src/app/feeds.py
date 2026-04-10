@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Iterable
 from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, cast
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote as _url_quote, urlencode, urlparse, urlunparse
 
 import feedparser
 import PyRSS2Gen
@@ -22,7 +22,15 @@ from app.writer.client import writer_client
 from podcast_processor.audio import get_audio_duration_ms
 from podcast_processor.podcast_downloader import find_audio_link
 
-logger = logging.getLogger("global_logger")
+logger = logging.getLogger(__name__)
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True only for http/https URLs to prevent javascript:/data: XSS."""
+    try:
+        return urlparse(url).scheme.lower() in ("http", "https")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _apply_feed_tag(title: str, feed: "Feed | None" = None) -> str:
@@ -37,13 +45,13 @@ def _apply_feed_tag(title: str, feed: "Feed | None" = None) -> str:
     - position "suffix"  →  "title [label]"
     - Any other value falls back to prefix.
     """
-    global_label = getattr(config, "feed_tag_label", "podly")
-    global_position = getattr(config, "feed_tag_position", "prefix")
-    feed_tag_override = getattr(config, "feed_tag_override", False)
+    global_label = config.feed_tag_label
+    global_position = config.feed_tag_position
+    feed_tag_override = config.feed_tag_override
 
     if feed is not None and not feed_tag_override:
-        per_label = getattr(feed, "feed_tag_label", None)
-        per_position = getattr(feed, "feed_tag_position", None)
+        per_label = feed.feed_tag_label
+        per_position = feed.feed_tag_position
         label = per_label if per_label is not None else global_label
         position = per_position if per_position is not None else global_position
     else:
@@ -67,19 +75,13 @@ def _episode_status_suffix(post: "Post", failed_guids: "set[str]") -> str:
     - guid in failed_guids              →  error symbol    (e.g. ' ⚠')
     - otherwise                         →  ''  (no change)
     """
-    if not getattr(config, "episode_status_indicator_enabled", False):
+    if not config.episode_status_indicator_enabled:
         return ""
     if post.processed_audio_path is not None:
-        symbol = getattr(
-            config, "episode_status_processed_symbol",
-            "✓"
-        ).strip()
+        symbol = config.episode_status_processed_symbol.strip()
         return f" {symbol}" if symbol else ""
     if post.guid in failed_guids:
-        symbol = getattr(
-            config, "episode_status_error_symbol",
-            "⚠"
-        ).strip()
+        symbol = config.episode_status_error_symbol.strip()
         return f" {symbol}" if symbol else ""
     return ""
 
@@ -228,7 +230,7 @@ def build_post_feed_description_html(post: Post) -> str:
 
     if post.processed_audio_path is not None:
         source_url = post.link or post.download_url
-        if source_url:
+        if source_url and _is_safe_url(source_url):
             escaped_url = html.escape(source_url, quote=True)
             description_parts.append(
                 f'<p>🔗 <a href="{escaped_url}">Original episode source</a></p>'
@@ -724,13 +726,14 @@ def generate_feed_xml(feed: Feed) -> Any:
         )
 
     # Compute failed episode GUIDs in a single query (only when indicator is on).
+    # Use created_at (not id, which is a random UUID) to identify the latest job.
     failed_guids: set[str] = set()
-    if getattr(config, "episode_status_indicator_enabled", False) and posts:
+    if config.episode_status_indicator_enabled and posts:
         post_guids = [p.guid for p in posts]
-        latest_id_subq = (
+        latest_created_subq = (
             db.session.query(
                 ProcessingJob.post_guid,
-                func.max(ProcessingJob.id).label("max_id"),
+                func.max(ProcessingJob.created_at).label("max_created_at"),
             )
             .filter(ProcessingJob.post_guid.in_(post_guids))
             .group_by(ProcessingJob.post_guid)
@@ -739,9 +742,9 @@ def generate_feed_xml(feed: Feed) -> Any:
         failed_rows = (
             db.session.query(ProcessingJob.post_guid)
             .join(
-                latest_id_subq,
-                (ProcessingJob.post_guid == latest_id_subq.c.post_guid)
-                & (ProcessingJob.id == latest_id_subq.c.max_id),
+                latest_created_subq,
+                (ProcessingJob.post_guid == latest_created_subq.c.post_guid)
+                & (ProcessingJob.created_at == latest_created_subq.c.max_created_at),
             )
             .filter(ProcessingJob.status.in_(["failed", "cancelled"]))
             .all()

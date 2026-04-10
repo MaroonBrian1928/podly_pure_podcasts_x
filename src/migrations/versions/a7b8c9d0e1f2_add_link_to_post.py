@@ -36,5 +36,6 @@ def upgrade():
 
 
 def downgrade():
-    with op.batch_alter_table("post", schema=None) as batch_op:
-        batch_op.drop_column("link")
+    if column_exists("post", "link"):
+        with op.batch_alter_table("post", schema=None) as batch_op:
+            batch_op.drop_column("link")

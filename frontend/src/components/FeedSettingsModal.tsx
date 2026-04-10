@@ -11,6 +11,7 @@ interface FeedSettingsModalProps {
   llmChapterFallbackGlobalDefault?: boolean;
   globalFeedTagLabel?: string;
   globalFeedTagPosition?: string;
+  globalFeedTagOverride?: boolean;
   episodeDescriptionOverride?: 'source' | 'podly' | null;
   globalEpisodeDescriptionView?: 'source' | 'podly';
   onEpisodeDescriptionViewChange?: (view: 'source' | 'podly' | null) => void;
@@ -74,8 +75,9 @@ export default function FeedSettingsModal({
   onClose,
   autoWhitelistGlobalDefault,
   llmChapterFallbackGlobalDefault,
-  globalFeedTagLabel = 'podly',
-  globalFeedTagPosition = 'prefix',
+  globalFeedTagLabel = '',
+  globalFeedTagPosition = 'suffix',
+  globalFeedTagOverride = false,
   episodeDescriptionOverride = null,
   globalEpisodeDescriptionView = 'source',
   onEpisodeDescriptionViewChange,
@@ -243,6 +245,11 @@ export default function FeedSettingsModal({
         <div className="overflow-y-auto flex-1 px-5 py-4 space-y-5">
 
           {/* ── Feed tag ── */}
+          {globalFeedTagOverride && (
+            <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+              Global tag override is enabled — per-feed tag settings below are ignored. Disable "Override per-feed tag settings" in App Settings to use per-feed values.
+            </div>
+          )}
           <div>
             <FieldLabel
               htmlFor="fs-feed-tag-label"
@@ -257,6 +264,7 @@ export default function FeedSettingsModal({
               value={feedTagLabel}
               onChange={(e) => setFeedTagLabel(e.target.value)}
               placeholder={`Use global default (${globalFeedTagLabel || 'none'})`}
+              disabled={globalFeedTagOverride}
               className={selectClass}
             />
           </div>
@@ -271,13 +279,14 @@ export default function FeedSettingsModal({
                 { value: 'prefix', label: '[tag] Feed Title' },
                 { value: 'suffix', label: 'Feed Title [tag]' },
               ].map((opt) => (
-                <label key={opt.value} className="flex items-center gap-2.5 cursor-pointer">
+                <label key={opt.value} className={`flex items-center gap-2.5 ${globalFeedTagOverride ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                   <input
                     type="radio"
                     name={`feedTagPosition-${feed.id}`}
                     value={opt.value}
                     checked={feedTagPosition === opt.value}
                     onChange={() => setFeedTagPosition(opt.value)}
+                    disabled={globalFeedTagOverride}
                     className="accent-blue-600"
                   />
                   <span className="text-sm text-gray-700">{opt.label}</span>

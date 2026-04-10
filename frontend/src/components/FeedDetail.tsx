@@ -531,6 +531,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
   const episodes = episodesPage?.items ?? [];
   const totalCount = episodesPage?.total ?? 0;
+  const taggedFeedTitle = isAdmin
+    ? computeTaggedTitle(currentFeed, configResponse?.config?.app)
+    : null;
   const whitelistedCount =
     episodesPage?.whitelisted_total ?? episodes.filter((ep: Episode) => ep.whitelisted).length;
   const totalPages = Math.max(
@@ -716,18 +719,15 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                 {currentFeed.author && (
                   <p className="text-lg text-gray-600">by {currentFeed.author}</p>
                 )}
+                {taggedFeedTitle && (
+                  <p className="text-sm text-gray-500 mt-1" title="How this feed title appears in your podcast app">
+                    <span className="font-medium">In your app:</span>{' '}
+                    <span>{taggedFeedTitle}</span>
+                  </p>
+                )}
                 <div className="mt-2 text-sm text-gray-500">
                   <span>{totalCount} episodes visible</span>
                 </div>
-                {isAdmin && (() => {
-                  const tagged = computeTaggedTitle(currentFeed, configResponse?.config?.app);
-                  return tagged ? (
-                    <p className="text-sm text-gray-500 mt-1" title="How this feed title appears in your podcast app">
-                      <span className="font-medium">In your app:</span>{' '}
-                      <span>{tagged}</span>
-                    </p>
-                  ) : null;
-                })()}
                 {requireAuth && isAdmin && (
                   <div className="mt-2 flex items-center gap-2 flex-wrap text-sm">
                     <button
@@ -1330,8 +1330,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         llmChapterFallbackGlobalDefault={
           configResponse?.config?.llm?.enable_llm_chapter_fallback_tagging
         }
-        globalFeedTagLabel={configResponse?.config?.app?.feed_tag_label ?? 'podly'}
-        globalFeedTagPosition={configResponse?.config?.app?.feed_tag_position ?? 'prefix'}
+        globalFeedTagLabel={configResponse?.config?.app?.feed_tag_label ?? ''}
+        globalFeedTagPosition={configResponse?.config?.app?.feed_tag_position ?? 'suffix'}
+        globalFeedTagOverride={configResponse?.config?.app?.feed_tag_override ?? false}
         episodeDescriptionOverride={perFeedDescOverride}
         globalEpisodeDescriptionView={loadGlobalEpisodeDescriptionView()}
         onEpisodeDescriptionViewChange={handleEpisodeDescriptionViewChange}
