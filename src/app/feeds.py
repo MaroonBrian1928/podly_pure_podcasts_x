@@ -226,12 +226,13 @@ def build_post_feed_description_html(post: Post) -> str:
     if chapters_html:
         description_parts.append(chapters_html)
 
-    source_url = post.link or post.download_url
-    if source_url:
-        escaped_url = html.escape(source_url, quote=True)
-        description_parts.append(
-            f'<p>🔗 <a href="{escaped_url}">Original episode source</a></p>'
-        )
+    if post.processed_audio_path is not None:
+        source_url = post.link or post.download_url
+        if source_url:
+            escaped_url = html.escape(source_url, quote=True)
+            description_parts.append(
+                f'<p>🔗 <a href="{escaped_url}">Original episode source</a></p>'
+            )
 
     return "\n".join(description_parts)
 
@@ -742,7 +743,7 @@ def generate_feed_xml(feed: Feed) -> Any:
                 (ProcessingJob.post_guid == latest_id_subq.c.post_guid)
                 & (ProcessingJob.id == latest_id_subq.c.max_id),
             )
-            .filter(ProcessingJob.status == "failed")
+            .filter(ProcessingJob.status.in_(["failed", "cancelled"]))
             .all()
         )
         failed_guids = {row.post_guid for row in failed_rows}

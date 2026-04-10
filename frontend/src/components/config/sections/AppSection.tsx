@@ -170,7 +170,8 @@ export default function AppSection() {
             </div>
             {!!pending?.app?.episode_status_indicator_enabled && (
               <div className="grid grid-cols-2 gap-3 ml-6">
-                <Field label="Processed symbol">
+                <div>
+                  <label className="block text-sm text-gray-700 mb-1">Processed symbol</label>
                   <input
                     className="input"
                     type="text"
@@ -180,8 +181,9 @@ export default function AppSection() {
                     onChange={(e) => setField(['app', 'episode_status_processed_symbol'], e.target.value)}
                   />
                   <p className="text-xs text-gray-500 mt-1">e.g. "My Episode {pending?.app?.episode_status_processed_symbol || '✓'}"</p>
-                </Field>
-                <Field label="Error symbol">
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-700 mb-1">Error symbol</label>
                   <input
                     className="input"
                     type="text"
@@ -191,7 +193,7 @@ export default function AppSection() {
                     onChange={(e) => setField(['app', 'episode_status_error_symbol'], e.target.value)}
                   />
                   <p className="text-xs text-gray-500 mt-1">e.g. "My Episode {pending?.app?.episode_status_error_symbol || '⚠'}"</p>
-                </Field>
+                </div>
               </div>
             )}
           </div>
