@@ -13,8 +13,10 @@ import feedparser
 import PyRSS2Gen
 from flask import current_app, g, request
 
+from sqlalchemy import func
+
 from app.extensions import db
-from app.models import Feed, Post, User, UserFeed
+from app.models import Feed, Post, ProcessingJob, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
 from podcast_processor.audio import get_audio_duration_ms
@@ -48,12 +50,38 @@ def _apply_feed_tag(title: str, feed: "Feed | None" = None) -> str:
         label = global_label
         position = global_position
 
+    label = label.strip() if label else ""
     if not label:
         return title
     tag = f"[{label}]"
     if position == "suffix":
         return f"{title} {tag}"
     return f"{tag} {title}"
+
+
+def _episode_status_suffix(post: "Post", failed_guids: "set[str]") -> str:
+    """Return the status symbol suffix for an episode title, or empty string.
+
+    Only active when episode_status_indicator_enabled is True in config.
+    - processed_audio_path is not None  →  processed symbol (e.g. ' ✓')
+    - guid in failed_guids              →  error symbol    (e.g. ' ⚠')
+    - otherwise                         →  ''  (no change)
+    """
+    if not getattr(config, "episode_status_indicator_enabled", False):
+        return ""
+    if post.processed_audio_path is not None:
+        symbol = getattr(
+            config, "episode_status_processed_symbol",
+            "✓"
+        ).strip()
+        return f" {symbol}" if symbol else ""
+    if post.guid in failed_guids:
+        symbol = getattr(
+            config, "episode_status_error_symbol",
+            "⚠"
+        ).strip()
+        return f" {symbol}" if symbol else ""
+    return ""
 
 _FORWARDED_PROTO_RE = re.compile(
     r"(?:^|[;,])\s*proto=(\"?)(https?|[A-Za-z]+)\1", re.IGNORECASE
@@ -628,7 +656,11 @@ def _feed_item_duration_seconds(post: Post) -> int | None:
     return duration_seconds if duration_seconds > 0 else None
 
 
-def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem:
+def feed_item(
+    post: Post,
+    prepend_feed_title: bool = False,
+    failed_guids: "set[str] | None" = None,
+) -> PyRSS2Gen.RSSItem:
     """
     Given a post, return the corresponding RSS item. Reference:
     https://github.com/Podcast-Standards-Project/PSP-1-Podcast-RSS-Specification?tab=readme-ov-file#required-item-elements
@@ -644,6 +676,7 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
     title = post.title
     if prepend_feed_title and post.feed:
         title = f"[{post.feed.title}] {title}"
+    title += _episode_status_suffix(post, failed_guids or set())
 
     duration_seconds = _feed_item_duration_seconds(post)
 
@@ -682,7 +715,32 @@ def generate_feed_xml(feed: Feed) -> Any:
             .all()
         )
 
-    items = [feed_item(post) for post in posts]
+    # Compute failed episode GUIDs in a single query (only when indicator is on).
+    failed_guids: set[str] = set()
+    if getattr(config, "episode_status_indicator_enabled", False) and posts:
+        post_guids = [p.guid for p in posts]
+        latest_id_subq = (
+            db.session.query(
+                ProcessingJob.post_guid,
+                func.max(ProcessingJob.id).label("max_id"),
+            )
+            .filter(ProcessingJob.post_guid.in_(post_guids))
+            .group_by(ProcessingJob.post_guid)
+            .subquery()
+        )
+        failed_rows = (
+            db.session.query(ProcessingJob.post_guid)
+            .join(
+                latest_id_subq,
+                (ProcessingJob.post_guid == latest_id_subq.c.post_guid)
+                & (ProcessingJob.id == latest_id_subq.c.max_id),
+            )
+            .filter(ProcessingJob.status == "failed")
+            .all()
+        )
+        failed_guids = {row.post_guid for row in failed_rows}
+
+    items = [feed_item(post, failed_guids=failed_guids) for post in posts]
 
     base_url = _get_base_url()
     link = _append_feed_token_params(f"{base_url}/feed/{feed.id}")

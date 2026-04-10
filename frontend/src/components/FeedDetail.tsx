@@ -13,6 +13,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
+import { computeTaggedTitle } from '../utils/feedTag';
 
 interface FeedDetailProps {
   feed: Feed;
@@ -23,11 +24,13 @@ interface FeedDetailProps {
 type SortOption = 'newest' | 'oldest' | 'title';
 type EpisodeDescriptionView = 'source' | 'podly';
 
-const EPISODE_DESCRIPTION_VIEW_STORAGE_KEY_PREFIX = 'podly:episode-description-view:feed:';
-const EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY = 'podly:episode-description-view:global';
+import {
+  EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY,
+  EPISODE_DESCRIPTION_VIEW_FEED_KEY_PREFIX,
+} from '../constants/localStorage';
 
 function getEpisodeDescriptionViewStorageKey(feedId: number): string {
-  return `${EPISODE_DESCRIPTION_VIEW_STORAGE_KEY_PREFIX}${feedId}`;
+  return `${EPISODE_DESCRIPTION_VIEW_FEED_KEY_PREFIX}${feedId}`;
 }
 
 function loadGlobalEpisodeDescriptionView(): EpisodeDescriptionView {
@@ -62,6 +65,7 @@ function persistEpisodeDescriptionView(
   }
 }
 
+
 interface ProcessingEstimate {
   post_guid: string;
   estimated_minutes: number;
@@ -91,8 +95,13 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [episodeDescriptionView, setEpisodeDescriptionView] =
     useState<EpisodeDescriptionView>(() => loadEpisodeDescriptionView(feed.id));
+  // Stable state for the per-feed override — prevents the modal's useEffect from
+  // re-firing on every parent render and resetting in-progress user selections.
+  const [perFeedDescOverride, setPerFeedDescOverride] =
+    useState<EpisodeDescriptionView | null>(() => loadPerFeedEpisodeDescriptionView(feed.id));
   const handleEpisodeDescriptionViewChange = (view: EpisodeDescriptionView | null) => {
     persistEpisodeDescriptionView(currentFeed.id, view);
+    setPerFeedDescOverride(view);
     setEpisodeDescriptionView(view ?? loadGlobalEpisodeDescriptionView());
   };
   const [showSubscribersModal, setShowSubscribersModal] = useState(false);
@@ -704,6 +713,15 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
               {/* Title aligned to bottom-left of image */}
               <div className="flex-1 min-w-0 pb-2">
                 <h1 className="text-2xl font-bold text-gray-900 mb-1">{currentFeed.title}</h1>
+                {isAdmin && (() => {
+                  const tagged = computeTaggedTitle(currentFeed, configResponse?.config?.app);
+                  return tagged ? (
+                    <p className="text-sm text-gray-500 mb-1" title="How this feed title appears in your podcast app">
+                      <span className="font-medium">In your app:</span>{' '}
+                      <span className="font-mono">{tagged}</span>
+                    </p>
+                  ) : null;
+                })()}
                 {currentFeed.author && (
                   <p className="text-lg text-gray-600">by {currentFeed.author}</p>
                 )}
@@ -1314,7 +1332,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         }
         globalFeedTagLabel={configResponse?.config?.app?.feed_tag_label ?? 'podly'}
         globalFeedTagPosition={configResponse?.config?.app?.feed_tag_position ?? 'prefix'}
-        episodeDescriptionOverride={loadPerFeedEpisodeDescriptionView(currentFeed.id)}
+        episodeDescriptionOverride={perFeedDescOverride}
         globalEpisodeDescriptionView={loadGlobalEpisodeDescriptionView()}
         onEpisodeDescriptionViewChange={handleEpisodeDescriptionViewChange}
       />

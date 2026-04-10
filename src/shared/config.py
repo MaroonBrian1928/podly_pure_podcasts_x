@@ -163,6 +163,7 @@ class Config(BaseModel):
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
     feed_tag_label: str = Field(
         default=DEFAULTS.APP_FEED_TAG_LABEL,
+        max_length=50,
         description="Text inside the brackets added to feed titles (e.g. 'podly'). Empty string omits the tag entirely.",
     )
     feed_tag_position: str = Field(
@@ -172,6 +173,20 @@ class Config(BaseModel):
     feed_tag_override: bool = Field(
         default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
         description="When True, the global tag label/position always overrides any per-feed tag settings.",
+    )
+    episode_status_indicator_enabled: bool = Field(
+        default=DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+        description="When True, appends a status symbol to episode titles in the RSS feed.",
+    )
+    episode_status_processed_symbol: str = Field(
+        default=DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+        max_length=10,
+        description="Symbol appended to episode titles when processing succeeded.",
+    )
+    episode_status_error_symbol: str = Field(
+        default=DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
+        max_length=10,
+        description="Symbol appended to episode titles when processing failed.",
     )
     notification_apprise_url: str = Field(
         default=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,

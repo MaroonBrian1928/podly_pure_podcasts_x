@@ -27,6 +27,7 @@ def send_episode_notification(
     episode_title: str,
     success: bool,
     error_message: str | None = None,
+    tag_label: str = "podly",
 ) -> None:
     """Send an episode processing notification via the Apprise API.
 
@@ -39,12 +40,15 @@ def send_episode_notification(
 
     notify_url = apprise_url.rstrip("/") + "/notify/" + apprise_key.strip("/")
 
+    label = tag_label.strip() or "podly"
+    prefix = f"[{label}]"
+
     if success:
-        title = f"[podly] Processed: {feed_title}"
+        title = f"{prefix} Processed: {feed_title}"
         body = f"Episode ready: {episode_title}"
         msg_type = "success"
     else:
-        title = f"[podly] Processing failed: {feed_title}"
+        title = f"{prefix} Processing failed: {feed_title}"
         body = f"Episode: {episode_title}"
         if error_message:
             body += f"\nError: {error_message}"

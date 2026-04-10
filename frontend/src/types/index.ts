@@ -171,6 +171,9 @@ export interface AppConfigUI {
   feed_tag_label: string;
   feed_tag_position: string;
   feed_tag_override: boolean;
+  episode_status_indicator_enabled: boolean;
+  episode_status_processed_symbol: string;
+  episode_status_error_symbol: string;
   notification_apprise_url: string;
   notification_apprise_key: string;
 }

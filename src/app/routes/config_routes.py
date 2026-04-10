@@ -240,6 +240,21 @@ def _hydrate_app_config(data: dict[str, Any]) -> None:
         "feed_tag_override",
         app_cfg.get("feed_tag_override"),
     )
+    app_cfg["episode_status_indicator_enabled"] = getattr(
+        runtime_config,
+        "episode_status_indicator_enabled",
+        app_cfg.get("episode_status_indicator_enabled"),
+    )
+    app_cfg["episode_status_processed_symbol"] = getattr(
+        runtime_config,
+        "episode_status_processed_symbol",
+        app_cfg.get("episode_status_processed_symbol"),
+    )
+    app_cfg["episode_status_error_symbol"] = getattr(
+        runtime_config,
+        "episode_status_error_symbol",
+        app_cfg.get("episode_status_error_symbol"),
+    )
     app_cfg["notification_apprise_url"] = getattr(
         runtime_config,
         "notification_apprise_url",

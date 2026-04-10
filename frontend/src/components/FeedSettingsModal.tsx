@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import type { Feed, FeedSettingsUpdate } from '../types';
@@ -48,12 +48,23 @@ function InfoTooltip({ text }: { text: string }) {
   );
 }
 
-function FieldLabel({ children, tooltip }: { children: React.ReactNode; tooltip: string }) {
+function FieldLabel({
+  children,
+  tooltip,
+  htmlFor,
+}: {
+  children: React.ReactNode;
+  tooltip: string;
+  htmlFor?: string;
+}) {
   return (
-    <div className="flex items-center text-sm font-medium text-gray-700 mb-2">
+    <label
+      htmlFor={htmlFor}
+      className="flex items-center text-sm font-medium text-gray-700 mb-2"
+    >
       {children}
       <InfoTooltip text={tooltip} />
-    </div>
+    </label>
   );
 }
 
@@ -120,10 +131,21 @@ export default function FeedSettingsModal({
     setDescriptionViewOverride(episodeDescriptionOverride);
   }, [feed, llmChapterFallbackGlobalDefault, episodeDescriptionOverride]);
 
+  // Track the pending localStorage change so we can apply it only after a
+  // successful API call (avoids an unrollback-able local state change on error).
+  const pendingDescViewRef = useRef<{ value: 'source' | 'podly' | null; changed: boolean }>({
+    value: null,
+    changed: false,
+  });
+
   const updateMutation = useMutation({
     mutationFn: (settings: FeedSettingsUpdate) =>
       feedsApi.updateFeedSettings(feed.id, settings),
     onSuccess: () => {
+      // Apply the localStorage-only preference only once the API call succeeds.
+      if (pendingDescViewRef.current.changed) {
+        onEpisodeDescriptionViewChange?.(pendingDescViewRef.current.value);
+      }
       queryClient.invalidateQueries({ queryKey: ['feeds'] });
       onClose();
     },
@@ -173,12 +195,14 @@ export default function FeedSettingsModal({
       settings.feed_tag_position = normalizedPosition === '' ? null : normalizedPosition;
     }
 
-    // Episode description view lives in localStorage only — apply immediately
-    if (descriptionViewOverride !== episodeDescriptionOverride) {
-      onEpisodeDescriptionViewChange?.(descriptionViewOverride);
-    }
+    const descChanged = descriptionViewOverride !== episodeDescriptionOverride;
+    pendingDescViewRef.current = { value: descriptionViewOverride, changed: descChanged };
 
     if (Object.keys(settings).length === 0) {
+      // No backend changes — apply the localStorage preference directly and close.
+      if (descChanged) {
+        onEpisodeDescriptionViewChange?.(descriptionViewOverride);
+      }
       onClose();
       return;
     }
@@ -220,11 +244,16 @@ export default function FeedSettingsModal({
 
           {/* ── Feed tag ── */}
           <div>
-            <FieldLabel tooltip="Text shown inside brackets on feed titles in your podcast app. Leave empty to inherit the global default.">
+            <FieldLabel
+              htmlFor="fs-feed-tag-label"
+              tooltip="Text shown inside brackets on feed titles in your podcast app. Leave empty to inherit the global default."
+            >
               Feed tag label
             </FieldLabel>
             <input
+              id="fs-feed-tag-label"
               type="text"
+              maxLength={50}
               value={feedTagLabel}
               onChange={(e) => setFeedTagLabel(e.target.value)}
               placeholder={`Use global default (${globalFeedTagLabel || 'none'})`}
@@ -245,7 +274,7 @@ export default function FeedSettingsModal({
                 <label key={opt.value} className="flex items-center gap-2.5 cursor-pointer">
                   <input
                     type="radio"
-                    name="feedTagPosition"
+                    name={`feedTagPosition-${feed.id}`}
                     value={opt.value}
                     checked={feedTagPosition === opt.value}
                     onChange={() => setFeedTagPosition(opt.value)}
@@ -285,7 +314,7 @@ export default function FeedSettingsModal({
                 <label key={opt.value} className="flex items-start gap-2.5 cursor-pointer">
                   <input
                     type="radio"
-                    name="adStrategy"
+                    name={`adStrategy-${feed.id}`}
                     value={opt.value}
                     checked={strategy === opt.value}
                     onChange={() => setStrategy(opt.value as typeof strategy)}
@@ -320,10 +349,14 @@ export default function FeedSettingsModal({
 
           {/* ── Behaviour overrides ── */}
           <div>
-            <FieldLabel tooltip="Whether new episodes are automatically queued for processing. Overrides the global setting for this feed only.">
+            <FieldLabel
+              htmlFor="fs-auto-whitelist"
+              tooltip="Whether new episodes are automatically queued for processing. Overrides the global setting for this feed only."
+            >
               Auto-whitelist new episodes
             </FieldLabel>
             <select
+              id="fs-auto-whitelist"
               value={autoWhitelistOverride}
               onChange={(e) => setAutoWhitelistOverride(e.target.value as 'inherit' | 'on' | 'off')}
               className={selectClass}
@@ -335,10 +368,14 @@ export default function FeedSettingsModal({
           </div>
 
           <div>
-            <FieldLabel tooltip="Preserves embedded chapters when available, falling back to description or transcript-derived chapters during LLM processing. Locked on when using chapter insertion mode.">
+            <FieldLabel
+              htmlFor="fs-chapter-fallback"
+              tooltip="Preserves embedded chapters when available, falling back to description or transcript-derived chapters during LLM processing. Locked on when using chapter insertion mode."
+            >
               LLM-based chapter tagging
             </FieldLabel>
             <select
+              id="fs-chapter-fallback"
               value={isChapterFallbackLocked ? 'on' : chapterFallbackOverride}
               disabled={isChapterFallbackLocked}
               onChange={(e) => setChapterFallbackOverride(e.target.value as 'inherit' | 'on' | 'off')}
@@ -359,10 +396,14 @@ export default function FeedSettingsModal({
 
           {/* ── Episode description preview ── */}
           <div>
-            <FieldLabel tooltip="Which episode description is shown in the Podly UI. This is a local preference saved in your browser — it does not affect the RSS feed delivered to your podcast app.">
+            <FieldLabel
+              htmlFor="fs-desc-view"
+              tooltip="Which episode description is shown in the Podly UI. This is a local preference saved in your browser — it does not affect the RSS feed delivered to your podcast app."
+            >
               Episode description preview
             </FieldLabel>
             <select
+              id="fs-desc-view"
               value={descriptionViewOverride ?? 'global'}
               onChange={(e) => {
                 const v = e.target.value;

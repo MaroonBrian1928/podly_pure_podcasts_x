@@ -282,33 +282,19 @@ class PodcastProcessor:
         except ProcessorException as e:
             error_msg = str(e)
             if "Processing job in progress" in error_msg:
-                status_msg = "Another processing job is already running for this episode"
-                self.status_manager.update_job_status(
-                    job,
-                    "failed",
-                    cached_current_step,
-                    status_msg,
-                )
-                send_episode_notification(
-                    apprise_url=getattr(self.config, "notification_apprise_url", ""),
-                    apprise_key=getattr(self.config, "notification_apprise_key", ""),
-                    feed_title=cached_feed_title or "",
-                    episode_title=cached_post_title or "",
-                    success=False,
-                    error_message=status_msg,
-                )
-            else:
-                self.status_manager.update_job_status(
-                    job, "failed", cached_current_step, error_msg
-                )
-                send_episode_notification(
-                    apprise_url=getattr(self.config, "notification_apprise_url", ""),
-                    apprise_key=getattr(self.config, "notification_apprise_key", ""),
-                    feed_title=cached_feed_title or "",
-                    episode_title=cached_post_title or "",
-                    success=False,
-                    error_message=error_msg,
-                )
+                error_msg = "Another processing job is already running for this episode"
+            self.status_manager.update_job_status(
+                job, "failed", cached_current_step, error_msg
+            )
+            send_episode_notification(
+                apprise_url=getattr(self.config, "notification_apprise_url", ""),
+                apprise_key=getattr(self.config, "notification_apprise_key", ""),
+                feed_title=cached_feed_title or "",
+                episode_title=cached_post_title or "",
+                success=False,
+                error_message=error_msg,
+                tag_label=getattr(self.config, "feed_tag_label", "podly"),
+            )
             raise
 
         except Exception as e:
@@ -328,6 +314,7 @@ class PodcastProcessor:
                 episode_title=cached_post_title or "",
                 success=False,
                 error_message=f"Unexpected error: {e!s}",
+                tag_label=getattr(self.config, "feed_tag_label", "podly"),
             )
             raise
 
@@ -899,6 +886,7 @@ class PodcastProcessor:
             feed_title=getattr(post.feed, "title", "") if post.feed else "",
             episode_title=post.title or "",
             success=True,
+            tag_label=getattr(self.config, "feed_tag_label", "podly"),
         )
 
     def _raise_if_cancelled(

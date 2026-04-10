@@ -551,6 +551,21 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
     )
+    episode_status_indicator_enabled = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+    )
+    episode_status_processed_symbol = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+    )
+    episode_status_error_symbol = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
+    )
     notification_apprise_url = db.Column(
         db.Text,
         nullable=False,

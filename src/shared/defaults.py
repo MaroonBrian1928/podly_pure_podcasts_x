@@ -54,6 +54,13 @@ APP_FEED_TAG_LABEL = "podly"
 APP_FEED_TAG_POSITION = "prefix"  # "prefix" or "suffix"
 APP_FEED_TAG_OVERRIDE = False  # When True, global tag always wins over per-feed tag
 
+# Episode status indicator defaults
+# When enabled, a symbol is appended to episode titles in the RSS feed so users
+# can see processing status directly in their podcast app.
+APP_EPISODE_STATUS_INDICATOR_ENABLED = False
+APP_EPISODE_STATUS_PROCESSED_SYMBOL = "✓"
+APP_EPISODE_STATUS_ERROR_SYMBOL = "⚠"
+
 # Notification defaults (Apprise API integration)
 APP_NOTIFICATION_APPRISE_URL = ""
 APP_NOTIFICATION_APPRISE_KEY = ""

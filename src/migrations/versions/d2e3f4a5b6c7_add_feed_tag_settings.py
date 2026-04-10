@@ -1,7 +1,7 @@
 """add feed tag settings
 
 Revision ID: d2e3f4a5b6c7
-Revises: 3e5eebc6b3b1
+Revises: c1d2e3f4a5b6
 Create Date: 2026-04-09 00:00:00.000000
 
 """

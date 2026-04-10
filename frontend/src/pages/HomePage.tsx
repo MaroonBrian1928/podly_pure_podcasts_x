@@ -157,7 +157,7 @@ export default function HomePage() {
             Podcast Feeds
           </h2>
           <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-            <div className="min-w-0 flex-1">
+            <div className="min-w-[100px] flex-1">
               <label htmlFor="feed-sort" className="sr-only">
                 Sort feeds
               </label>
@@ -183,7 +183,7 @@ export default function HomePage() {
                 onClick={() => refreshAllMutation.mutate()}
                 disabled={refreshAllMutation.isPending}
                 title="Refresh all feeds"
-                className={`h-10 w-10 shrink-0 flex items-center justify-center rounded-md border transition-colors ${
+                className={`h-10 w-10 shrink-0 flex items-center justify-center rounded-md border bg-white transition-colors ${
                   refreshAllMutation.isPending
                     ? 'border-gray-200 text-gray-400 cursor-not-allowed'
                     : 'border-gray-200 text-gray-600 hover:bg-gray-100'
@@ -207,7 +207,7 @@ export default function HomePage() {
             )}
             <button
               onClick={handleCopyAggregateLink}
-              className="h-10 w-10 shrink-0 flex items-center justify-center rounded-md border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors"
+              className="h-10 w-10 shrink-0 flex items-center justify-center rounded-md border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 transition-colors"
               title="Copy your aggregate feed URL (last 3 episodes from each feed)"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

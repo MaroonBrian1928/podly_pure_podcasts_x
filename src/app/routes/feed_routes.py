@@ -144,6 +144,16 @@ def _build_feed_settings_updates(
                 None,
                 (jsonify({"error": "feed_tag_label must be a string or null"}), 400),
             )
+        if isinstance(tag_label, str):
+            tag_label = tag_label.strip()
+            if len(tag_label) > 50:
+                return (
+                    None,
+                    (jsonify({"error": "feed_tag_label must be 50 characters or fewer"}), 400),
+                )
+            # Normalise empty string to null (no override)
+            if tag_label == "":
+                tag_label = None
         updates["feed_tag_label"] = tag_label
 
     if "feed_tag_position" in payload:

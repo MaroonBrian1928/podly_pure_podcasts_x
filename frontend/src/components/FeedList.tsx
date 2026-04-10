@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../contexts/AuthContext';
-import type { Feed } from '../types';
+import type { Feed, ConfigResponse } from '../types';
 import type { FeedSortOption } from '../utils/feedListSort';
+import { configApi } from '../services/api';
+import { computeTaggedTitle } from '../utils/feedTag';
 
 function getLatestEpisodeTimestamp(feed: Feed): number | null {
   if (!feed.latest_episode_release_date) {
@@ -76,7 +79,16 @@ export default function FeedList({
 }: FeedListProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const { requireAuth, user } = useAuth();
+  const isAdmin = !requireAuth || user?.role === 'admin';
   const showMembership = Boolean(requireAuth && user?.role === 'admin');
+
+  // Reuses cached data from FeedDetail/HomePage — no extra network request.
+  const { data: configResponse } = useQuery<ConfigResponse>({
+    queryKey: ['config'],
+    queryFn: configApi.getConfig,
+    enabled: isAdmin,
+  });
+  const appCfg = configResponse?.config?.app;
 
   // Ensure feeds is an array
   const feedsArray = Array.isArray(feeds) ? feeds : [];
@@ -210,6 +222,14 @@ export default function FeedList({
                   {/* Feed Info */}
                   <div className="flex-1 min-w-0">
                     <h3 className="font-medium text-gray-900 line-clamp-2">{feed.title}</h3>
+                    {isAdmin && (() => {
+                      const tagged = computeTaggedTitle(feed, appCfg);
+                      return tagged ? (
+                        <p className="text-xs text-gray-400 truncate mt-0.5" title="How this feed appears in your podcast app">
+                          {tagged}
+                        </p>
+                      ) : null;
+                    })()}
                     {feed.author && (
                       <p className="text-sm text-gray-600 mt-1">by {feed.author}</p>
                     )}

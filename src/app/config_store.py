@@ -157,6 +157,9 @@ def ensure_defaults() -> None:
             "feed_tag_label": DEFAULTS.APP_FEED_TAG_LABEL,
             "feed_tag_position": DEFAULTS.APP_FEED_TAG_POSITION,
             "feed_tag_override": DEFAULTS.APP_FEED_TAG_OVERRIDE,
+            "episode_status_indicator_enabled": DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+            "episode_status_processed_symbol": DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+            "episode_status_error_symbol": DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
             "notification_apprise_url": DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
             "notification_apprise_key": DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
         },
@@ -238,6 +241,9 @@ def read_combined() -> dict[str, Any]:
             "feed_tag_label": app_s.feed_tag_label,
             "feed_tag_position": app_s.feed_tag_position,
             "feed_tag_override": app_s.feed_tag_override,
+            "episode_status_indicator_enabled": app_s.episode_status_indicator_enabled,
+            "episode_status_processed_symbol": app_s.episode_status_processed_symbol,
+            "episode_status_error_symbol": app_s.episode_status_error_symbol,
             "notification_apprise_url": app_s.notification_apprise_url,
             "notification_apprise_key": app_s.notification_apprise_key,
         },
@@ -379,6 +385,9 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
         "feed_tag_label",
         "feed_tag_position",
         "feed_tag_override",
+        "episode_status_indicator_enabled",
+        "episode_status_processed_symbol",
+        "episode_status_error_symbol",
         "notification_apprise_url",
         "notification_apprise_key",
     ]:
@@ -597,6 +606,26 @@ def to_pydantic_config() -> PydanticConfig:
         ),
         feed_tag_override=bool(
             data["app"].get("feed_tag_override", DEFAULTS.APP_FEED_TAG_OVERRIDE)
+        ),
+        episode_status_indicator_enabled=bool(
+            data["app"].get(
+                "episode_status_indicator_enabled",
+                DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+            )
+        ),
+        episode_status_processed_symbol=str(
+            data["app"].get(
+                "episode_status_processed_symbol",
+                DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+            )
+            or DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL
+        ),
+        episode_status_error_symbol=str(
+            data["app"].get(
+                "episode_status_error_symbol",
+                DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
+            )
+            or DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL
         ),
         notification_apprise_url=str(
             data["app"].get(
