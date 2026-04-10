@@ -264,6 +264,8 @@ class PodcastProcessor:
                     cached_ad_detection_strategy,
                     cached_chapter_filter_strings,
                     cached_enable_llm_chapter_fallback_tagging,
+                    feed_title=cached_feed_title or "",
+                    post_title=cached_post_title or "",
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
@@ -379,6 +381,8 @@ class PodcastProcessor:
         ad_detection_strategy: str = "llm",
         chapter_filter_strings: str | None = None,
         enable_llm_chapter_fallback_tagging: bool | None = None,
+        feed_title: str = "",
+        post_title: str = "",
     ) -> None:
         """
         Perform the main processing steps based on the ad detection strategy.
@@ -390,14 +394,18 @@ class PodcastProcessor:
             cancel_callback: Optional callback to check for cancellation
             ad_detection_strategy: "llm", "chapter", or "chapter_insert"
             chapter_filter_strings: Comma-separated filter strings for chapter strategy
+            feed_title: Cached feed title for the success notification
+            post_title: Cached post title for the success notification
         """
         if ad_detection_strategy == "chapter":
             self._perform_chapter_based_processing(
-                post, job, processed_audio_path, cancel_callback, chapter_filter_strings
+                post, job, processed_audio_path, cancel_callback, chapter_filter_strings,
+                feed_title=feed_title, post_title=post_title,
             )
         elif ad_detection_strategy == "chapter_insert":
             self._perform_chapter_insertion_only_processing(
-                post, job, processed_audio_path, cancel_callback
+                post, job, processed_audio_path, cancel_callback,
+                feed_title=feed_title, post_title=post_title,
             )
         else:
             self._perform_llm_based_processing(
@@ -406,6 +414,8 @@ class PodcastProcessor:
                 processed_audio_path,
                 cancel_callback,
                 enable_llm_chapter_fallback_tagging,
+                feed_title=feed_title,
+                post_title=post_title,
             )
 
     def _resolve_llm_chapter_fallback_tagging_enabled(
@@ -434,6 +444,8 @@ class PodcastProcessor:
         processed_audio_path: str,
         cancel_callback: Callable[[], bool] | None = None,
         enable_llm_chapter_fallback_tagging: bool | None = None,
+        feed_title: str = "",
+        post_title: str = "",
     ) -> None:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
@@ -536,6 +548,8 @@ class PodcastProcessor:
             job,
             processed_audio_path,
             chapter_data=chapter_data_json,
+            feed_title=feed_title,
+            post_title=post_title,
         )
 
     def _perform_chapter_insertion_only_processing(
@@ -544,6 +558,8 @@ class PodcastProcessor:
         job: ProcessingJob,
         processed_audio_path: str,
         cancel_callback: Callable[[], bool] | None = None,
+        feed_title: str = "",
+        post_title: str = "",
     ) -> None:
         """
         Resolve and write chapters without ad detection or ad removal.
@@ -633,6 +649,8 @@ class PodcastProcessor:
             job,
             processed_audio_path,
             chapter_data=chapter_data_json,
+            feed_title=feed_title,
+            post_title=post_title,
         )
 
     def _refine_transcript_sourced_chapters(
@@ -755,6 +773,8 @@ class PodcastProcessor:
         processed_audio_path: str,
         cancel_callback: Callable[[], bool] | None = None,
         chapter_filter_strings: str | None = None,
+        feed_title: str = "",
+        post_title: str = "",
     ) -> None:
         """
         Perform chapter-based ad detection: read chapters, filter by title, remove ads.
@@ -846,7 +866,8 @@ class PodcastProcessor:
         }
 
         self._finalize_processing(
-            post, job, processed_audio_path, chapter_data=json.dumps(chapter_data)
+            post, job, processed_audio_path, chapter_data=json.dumps(chapter_data),
+            feed_title=feed_title, post_title=post_title,
         )
 
     def _finalize_processing(
@@ -855,9 +876,14 @@ class PodcastProcessor:
         job: ProcessingJob,
         processed_audio_path: str,
         chapter_data: str | None = None,
+        feed_title: str = "",
+        post_title: str = "",
     ) -> None:
         """
-        Finalize processing: update database and mark job complete.
+        Finalize processing: update database, mark job complete, and send notification.
+
+        feed_title and post_title are used for the success notification; they must be
+        passed in as cached strings because the ORM session may be expired by this point.
         """
         # Update the database with the processed audio path
         self._remove_unprocessed_audio(post)
@@ -883,8 +909,8 @@ class PodcastProcessor:
         send_episode_notification(
             apprise_url=self.config.notification_apprise_url,
             apprise_key=self.config.notification_apprise_key,
-            feed_title=cached_feed_title or "",
-            episode_title=cached_post_title or "",
+            feed_title=feed_title,
+            episode_title=post_title,
             success=True,
             tag_label=self.config.feed_tag_label,
         )
