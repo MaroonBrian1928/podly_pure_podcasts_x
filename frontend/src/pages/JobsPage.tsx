@@ -271,8 +271,7 @@ export default function JobsPage() {
 
   const run: JobManagerRun | null = managerStatus?.run ?? null;
   const hasActiveWork = run ? run.queued_jobs + run.running_jobs > 0 : false;
-  const queuedJobsCount =
-    run?.queued_jobs ?? jobs.filter(job => job.status === 'pending').length;
+  const queuedJobsCount = jobs.filter(job => job.status === 'pending').length;
   const retentionDays = cleanupPreview?.retention_days ?? null;
   const cleanupDisabled = retentionDays === null || retentionDays <= 0;
   const cleanupEligibleCount = cleanupPreview?.count ?? 0;

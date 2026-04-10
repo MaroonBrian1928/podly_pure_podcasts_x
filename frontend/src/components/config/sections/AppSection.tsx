@@ -170,23 +170,27 @@ export default function AppSection() {
             </div>
             {!!pending?.app?.episode_status_indicator_enabled && (
               <div className="grid grid-cols-2 gap-3 ml-6">
-                <Field label={`Processed symbol (e.g. "My Episode ${pending?.app?.episode_status_processed_symbol || '✓'}")`}>
+                <Field label="Processed symbol">
                   <input
                     className="input"
                     type="text"
                     maxLength={10}
+                    placeholder="✓"
                     value={pending?.app?.episode_status_processed_symbol ?? '✓'}
                     onChange={(e) => setField(['app', 'episode_status_processed_symbol'], e.target.value)}
                   />
+                  <p className="text-xs text-gray-500 mt-1">e.g. "My Episode {pending?.app?.episode_status_processed_symbol || '✓'}"</p>
                 </Field>
-                <Field label={`Error symbol (e.g. "My Episode ${pending?.app?.episode_status_error_symbol || '⚠'}")`}>
+                <Field label="Error symbol">
                   <input
                     className="input"
                     type="text"
                     maxLength={10}
+                    placeholder="⚠"
                     value={pending?.app?.episode_status_error_symbol ?? '⚠'}
                     onChange={(e) => setField(['app', 'episode_status_error_symbol'], e.target.value)}
                   />
+                  <p className="text-xs text-gray-500 mt-1">e.g. "My Episode {pending?.app?.episode_status_error_symbol || '⚠'}"</p>
                 </Field>
               </div>
             )}

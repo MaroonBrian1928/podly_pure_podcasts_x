@@ -226,8 +226,9 @@ def build_post_feed_description_html(post: Post) -> str:
     if chapters_html:
         description_parts.append(chapters_html)
 
-    if post.download_url:
-        escaped_url = html.escape(post.download_url, quote=True)
+    source_url = post.link or post.download_url
+    if source_url:
+        escaped_url = html.escape(source_url, quote=True)
         description_parts.append(
             f'<p>🔗 <a href="{escaped_url}">Original episode source</a></p>'
         )
@@ -927,6 +928,7 @@ def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
         feed_id=feed.id,
         guid=get_guid(entry),
         download_url=find_audio_link(entry),
+        link=str(entry.link).strip() if entry.get("link") else None,
         title=entry.title,
         description=_extract_post_description(entry),
         release_date=_parse_release_date(entry),

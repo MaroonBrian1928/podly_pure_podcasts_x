@@ -82,7 +82,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!feeds || !feedId) {
-      if (location.pathname === '/' && selectedFeed !== null) {
+      if (location.pathname === '/') {
         setSelectedFeed(null);
       }
       return;
@@ -90,17 +90,13 @@ export default function HomePage() {
 
     const parsedId = Number(feedId);
     if (!Number.isFinite(parsedId)) {
-      if (selectedFeed !== null) {
-        setSelectedFeed(null);
-      }
+      setSelectedFeed(null);
       return;
     }
 
     const matchingFeed = feeds.find((feed) => feed.id === parsedId) || null;
-    if (matchingFeed?.id !== selectedFeed?.id) {
-      setSelectedFeed(matchingFeed);
-    }
-  }, [feeds, feedId, location.pathname, selectedFeed]);
+    setSelectedFeed(matchingFeed);
+  }, [feeds, feedId, location.pathname]);
 
   if (isLoading) {
     return (

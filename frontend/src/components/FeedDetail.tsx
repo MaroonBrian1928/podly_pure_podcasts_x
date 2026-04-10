@@ -713,21 +713,21 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
               {/* Title aligned to bottom-left of image */}
               <div className="flex-1 min-w-0 pb-2">
                 <h1 className="text-2xl font-bold text-gray-900 mb-1">{currentFeed.title}</h1>
-                {isAdmin && (() => {
-                  const tagged = computeTaggedTitle(currentFeed, configResponse?.config?.app);
-                  return tagged ? (
-                    <p className="text-sm text-gray-500 mb-1" title="How this feed title appears in your podcast app">
-                      <span className="font-medium">In your app:</span>{' '}
-                      <span className="font-mono">{tagged}</span>
-                    </p>
-                  ) : null;
-                })()}
                 {currentFeed.author && (
                   <p className="text-lg text-gray-600">by {currentFeed.author}</p>
                 )}
                 <div className="mt-2 text-sm text-gray-500">
                   <span>{totalCount} episodes visible</span>
                 </div>
+                {isAdmin && (() => {
+                  const tagged = computeTaggedTitle(currentFeed, configResponse?.config?.app);
+                  return tagged ? (
+                    <p className="text-sm text-gray-500 mt-1" title="How this feed title appears in your podcast app">
+                      <span className="font-medium">In your app:</span>{' '}
+                      <span>{tagged}</span>
+                    </p>
+                  ) : null;
+                })()}
                 {requireAuth && isAdmin && (
                   <div className="mt-2 flex items-center gap-2 flex-wrap text-sm">
                     <button
