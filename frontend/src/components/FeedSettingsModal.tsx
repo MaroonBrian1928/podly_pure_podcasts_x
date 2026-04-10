@@ -11,11 +11,51 @@ interface FeedSettingsModalProps {
   llmChapterFallbackGlobalDefault?: boolean;
   globalFeedTagLabel?: string;
   globalFeedTagPosition?: string;
-  episodeDescriptionView?: 'source' | 'podly';
-  onEpisodeDescriptionViewChange?: (view: 'source' | 'podly') => void;
+  episodeDescriptionOverride?: 'source' | 'podly' | null;
+  globalEpisodeDescriptionView?: 'source' | 'podly';
+  onEpisodeDescriptionViewChange?: (view: 'source' | 'podly' | null) => void;
 }
 
 const DEFAULT_FILTER_STRINGS = 'sponsor,advertisement,ad break,promo,brought to you by';
+
+const selectClass =
+  'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 ' +
+  'focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 ' +
+  'disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500';
+
+function InfoTooltip({ text }: { text: string }) {
+  return (
+    <span className="relative group inline-flex items-center ml-1.5 cursor-help">
+      <svg
+        className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-500 transition-colors"
+        fill="currentColor"
+        viewBox="0 0 20 20"
+      >
+        <path
+          fillRule="evenodd"
+          d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+          clipRule="evenodd"
+        />
+      </svg>
+      <span
+        className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-60 px-2.5 py-1.5
+          text-xs text-white bg-gray-800 rounded-lg shadow-lg leading-relaxed
+          opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-20"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function FieldLabel({ children, tooltip }: { children: React.ReactNode; tooltip: string }) {
+  return (
+    <div className="flex items-center text-sm font-medium text-gray-700 mb-2">
+      {children}
+      <InfoTooltip text={tooltip} />
+    </div>
+  );
+}
 
 export default function FeedSettingsModal({
   feed,
@@ -25,7 +65,8 @@ export default function FeedSettingsModal({
   llmChapterFallbackGlobalDefault,
   globalFeedTagLabel = 'podly',
   globalFeedTagPosition = 'prefix',
-  episodeDescriptionView = 'source',
+  episodeDescriptionOverride = null,
+  globalEpisodeDescriptionView = 'source',
   onEpisodeDescriptionViewChange,
 }: FeedSettingsModalProps) {
   const queryClient = useQueryClient();
@@ -36,9 +77,7 @@ export default function FeedSettingsModal({
   const [filterStrings, setFilterStrings] = useState(
     feed.chapter_filter_strings || DEFAULT_FILTER_STRINGS
   );
-  const [chapterFallbackOverride, setChapterFallbackOverride] = useState<
-    'inherit' | 'on' | 'off'
-  >(
+  const [chapterFallbackOverride, setChapterFallbackOverride] = useState<'inherit' | 'on' | 'off'>(
     feed.enable_llm_chapter_fallback_tagging === true
       ? 'on'
       : feed.enable_llm_chapter_fallback_tagging === false
@@ -52,12 +91,12 @@ export default function FeedSettingsModal({
         ? 'off'
         : 'inherit'
   );
-  const [feedTagLabel, setFeedTagLabel] = useState<string>(
-    feed.feed_tag_label ?? ''
-  );
-  const [feedTagPosition, setFeedTagPosition] = useState<string>(
-    feed.feed_tag_position ?? ''
-  );
+  const [feedTagLabel, setFeedTagLabel] = useState<string>(feed.feed_tag_label ?? '');
+  const [feedTagPosition, setFeedTagPosition] = useState<string>(feed.feed_tag_position ?? '');
+  // null = use global default
+  const [descriptionViewOverride, setDescriptionViewOverride] = useState<
+    'source' | 'podly' | null
+  >(episodeDescriptionOverride);
 
   useEffect(() => {
     setStrategy(feed.ad_detection_strategy || 'llm');
@@ -78,7 +117,8 @@ export default function FeedSettingsModal({
     );
     setFeedTagLabel(feed.feed_tag_label ?? '');
     setFeedTagPosition(feed.feed_tag_position ?? '');
-  }, [feed, llmChapterFallbackGlobalDefault]);
+    setDescriptionViewOverride(episodeDescriptionOverride);
+  }, [feed, llmChapterFallbackGlobalDefault, episodeDescriptionOverride]);
 
   const updateMutation = useMutation({
     mutationFn: (settings: FeedSettingsUpdate) =>
@@ -110,60 +150,50 @@ export default function FeedSettingsModal({
     if (strategy !== currentStrategy) {
       settings.ad_detection_strategy = strategy;
     }
-
     if (strategy === 'chapter' && filterStrings !== currentFilterStrings) {
       settings.chapter_filter_strings = filterStrings || null;
     }
-
-    if (
-      strategy !== 'chapter_insert' &&
-      chapterFallbackOverride !== currentChapterFallbackOverride
-    ) {
+    if (strategy !== 'chapter_insert' && chapterFallbackOverride !== currentChapterFallbackOverride) {
       settings.enable_llm_chapter_fallback_tagging =
-        chapterFallbackOverride === 'inherit'
-          ? null
-          : chapterFallbackOverride === 'on';
+        chapterFallbackOverride === 'inherit' ? null : chapterFallbackOverride === 'on';
     }
-
     if (autoWhitelistOverride !== currentAutoWhitelistOverride) {
       settings.auto_whitelist_new_episodes_override =
         autoWhitelistOverride === 'inherit' ? null : autoWhitelistOverride === 'on';
     }
 
-    // Feed tag: empty string = use global default (send null); non-empty = use that value
     const normalizedLabel = feedTagLabel.trim();
     const currentLabel = feed.feed_tag_label ?? '';
     if (normalizedLabel !== currentLabel) {
       settings.feed_tag_label = normalizedLabel === '' ? null : normalizedLabel;
     }
-
     const normalizedPosition = feedTagPosition || '';
     const currentPosition = feed.feed_tag_position ?? '';
     if (normalizedPosition !== currentPosition) {
       settings.feed_tag_position = normalizedPosition === '' ? null : normalizedPosition;
     }
 
+    // Episode description view lives in localStorage only — apply immediately
+    if (descriptionViewOverride !== episodeDescriptionOverride) {
+      onEpisodeDescriptionViewChange?.(descriptionViewOverride);
+    }
+
     if (Object.keys(settings).length === 0) {
       onClose();
       return;
     }
-
     updateMutation.mutate(settings);
   };
 
   const autoWhitelistDefaultLabel =
-    autoWhitelistGlobalDefault === undefined
-      ? 'Unknown'
-      : autoWhitelistGlobalDefault
-        ? 'On'
-        : 'Off';
+    autoWhitelistGlobalDefault === undefined ? 'Unknown'
+    : autoWhitelistGlobalDefault ? 'On' : 'Off';
   const chapterFallbackGlobalDefaultLabel =
-    llmChapterFallbackGlobalDefault === undefined
-      ? 'Unknown'
-      : llmChapterFallbackGlobalDefault
-        ? 'On'
-        : 'Off';
+    llmChapterFallbackGlobalDefault === undefined ? 'Unknown'
+    : llmChapterFallbackGlobalDefault ? 'On' : 'Off';
   const isChapterFallbackLocked = strategy === 'chapter_insert';
+  const globalPositionLabel = globalFeedTagPosition === 'suffix' ? 'Feed Title [tag]' : '[tag] Feed Title';
+  const globalDescLabel = globalEpisodeDescriptionView === 'podly' ? 'Podly' : 'Source';
 
   if (!isOpen) return null;
 
@@ -171,56 +201,110 @@ export default function FeedSettingsModal({
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
 
-      <div className="relative w-full max-w-md bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden">
-        <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-200">
+      <div className="relative w-full max-w-md bg-white rounded-xl border border-gray-200 shadow-lg flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-200 flex-shrink-0">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Feed Settings</h2>
-            <p className="text-sm text-gray-600 mt-1">
-              Settings for "{feed.title}"
-            </p>
+            <p className="text-sm text-gray-600 mt-1">Settings for "{feed.title}"</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600"
-          >
+          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <div className="px-5 py-4 space-y-4">
+        {/* Scrollable body */}
+        <div className="overflow-y-auto flex-1 px-5 py-4 space-y-5">
+
+          {/* ── Feed tag ── */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Ad Detection Strategy
-            </label>
-            <select
-              value={strategy}
-              onChange={(e) =>
-                setStrategy(e.target.value as 'llm' | 'chapter' | 'chapter_insert')
-              }
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-            >
-              <option value="llm">LLM (AI-based)</option>
-              <option value="chapter">Chapter-based</option>
-              <option value="chapter_insert">
-                Chapter insertion only (no ad removal)
-              </option>
-            </select>
-            <p className="text-xs text-gray-500 mt-1">
-              {strategy === 'llm'
-                ? 'Uses AI transcription and classification to detect ads'
-                : strategy === 'chapter'
-                  ? 'Removes chapters matching filter strings (requires chapter metadata). Uses CBR encoding for accurate chapter seeking, instead of the default VBR.'
-                  : 'Preserves audio and only inserts chapter metadata into the processed file/output description.'}
-            </p>
+            <FieldLabel tooltip="Text shown inside brackets on feed titles in your podcast app. Leave empty to inherit the global default.">
+              Feed tag label
+            </FieldLabel>
+            <input
+              type="text"
+              value={feedTagLabel}
+              onChange={(e) => setFeedTagLabel(e.target.value)}
+              placeholder={`Use global default (${globalFeedTagLabel || 'none'})`}
+              className={selectClass}
+            />
+          </div>
+
+          <div>
+            <FieldLabel tooltip="Where the bracketed tag appears relative to the feed title. Select 'Use global default' to inherit the app-wide setting.">
+              Feed tag position
+            </FieldLabel>
+            <div className="flex flex-col gap-2">
+              {[
+                { value: '', label: `Use global default (${globalPositionLabel})` },
+                { value: 'prefix', label: '[tag] Feed Title' },
+                { value: 'suffix', label: 'Feed Title [tag]' },
+              ].map((opt) => (
+                <label key={opt.value} className="flex items-center gap-2.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="feedTagPosition"
+                    value={opt.value}
+                    checked={feedTagPosition === opt.value}
+                    onChange={() => setFeedTagPosition(opt.value)}
+                    className="accent-blue-600"
+                  />
+                  <span className="text-sm text-gray-700">{opt.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-t border-gray-100" />
+
+          {/* ── Ad detection strategy ── */}
+          <div>
+            <FieldLabel tooltip="Controls how ads are identified and handled during processing.">
+              Ad detection strategy
+            </FieldLabel>
+            <div className="flex flex-col gap-3">
+              {[
+                {
+                  value: 'llm',
+                  label: 'LLM (AI-based)',
+                  desc: 'Transcribes audio and uses AI to classify and remove ad segments.',
+                },
+                {
+                  value: 'chapter',
+                  label: 'Chapter-based',
+                  desc: 'Removes chapters whose titles match filter strings. Requires chapter metadata; uses CBR encoding.',
+                },
+                {
+                  value: 'chapter_insert',
+                  label: 'Chapter insertion only',
+                  desc: 'Keeps all audio intact and inserts chapter markers only — no ad removal.',
+                },
+              ].map((opt) => (
+                <label key={opt.value} className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="adStrategy"
+                    value={opt.value}
+                    checked={strategy === opt.value}
+                    onChange={() => setStrategy(opt.value as typeof strategy)}
+                    className="mt-0.5 accent-blue-600"
+                  />
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">{opt.label}</p>
+                    <p className="text-xs text-gray-500 leading-snug">{opt.desc}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
 
             {strategy === 'chapter' && (
-              <div className="mt-3 ml-3 pl-3 border-l-2 border-gray-200">
-                <label className="block text-xs text-gray-600 mb-1">
-                  Filter Strings
-                </label>
+              <div className="mt-3 ml-5 pl-3 border-l-2 border-gray-200">
+                <div className="flex items-center text-xs text-gray-600 mb-1">
+                  Filter strings
+                  <InfoTooltip text="Comma-separated list. Any chapter whose title contains one of these strings (case-insensitive) will be removed." />
+                </div>
                 <textarea
                   value={filterStrings}
                   onChange={(e) => setFilterStrings(e.target.value)}
@@ -228,137 +312,79 @@ export default function FeedSettingsModal({
                   rows={3}
                   className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Comma-separated list. Chapters containing any of these will be removed (case-insensitive).
-                </p>
               </div>
             )}
           </div>
 
+          <div className="border-t border-gray-100" />
+
+          {/* ── Behaviour overrides ── */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <FieldLabel tooltip="Whether new episodes are automatically queued for processing. Overrides the global setting for this feed only.">
               Auto-whitelist new episodes
-            </label>
+            </FieldLabel>
             <select
               value={autoWhitelistOverride}
-              onChange={(e) =>
-                setAutoWhitelistOverride(e.target.value as 'inherit' | 'on' | 'off')
-              }
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+              onChange={(e) => setAutoWhitelistOverride(e.target.value as 'inherit' | 'on' | 'off')}
+              className={selectClass}
             >
-              <option value="inherit">
-                Use global setting ({autoWhitelistDefaultLabel})
-              </option>
+              <option value="inherit">Use global setting ({autoWhitelistDefaultLabel})</option>
               <option value="on">On</option>
               <option value="off">Off</option>
             </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Overrides the global setting for this feed.
-            </p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Feed tag label
-            </label>
-            <input
-              type="text"
-              value={feedTagLabel}
-              onChange={(e) => setFeedTagLabel(e.target.value)}
-              placeholder={`Use global default (${globalFeedTagLabel || 'none'})`}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Text inside the brackets for this feed. Leave empty to use the global default.
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Feed tag position
-            </label>
-            <select
-              value={feedTagPosition}
-              onChange={(e) => setFeedTagPosition(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-            >
-              <option value="">Use global default ({globalFeedTagPosition === 'suffix' ? 'Feed Title [tag]' : '[tag] Feed Title'})</option>
-              <option value="prefix">[tag] Feed Title</option>
-              <option value="suffix">Feed Title [tag]</option>
-            </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Where the tag appears relative to the feed title.
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              LLM-Based chapter tagging
-            </label>
+            <FieldLabel tooltip="Preserves embedded chapters when available, falling back to description or transcript-derived chapters during LLM processing. Locked on when using chapter insertion mode.">
+              LLM-based chapter tagging
+            </FieldLabel>
             <select
               value={isChapterFallbackLocked ? 'on' : chapterFallbackOverride}
               disabled={isChapterFallbackLocked}
-              onChange={(e) =>
-                setChapterFallbackOverride(
-                  e.target.value as 'inherit' | 'on' | 'off'
-                )
-              }
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+              onChange={(e) => setChapterFallbackOverride(e.target.value as 'inherit' | 'on' | 'off')}
+              className={selectClass}
             >
-              <option value="inherit">
-                Use global setting ({chapterFallbackGlobalDefaultLabel})
-              </option>
+              <option value="inherit">Use global setting ({chapterFallbackGlobalDefaultLabel})</option>
               <option value="on">On</option>
               <option value="off">Off</option>
             </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Preserves embedded chapters when available, otherwise falls back
-              to description or transcript-derived chapters during LLM
-              processing.
-            </p>
             {isChapterFallbackLocked && (
-              <p className="text-xs text-blue-700 mt-2">
-                Chapter insertion mode requires chapter fallback tagging, so
-                this setting is locked on.
+              <p className="text-xs text-blue-600 mt-1">
+                Locked on — required by chapter insertion mode.
               </p>
             )}
           </div>
 
-          <div className="border-t border-gray-200" />
+          <div className="border-t border-gray-100" />
 
+          {/* ── Episode description preview ── */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <FieldLabel tooltip="Which episode description is shown in the Podly UI. This is a local preference saved in your browser — it does not affect the RSS feed delivered to your podcast app.">
               Episode description preview
-            </label>
+            </FieldLabel>
             <select
-              value={episodeDescriptionView}
-              onChange={(e) =>
-                onEpisodeDescriptionViewChange?.(
-                  e.target.value as 'source' | 'podly'
-                )
-              }
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+              value={descriptionViewOverride ?? 'global'}
+              onChange={(e) => {
+                const v = e.target.value;
+                setDescriptionViewOverride(v === 'global' ? null : (v as 'source' | 'podly'));
+              }}
+              className={selectClass}
             >
+              <option value="global">Use global default ({globalDescLabel})</option>
               <option value="source">Source description</option>
               <option value="podly">Podly description preview</option>
             </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Uses the same composed description as the Podly RSS feed (source
-              description + Podly chapters). This affects only the UI preview
-              and does not change source RSS content.
-            </p>
           </div>
 
           {updateMutation.isError && (
             <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-sm text-red-700">
-                Failed to save settings. Please try again.
-              </p>
+              <p className="text-sm text-red-700">Failed to save settings. Please try again.</p>
             </div>
           )}
         </div>
 
-        <div className="flex justify-end gap-3 px-5 py-4 border-t border-gray-200 bg-gray-50">
+        {/* Footer */}
+        <div className="flex justify-end gap-3 px-5 py-4 border-t border-gray-200 bg-gray-50 flex-shrink-0">
           <button
             type="button"
             onClick={onClose}

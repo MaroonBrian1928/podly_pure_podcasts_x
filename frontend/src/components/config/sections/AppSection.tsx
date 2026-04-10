@@ -1,8 +1,23 @@
+import { useState, useEffect } from 'react';
 import { useConfigContext } from '../ConfigContext';
 import { Section, Field, SaveButton } from '../shared';
 
+const EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY = 'podly:episode-description-view:global';
+
+function loadGlobalDescView(): 'source' | 'podly' {
+  if (typeof window === 'undefined') return 'source';
+  return window.localStorage.getItem(EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY) === 'podly'
+    ? 'podly'
+    : 'source';
+}
+
 export default function AppSection() {
   const { pending, setField, handleSave, isSaving } = useConfigContext();
+  const [globalDescView, setGlobalDescView] = useState<'source' | 'podly'>(loadGlobalDescView);
+
+  useEffect(() => {
+    window.localStorage.setItem(EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY, globalDescView);
+  }, [globalDescView]);
 
   if (!pending) return null;
 
@@ -142,6 +157,19 @@ export default function AppSection() {
             </label>
             <p className="text-xs text-gray-500">When enabled, the global tag label and position above apply to all feeds, ignoring any per-feed tag customizations.</p>
           </div>
+          <Field label="Default episode description view">
+            <select
+              className="input"
+              value={globalDescView}
+              onChange={(e) => setGlobalDescView(e.target.value as 'source' | 'podly')}
+            >
+              <option value="source">Source description</option>
+              <option value="podly">Podly description preview</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Default for all feeds. Can be overridden per feed in Feed Settings. Stored in your browser only.
+            </p>
+          </Field>
         </div>
       </Section>
 

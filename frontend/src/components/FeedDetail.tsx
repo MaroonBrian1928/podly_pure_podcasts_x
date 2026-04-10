@@ -24,32 +24,42 @@ type SortOption = 'newest' | 'oldest' | 'title';
 type EpisodeDescriptionView = 'source' | 'podly';
 
 const EPISODE_DESCRIPTION_VIEW_STORAGE_KEY_PREFIX = 'podly:episode-description-view:feed:';
+const EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY = 'podly:episode-description-view:global';
 
 function getEpisodeDescriptionViewStorageKey(feedId: number): string {
   return `${EPISODE_DESCRIPTION_VIEW_STORAGE_KEY_PREFIX}${feedId}`;
 }
 
+function loadGlobalEpisodeDescriptionView(): EpisodeDescriptionView {
+  if (typeof window === 'undefined') return 'source';
+  const v = window.localStorage.getItem(EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY);
+  return v === 'podly' ? 'podly' : 'source';
+}
+
+
+/** Returns the raw per-feed override, or null if not set (inherit global). */
+function loadPerFeedEpisodeDescriptionView(feedId: number): EpisodeDescriptionView | null {
+  if (typeof window === 'undefined') return null;
+  const v = window.localStorage.getItem(getEpisodeDescriptionViewStorageKey(feedId));
+  if (v === 'podly') return 'podly';
+  if (v === 'source') return 'source';
+  return null;
+}
+
 function loadEpisodeDescriptionView(feedId: number): EpisodeDescriptionView {
-  if (typeof window === 'undefined') {
-    return 'source';
-  }
-  const rawValue = window.localStorage.getItem(
-    getEpisodeDescriptionViewStorageKey(feedId)
-  );
-  return rawValue === 'podly' ? 'podly' : 'source';
+  return loadPerFeedEpisodeDescriptionView(feedId) ?? loadGlobalEpisodeDescriptionView();
 }
 
 function persistEpisodeDescriptionView(
   feedId: number,
-  view: EpisodeDescriptionView
+  view: EpisodeDescriptionView | null
 ): void {
-  if (typeof window === 'undefined') {
-    return;
+  if (typeof window === 'undefined') return;
+  if (view === null) {
+    window.localStorage.removeItem(getEpisodeDescriptionViewStorageKey(feedId));
+  } else {
+    window.localStorage.setItem(getEpisodeDescriptionViewStorageKey(feedId), view);
   }
-  window.localStorage.setItem(
-    getEpisodeDescriptionViewStorageKey(feedId),
-    view
-  );
 }
 
 interface ProcessingEstimate {
@@ -81,9 +91,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [episodeDescriptionView, setEpisodeDescriptionView] =
     useState<EpisodeDescriptionView>(() => loadEpisodeDescriptionView(feed.id));
-  const handleEpisodeDescriptionViewChange = (view: EpisodeDescriptionView) => {
-    setEpisodeDescriptionView(view);
+  const handleEpisodeDescriptionViewChange = (view: EpisodeDescriptionView | null) => {
     persistEpisodeDescriptionView(currentFeed.id, view);
+    setEpisodeDescriptionView(view ?? loadGlobalEpisodeDescriptionView());
   };
   const [showSubscribersModal, setShowSubscribersModal] = useState(false);
 
@@ -1304,7 +1314,8 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         }
         globalFeedTagLabel={configResponse?.config?.app?.feed_tag_label ?? 'podly'}
         globalFeedTagPosition={configResponse?.config?.app?.feed_tag_position ?? 'prefix'}
-        episodeDescriptionView={episodeDescriptionView}
+        episodeDescriptionOverride={loadPerFeedEpisodeDescriptionView(currentFeed.id)}
+        globalEpisodeDescriptionView={loadGlobalEpisodeDescriptionView()}
         onEpisodeDescriptionViewChange={handleEpisodeDescriptionViewChange}
       />
 
