@@ -226,6 +226,12 @@ def build_post_feed_description_html(post: Post) -> str:
     if chapters_html:
         description_parts.append(chapters_html)
 
+    if post.download_url:
+        escaped_url = html.escape(post.download_url, quote=True)
+        description_parts.append(
+            f'<p>🔗 <a href="{escaped_url}">Original episode source</a></p>'
+        )
+
     return "\n".join(description_parts)
 
 
