@@ -136,6 +136,26 @@ def test_remote_transcription_request_kwargs_match_whisperx_payload_defaults() -
     }
 
 
+def test_remote_transcription_request_kwargs_include_word_timestamps_when_requested() -> (
+    None
+):
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber
+    from shared.config import RemoteWhisperConfig
+
+    transcriber = OpenAIWhisperTranscriber(
+        logging.getLogger("global_logger"),
+        RemoteWhisperConfig(api_key="test-key"),
+    )
+
+    request_kwargs = transcriber.build_transcription_request_kwargs(
+        MagicMock(),
+        include_word_timestamps=True,
+    )
+
+    assert request_kwargs["timestamp_granularities"] == ["segment", "word"]
+    assert request_kwargs["extra_body"] == {"align": True}
+
+
 def test_remote_transcription_request_kwargs_omit_diarization_flags_when_disabled() -> (
     None
 ):
@@ -227,6 +247,52 @@ def test_extract_segments_from_dict_response_preserves_speaker_labels() -> None:
     ]
 
 
+def test_extract_segments_from_dict_response_preserves_word_timestamps() -> None:
+    from podcast_processor.transcribe import (
+        OpenAIWhisperTranscriber,
+        Segment,
+        WordTimestamp,
+    )
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "Hello world",
+                    "words": [
+                        {
+                            "word": "Hello",
+                            "start": 0.0,
+                            "end": 0.4,
+                            "score": 0.98,
+                        },
+                        {
+                            "word": "world",
+                            "start": 0.41,
+                            "end": 1.0,
+                            "score": 0.97,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert segments == [
+        Segment(
+            start=0.0,
+            end=1.0,
+            text="Hello world",
+            words=[
+                WordTimestamp(word="Hello", start=0.0, end=0.4, score=0.98),
+                WordTimestamp(word="world", start=0.41, end=1.0, score=0.97),
+            ],
+        )
+    ]
+
+
 def test_extract_segments_from_sdk_like_response() -> None:
     from podcast_processor.transcribe import OpenAIWhisperTranscriber, Segment
 
@@ -240,4 +306,33 @@ def test_extract_segments_from_sdk_like_response() -> None:
 
     assert segments == [
         Segment(start=1.25, end=2.5, text="typed response"),
+    ]
+
+
+def test_offset_updates_word_timestamps() -> None:
+    from podcast_processor.transcribe import (
+        OpenAIWhisperTranscriber,
+        Segment,
+        WordTimestamp,
+    )
+
+    shifted = OpenAIWhisperTranscriber.add_offset_to_segments(
+        [
+            Segment(
+                start=1.0,
+                end=2.0,
+                text="bad word",
+                words=[WordTimestamp(word="bad", start=1.0, end=1.2, score=0.9)],
+            )
+        ],
+        500,
+    )
+
+    assert shifted == [
+        Segment(
+            start=1.5,
+            end=2.5,
+            text="bad word",
+            words=[WordTimestamp(word="bad", start=1.5, end=1.7, score=0.9)],
+        )
     ]

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
+import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
 
 interface LLMProcessingStatsProps {
@@ -36,18 +37,6 @@ export default function LLMProcessingStats({
       return `${hours}h ${minutes}m ${secs}s`;
     }
     return `${minutes}m ${secs}s`;
-  };
-
-  const formatTimelineLabel = (seconds: number) => {
-    const totalSeconds = Math.max(0, Math.round(seconds));
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${minutes}:${secs.toString().padStart(2, '0')}`;
   };
 
   const formatTimestamp = (timestamp: string | null) => {
@@ -96,6 +85,47 @@ export default function LLMProcessingStats({
       : stats
         ? activeTab
         : 'empty';
+  const durationFallbackCandidates = [
+    ...(stats?.transcript_segments || []).map((segment) => segment.end_time),
+    ...((stats?.processing_stats?.bleep_windows || []).map((window) => window.end_time)),
+  ];
+  const durationSeconds = stats?.post?.duration
+    ?? (durationFallbackCandidates.length ? Math.max(...durationFallbackCandidates) : 0);
+  const fallbackAdBlocks = ((stats?.transcript_segments || [])
+    .filter((segment) => segment.primary_label === 'ad')
+    .map((segment) => ({ startTime: segment.start_time, endTime: segment.end_time }))
+    .sort((a, b) => a.startTime - b.startTime));
+  const mergedFallbackAdBlocks = fallbackAdBlocks.reduce<Array<{ startTime: number; endTime: number }>>((merged, segment) => {
+    if (!merged.length) {
+      return [{ ...segment }];
+    }
+
+    const current = merged[merged.length - 1];
+    if (segment.startTime <= current.endTime + 1) {
+      current.endTime = Math.max(current.endTime, segment.endTime);
+      return merged;
+    }
+
+    merged.push({ ...segment });
+    return merged;
+  }, []);
+  const apiAdBlocks = (stats?.processing_stats?.ad_blocks || []).map((block) => ({
+    startTime: block.start_time,
+    endTime: block.end_time,
+  }));
+  const adBlocks = apiAdBlocks.length ? apiAdBlocks : mergedFallbackAdBlocks;
+  const adTimeSeconds = stats?.processing_stats?.estimated_ad_time_seconds
+    ?? adBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const adPercent = stats?.processing_stats?.ad_percentage
+    ?? (durationSeconds > 0 ? (adTimeSeconds / durationSeconds) * 100 : 0);
+  const bleepBlocks = (stats?.processing_stats?.bleep_windows || []).map((window) => ({
+    startTime: window.start_time,
+    endTime: window.end_time,
+  }));
+  const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
+    ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const bleepPercent = stats?.processing_stats?.bleeped_percentage
+    ?? (durationSeconds > 0 ? (bleepTimeSeconds / durationSeconds) * 100 : 0);
 
   if (!hasProcessedAudio) {
     return null;
@@ -297,124 +327,43 @@ export default function LLMProcessingStats({
                         </div>
                       )}
 
-                      {(() => {
-                        const durationSeconds = stats.post?.duration
-                          ?? (stats.transcript_segments?.length
-                            ? Math.max(...stats.transcript_segments.map((segment) => segment.end_time))
-                            : 0);
-                        const fallbackAdBlocks = (() => {
-                          const adSegments = (stats.transcript_segments || [])
-                            .filter((segment) => segment.primary_label === 'ad')
-                            .map((segment) => ({ start: segment.start_time, end: segment.end_time }))
-                            .sort((a, b) => a.start - b.start);
+                      <ProcessingTimelineSummaryCard
+                        title="Advertisement Removal Summary"
+                        itemCount={adBlocks.length}
+                        itemLabel="Ad Blocks"
+                        totalTimeSeconds={adTimeSeconds}
+                        totalTimeLabel="Time Removed"
+                        percentage={adPercent}
+                        percentageLabel="Episode Reduced"
+                        durationSeconds={durationSeconds}
+                        segments={adBlocks}
+                        metricAccentClassName="text-blue-600"
+                        percentageAccentClassName="text-rose-600"
+                        segmentClassName="bg-rose-500/70"
+                        summaryBaseLabel="clean"
+                        summarySegmentLabel="removed"
+                        legendBaseLabel="Content"
+                        legendSegmentLabel="Ads removed"
+                      />
 
-                          if (!adSegments.length) return [];
-
-                          const merged: Array<{ start: number; end: number }> = [];
-                          let current = { ...adSegments[0] };
-                          const gapSeconds = 1;
-                          for (const segment of adSegments.slice(1)) {
-                            if (segment.start <= current.end + gapSeconds) {
-                              current.end = Math.max(current.end, segment.end);
-                            } else {
-                              merged.push(current);
-                              current = { ...segment };
-                            }
-                          }
-                          merged.push(current);
-                          return merged;
-                        })();
-
-                        const apiAdBlocks = (stats.processing_stats?.ad_blocks || []).map((block) => ({
-                          start: block.start_time,
-                          end: block.end_time,
-                        }));
-                        const adBlocks = apiAdBlocks.length ? apiAdBlocks : fallbackAdBlocks;
-                        const adTimeSeconds = stats.processing_stats?.estimated_ad_time_seconds
-                          ?? adBlocks.reduce((sum, block) => sum + Math.max(0, block.end - block.start), 0);
-                        const adPercent = durationSeconds > 0
-                          ? (adTimeSeconds / durationSeconds) * 100
-                          : 0;
-                        const cleanSeconds = Math.max(0, durationSeconds - adTimeSeconds);
-                        const timelineTicks = [0, 0.25, 0.5, 0.75, 1];
-                        const timelineTrackClass = 'relative h-3 w-full rounded-full bg-gray-200 overflow-hidden';
-                        const timelineContentOverlayClass = 'absolute inset-0 bg-gradient-to-r from-blue-500/20 via-blue-400/15 to-blue-500/20';
-                        const timelineLegendSwatchClass = 'relative h-2.5 w-5 shrink-0 overflow-hidden rounded-full';
-                        const timelineAdSegmentClass = 'bg-rose-500/70';
-
-                        return (
-                          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                            <h3 className="font-semibold text-gray-900 mb-4 text-left">Advertisement Removal Summary</h3>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
-                              <div>
-                                <div className="text-2xl font-bold text-blue-600">{adBlocks.length}</div>
-                                <div className="text-sm text-gray-600">Ad Blocks</div>
-                              </div>
-                              <div>
-                                <div className="text-2xl font-bold text-blue-600">{formatDuration(adTimeSeconds)}</div>
-                                <div className="text-sm text-gray-600">Time Removed</div>
-                              </div>
-                              <div>
-                                <div className="text-2xl font-bold text-rose-600">{adPercent.toFixed(1)}%</div>
-                                <div className="text-sm text-gray-600">Episode Reduced</div>
-                              </div>
-                            </div>
-
-                            <div className="mt-5 space-y-3">
-                              <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-gray-600">
-                                <div className="flex items-center gap-2">
-                                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-gray-500 border border-gray-200">
-                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
-                                  </span>
-                                  Episode Timeline
-                                </div>
-                                <div className="text-gray-600">
-                                  {formatDuration(cleanSeconds)} clean
-                                  <span className="text-rose-600 ml-2">
-                                    {formatDuration(adTimeSeconds)} removed ({adPercent.toFixed(1)}%)
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className={timelineTrackClass}>
-                                <div className={timelineContentOverlayClass} />
-                                {durationSeconds > 0 && adBlocks.map((block, index) => {
-                                  const left = Math.max(0, (block.start / durationSeconds) * 100);
-                                  const width = Math.max(0.5, ((block.end - block.start) / durationSeconds) * 100);
-                                  return (
-                                    <div
-                                      key={`${block.start}-${block.end}-${index}`}
-                                      className={`absolute top-0 h-full rounded-full ${timelineAdSegmentClass}`}
-                                      style={{ left: `${left}%`, width: `${width}%` }}
-                                    />
-                                  );
-                                })}
-                              </div>
-
-                              <div className="flex justify-between text-xs text-gray-500">
-                                {timelineTicks.map((tick) => (
-                                  <span key={tick}>{formatTimelineLabel(durationSeconds * tick)}</span>
-                                ))}
-                              </div>
-
-                              <div className="flex items-center gap-4 text-xs text-gray-500">
-                                <span className="flex items-center gap-2">
-                                  <span className={`${timelineLegendSwatchClass} bg-gray-200`}>
-                                    <span className={timelineContentOverlayClass} />
-                                  </span>
-                                  Content
-                                </span>
-                                <span className="flex items-center gap-2">
-                                  <span className={`${timelineLegendSwatchClass} ${timelineAdSegmentClass}`} />
-                                  Ads removed
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })()}
+                      <ProcessingTimelineSummaryCard
+                        title="Bleeps Added"
+                        itemCount={bleepBlocks.length}
+                        itemLabel="Bleep Windows"
+                        totalTimeSeconds={bleepTimeSeconds}
+                        totalTimeLabel="Time Bleeped"
+                        percentage={bleepPercent}
+                        percentageLabel="Episode Bleeped"
+                        durationSeconds={durationSeconds}
+                        segments={bleepBlocks}
+                        metricAccentClassName="text-amber-600"
+                        percentageAccentClassName="text-amber-700"
+                        segmentClassName="bg-amber-500/80"
+                        summaryBaseLabel="not bleeped"
+                        summarySegmentLabel="bleeped"
+                        legendBaseLabel="Original audio"
+                        legendSegmentLabel="Bleeps"
+                      />
 
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">AI Model Performance</h3>

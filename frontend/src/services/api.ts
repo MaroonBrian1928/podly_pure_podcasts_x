@@ -287,6 +287,12 @@ export const feedsApi = {
         start_time: number;
         end_time: number;
       }>;
+      bleeped_time_seconds?: number;
+      bleeped_percentage?: number;
+      bleep_windows?: Array<{
+        start_time: number;
+        end_time: number;
+      }>;
       model_call_statuses: Record<string, number>;
       model_types: Record<string, number>;
     };
@@ -456,6 +462,12 @@ export const feedsApi = {
       ad_percentage: number;
       estimated_ad_time_seconds: number;
       ad_blocks?: Array<{
+        start_time: number;
+        end_time: number;
+      }>;
+      bleeped_time_seconds?: number;
+      bleeped_percentage?: number;
+      bleep_windows?: Array<{
         start_time: number;
         end_time: number;
       }>;

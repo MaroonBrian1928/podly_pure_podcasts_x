@@ -317,7 +317,13 @@ class AudioProcessor:
             return [*ad_segments[:-1], (ad_segments[-1][0], audio_duration_seconds)]
         return ad_segments
 
-    def process_audio(self, post: Post, output_path: str) -> list[tuple[int, int]]:
+    def process_audio(
+        self,
+        post: Post,
+        output_path: str,
+        *,
+        input_audio_path: str | None = None,
+    ) -> list[tuple[int, int]]:
         """
         Process the podcast audio by removing ad segments.
 
@@ -328,11 +334,12 @@ class AudioProcessor:
             The merged ad segments that were removed, as millisecond windows.
         """
         ad_segments = self.get_ad_segments(post)
+        source_audio_path = input_audio_path or post.unprocessed_audio_path
 
-        duration_ms = get_audio_duration_ms(post.unprocessed_audio_path)
+        duration_ms = get_audio_duration_ms(source_audio_path)
         if duration_ms is None:
             raise ValueError(
-                f"Could not determine duration for audio: {post.unprocessed_audio_path}"
+                f"Could not determine duration for audio: {source_audio_path}"
             )
 
         merged_ad_segments = self.merge_ad_segments(
@@ -348,7 +355,7 @@ class AudioProcessor:
 
         # LLM strategy doesn't use chapter markers, so VBR is fine for smaller files
         clip_segments_with_fade(
-            in_path=post.unprocessed_audio_path,
+            in_path=source_audio_path,
             ad_segments_ms=merged_ad_segments,
             fade_ms=self.config.output.fade_ms,
             out_path=output_path,

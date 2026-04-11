@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -150,6 +151,71 @@ def clip_segments_exact(
     )
 
 
+def overlay_beeps_with_ducking(
+    censor_windows_ms: list[tuple[int, int]],
+    in_path: str,
+    out_path: str,
+    *,
+    beep_frequency_hz: int = 1000,
+    beep_volume: float = 0.65,
+    duck_volume: float = 0.08,
+    use_vbr: bool = False,
+    vbr_quality: int = 2,
+    cbr_bitrate: str = "192k",
+) -> None:
+    if not censor_windows_ms:
+        shutil.copyfile(in_path, out_path)
+        return
+
+    encoding_args = _get_encoding_args(use_vbr, vbr_quality, cbr_bitrate)
+    merged_windows = _merge_time_windows_ms(censor_windows_ms)
+    window_condition = _build_window_condition_expression(merged_windows)
+    audio_duration_ms = get_audio_duration_ms(in_path)
+    assert audio_duration_ms is not None
+
+    main_audio = ffmpeg.input(in_path).audio
+    ducked_audio = main_audio.filter(
+        "volume",
+        volume=f"if(gt({window_condition},0),{duck_volume},1)",
+        eval="frame",
+    )
+    beep_stream = ffmpeg.input(
+        (
+            "sine="
+            f"frequency={beep_frequency_hz}:"
+            f"duration={audio_duration_ms / 1000.0:.3f}:"
+            "sample_rate=44100"
+        ),
+        f="lavfi",
+    ).audio.filter(
+        "volume",
+        volume=f"if(gt({window_condition},0),{beep_volume},0)",
+        eval="frame",
+    )
+
+    mixed_audio = ffmpeg.filter(
+        [ducked_audio, beep_stream],
+        "amix",
+        inputs=2,
+        duration="first",
+        dropout_transition=0,
+        normalize=0,
+    )
+
+    (
+        mixed_audio.output(out_path, acodec="libmp3lame", **encoding_args)
+        .overwrite_output()
+        .run(quiet=True)
+    )
+
+    logger.info(
+        "[FFMPEG_BLEEP] Applied %d censor windows: %s -> %s",
+        len(merged_windows),
+        in_path,
+        out_path,
+    )
+
+
 def _clip_segments_simple(
     ad_segments_ms: list[tuple[int, int]],
     in_path: str,
@@ -218,6 +284,45 @@ def _clip_segments_simple(
         )
 
     logger.info("[FFMPEG_SIMPLE] Completed simple audio concatenation: %s", out_path)
+
+
+def _merge_time_windows_ms(
+    windows: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if not windows:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    for raw_start_ms, raw_end_ms in sorted(windows):
+        start_ms = max(0, int(raw_start_ms))
+        end_ms = max(start_ms, int(raw_end_ms))
+
+        if not merged:
+            merged.append((start_ms, end_ms))
+            continue
+
+        prev_start_ms, prev_end_ms = merged[-1]
+        if start_ms <= prev_end_ms:
+            merged[-1] = (prev_start_ms, max(prev_end_ms, end_ms))
+            continue
+
+        merged.append((start_ms, end_ms))
+
+    return merged
+
+
+def _build_window_condition_expression(windows: list[tuple[int, int]]) -> str:
+    if not windows:
+        return "0"
+
+    expressions = [
+        f"between(t,{start_ms / 1000.0:.3f},{end_ms / 1000.0:.3f})"
+        for start_ms, end_ms in windows
+        if end_ms > start_ms
+    ]
+    if not expressions:
+        return "0"
+    return "+".join(expressions)
 
 
 def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:

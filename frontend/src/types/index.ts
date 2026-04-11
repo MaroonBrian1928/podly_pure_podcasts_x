@@ -14,6 +14,8 @@ export interface Feed {
   chapter_filter_strings?: string | null;
   enable_llm_chapter_fallback_tagging?: boolean | null;
   auto_whitelist_new_episodes_override?: boolean | null;
+  enable_profanity_bleeping?: boolean;
+  confirm_whisperx_endpoint?: boolean;
 }
 
 export interface FeedSettingsUpdate {
@@ -21,6 +23,8 @@ export interface FeedSettingsUpdate {
   chapter_filter_strings?: string | null;
   enable_llm_chapter_fallback_tagging?: boolean | null;
   auto_whitelist_new_episodes_override?: boolean | null;
+  enable_profanity_bleeping?: boolean;
+  confirm_whisperx_endpoint?: boolean;
 }
 
 export interface Episode {

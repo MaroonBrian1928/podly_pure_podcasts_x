@@ -35,6 +35,7 @@ from app.routes.post_stats_utils import (
     is_mixed_segment,
     merge_time_windows,
     parse_refined_windows,
+    parse_time_windows,
 )
 from app.routes.post_utils import (
     ensure_whitelisted_for_download,
@@ -597,6 +598,8 @@ def api_post_stats(p_guid: str) -> flask.Response:
     # both content and ad).
     raw_refined = getattr(post, "refined_ad_boundaries", None) or []
     refined_windows = parse_refined_windows(raw_refined)
+    raw_bleep_windows = getattr(post, "bleep_windows", None) or []
+    bleep_windows = parse_time_windows(raw_bleep_windows)
 
     model_call_details = []
     for call in model_calls:
@@ -701,9 +704,15 @@ def api_post_stats(p_guid: str) -> flask.Response:
     duration_seconds = float(post.duration or 0)
     if duration_seconds <= 0 and transcript_segments:
         duration_seconds = max(float(seg.end_time) for seg in transcript_segments)
+    if duration_seconds <= 0 and bleep_windows:
+        duration_seconds = max(end for _, end in bleep_windows)
 
     ad_percentage = (
         (ad_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
+    )
+    bleep_time_seconds = sum(end - start for start, end in bleep_windows if end > start)
+    bleep_percentage = (
+        (bleep_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
     )
 
     stats_data = {
@@ -733,6 +742,15 @@ def api_post_stats(p_guid: str) -> flask.Response:
                     "end_time": round(end, 1),
                 }
                 for start, end in ad_blocks
+            ],
+            "bleeped_time_seconds": round(bleep_time_seconds, 1),
+            "bleeped_percentage": round(bleep_percentage, 1),
+            "bleep_windows": [
+                {
+                    "start_time": round(start, 3),
+                    "end_time": round(end, 3),
+                }
+                for start, end in bleep_windows
             ],
             "model_call_statuses": model_call_statuses,
             "model_types": model_types,

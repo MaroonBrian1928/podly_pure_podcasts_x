@@ -50,6 +50,7 @@ from app.routes.feed_utils import (
     user_feed_count,
     whitelist_latest_for_first_member,
 )
+from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 
 from .auth_routes import _require_authenticated_user as _auth_get_user
@@ -78,6 +79,101 @@ def _parse_optional_feed_bool(
             ),
         )
     return value, None
+
+
+def _parse_nonnullable_feed_bool(
+    payload: dict[str, Any],
+    field_name: str,
+) -> tuple[object, ResponseReturnValue | None]:
+    value, error_response = _parse_optional_feed_bool(payload, field_name)
+    if error_response is not None:
+        return _MISSING, error_response
+    if value is None:
+        return (
+            _MISSING,
+            (
+                jsonify({"error": f"{field_name} must be a boolean."}),
+                400,
+            ),
+        )
+    return value, None
+
+
+def _validate_profanity_bleeping_settings(
+    *,
+    feed: Feed,
+    updates: dict[str, Any],
+    resolved_strategy: str,
+) -> ResponseReturnValue | None:
+    resolved_bleeping_enabled = updates.get(
+        "enable_profanity_bleeping",
+        bool(getattr(feed, "enable_profanity_bleeping", False)),
+    )
+    if not resolved_bleeping_enabled:
+        return None
+
+    if resolved_strategy not in ("llm", "chapter_insert"):
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "enable_profanity_bleeping is only supported when "
+                        "ad_detection_strategy is 'llm' or 'chapter_insert'"
+                    )
+                }
+            ),
+            400,
+        )
+
+    resolved_confirm_whisperx = updates.get(
+        "confirm_whisperx_endpoint",
+        bool(getattr(feed, "confirm_whisperx_endpoint", False)),
+    )
+    if not resolved_confirm_whisperx:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "confirm_whisperx_endpoint must be true before "
+                        "enable_profanity_bleeping can be enabled"
+                    )
+                }
+            ),
+            400,
+        )
+
+    runtime_whisper = getattr(runtime_config, "whisper", None)
+    runtime_whisper_type = getattr(runtime_whisper, "whisper_type", None)
+    if runtime_whisper_type != "remote":
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "enable_profanity_bleeping currently requires "
+                        "WHISPER_TYPE=remote with a WhisperX-compatible endpoint"
+                    )
+                }
+            ),
+            400,
+        )
+
+    return None
+
+
+def _apply_feed_bool_update(
+    payload: dict[str, Any],
+    updates: dict[str, Any],
+    *,
+    field_name: str,
+    allow_null: bool,
+) -> ResponseReturnValue | None:
+    parser = _parse_optional_feed_bool if allow_null else _parse_nonnullable_feed_bool
+    value, error_response = parser(payload, field_name)
+    if error_response is not None:
+        return error_response
+    if value is not _MISSING:
+        updates[field_name] = value
+    return None
 
 
 def _build_feed_settings_updates(
@@ -119,23 +215,25 @@ def _build_feed_settings_updates(
             )
         updates["chapter_filter_strings"] = filter_strings
 
-    chapter_fallback_enabled, error_response = _parse_optional_feed_bool(
-        payload,
-        "enable_llm_chapter_fallback_tagging",
-    )
-    if error_response is not None:
-        return None, error_response
-    if chapter_fallback_enabled is not _MISSING:
-        updates["enable_llm_chapter_fallback_tagging"] = chapter_fallback_enabled
+    for field_name, allow_null in (
+        ("enable_llm_chapter_fallback_tagging", True),
+        ("auto_whitelist_new_episodes_override", True),
+        ("enable_profanity_bleeping", False),
+        ("confirm_whisperx_endpoint", False),
+    ):
+        error_response = _apply_feed_bool_update(
+            payload,
+            updates,
+            field_name=field_name,
+            allow_null=allow_null,
+        )
+        if error_response is not None:
+            return None, error_response
 
-    auto_whitelist_override, error_response = _parse_optional_feed_bool(
-        payload,
-        "auto_whitelist_new_episodes_override",
+    chapter_fallback_enabled = updates.get(
+        "enable_llm_chapter_fallback_tagging",
+        _MISSING,
     )
-    if error_response is not None:
-        return None, error_response
-    if auto_whitelist_override is not _MISSING:
-        updates["auto_whitelist_new_episodes_override"] = auto_whitelist_override
 
     resolved_strategy = updates.get(
         "ad_detection_strategy",
@@ -160,6 +258,14 @@ def _build_feed_settings_updates(
                 400,
             ),
         )
+
+    profanity_error = _validate_profanity_bleeping_settings(
+        feed=feed,
+        updates=updates,
+        resolved_strategy=resolved_strategy,
+    )
+    if profanity_error is not None:
+        return None, profanity_error
 
     if not updates:
         return None, (jsonify({"error": "No settings provided."}), 400)
@@ -917,6 +1023,12 @@ def _serialize_feed(
         "chapter_filter_strings": getattr(feed, "chapter_filter_strings", None),
         "enable_llm_chapter_fallback_tagging": getattr(
             feed, "enable_llm_chapter_fallback_tagging", None
+        ),
+        "enable_profanity_bleeping": bool(
+            getattr(feed, "enable_profanity_bleeping", False)
+        ),
+        "confirm_whisperx_endpoint": bool(
+            getattr(feed, "confirm_whisperx_endpoint", False)
         ),
     }
     return feed_payload

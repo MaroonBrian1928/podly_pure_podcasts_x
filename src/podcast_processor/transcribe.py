@@ -13,11 +13,19 @@ from podcast_processor.audio import split_audio
 from shared.config import GroqWhisperConfig, RemoteWhisperConfig
 
 
+class WordTimestamp(BaseModel):
+    word: str
+    start: float | None = None
+    end: float | None = None
+    score: float | None = None
+
+
 class Segment(BaseModel):
     start: float
     end: float
     text: str
     speaker_label: str | None = None
+    words: list[WordTimestamp] | None = None
 
 
 class Transcriber(ABC):
@@ -27,7 +35,9 @@ class Transcriber(ABC):
         pass
 
     @abstractmethod
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self, audio_file_path: str, *, include_word_timestamps: bool = False
+    ) -> list[Segment]:
         pass
 
 
@@ -55,8 +65,11 @@ class TestWhisperTranscriber(Transcriber):
     def model_name(self) -> str:
         return "test_whisper"
 
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self, audio_file_path: str, *, include_word_timestamps: bool = False
+    ) -> list[Segment]:
         del audio_file_path
+        del include_word_timestamps
         self.logger.info("Using test whisper")
         return [
             Segment(start=0, end=1, text="This is a test"),
@@ -83,7 +96,10 @@ class LocalWhisperTranscriber(Transcriber):
     def local_seg_to_seg(local_segments: list[LocalTranscriptSegment]) -> list[Segment]:
         return [seg.to_segment() for seg in local_segments]
 
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self, audio_file_path: str, *, include_word_timestamps: bool = False
+    ) -> list[Segment]:
+        del include_word_timestamps
         # Import whisper only when needed to avoid CUDA dependencies during module import
         try:
             import whisper
@@ -126,7 +142,9 @@ class OpenAIWhisperTranscriber(Transcriber):
     def model_name(self) -> str:
         return self.config.model  # e.g. "whisper-1"
 
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self, audio_file_path: str, *, include_word_timestamps: bool = False
+    ) -> list[Segment]:
         self.logger.info(
             "[WHISPER_REMOTE] Starting remote whisper transcription for: %s",
             audio_file_path,
@@ -150,7 +168,10 @@ class OpenAIWhisperTranscriber(Transcriber):
                 len(chunks),
                 chunk_path,
             )
-            segments = self.get_segments_for_chunk(str(chunk_path))
+            segments = self.get_segments_for_chunk(
+                str(chunk_path),
+                include_word_timestamps=include_word_timestamps,
+            )
             self.logger.info(
                 "[WHISPER_REMOTE] Chunk %d/%d complete: %d segments",
                 idx + 1,
@@ -174,25 +195,42 @@ class OpenAIWhisperTranscriber(Transcriber):
         for segment in segments:
             segment.start += offset_sec
             segment.end += offset_sec
+            if segment.words:
+                for word in segment.words:
+                    if word.start is not None:
+                        word.start += offset_sec
+                    if word.end is not None:
+                        word.end += offset_sec
 
         return segments
 
-    def build_transcription_request_kwargs(self, audio_file: Any) -> dict[str, Any]:
+    def build_transcription_request_kwargs(
+        self,
+        audio_file: Any,
+        *,
+        include_word_timestamps: bool = False,
+    ) -> dict[str, Any]:
         request_kwargs: dict[str, Any] = {
             "model": self.config.model,
             "file": audio_file,
-            "timestamp_granularities": ["segment"],
+            "timestamp_granularities": (
+                ["segment", "word"] if include_word_timestamps else ["segment"]
+            ),
             "language": self.config.language,
             "response_format": "verbose_json",
         }
 
+        extra_body: dict[str, Any] = {}
+        if include_word_timestamps:
+            extra_body["align"] = True
+
         if self.config.diarize:
-            extra_body: dict[str, Any] = {
-                "align": True,
-                "diarize": True,
-            }
+            extra_body["align"] = True
+            extra_body["diarize"] = True
             if self.config.speaker_embeddings:
                 extra_body["speaker_embeddings"] = True
+
+        if extra_body:
             request_kwargs["extra_body"] = extra_body
 
         return request_kwargs
@@ -202,6 +240,35 @@ class OpenAIWhisperTranscriber(Transcriber):
         if isinstance(segment, dict):
             return segment.get(field_name)
         return getattr(segment, field_name, None)
+
+    @classmethod
+    def _get_word_entries(cls, segment: Any) -> list[Any]:
+        words = cls._get_segment_field(segment, "words")
+        if isinstance(words, list):
+            return words
+
+        word_segments = cls._get_segment_field(segment, "word_segments")
+        if isinstance(word_segments, list):
+            return word_segments
+
+        return []
+
+    @classmethod
+    def _parse_word(cls, word: Any) -> WordTimestamp | None:
+        text = cls._get_segment_field(word, "word")
+        if text is None:
+            return None
+
+        start = cls._get_segment_field(word, "start")
+        end = cls._get_segment_field(word, "end")
+        score = cls._get_segment_field(word, "score")
+
+        return WordTimestamp(
+            word=str(text),
+            start=float(start) if start is not None else None,
+            end=float(end) if end is not None else None,
+            score=float(score) if score is not None else None,
+        )
 
     @classmethod
     def _get_speaker_label(cls, segment: Any) -> str | None:
@@ -228,11 +295,20 @@ class OpenAIWhisperTranscriber(Transcriber):
                 "start, end, text"
             )
 
+        parsed_words = [
+            parsed_word
+            for parsed_word in (
+                cls._parse_word(word) for word in cls._get_word_entries(segment)
+            )
+            if parsed_word is not None
+        ]
+
         return Segment(
             start=float(start),
             end=float(end),
             text=str(text),
             speaker_label=cls._get_speaker_label(segment),
+            words=parsed_words or None,
         )
 
     @classmethod
@@ -265,18 +341,27 @@ class OpenAIWhisperTranscriber(Transcriber):
 
         return [cls._parse_segment(segment) for segment in segment_payloads]
 
-    def get_segments_for_chunk(self, chunk_path: str) -> list[Segment]:
+    def get_segments_for_chunk(
+        self,
+        chunk_path: str,
+        *,
+        include_word_timestamps: bool = False,
+    ) -> list[Segment]:
         with open(chunk_path, "rb") as f:
             self.logger.info(
-                "[WHISPER_API_CALL] Sending chunk to API: %s (timeout=%ds diarize=%s speaker_embeddings=%s)",
+                "[WHISPER_API_CALL] Sending chunk to API: %s (timeout=%ds diarize=%s speaker_embeddings=%s include_word_timestamps=%s)",
                 chunk_path,
                 self.config.timeout_sec,
                 self.config.diarize,
                 self.config.speaker_embeddings,
+                include_word_timestamps,
             )
 
             transcription = self.openai_client.audio.transcriptions.create(
-                **self.build_transcription_request_kwargs(f),
+                **self.build_transcription_request_kwargs(
+                    f,
+                    include_word_timestamps=include_word_timestamps,
+                ),
             )
 
             self.logger.debug(
@@ -310,7 +395,10 @@ class GroqWhisperTranscriber(Transcriber):
     def model_name(self) -> str:
         return f"groq_{self.config.model}"
 
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self, audio_file_path: str, *, include_word_timestamps: bool = False
+    ) -> list[Segment]:
+        del include_word_timestamps
         self.logger.info(
             "[WHISPER_GROQ] Starting Groq whisper transcription for: %s",
             audio_file_path,

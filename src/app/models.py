@@ -48,6 +48,8 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     # Per-feed override for LLM chapter fallback tagging, null = use global config
     enable_llm_chapter_fallback_tagging = db.Column(db.Boolean, nullable=True)
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
+    enable_profanity_bleeping = db.Column(db.Boolean, nullable=False, default=False)
+    confirm_whisperx_endpoint = db.Column(db.Boolean, nullable=False, default=False)
 
     posts = db.relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
@@ -105,6 +107,8 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     download_count = db.Column(db.Integer, nullable=True, default=0)
     # JSON data for chapter-based processing results
     chapter_data = db.Column(db.Text, nullable=True)
+    # Exact censor windows applied to the processed audio for this post.
+    bleep_windows = db.Column(db.JSON, nullable=True)
 
     # Latest (most recent) refined ad cut windows for this post.
     # This is written by the ad classifier boundary refinement step and read by the

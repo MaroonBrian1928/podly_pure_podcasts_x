@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from app.models import Post, ProcessingJob
 from podcast_processor.chapter_reader import Chapter
-from podcast_processor.podcast_processor import PodcastProcessor
+from podcast_processor.podcast_processor import PodcastProcessor, ProfanityBleepResult
 from shared.test_utils import create_standard_test_config
 
 
@@ -338,6 +338,113 @@ def test_llm_embedded_chapters_adjust_each_marker_by_prior_removed_audio() -> No
         {"title": "Main", "start_time": 20.0, "end_time": 60.0},
         {"title": "Wrap", "start_time": 60.0, "end_time": 90.0},
     ]
+
+
+def test_llm_processing_persists_bleep_windows_when_enabled() -> None:
+    config = create_standard_test_config()
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.status_manager = MagicMock()
+    processor.audio_processor = MagicMock()
+    processor.audio_processor.process_audio.return_value = []
+    processor._classify_ad_segments = MagicMock()
+    processor._transcribe_for_processing = MagicMock(
+        return_value=(
+            [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0)],
+            [],
+        )
+    )
+    processor._prepare_profanity_bleeped_audio = MagicMock(
+        return_value=ProfanityBleepResult(
+            "/tmp/bleeped.mp3",
+            [(120, 240), (1000, 1300)],
+        )
+    )
+    processor._cleanup_temp_audio_path = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    processor._perform_llm_based_processing(
+        post,
+        job,
+        "/tmp/output.mp3",
+        enable_profanity_bleeping=True,
+    )
+
+    processor.audio_processor.process_audio.assert_called_once_with(
+        post,
+        "/tmp/output.mp3",
+        input_audio_path="/tmp/bleeped.mp3",
+    )
+    assert processor._finalize_processing.call_args.kwargs["bleep_windows"] == [
+        {"start_time": 0.12, "end_time": 0.24},
+        {"start_time": 1.0, "end_time": 1.3},
+    ]
+
+
+def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> None:
+    config = create_standard_test_config()
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.status_manager = MagicMock()
+    processor.audio_processor = MagicMock()
+    processor.audio_processor.process_audio.return_value = []
+    processor._classify_ad_segments = MagicMock()
+    processor._transcribe_for_processing = MagicMock(
+        return_value=(
+            [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0)],
+            None,
+        )
+    )
+    processor._prepare_profanity_bleeped_audio = MagicMock(
+        return_value=ProfanityBleepResult(
+            "/tmp/bleeped.mp3",
+            [(1250, 1750)],
+        )
+    )
+    processor._cleanup_temp_audio_path = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+        bleep_windows=[{"start_time": 1.25, "end_time": 1.75}],
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    processor._perform_llm_based_processing(
+        post,
+        job,
+        "/tmp/output.mp3",
+        enable_profanity_bleeping=True,
+    )
+
+    processor._transcribe_for_processing.assert_called_once_with(
+        post,
+        include_word_timestamps=False,
+    )
+    assert processor._prepare_profanity_bleeped_audio.call_args.kwargs[
+        "saved_bleep_windows_ms"
+    ] == [(1250, 1750)]
 
 
 def test_processing_steps_routes_chapter_insert_strategy() -> None:

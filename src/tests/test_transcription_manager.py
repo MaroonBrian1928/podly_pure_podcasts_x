@@ -25,9 +25,12 @@ class MockTranscriber(Transcriber):
         """Implementation of the abstract property"""
         return self._model_name
 
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self, audio_file_path: str, *, include_word_timestamps: bool = False
+    ) -> list[Segment]:
         """Return mock segments or raise exception based on configuration."""
         del audio_file_path
+        del include_word_timestamps
         if isinstance(self.mock_response, Exception):
             raise self.mock_response
         return self.mock_response
@@ -340,3 +343,40 @@ def test_transcribe_persists_optional_speaker_labels(
         assert len(segments) == 2
         assert segments[0].speaker_label == "SPEAKER_00"
         assert segments[1].speaker_label == "SPEAKER_01"
+
+
+def test_transcribe_for_processing_returns_rich_segments_when_requested(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+) -> None:
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-rich.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-rich",
+            download_url="http://example.com/audio-rich.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        rich_segments = [
+            Segment(start=0.0, end=1.0, text="Hello"),
+            Segment(start=1.0, end=2.0, text="world"),
+        ]
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=MockTranscriber(rich_segments),
+        )
+
+        db_segments, returned_rich_segments = manager.transcribe_for_processing(
+            post,
+            include_word_timestamps=True,
+        )
+
+        assert len(db_segments) == 2
+        assert returned_rich_segments == rich_segments

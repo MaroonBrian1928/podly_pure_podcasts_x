@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
+import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
 
 interface ChapterProcessingStatsProps {
@@ -77,6 +78,20 @@ export default function ChapterProcessingStats({
       : stats
         ? activeTab
         : 'empty';
+  const durationFallbackCandidates = [
+    ...(stats?.transcript_segments || []).map((segment) => segment.end_time),
+    ...((stats?.processing_stats?.bleep_windows || []).map((window) => window.end_time)),
+  ];
+  const durationSeconds = stats?.post?.duration
+    ?? (durationFallbackCandidates.length ? Math.max(...durationFallbackCandidates) : 0);
+  const bleepBlocks = (stats?.processing_stats?.bleep_windows || []).map((window) => ({
+    startTime: window.start_time,
+    endTime: window.end_time,
+  }));
+  const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
+    ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const bleepPercent = stats?.processing_stats?.bleeped_percentage
+    ?? (durationSeconds > 0 ? (bleepTimeSeconds / durationSeconds) * 100 : 0);
 
   if (!hasProcessedAudio) {
     return null;
@@ -206,8 +221,29 @@ export default function ChapterProcessingStats({
 
                       {isChapterInsert && (
                         <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
-                          Chapter insertion mode keeps audio unchanged and only writes chapter metadata.
+                          Chapter insertion mode preserves episode timing and only writes chapter metadata unless profanity bleeping was applied.
                         </div>
+                      )}
+
+                      {isChapterInsert && (
+                        <ProcessingTimelineSummaryCard
+                          title="Bleeps Added"
+                          itemCount={bleepBlocks.length}
+                          itemLabel="Bleep Windows"
+                          totalTimeSeconds={bleepTimeSeconds}
+                          totalTimeLabel="Time Bleeped"
+                          percentage={bleepPercent}
+                          percentageLabel="Episode Bleeped"
+                          durationSeconds={durationSeconds}
+                          segments={bleepBlocks}
+                          metricAccentClassName="text-amber-600"
+                          percentageAccentClassName="text-amber-700"
+                          segmentClassName="bg-amber-500/80"
+                          summaryBaseLabel="not bleeped"
+                          summarySegmentLabel="bleeped"
+                          legendBaseLabel="Original audio"
+                          legendSegmentLabel="Bleeps"
+                        />
                       )}
 
                       <div>

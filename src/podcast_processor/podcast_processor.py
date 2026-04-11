@@ -2,8 +2,10 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +15,10 @@ from sqlalchemy.orm import object_session
 
 from app.extensions import db
 from app.models import Post, ProcessingJob, TranscriptSegment
+from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
-from podcast_processor.audio import clip_segments_exact
+from podcast_processor.audio import clip_segments_exact, overlay_beeps_with_ducking
 from podcast_processor.audio_processor import AudioProcessor
 from podcast_processor.chapter_ad_detector import (
     ChapterAdDetector,
@@ -35,6 +38,7 @@ from podcast_processor.chapter_writer import (
 )
 from podcast_processor.podcast_downloader import PodcastDownloader, sanitize_title
 from podcast_processor.processing_status_manager import ProcessingStatusManager
+from podcast_processor.profanity_filter import extract_profanity_windows
 from podcast_processor.prompt import (
     DEFAULT_SYSTEM_PROMPT_PATH,
     DEFAULT_USER_PROMPT_TEMPLATE_PATH,
@@ -50,6 +54,12 @@ from shared.processing_paths import (
 )
 
 logger = logging.getLogger("global_logger")
+
+
+@dataclass(frozen=True)
+class ProfanityBleepResult:
+    audio_path: str | None
+    windows_ms: list[tuple[int, int]]
 
 
 def get_post_processed_audio_path(post: Post) -> ProcessingPaths | None:
@@ -183,6 +193,9 @@ class PodcastProcessor:
                 ad_detection_strategy=cached_ad_detection_strategy,
             )
         )
+        cached_enable_profanity_bleeping = self._resolve_profanity_bleeping_enabled(
+            getattr(post, "feed", None)
+        )
 
         try:
             self.logger.debug(
@@ -263,6 +276,7 @@ class PodcastProcessor:
                     cached_ad_detection_strategy,
                     cached_chapter_filter_strings,
                     cached_enable_llm_chapter_fallback_tagging,
+                    cached_enable_profanity_bleeping,
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
@@ -366,6 +380,7 @@ class PodcastProcessor:
         ad_detection_strategy: str = "llm",
         chapter_filter_strings: str | None = None,
         enable_llm_chapter_fallback_tagging: bool | None = None,
+        enable_profanity_bleeping: bool = False,
     ) -> None:
         """
         Perform the main processing steps based on the ad detection strategy.
@@ -378,14 +393,32 @@ class PodcastProcessor:
             ad_detection_strategy: "llm", "chapter", or "chapter_insert"
             chapter_filter_strings: Comma-separated filter strings for chapter strategy
         """
+        if enable_profanity_bleeping and ad_detection_strategy == "chapter":
+            raise ProcessorException(
+                "Profanity bleeping requires transcripts and is not supported for "
+                "chapter-based ad removal"
+            )
+
         if ad_detection_strategy == "chapter":
             self._perform_chapter_based_processing(
                 post, job, processed_audio_path, cancel_callback, chapter_filter_strings
             )
         elif ad_detection_strategy == "chapter_insert":
-            self._perform_chapter_insertion_only_processing(
-                post, job, processed_audio_path, cancel_callback
-            )
+            if enable_profanity_bleeping:
+                self._perform_chapter_insertion_only_processing(
+                    post,
+                    job,
+                    processed_audio_path,
+                    cancel_callback,
+                    enable_profanity_bleeping,
+                )
+            else:
+                self._perform_chapter_insertion_only_processing(
+                    post,
+                    job,
+                    processed_audio_path,
+                    cancel_callback,
+                )
         else:
             self._perform_llm_based_processing(
                 post,
@@ -393,6 +426,7 @@ class PodcastProcessor:
                 processed_audio_path,
                 cancel_callback,
                 enable_llm_chapter_fallback_tagging,
+                enable_profanity_bleeping,
             )
 
     def _resolve_llm_chapter_fallback_tagging_enabled(
@@ -414,6 +448,154 @@ class PodcastProcessor:
 
         return bool(getattr(self.config, "enable_llm_chapter_fallback_tagging", False))
 
+    def _resolve_profanity_bleeping_enabled(self, feed: Any | None) -> bool:
+        if feed is None:
+            return False
+        return bool(getattr(feed, "enable_profanity_bleeping", False))
+
+    def _prepare_profanity_bleeped_audio(
+        self,
+        *,
+        source_audio_path: str | None,
+        processed_audio_path: str,
+        rich_transcript_segments: list[Any] | None,
+        saved_bleep_windows_ms: list[tuple[int, int]] | None = None,
+        enable_profanity_bleeping: bool,
+        use_vbr: bool = True,
+    ) -> ProfanityBleepResult:
+        if not enable_profanity_bleeping:
+            return ProfanityBleepResult(source_audio_path, [])
+        if not source_audio_path:
+            raise ProcessorException(
+                "No unprocessed audio available for profanity bleeping"
+            )
+
+        windows_ms = list(saved_bleep_windows_ms or [])
+        if not windows_ms and saved_bleep_windows_ms is None:
+            runtime_whisper = getattr(runtime_config, "whisper", None)
+            if getattr(runtime_whisper, "whisper_type", None) != "remote":
+                raise ProcessorException(
+                    "Profanity bleeping currently requires remote transcription with "
+                    "a WhisperX-compatible endpoint"
+                )
+
+            windows_ms, saw_word_timestamps = extract_profanity_windows(
+                rich_transcript_segments or []
+            )
+            if not saw_word_timestamps:
+                raise ProcessorException(
+                    "Profanity bleeping requires WhisperX word timestamps, but the "
+                    "current transcription response did not include them"
+                )
+
+        if not windows_ms:
+            return ProfanityBleepResult(source_audio_path, [])
+
+        temp_dir = str(Path(processed_audio_path).parent)
+        with tempfile.NamedTemporaryFile(
+            suffix=".mp3",
+            prefix="bleeped_source_",
+            delete=False,
+            dir=temp_dir,
+        ) as temp_file:
+            temp_path = temp_file.name
+
+        overlay_beeps_with_ducking(
+            windows_ms,
+            source_audio_path,
+            temp_path,
+            use_vbr=use_vbr,
+        )
+        return ProfanityBleepResult(temp_path, windows_ms)
+
+    def _serialize_bleep_windows(
+        self, windows_ms: list[tuple[int, int]]
+    ) -> list[dict[str, float]]:
+        return [
+            {
+                "start_time": round(start_ms / 1000.0, 3),
+                "end_time": round(end_ms / 1000.0, 3),
+            }
+            for start_ms, end_ms in windows_ms
+            if end_ms > start_ms
+        ]
+
+    def _load_saved_bleep_windows(
+        self, post: Post | None
+    ) -> tuple[bool, list[tuple[int, int]]]:
+        if post is None:
+            return False, []
+
+        raw_windows = getattr(post, "bleep_windows", None)
+        if raw_windows is None:
+            return False, []
+        if not isinstance(raw_windows, list):
+            return True, []
+
+        windows_ms: list[tuple[int, int]] = []
+        for item in raw_windows:
+            if not isinstance(item, dict):
+                continue
+
+            start_raw = item.get("start_time")
+            end_raw = item.get("end_time")
+            if start_raw is None or end_raw is None:
+                continue
+
+            try:
+                start_ms = max(0, round(float(start_raw) * 1000.0))
+                end_ms = max(start_ms, round(float(end_raw) * 1000.0))
+            except Exception:  # noqa: BLE001
+                continue
+
+            if end_ms > start_ms:
+                windows_ms.append((start_ms, end_ms))
+
+        return True, windows_ms
+
+    def _cleanup_temp_audio_path(
+        self,
+        temp_audio_path: str | None,
+        *,
+        original_audio_path: str | None,
+    ) -> None:
+        if (
+            not temp_audio_path
+            or temp_audio_path == original_audio_path
+            or not os.path.exists(temp_audio_path)
+        ):
+            return
+
+        try:
+            os.remove(temp_audio_path)
+        except OSError:
+            self.logger.warning(
+                "Failed to remove temporary audio file %s",
+                temp_audio_path,
+                exc_info=True,
+            )
+
+    def _transcribe_for_processing(
+        self,
+        post: Post,
+        *,
+        include_word_timestamps: bool,
+    ) -> tuple[list[Any], list[Any] | None]:
+        transcribe_for_processing = getattr(
+            self.transcription_manager,
+            "transcribe_for_processing",
+            None,
+        )
+        if callable(transcribe_for_processing):
+            result = transcribe_for_processing(
+                post,
+                include_word_timestamps=include_word_timestamps,
+            )
+            if isinstance(result, tuple) and len(result) == 2:
+                return result
+
+        return self.transcription_manager.transcribe(post), None
+
     def _perform_llm_based_processing(
         self,
         post: Post,
@@ -421,15 +603,24 @@ class PodcastProcessor:
         processed_audio_path: str,
         cancel_callback: Callable[[], bool] | None = None,
         enable_llm_chapter_fallback_tagging: bool | None = None,
+        enable_profanity_bleeping: bool = False,
     ) -> None:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
         """
+        has_saved_bleep_windows, saved_bleep_windows_ms = (
+            self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
+        )
         # Step 2: Transcribe audio
         self.status_manager.update_job_status(
             job, "running", 2, "Transcribing audio", 50.0
         )
-        transcript_segments = self.transcription_manager.transcribe(post)
+        transcript_segments, rich_transcript_segments = self._transcribe_for_processing(
+            post,
+            include_word_timestamps=(
+                enable_profanity_bleeping and not has_saved_bleep_windows
+            ),
+        )
         self._raise_if_cancelled(job, 2, cancel_callback)
         unprocessed_audio_path = (
             str(post.unprocessed_audio_path) if post.unprocessed_audio_path else None
@@ -444,9 +635,38 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job, "running", 4, "Processing audio", 90.0
         )
-        removed_segments_ms = self.audio_processor.process_audio(
-            post, processed_audio_path
+        profanity_bleep_result = self._prepare_profanity_bleeped_audio(
+            source_audio_path=unprocessed_audio_path,
+            processed_audio_path=processed_audio_path,
+            rich_transcript_segments=rich_transcript_segments,
+            saved_bleep_windows_ms=(
+                saved_bleep_windows_ms if has_saved_bleep_windows else None
+            ),
+            enable_profanity_bleeping=enable_profanity_bleeping,
         )
+        profanity_source_audio_path = profanity_bleep_result.audio_path
+        bleep_windows = (
+            self._serialize_bleep_windows(profanity_bleep_result.windows_ms)
+            if enable_profanity_bleeping
+            else None
+        )
+        try:
+            if profanity_source_audio_path == unprocessed_audio_path:
+                removed_segments_ms = self.audio_processor.process_audio(
+                    post,
+                    processed_audio_path,
+                )
+            else:
+                removed_segments_ms = self.audio_processor.process_audio(
+                    post,
+                    processed_audio_path,
+                    input_audio_path=profanity_source_audio_path,
+                )
+        finally:
+            self._cleanup_temp_audio_path(
+                profanity_source_audio_path,
+                original_audio_path=unprocessed_audio_path,
+            )
         removed_segments_sec = [
             (start_ms / 1000.0, end_ms / 1000.0)
             for start_ms, end_ms in removed_segments_ms
@@ -523,6 +743,7 @@ class PodcastProcessor:
             job,
             processed_audio_path,
             chapter_data=chapter_data_json,
+            bleep_windows=bleep_windows,
         )
 
     def _perform_chapter_insertion_only_processing(
@@ -531,6 +752,7 @@ class PodcastProcessor:
         job: ProcessingJob,
         processed_audio_path: str,
         cancel_callback: Callable[[], bool] | None = None,
+        enable_profanity_bleeping: bool = False,
     ) -> None:
         """
         Resolve and write chapters without ad detection or ad removal.
@@ -545,6 +767,10 @@ class PodcastProcessor:
 
         post_description = post.description
         transcript_segments: list[Any] = []
+        rich_transcript_segments: list[Any] | None = None
+        has_saved_bleep_windows, saved_bleep_windows_ms = (
+            self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
+        )
 
         # First attempt chapter resolution without transcription
         self.status_manager.update_job_status(
@@ -559,19 +785,36 @@ class PodcastProcessor:
         self._raise_if_cancelled(job, 2, cancel_callback)
 
         # Only transcribe if we still need transcript-based fallback chapters
-        if chapter_source == "none":
+        if chapter_source == "none" or enable_profanity_bleeping:
             self.status_manager.update_job_status(
-                job, "running", 3, "Transcribing audio for chapter generation", 75.0
+                job,
+                "running",
+                3,
+                (
+                    "Transcribing audio for chapter generation"
+                    if chapter_source == "none"
+                    else "Transcribing audio for profanity bleeping"
+                ),
+                75.0,
             )
-            transcript_segments = self.transcription_manager.transcribe(post)
+            (
+                transcript_segments,
+                rich_transcript_segments,
+            ) = self._transcribe_for_processing(
+                post,
+                include_word_timestamps=(
+                    enable_profanity_bleeping and not has_saved_bleep_windows
+                ),
+            )
             self._raise_if_cancelled(job, 3, cancel_callback)
 
-            chapters_for_output, chapter_source = resolve_llm_path_chapters(
-                unprocessed_audio_path=unprocessed_audio_path,
-                description=post_description,
-                transcript_segments=transcript_segments,
-                logger_override=self.logger,
-            )
+            if chapter_source == "none":
+                chapters_for_output, chapter_source = resolve_llm_path_chapters(
+                    unprocessed_audio_path=unprocessed_audio_path,
+                    description=post_description,
+                    transcript_segments=transcript_segments,
+                    logger_override=self.logger,
+                )
         else:
             self.status_manager.update_job_status(
                 job, "running", 3, "Chapters resolved", 75.0
@@ -592,7 +835,30 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job, "running", 4, "Copying audio and writing chapters", 90.0
         )
-        shutil.copyfile(unprocessed_audio_path, processed_audio_path)
+        profanity_bleep_result = self._prepare_profanity_bleeped_audio(
+            source_audio_path=unprocessed_audio_path,
+            processed_audio_path=processed_audio_path,
+            rich_transcript_segments=rich_transcript_segments,
+            saved_bleep_windows_ms=(
+                saved_bleep_windows_ms if has_saved_bleep_windows else None
+            ),
+            enable_profanity_bleeping=enable_profanity_bleeping,
+            use_vbr=False,
+        )
+        profanity_source_audio_path = profanity_bleep_result.audio_path
+        bleep_windows = (
+            self._serialize_bleep_windows(profanity_bleep_result.windows_ms)
+            if enable_profanity_bleeping
+            else None
+        )
+        try:
+            assert profanity_source_audio_path is not None
+            shutil.copyfile(profanity_source_audio_path, processed_audio_path)
+        finally:
+            self._cleanup_temp_audio_path(
+                profanity_source_audio_path,
+                original_audio_path=unprocessed_audio_path,
+            )
 
         chapter_data_json: str | None = None
         if chapters_for_output:
@@ -620,6 +886,7 @@ class PodcastProcessor:
             job,
             processed_audio_path,
             chapter_data=chapter_data_json,
+            bleep_windows=bleep_windows,
         )
 
     def _refine_transcript_sourced_chapters(
@@ -842,6 +1109,7 @@ class PodcastProcessor:
         job: ProcessingJob,
         processed_audio_path: str,
         chapter_data: str | None = None,
+        bleep_windows: list[dict[str, float]] | None = None,
     ) -> None:
         """
         Finalize processing: update database and mark job complete.
@@ -851,6 +1119,7 @@ class PodcastProcessor:
         update_data = {
             "processed_audio_path": processed_audio_path,
             "unprocessed_audio_path": None,
+            "bleep_windows": bleep_windows,
         }
         if chapter_data is not None:
             update_data["chapter_data"] = chapter_data

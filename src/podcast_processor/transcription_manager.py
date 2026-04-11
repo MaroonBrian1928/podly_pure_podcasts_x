@@ -16,6 +16,7 @@ from .transcribe import (
     GroqWhisperTranscriber,
     LocalWhisperTranscriber,
     OpenAIWhisperTranscriber,
+    Segment,
     TestWhisperTranscriber,
     Transcriber,
 )
@@ -152,6 +153,18 @@ class TranscriptionManager:
         return model_call
 
     def transcribe(self, post: Post) -> list[TranscriptSegment]:
+        db_segments, _ = self.transcribe_for_processing(
+            post,
+            include_word_timestamps=False,
+        )
+        return db_segments
+
+    def transcribe_for_processing(
+        self,
+        post: Post,
+        *,
+        include_word_timestamps: bool = False,
+    ) -> tuple[list[TranscriptSegment], list[Segment] | None]:
         """
         Transcribes a podcast audio file, or retrieves existing transcription.
 
@@ -159,7 +172,8 @@ class TranscriptionManager:
             post: The Post object containing the podcast audio to transcribe
 
         Returns:
-            A list of TranscriptSegment objects with the transcription results
+            The persisted transcript segments and, when requested, the richer
+            in-memory transcription payload that may include word timestamps.
         """
         self.logger.info(
             f"Starting transcription process for post {post.id} using {self.transcriber.model_name}"
@@ -167,7 +181,13 @@ class TranscriptionManager:
 
         existing_segments = self.get_reusable_transcription(post)
         if existing_segments is not None:
-            return existing_segments
+            rich_segments = None
+            if include_word_timestamps:
+                rich_segments = self.transcriber.transcribe(
+                    post.unprocessed_audio_path,
+                    include_word_timestamps=True,
+                )
+            return existing_segments, rich_segments
 
         # Create or reuse the ModelCall record for this transcription attempt
         current_whisper_call = self._get_or_create_whisper_model_call(post)
@@ -182,7 +202,10 @@ class TranscriptionManager:
             # Expire session state before long-running transcription to avoid stale locks
             self.db_session.expire_all()
 
-            pydantic_segments = self.transcriber.transcribe(post.unprocessed_audio_path)
+            pydantic_segments = self.transcriber.transcribe(
+                post.unprocessed_audio_path,
+                include_word_timestamps=include_word_timestamps,
+            )
             self.logger.info(
                 f"[TRANSCRIBE_COMPLETE] Transcription by {self.transcriber.model_name} for post {post.id} resulted in {len(pydantic_segments)} segments."
             )
@@ -225,7 +248,7 @@ class TranscriptionManager:
             self.logger.info(
                 f"Successfully stored {len(db_segments)} transcript segments and updated ModelCall {current_whisper_call.id} for post {post.id}."
             )
-            return db_segments
+            return db_segments, (pydantic_segments if include_word_timestamps else None)
 
         except Exception as e:
             self.logger.error(

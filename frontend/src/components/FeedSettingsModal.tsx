@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
-import type { Feed, FeedSettingsUpdate } from '../types';
+import type { Feed, FeedSettingsUpdate, WhisperConfig } from '../types';
 
 interface FeedSettingsModalProps {
   feed: Feed;
@@ -10,6 +10,7 @@ interface FeedSettingsModalProps {
   onClose: () => void;
   autoWhitelistGlobalDefault?: boolean;
   llmChapterFallbackGlobalDefault?: boolean;
+  whisperType?: WhisperConfig['whisper_type'];
   episodeDescriptionView?: 'source' | 'podly';
   onEpisodeDescriptionViewChange?: (view: 'source' | 'podly') => void;
 }
@@ -22,6 +23,7 @@ export default function FeedSettingsModal({
   onClose,
   autoWhitelistGlobalDefault,
   llmChapterFallbackGlobalDefault,
+  whisperType,
   episodeDescriptionView = 'source',
   onEpisodeDescriptionViewChange,
 }: FeedSettingsModalProps) {
@@ -49,6 +51,12 @@ export default function FeedSettingsModal({
         ? 'off'
         : 'inherit'
   );
+  const [profanityBleepingEnabled, setProfanityBleepingEnabled] = useState(
+    !!feed.enable_profanity_bleeping
+  );
+  const [confirmWhisperxEndpoint, setConfirmWhisperxEndpoint] = useState(
+    !!feed.confirm_whisperx_endpoint
+  );
 
   useEffect(() => {
     setStrategy(feed.ad_detection_strategy || 'llm');
@@ -67,6 +75,8 @@ export default function FeedSettingsModal({
           ? 'off'
           : 'inherit'
     );
+    setProfanityBleepingEnabled(!!feed.enable_profanity_bleeping);
+    setConfirmWhisperxEndpoint(!!feed.confirm_whisperx_endpoint);
   }, [feed, llmChapterFallbackGlobalDefault]);
 
   const updateMutation = useMutation({
@@ -92,8 +102,25 @@ export default function FeedSettingsModal({
       : feed.auto_whitelist_new_episodes_override === false
         ? 'off'
         : 'inherit';
+  const currentProfanityBleepingEnabled = !!feed.enable_profanity_bleeping;
+  const currentConfirmWhisperxEndpoint = !!feed.confirm_whisperx_endpoint;
+  const supportsTranscriptBleeping =
+    strategy === 'llm' || strategy === 'chapter_insert';
+  const isProfanityControlLocked = !confirmWhisperxEndpoint;
+  const profanityValidationError =
+    profanityBleepingEnabled && !supportsTranscriptBleeping
+      ? 'Profanity bleeping is only available for LLM and Chapter insertion modes.'
+      : profanityBleepingEnabled && !confirmWhisperxEndpoint
+        ? 'Confirm that you are using a WhisperX-compatible endpoint before enabling profanity bleeping.'
+        : profanityBleepingEnabled && whisperType !== undefined && whisperType !== 'remote'
+          ? 'Profanity bleeping currently requires remote transcription with a WhisperX-compatible endpoint.'
+          : null;
 
   const handleSave = () => {
+    if (profanityValidationError) {
+      return;
+    }
+
     const settings: FeedSettingsUpdate = {};
 
     if (strategy !== currentStrategy) {
@@ -117,6 +144,14 @@ export default function FeedSettingsModal({
     if (autoWhitelistOverride !== currentAutoWhitelistOverride) {
       settings.auto_whitelist_new_episodes_override =
         autoWhitelistOverride === 'inherit' ? null : autoWhitelistOverride === 'on';
+    }
+
+    if (profanityBleepingEnabled !== currentProfanityBleepingEnabled) {
+      settings.enable_profanity_bleeping = profanityBleepingEnabled;
+    }
+
+    if (confirmWhisperxEndpoint !== currentConfirmWhisperxEndpoint) {
+      settings.confirm_whisperx_endpoint = confirmWhisperxEndpoint;
     }
 
     if (Object.keys(settings).length === 0) {
@@ -212,6 +247,56 @@ export default function FeedSettingsModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
+              Profanity bleeping
+            </label>
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={confirmWhisperxEndpoint}
+                onChange={(e) => {
+                  const isChecked = e.target.checked;
+                  setConfirmWhisperxEndpoint(isChecked);
+                  if (!isChecked) {
+                    setProfanityBleepingEnabled(false);
+                  }
+                }}
+                className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              <span className="text-xs text-gray-600">
+                I confirm the active remote transcription endpoint is WhisperX-compatible and returns word timestamps.
+              </span>
+            </label>
+
+            <div className={`mt-3 transition-opacity ${isProfanityControlLocked ? 'opacity-50' : 'opacity-100'}`}>
+              <select
+                value={profanityBleepingEnabled ? 'on' : 'off'}
+                disabled={isProfanityControlLocked}
+                onChange={(e) => setProfanityBleepingEnabled(e.target.value === 'on')}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+              >
+                <option value="off">Off</option>
+                <option value="on">On</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Uses WhisperX word timestamps to overlay a censor beep and duck the original audio during profane words.
+              </p>
+            </div>
+
+            {isProfanityControlLocked && (
+              <p className="text-xs text-gray-500 mt-2">
+                Check the WhisperX confirmation above to enable this setting.
+              </p>
+            )}
+
+            {!supportsTranscriptBleeping && (
+              <p className="text-xs text-amber-700 mt-2">
+                Switch to LLM or Chapter insertion mode to enable transcript-based bleeping.
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
               Auto-whitelist new episodes
             </label>
             <select
@@ -297,6 +382,11 @@ export default function FeedSettingsModal({
               </p>
             </div>
           )}
+          {profanityValidationError && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
+              <p className="text-sm text-amber-800">{profanityValidationError}</p>
+            </div>
+          )}
         </div>
 
         <div className="flex justify-end gap-3 px-5 py-4 border-t border-gray-200 bg-gray-50">
@@ -310,7 +400,7 @@ export default function FeedSettingsModal({
           <button
             type="button"
             onClick={handleSave}
-            disabled={updateMutation.isPending}
+            disabled={updateMutation.isPending || !!profanityValidationError}
             className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50"
           >
             {updateMutation.isPending ? 'Saving...' : 'Save'}

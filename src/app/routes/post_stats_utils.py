@@ -56,16 +56,29 @@ def count_primary_labels(
 
 
 def parse_refined_windows(raw_refined: Any) -> list[tuple[float, float]]:
-    refined_windows: list[tuple[float, float]] = []
-    if not isinstance(raw_refined, list):
-        return refined_windows
+    return parse_time_windows(
+        raw_refined,
+        start_key="refined_start",
+        end_key="refined_end",
+    )
 
-    for item in raw_refined:
+
+def parse_time_windows(
+    raw_windows: Any,
+    *,
+    start_key: str = "start_time",
+    end_key: str = "end_time",
+) -> list[tuple[float, float]]:
+    parsed_windows: list[tuple[float, float]] = []
+    if not isinstance(raw_windows, list):
+        return parsed_windows
+
+    for item in raw_windows:
         if not isinstance(item, dict):
             continue
 
-        start_raw = item.get("refined_start")
-        end_raw = item.get("refined_end")
+        start_raw = item.get(start_key)
+        end_raw = item.get(end_key)
         if start_raw is None or end_raw is None:
             continue
 
@@ -76,9 +89,9 @@ def parse_refined_windows(raw_refined: Any) -> list[tuple[float, float]]:
             continue
 
         if end_v > start_v:
-            refined_windows.append((start_v, end_v))
+            parsed_windows.append((start_v, end_v))
 
-    return refined_windows
+    return parsed_windows
 
 
 def merge_time_windows(

@@ -4,6 +4,7 @@ from pathlib import Path
 from podcast_processor.audio import (
     clip_segments_with_fade,
     get_audio_duration_ms,
+    overlay_beeps_with_ducking,
     split_audio,
 )
 
@@ -93,6 +94,38 @@ def test_clip_segment_with_fade_end() -> None:
         assert abs(actual_duration - expected_duration) <= 60, (
             f"Duration mismatch: expected {expected_duration}ms, got {actual_duration}ms, "
             f"difference: {abs(actual_duration - expected_duration)}ms"
+        )
+
+
+def test_overlay_beeps_with_ducking_preserves_duration() -> None:
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".mp3") as temp_file:
+        overlay_beeps_with_ducking(
+            [(3_000, 3_600), (10_000, 10_400)],
+            TEST_FILE_PATH,
+            temp_file.name,
+        )
+
+        actual_duration = get_audio_duration_ms(temp_file.name)
+        assert actual_duration is not None, "Failed to get audio duration"
+        assert abs(actual_duration - TEST_FILE_DURATION) <= 100, (
+            f"Duration mismatch: expected {TEST_FILE_DURATION}ms, got {actual_duration}ms, "
+            f"difference: {abs(actual_duration - TEST_FILE_DURATION)}ms"
+        )
+
+
+def test_overlay_beeps_with_ducking_handles_equal_length_windows() -> None:
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".mp3") as temp_file:
+        overlay_beeps_with_ducking(
+            [(3_000, 3_400), (10_000, 10_400), (20_000, 20_400)],
+            TEST_FILE_PATH,
+            temp_file.name,
+        )
+
+        actual_duration = get_audio_duration_ms(temp_file.name)
+        assert actual_duration is not None, "Failed to get audio duration"
+        assert abs(actual_duration - TEST_FILE_DURATION) <= 100, (
+            f"Duration mismatch: expected {TEST_FILE_DURATION}ms, got {actual_duration}ms, "
+            f"difference: {abs(actual_duration - TEST_FILE_DURATION)}ms"
         )
 
 
