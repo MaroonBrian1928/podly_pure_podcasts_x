@@ -102,6 +102,94 @@ def test_audio_endpoint_supports_range_requests(app, tmp_path):
     assert "attachment" not in response.headers.get("Content-Disposition", "").lower()
 
 
+def test_audio_endpoint_increments_counter_for_initial_requests(app, tmp_path):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        processed_audio = tmp_path / "processed.mp3"
+        processed_audio.write_bytes(b"processed audio")
+
+        post = Post(
+            feed_id=feed.id,
+            guid="count-audio-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Count Audio Episode",
+            processed_audio_path=str(processed_audio),
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        client = app.test_client()
+
+        with mock.patch("app.routes.post_utils.writer_client") as mock_writer:
+
+            def side_effect(action, params, wait=False):
+                if action == "increment_download_count":
+                    post_id = params["post_id"]
+                    Post.query.filter_by(id=post_id).update(
+                        {Post.download_count: (Post.download_count or 0) + 1}
+                    )
+                    db.session.commit()
+
+            mock_writer.action.side_effect = side_effect
+
+            response = client.get(f"/api/posts/{post.guid}/audio")
+            assert response.status_code == 200
+            db.session.refresh(post)
+            assert post.download_count == 1
+
+            response = client.get(
+                f"/api/posts/{post.guid}/audio",
+                headers={"Range": "bytes=0-8"},
+            )
+            assert response.status_code == 206
+            db.session.refresh(post)
+            assert post.download_count == 2
+
+
+def test_audio_endpoint_skips_counter_for_non_initial_range_requests(app, tmp_path):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        processed_audio = tmp_path / "processed.mp3"
+        processed_audio.write_bytes(b"processed audio")
+
+        post = Post(
+            feed_id=feed.id,
+            guid="skip-range-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Skip Range Episode",
+            processed_audio_path=str(processed_audio),
+            whitelisted=True,
+            download_count=7,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        client = app.test_client()
+
+        with mock.patch("app.routes.post_utils.writer_client") as mock_writer:
+            response = client.get(
+                f"/api/posts/{post.guid}/audio",
+                headers={"Range": "bytes=9-15"},
+            )
+            assert response.status_code == 206
+            db.session.refresh(post)
+            assert post.download_count == 7
+            mock_writer.action.assert_not_called()
+
+
 def test_audio_triggers_processing_when_enabled(app):
     """Start processing when streamed audio is missing and toggle is enabled."""
     app.testing = True
@@ -181,10 +269,15 @@ def test_audio_auto_whitelists_post(app, tmp_path):
             mock_writer.action.return_value = SimpleNamespace(success=True, data=None)
             response = client.get(f"/post/{post_guid}.mp3")
             assert response.status_code == 200
-            mock_writer.action.assert_called_once_with(
-                "whitelist_post",
-                {"post_id": post_id},
-                wait=True,
+            mock_writer.action.assert_has_calls(
+                [
+                    mock.call("whitelist_post", {"post_id": post_id}, wait=True),
+                    mock.call(
+                        "increment_download_count",
+                        {"post_id": post_id},
+                        wait=False,
+                    ),
+                ]
             )
     finally:
         runtime_config.autoprocess_on_download = original_flag
@@ -707,6 +800,28 @@ def test_post_stats_include_chapters_for_chapter_insert_strategy(app):
         )
         db.session.add(post)
         db.session.commit()
+
+        db.session.add_all(
+            [
+                TranscriptSegment(
+                    post_id=post.id,
+                    sequence_num=0,
+                    start_time=0.0,
+                    end_time=12.5,
+                    text="Chapter intro",
+                    speaker_label="SPEAKER_00",
+                ),
+                TranscriptSegment(
+                    post_id=post.id,
+                    sequence_num=1,
+                    start_time=12.5,
+                    end_time=30.0,
+                    text="Chapter main topic",
+                    speaker_label="SPEAKER_01",
+                ),
+            ]
+        )
+        db.session.commit()
         guid = post.guid
 
     client = app.test_client()
@@ -731,6 +846,20 @@ def test_post_stats_include_chapters_for_chapter_insert_strategy(app):
             "start_time": 12.5,
             "end_time": 30.0,
             "label": "content",
+        },
+    ]
+    assert payload["processing_stats"]["speaker_breakdown"] == [
+        {
+            "speaker_label": "SPEAKER_01",
+            "speaking_time_seconds": 17.5,
+            "speaking_percentage": 58.3,
+            "segment_count": 1,
+        },
+        {
+            "speaker_label": "SPEAKER_00",
+            "speaking_time_seconds": 12.5,
+            "speaking_percentage": 41.7,
+            "segment_count": 1,
         },
     ]
 
@@ -800,8 +929,38 @@ def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):
                 post_id=post.id,
                 sequence_num=0,
                 start_time=0.0,
-                end_time=5.0,
+                end_time=4.0,
                 text="Host intro",
+                speaker_label="SPEAKER_00",
+            )
+        )
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=1,
+                start_time=4.0,
+                end_time=8.0,
+                text="Guest answer",
+                speaker_label="SPEAKER_01",
+            )
+        )
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=2,
+                start_time=8.0,
+                end_time=10.0,
+                text="Cross-talk",
+                speaker_label=None,
+            )
+        )
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=3,
+                start_time=10.0,
+                end_time=12.0,
+                text="Host follow-up",
                 speaker_label="SPEAKER_00",
             )
         )
@@ -841,6 +1000,26 @@ def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):
     assert payload is not None
 
     assert payload["transcript_segments"][0]["speaker_label"] == "SPEAKER_00"
+    assert payload["processing_stats"]["speaker_breakdown"] == [
+        {
+            "speaker_label": "SPEAKER_00",
+            "speaking_time_seconds": 6.0,
+            "speaking_percentage": 50.0,
+            "segment_count": 2,
+        },
+        {
+            "speaker_label": "SPEAKER_01",
+            "speaking_time_seconds": 4.0,
+            "speaking_percentage": 33.3,
+            "segment_count": 1,
+        },
+        {
+            "speaker_label": None,
+            "speaking_time_seconds": 2.0,
+            "speaking_percentage": 16.7,
+            "segment_count": 1,
+        },
+    ]
     assert payload["related_logs"]["latest_job_id"] == "job-123"
     assert any(
         entry["stage"] == "transcription" and entry["step_name"] == "Transcribing audio"

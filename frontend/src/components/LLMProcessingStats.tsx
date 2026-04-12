@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
+import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
 
 interface LLMProcessingStatsProps {
   episodeGuid: string;
@@ -11,7 +12,13 @@ interface LLMProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'model-calls' | 'transcript' | 'identifications' | 'logs';
+type TabId =
+  | 'overview'
+  | 'speakers'
+  | 'model-calls'
+  | 'transcript'
+  | 'identifications'
+  | 'logs';
 
 export default function LLMProcessingStats({
   episodeGuid,
@@ -78,6 +85,8 @@ export default function LLMProcessingStats({
   const hasSpeakerLabels = (stats?.transcript_segments || []).some(
     (segment) => Boolean(segment.speaker_label)
   );
+  const showSpeakerTab = hasSpeakerLabels
+    && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
   const contentViewKey = isLoading
     ? 'loading'
     : error
@@ -127,6 +136,12 @@ export default function LLMProcessingStats({
   const bleepPercent = stats?.processing_stats?.bleeped_percentage
     ?? (durationSeconds > 0 ? (bleepTimeSeconds / durationSeconds) * 100 : 0);
 
+  useEffect(() => {
+    if (!showSpeakerTab && activeTab === 'speakers') {
+      setActiveTab('overview');
+    }
+  }, [activeTab, showSpeakerTab]);
+
   if (!hasProcessedAudio) {
     return null;
   }
@@ -161,6 +176,7 @@ export default function LLMProcessingStats({
               <nav className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
+                  ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
                   { id: 'model-calls', label: 'Model Calls' },
                   { id: 'transcript', label: 'Transcript Segments' },
                   { id: 'identifications', label: 'Identifications' },
@@ -176,6 +192,7 @@ export default function LLMProcessingStats({
                     } shrink-0 whitespace-nowrap`}
                   >
                     {tab.label}
+                    {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
                     {stats && tab.id === 'model-calls' && stats.model_calls && ` (${stats.model_calls.length})`}
                     {stats && tab.id === 'transcript' && stats.transcript_segments && ` (${stats.transcript_segments.length})`}
                     {stats && tab.id === 'identifications' && stats.identifications && ` (${stats.identifications.length})`}
@@ -486,6 +503,14 @@ export default function LLMProcessingStats({
                           </table>
                         </div>
                       </div>
+                    </div>
+                  )}
+
+                  {activeTab === 'speakers' && showSpeakerTab && (
+                    <div>
+                      <SpeakerTimeBreakdown
+                        speakerBreakdown={stats.processing_stats?.speaker_breakdown}
+                      />
                     </div>
                   )}
 

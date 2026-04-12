@@ -293,6 +293,12 @@ export const feedsApi = {
         start_time: number;
         end_time: number;
       }>;
+      speaker_breakdown?: Array<{
+        speaker_label: string | null;
+        speaking_time_seconds: number;
+        speaking_percentage: number;
+        segment_count: number;
+      }>;
       model_call_statuses: Record<string, number>;
       model_types: Record<string, number>;
     };
@@ -470,6 +476,12 @@ export const feedsApi = {
       bleep_windows?: Array<{
         start_time: number;
         end_time: number;
+      }>;
+      speaker_breakdown?: Array<{
+        speaker_label: string | null;
+        speaking_time_seconds: number;
+        speaking_percentage: number;
+        segment_count: number;
       }>;
       model_call_statuses: Record<string, number>;
       model_types: Record<string, number>;

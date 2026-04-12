@@ -35,6 +35,12 @@ def test_clear_post_processing_data_action_clears_chapter_data(app) -> None:
             processed_audio_path="/tmp/out.mp3",
             duration=123,
             chapter_data='{"chapter_source":"transcript","chapters_for_output":[]}',
+            transcript_word_timestamps=[
+                {
+                    "sequence_num": 0,
+                    "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+                }
+            ],
         )
         db.session.add(post)
         db.session.commit()
@@ -48,6 +54,7 @@ def test_clear_post_processing_data_action_clears_chapter_data(app) -> None:
         assert post.processed_audio_path is None
         assert post.duration is None
         assert post.chapter_data is None
+        assert post.transcript_word_timestamps is None
 
 
 def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) -> None:
@@ -71,6 +78,12 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
             duration=321,
             chapter_data='{"chapter_source":"transcript","chapters_for_output":[]}',
             bleep_windows=[{"start_time": 1.25, "end_time": 1.75}],
+            transcript_word_timestamps=[
+                {
+                    "sequence_num": 0,
+                    "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+                }
+            ],
             refined_ad_boundaries=[{"start": 1.0, "end": 2.0}],
             refined_ad_boundaries_updated_at=datetime.now(UTC).replace(tzinfo=None),
         )
@@ -137,6 +150,12 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
         assert post.duration is None
         assert post.chapter_data is None
         assert post.bleep_windows == [{"start_time": 1.25, "end_time": 1.75}]
+        assert post.transcript_word_timestamps == [
+            {
+                "sequence_num": 0,
+                "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+            }
+        ]
         assert post.refined_ad_boundaries is None
         assert post.refined_ad_boundaries_updated_at is None
 

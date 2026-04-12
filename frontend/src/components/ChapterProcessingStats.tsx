@@ -4,6 +4,7 @@ import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
+import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
 
 interface ChapterProcessingStatsProps {
   episodeGuid: string;
@@ -11,7 +12,7 @@ interface ChapterProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'chapters' | 'transcript' | 'logs';
+type TabId = 'overview' | 'chapters' | 'speakers' | 'transcript' | 'logs';
 
 export default function ChapterProcessingStats({
   episodeGuid,
@@ -28,13 +29,18 @@ export default function ChapterProcessingStats({
   });
   const isChapterInsert = stats?.ad_detection_strategy === 'chapter_insert';
   const showTranscriptTab = isChapterInsert;
+  const showSpeakerTab = isChapterInsert
+    && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
   const modelEntries = Object.entries(stats?.processing_stats?.model_types || {});
 
   useEffect(() => {
     if (!showTranscriptTab && activeTab === 'transcript') {
       setActiveTab('overview');
     }
-  }, [showTranscriptTab, activeTab]);
+    if (!showSpeakerTab && activeTab === 'speakers') {
+      setActiveTab('overview');
+    }
+  }, [showSpeakerTab, showTranscriptTab, activeTab]);
 
   const formatDuration = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -128,6 +134,7 @@ export default function ChapterProcessingStats({
                 {[
                   { id: 'overview', label: 'Overview' },
                   { id: 'chapters', label: 'Chapters' },
+                  ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
                   { id: 'logs', label: 'Related Logs' },
                   ...(showTranscriptTab ? [{ id: 'transcript', label: 'Transcript' }] : []),
                 ].map((tab) => (
@@ -142,6 +149,7 @@ export default function ChapterProcessingStats({
                   >
                     {tab.label}
                     {stats && tab.id === 'chapters' && stats.chapters && ` (${stats.chapters.chapters?.length || 0})`}
+                    {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
                     {stats && tab.id === 'logs' && ` (${stats.related_logs?.entries.length || 0})`}
                     {stats && tab.id === 'transcript' && ` (${stats.transcript_segments?.length || 0})`}
                   </button>
@@ -427,6 +435,14 @@ export default function ChapterProcessingStats({
                         Related Logs ({stats.related_logs?.entries.length || 0})
                       </h3>
                       <ProcessingStageLogs relatedLogs={stats.related_logs} />
+                    </div>
+                  )}
+
+                  {activeTab === 'speakers' && showSpeakerTab && (
+                    <div>
+                      <SpeakerTimeBreakdown
+                        speakerBreakdown={stats.processing_stats?.speaker_breakdown}
+                      />
                     </div>
                   )}
 

@@ -447,6 +447,108 @@ def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> 
     ] == [(1250, 1750)]
 
 
+def test_llm_processing_requests_word_timestamps_for_word_level_refiner() -> None:
+    config = create_standard_test_config()
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = True
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.status_manager = MagicMock()
+    processor.audio_processor = MagicMock()
+    processor.audio_processor.process_audio.return_value = []
+    processor._classify_ad_segments = MagicMock()
+    processor._transcribe_for_processing = MagicMock(
+        return_value=(
+            [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0)],
+            None,
+        )
+    )
+    processor._prepare_profanity_bleeped_audio = MagicMock(
+        return_value=ProfanityBleepResult("/tmp/input.mp3", [])
+    )
+    processor._cleanup_temp_audio_path = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    processor._perform_llm_based_processing(
+        post,
+        job,
+        "/tmp/output.mp3",
+        enable_profanity_bleeping=False,
+    )
+
+    processor._transcribe_for_processing.assert_called_once_with(
+        post,
+        include_word_timestamps=True,
+    )
+
+
+def test_llm_processing_reuses_saved_word_timestamps_for_word_level_refiner() -> None:
+    config = create_standard_test_config()
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = True
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.status_manager = MagicMock()
+    processor.audio_processor = MagicMock()
+    processor.audio_processor.process_audio.return_value = []
+    processor._classify_ad_segments = MagicMock()
+    processor._transcribe_for_processing = MagicMock(
+        return_value=(
+            [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0)],
+            None,
+        )
+    )
+    processor._prepare_profanity_bleeped_audio = MagicMock(
+        return_value=ProfanityBleepResult("/tmp/input.mp3", [])
+    )
+    processor._cleanup_temp_audio_path = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+        transcript_word_timestamps=[
+            {
+                "sequence_num": 0,
+                "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+            }
+        ],
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    processor._perform_llm_based_processing(
+        post,
+        job,
+        "/tmp/output.mp3",
+        enable_profanity_bleeping=False,
+    )
+
+    processor._transcribe_for_processing.assert_called_once_with(
+        post,
+        include_word_timestamps=False,
+    )
+
+
 def test_processing_steps_routes_chapter_insert_strategy() -> None:
     processor = object.__new__(PodcastProcessor)
     processor._perform_chapter_based_processing = MagicMock()

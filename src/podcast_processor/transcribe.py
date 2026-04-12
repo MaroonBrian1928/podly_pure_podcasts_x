@@ -2,6 +2,7 @@ import logging
 import shutil
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,104 @@ class Segment(BaseModel):
     text: str
     speaker_label: str | None = None
     words: list[WordTimestamp] | None = None
+
+
+def serialize_segment_word_timestamps(
+    segments: Sequence[Segment],
+) -> list[dict[str, Any]] | None:
+    payload: list[dict[str, Any]] = []
+    for sequence_num, segment in enumerate(segments or []):
+        words_payload: list[dict[str, Any]] = []
+        for word in segment.words or []:
+            if word.start is None or word.end is None:
+                continue
+            words_payload.append(
+                {
+                    "word": str(word.word),
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "score": (float(word.score) if word.score is not None else None),
+                }
+            )
+        if words_payload:
+            payload.append(
+                {
+                    "sequence_num": int(sequence_num),
+                    "words": words_payload,
+                }
+            )
+    return payload or None
+
+
+def load_word_timestamps_by_sequence(
+    raw_payload: Any,
+) -> dict[int, list[WordTimestamp]]:
+    words_by_sequence: dict[int, list[WordTimestamp]] = {}
+    if not isinstance(raw_payload, list):
+        return words_by_sequence
+
+    for segment_payload in raw_payload:
+        if not isinstance(segment_payload, dict):
+            continue
+
+        sequence_num = segment_payload.get("sequence_num")
+        words = segment_payload.get("words")
+        if sequence_num is None or not isinstance(words, list):
+            continue
+
+        try:
+            sequence_num_int = int(sequence_num)
+        except Exception:  # noqa: BLE001
+            continue
+
+        parsed_words: list[WordTimestamp] = []
+        for word_payload in words:
+            try:
+                parsed = OpenAIWhisperTranscriber._parse_word(word_payload)
+            except Exception:  # noqa: BLE001
+                parsed = None
+            if parsed is not None:
+                parsed_words.append(parsed)
+
+        if parsed_words:
+            words_by_sequence[sequence_num_int] = parsed_words
+
+    return words_by_sequence
+
+
+def merge_segments_with_saved_word_timestamps(
+    base_segments: Sequence[Any],
+    raw_payload: Any,
+) -> list[Segment] | None:
+    words_by_sequence = load_word_timestamps_by_sequence(raw_payload)
+    if not words_by_sequence:
+        return None
+
+    merged_segments: list[Segment] = []
+    for fallback_sequence_num, segment in enumerate(base_segments or []):
+        sequence_num_raw = getattr(segment, "sequence_num", fallback_sequence_num)
+        try:
+            sequence_num = int(sequence_num_raw)
+        except Exception:  # noqa: BLE001
+            sequence_num = fallback_sequence_num
+
+        try:
+            start_time = float(segment.start_time)
+            end_time = float(segment.end_time)
+        except Exception:  # noqa: BLE001
+            continue
+
+        merged_segments.append(
+            Segment(
+                start=start_time,
+                end=end_time,
+                text=str(getattr(segment, "text", "")),
+                speaker_label=getattr(segment, "speaker_label", None),
+                words=words_by_sequence.get(sequence_num) or None,
+            )
+        )
+
+    return merged_segments
 
 
 class Transcriber(ABC):

@@ -33,6 +33,31 @@ def increment_download_count(post: Post) -> None:
         logger.error(f"Failed to increment download count for post {post.guid}: {e}")
 
 
+def should_increment_download_count_for_request() -> bool:
+    """Count full downloads and initial byte-range requests only.
+
+    Podcast clients commonly request enclosure URLs with `Range: bytes=0-...`.
+    We want those to count, but we avoid counting later follow-up range requests
+    for the same file chunk stream.
+    """
+    range_header = flask.request.headers.get("Range", "").strip()
+    if not range_header:
+        return True
+
+    if not range_header.lower().startswith("bytes="):
+        return False
+
+    first_range = range_header[6:].split(",", 1)[0].strip()
+    start_str = first_range.split("-", 1)[0].strip()
+    if not start_str:
+        return False
+
+    try:
+        return int(start_str) == 0
+    except ValueError:
+        return False
+
+
 def ensure_whitelisted_for_download(post: Post, p_guid: str) -> flask.Response | None:
     """Make sure a post is whitelisted before serving or queuing audio."""
     if post.whitelisted:

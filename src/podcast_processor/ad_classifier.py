@@ -33,7 +33,7 @@ from podcast_processor.token_rate_limiter import (
     TokenRateLimiter,
     configure_rate_limiter_for_model,
 )
-from podcast_processor.transcribe import Segment
+from podcast_processor.transcribe import Segment, load_word_timestamps_by_sequence
 from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 from shared.config import Config, TestWhisperConfig
 from shared.llm_utils import model_uses_max_completion_tokens
@@ -1389,6 +1389,10 @@ class AdClassifier:
         # Latest refined boundaries for downstream audio cuts. Overwrites prior
         # values for the post ("latest successful" semantics).
         refined_boundaries: list[dict[str, Any]] = []
+        post_row = self._safe_get_post_row(post) or post
+        words_by_sequence = load_word_timestamps_by_sequence(
+            getattr(post_row, "transcript_word_timestamps", None)
+        )
 
         # Get ad identifications
         identifications = (
@@ -1418,12 +1422,10 @@ class AdClassifier:
                 ad_end=block["end"],
                 confidence=block["confidence"],
                 all_segments=[
-                    {
-                        "sequence_num": s.sequence_num,
-                        "start_time": s.start_time,
-                        "text": s.text,
-                        "end_time": s.end_time,
-                    }
+                    self._segment_payload_for_boundary_refinement(
+                        s,
+                        words_by_sequence.get(int(s.sequence_num)),
+                    )
                     for s in transcript_segments
                 ],
                 post_id=post.id,
@@ -1480,6 +1482,27 @@ class AdClassifier:
                 post.id,
                 exc,
             )
+
+    @staticmethod
+    def _segment_payload_for_boundary_refinement(
+        segment: TranscriptSegment,
+        words: list[Any] | None,
+    ) -> dict[str, Any]:
+        payload = {
+            "sequence_num": segment.sequence_num,
+            "start_time": segment.start_time,
+            "text": segment.text,
+            "end_time": segment.end_time,
+        }
+        if words:
+            payload["words"] = words
+        return payload
+
+    def _safe_get_post_row(self, post: Post) -> Post | None:
+        try:
+            return self.db_session.get(Post, post.id)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _group_into_blocks(
         self, identifications: list[Identification]

@@ -55,6 +55,76 @@ def count_primary_labels(
     return content_segments, ad_segments
 
 
+def build_speaker_breakdown(transcript_segments: Iterable[Any]) -> list[dict[str, Any]]:
+    speaker_totals: dict[str | None, dict[str, Any]] = {}
+    total_speaking_time_seconds = 0.0
+
+    for segment in transcript_segments:
+        start_raw = getattr(segment, "start_time", None)
+        end_raw = getattr(segment, "end_time", None)
+        if start_raw is None or end_raw is None:
+            continue
+
+        try:
+            start_time = float(start_raw)
+            end_time = float(end_raw)
+        except (TypeError, ValueError):
+            continue
+
+        duration_seconds = end_time - start_time
+        if duration_seconds <= 0:
+            continue
+
+        speaker_label_raw = getattr(segment, "speaker_label", None)
+        speaker_label: str | None
+        if isinstance(speaker_label_raw, str):
+            speaker_label = speaker_label_raw.strip() or None
+        elif speaker_label_raw is None:
+            speaker_label = None
+        else:
+            speaker_label = str(speaker_label_raw)
+
+        speaker_entry = speaker_totals.setdefault(
+            speaker_label,
+            {
+                "speaker_label": speaker_label,
+                "speaking_time_seconds": 0.0,
+                "segment_count": 0,
+            },
+        )
+        speaker_entry["speaking_time_seconds"] += duration_seconds
+        speaker_entry["segment_count"] += 1
+        total_speaking_time_seconds += duration_seconds
+
+    speaker_breakdown = sorted(
+        speaker_totals.values(),
+        key=lambda entry: (
+            -float(entry["speaking_time_seconds"]),
+            entry["speaker_label"] is None,
+            entry["speaker_label"] or "",
+        ),
+    )
+
+    return [
+        {
+            "speaker_label": entry["speaker_label"],
+            "speaking_time_seconds": round(float(entry["speaking_time_seconds"]), 1),
+            "speaking_percentage": round(
+                (
+                    float(entry["speaking_time_seconds"])
+                    / total_speaking_time_seconds
+                    * 100
+                )
+                if total_speaking_time_seconds > 0
+                else 0.0,
+                1,
+            ),
+            "segment_count": int(entry["segment_count"]),
+        }
+        for entry in speaker_breakdown
+    ]
+
+
 def parse_refined_windows(raw_refined: Any) -> list[tuple[float, float]]:
     return parse_time_windows(
         raw_refined,

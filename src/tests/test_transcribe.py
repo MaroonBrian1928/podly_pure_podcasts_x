@@ -336,3 +336,73 @@ def test_offset_updates_word_timestamps() -> None:
             words=[WordTimestamp(word="bad", start=1.5, end=1.7, score=0.9)],
         )
     ]
+
+
+def test_serialize_segment_word_timestamps_compacts_payload() -> None:
+    from podcast_processor.transcribe import (
+        Segment,
+        WordTimestamp,
+        serialize_segment_word_timestamps,
+    )
+
+    payload = serialize_segment_word_timestamps(
+        [
+            Segment(
+                start=0.0,
+                end=1.0,
+                text="Hello world",
+                words=[
+                    WordTimestamp(word="Hello", start=0.0, end=0.4, score=0.98),
+                    WordTimestamp(word="world", start=0.41, end=1.0, score=0.97),
+                ],
+            ),
+            Segment(start=1.0, end=2.0, text="No word timings here"),
+        ]
+    )
+
+    assert payload == [
+        {
+            "sequence_num": 0,
+            "words": [
+                {"word": "Hello", "start": 0.0, "end": 0.4, "score": 0.98},
+                {"word": "world", "start": 0.41, "end": 1.0, "score": 0.97},
+            ],
+        }
+    ]
+
+
+def test_merge_segments_with_saved_word_timestamps_rebuilds_rich_segments() -> None:
+    from podcast_processor.transcribe import merge_segments_with_saved_word_timestamps
+
+    merged = merge_segments_with_saved_word_timestamps(
+        [
+            SimpleNamespace(
+                sequence_num=0,
+                start_time=0.0,
+                end_time=1.0,
+                text="Hello world",
+                speaker_label="SPEAKER_00",
+            ),
+            SimpleNamespace(
+                sequence_num=1,
+                start_time=1.0,
+                end_time=2.0,
+                text="No timings",
+                speaker_label=None,
+            ),
+        ],
+        [
+            {
+                "sequence_num": 0,
+                "words": [
+                    {"word": "Hello", "start": 0.0, "end": 0.4, "score": 0.98},
+                    {"word": "world", "start": 0.41, "end": 1.0, "score": 0.97},
+                ],
+            }
+        ],
+    )
+
+    assert merged is not None
+    assert merged[0].speaker_label == "SPEAKER_00"
+    assert [word.word for word in (merged[0].words or [])] == ["Hello", "world"]
+    assert merged[1].words is None

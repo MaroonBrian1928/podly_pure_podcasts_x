@@ -453,6 +453,29 @@ class PodcastProcessor:
             return False
         return bool(getattr(feed, "enable_profanity_bleeping", False))
 
+    def _word_level_boundary_refiner_enabled(self) -> bool:
+        return bool(
+            getattr(self.config, "enable_boundary_refinement", False)
+            and getattr(self.config, "enable_word_level_boundary_refinder", False)
+        )
+
+    def _has_saved_transcript_word_timestamps(self, post: Post | None) -> bool:
+        if post is None:
+            return False
+
+        raw_payload = getattr(post, "transcript_word_timestamps", None)
+        if not isinstance(raw_payload, list):
+            return False
+
+        for segment_payload in raw_payload:
+            if not isinstance(segment_payload, dict):
+                continue
+            words = segment_payload.get("words")
+            if isinstance(words, list) and words:
+                return True
+
+        return False
+
     def _prepare_profanity_bleeped_audio(
         self,
         *,
@@ -608,6 +631,12 @@ class PodcastProcessor:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
         """
+        needs_word_timestamps_for_refiner = self._word_level_boundary_refiner_enabled()
+        has_saved_transcript_word_timestamps = (
+            self._has_saved_transcript_word_timestamps(
+                post if needs_word_timestamps_for_refiner else None
+            )
+        )
         has_saved_bleep_windows, saved_bleep_windows_ms = (
             self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
         )
@@ -618,7 +647,11 @@ class PodcastProcessor:
         transcript_segments, rich_transcript_segments = self._transcribe_for_processing(
             post,
             include_word_timestamps=(
-                enable_profanity_bleeping and not has_saved_bleep_windows
+                (enable_profanity_bleeping and not has_saved_bleep_windows)
+                or (
+                    needs_word_timestamps_for_refiner
+                    and not has_saved_transcript_word_timestamps
+                )
             ),
         )
         self._raise_if_cancelled(job, 2, cancel_callback)

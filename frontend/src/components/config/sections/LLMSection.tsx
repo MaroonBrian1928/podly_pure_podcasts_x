@@ -164,8 +164,8 @@ export default function LLMSection() {
             />
           </Field>
           <Field
-            label="Enable Word-Level Boundary Refiner"
-            hint="Uses a word-position heuristic to estimate the ad start time within a transcript segment"
+            label="Enable Intra-Segment Boundary Refinement"
+            hint="Uses saved WhisperX word timestamps for exact ad cut timing when available, and falls back to the existing heuristic estimate otherwise."
           >
             <input
               type="checkbox"

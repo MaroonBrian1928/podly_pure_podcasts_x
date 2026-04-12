@@ -204,3 +204,62 @@ def test_refine_end_uses_segment_seq_without_phrase() -> None:
     assert err is None
     assert changed is True
     assert refined_end == 205.0
+
+
+def test_estimate_phrase_time_prefers_exact_word_timestamps() -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+
+    estimated = refiner._estimate_phrase_time(
+        all_segments=[
+            {
+                "sequence_num": 12,
+                "start_time": 100.0,
+                "end_time": 110.0,
+                "text": "this is brought to you by a sponsor today",
+                "words": [
+                    {"word": "this", "start": 100.0, "end": 100.4},
+                    {"word": "is", "start": 100.4, "end": 100.8},
+                    {"word": "brought", "start": 100.8, "end": 101.3},
+                    {"word": "to", "start": 101.3, "end": 101.5},
+                    {"word": "you", "start": 101.5, "end": 101.9},
+                    {"word": "by", "start": 101.9, "end": 102.1},
+                    {"word": "a", "start": 102.1, "end": 102.2},
+                    {"word": "sponsor", "start": 104.75, "end": 105.4},
+                    {"word": "today", "start": 105.4, "end": 106.0},
+                ],
+            }
+        ],
+        context_segments=[],
+        preferred_segment_seq=12,
+        phrase="sponsor today",
+        direction="start",
+    )
+
+    assert estimated == 104.75
+
+
+def test_estimate_word_time_prefers_exact_word_timestamps() -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+
+    estimated = refiner._estimate_word_time(
+        all_segments=[
+            {
+                "sequence_num": 15,
+                "start_time": 200.0,
+                "end_time": 210.0,
+                "text": "alpha beta gamma delta",
+                "words": [
+                    {"word": "alpha", "start": 200.0, "end": 200.5},
+                    {"word": "beta", "start": 200.5, "end": 201.0},
+                    {"word": "gamma", "start": 205.25, "end": 205.8},
+                    {"word": "delta", "start": 205.8, "end": 206.4},
+                ],
+            }
+        ],
+        segment_seq=15,
+        word="gamma",
+        occurrence="first",
+        word_index=None,
+    )
+
+    assert estimated == 205.25

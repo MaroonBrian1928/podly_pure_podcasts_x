@@ -114,6 +114,7 @@ def clear_post_processing_data_action(params: dict[str, Any]) -> dict[str, Any]:
     post.duration = None
     post.chapter_data = None
     post.bleep_windows = None
+    post.transcript_word_timestamps = None
     post.refined_ad_boundaries = None
     post.refined_ad_boundaries_updated_at = None
 
@@ -184,7 +185,7 @@ def clear_post_processing_data_keep_transcript_action(
     )
 
     # Reset output and most derived processing fields, but preserve transcript/model
-    # calls and saved bleep windows so keep-transcript reprocess can reuse them.
+    # calls and saved transcript metadata so keep-transcript reprocess can reuse them.
     post.unprocessed_audio_path = None
     post.processed_audio_path = None
     post.duration = None

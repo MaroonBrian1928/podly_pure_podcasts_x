@@ -112,7 +112,10 @@ class Config(BaseModel):
     )
     enable_word_level_boundary_refinder: bool = Field(
         default=DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
-        description="Enable word-level (heuristic-timed) ad boundary refinement",
+        description=(
+            "Enable intra-segment ad boundary refinement. Uses saved word "
+            "timestamps when available and falls back to segment-level heuristics."
+        ),
     )
     enable_llm_chapter_fallback_tagging: bool = Field(
         default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,

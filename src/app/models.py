@@ -109,6 +109,9 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     chapter_data = db.Column(db.Text, nullable=True)
     # Exact censor windows applied to the processed audio for this post.
     bleep_windows = db.Column(db.JSON, nullable=True)
+    # Optional per-segment word timestamps from WhisperX-compatible transcription.
+    # Stored as reusable transcript metadata for exact intra-segment refinement.
+    transcript_word_timestamps = db.Column(db.JSON, nullable=True)
 
     # Latest (most recent) refined ad cut windows for this post.
     # This is written by the ad classifier boundary refinement step and read by the

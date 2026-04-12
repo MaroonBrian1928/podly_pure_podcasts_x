@@ -29,6 +29,7 @@ from app.posts import (
     clear_post_processing_data_keep_transcript,
 )
 from app.routes.post_stats_utils import (
+    build_speaker_breakdown,
     count_model_calls,
     count_primary_labels,
     group_identifications_by_segment,
@@ -41,6 +42,7 @@ from app.routes.post_utils import (
     ensure_whitelisted_for_download,
     increment_download_count,
     missing_processed_audio_response,
+    should_increment_download_count_for_request,
 )
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
@@ -591,6 +593,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
     content_segments, ad_segments = count_primary_labels(
         transcript_segments, identifications_by_segment
     )
+    speaker_breakdown = build_speaker_breakdown(transcript_segments)
 
     # Refined ad windows are written by boundary refinement and are used for precise
     # cutting. We also derive a UI-only "mixed" flag for segments that overlap a
@@ -752,6 +755,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 }
                 for start, end in bleep_windows
             ],
+            "speaker_breakdown": speaker_breakdown,
             "model_call_statuses": model_call_statuses,
             "model_types": model_types,
         },
@@ -1332,6 +1336,8 @@ def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
             conditional=True,
         )
         response.headers["Accept-Ranges"] = "bytes"
+        if should_increment_download_count_for_request():
+            increment_download_count(post)
         return response
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error serving audio file for {p_guid}: {e}")
@@ -1376,7 +1382,8 @@ def api_download_post(p_guid: str) -> flask.Response:
         logger.error(f"Error serving file for {p_guid}: {e}")
         return flask.make_response(("Error serving file", 500))
 
-    increment_download_count(post)
+    if should_increment_download_count_for_request():
+        increment_download_count(post)
     return response
 
 
@@ -1411,7 +1418,8 @@ def api_download_original_post(p_guid: str) -> flask.Response:
         logger.error(f"Error serving original file for {p_guid}: {e}")
         return flask.make_response(("Error serving file", 500))
 
-    increment_download_count(post)
+    if should_increment_download_count_for_request():
+        increment_download_count(post)
     return response
 
 

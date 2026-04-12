@@ -8,7 +8,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Identification, ModelCall, TranscriptSegment
+from app.models import Identification, ModelCall, Post, TranscriptSegment
 
 
 def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -158,10 +158,74 @@ def _normalize_segments_payload(
     return normalized
 
 
+def _normalize_transcript_word_timestamps_payload(
+    payload: Any,
+) -> list[dict[str, Any]] | None:
+    if not isinstance(payload, list):
+        return None
+
+    normalized_segments: list[dict[str, Any]] = []
+    for segment_payload in payload:
+        if not isinstance(segment_payload, dict):
+            continue
+
+        sequence_num = segment_payload.get("sequence_num")
+        words = segment_payload.get("words")
+        if sequence_num is None or not isinstance(words, list):
+            continue
+
+        try:
+            sequence_num_i = int(sequence_num)
+        except Exception:  # noqa: BLE001
+            continue
+
+        normalized_words: list[dict[str, Any]] = []
+        for word_payload in words:
+            if not isinstance(word_payload, dict):
+                continue
+
+            raw_word = word_payload.get("word")
+            raw_start = word_payload.get("start")
+            raw_end = word_payload.get("end")
+            if raw_word is None or raw_start is None or raw_end is None:
+                continue
+
+            try:
+                start_f = float(raw_start)
+                end_f = float(raw_end)
+            except Exception:  # noqa: BLE001
+                continue
+            if end_f < start_f:
+                continue
+
+            raw_score = word_payload.get("score")
+            normalized_words.append(
+                {
+                    "word": str(raw_word),
+                    "start": start_f,
+                    "end": end_f,
+                    "score": (float(raw_score) if raw_score is not None else None),
+                }
+            )
+
+        if normalized_words:
+            normalized_segments.append(
+                {
+                    "sequence_num": sequence_num_i,
+                    "words": normalized_words,
+                }
+            )
+
+    return normalized_segments or None
+
+
 def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
     post_id = params.get("post_id")
     segments = params.get("segments")
     model_call_id = params.get("model_call_id")
+    transcript_word_timestamps = _normalize_transcript_word_timestamps_payload(
+        params.get("transcript_word_timestamps")
+    )
 
     if post_id is None:
         raise ValueError("post_id is required")
@@ -169,6 +233,9 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("segments must be a list")
 
     post_id_i = int(post_id)
+    post = db.session.get(Post, post_id_i)
+    if post is None:
+        raise ValueError(f"Post {post_id_i} not found")
 
     seg_ids = [
         row[0]
@@ -205,6 +272,8 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
 
     if payload:
         db.session.execute(sqlite_insert(TranscriptSegment).values(payload))
+
+    post.transcript_word_timestamps = transcript_word_timestamps
 
     if model_call_id is not None:
         mc = db.session.get(ModelCall, int(model_call_id))

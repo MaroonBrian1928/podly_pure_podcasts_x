@@ -19,6 +19,8 @@ from .transcribe import (
     Segment,
     TestWhisperTranscriber,
     Transcriber,
+    merge_segments_with_saved_word_timestamps,
+    serialize_segment_word_timestamps,
 )
 
 
@@ -152,6 +154,25 @@ class TranscriptionManager:
             raise RuntimeError(f"ModelCall {model_call_id} not found after upsert")
         return model_call
 
+    def _persist_transcript_word_timestamps(
+        self,
+        post_id: int,
+        transcript_word_timestamps: list[dict[str, Any]] | None,
+    ) -> None:
+        result = writer_client.update(
+            "Post",
+            post_id,
+            {"transcript_word_timestamps": transcript_word_timestamps},
+            wait=True,
+        )
+        if not result or not result.success:
+            raise RuntimeError(
+                getattr(result, "error", "Failed to persist transcript word timestamps")
+            )
+
+    def _transcriber_supports_word_timestamps(self) -> bool:
+        return isinstance(self.transcriber, OpenAIWhisperTranscriber)
+
     def transcribe(self, post: Post) -> list[TranscriptSegment]:
         db_segments, _ = self.transcribe_for_processing(
             post,
@@ -183,10 +204,36 @@ class TranscriptionManager:
         if existing_segments is not None:
             rich_segments = None
             if include_word_timestamps:
-                rich_segments = self.transcriber.transcribe(
-                    post.unprocessed_audio_path,
-                    include_word_timestamps=True,
+                rich_segments = merge_segments_with_saved_word_timestamps(
+                    existing_segments,
+                    getattr(post, "transcript_word_timestamps", None),
                 )
+                if rich_segments is None:
+                    if self._transcriber_supports_word_timestamps():
+                        self.logger.info(
+                            "Existing transcript found for post %s but no saved word timestamps were available; requesting them from %s.",
+                            post.id,
+                            self.transcriber.model_name,
+                        )
+                        rich_segments = self.transcriber.transcribe(
+                            post.unprocessed_audio_path,
+                            include_word_timestamps=True,
+                        )
+                        self._persist_transcript_word_timestamps(
+                            post.id,
+                            serialize_segment_word_timestamps(rich_segments),
+                        )
+                    else:
+                        self.logger.info(
+                            "Existing transcript found for post %s, but transcriber %s does not provide reusable word timestamps. Falling back to segment-level refinement.",
+                            post.id,
+                            self.transcriber.model_name,
+                        )
+                else:
+                    self.logger.info(
+                        "Reused saved word timestamps for existing transcript on post %s.",
+                        post.id,
+                    )
             return existing_segments, rich_segments
 
         # Create or reuse the ModelCall record for this transcription attempt
@@ -227,6 +274,9 @@ class TranscriptionManager:
                     "post_id": post.id,
                     "segments": segments_payload,
                     "model_call_id": current_whisper_call.id,
+                    "transcript_word_timestamps": serialize_segment_word_timestamps(
+                        pydantic_segments
+                    ),
                 },
                 wait=True,
             )
