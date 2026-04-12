@@ -98,8 +98,9 @@ export default function LLMProcessingStats({
     ...(stats?.transcript_segments || []).map((segment) => segment.end_time),
     ...((stats?.processing_stats?.bleep_windows || []).map((window) => window.end_time)),
   ];
-  const durationSeconds = stats?.post?.duration
-    ?? (durationFallbackCandidates.length ? Math.max(...durationFallbackCandidates) : 0);
+  const fallbackDurationSeconds = durationFallbackCandidates.length
+    ? Math.max(...durationFallbackCandidates)
+    : 0;
   const fallbackAdBlocks = ((stats?.transcript_segments || [])
     .filter((segment) => segment.primary_label === 'ad')
     .map((segment) => ({ startTime: segment.start_time, endTime: segment.end_time }))
@@ -125,8 +126,14 @@ export default function LLMProcessingStats({
   const adBlocks = apiAdBlocks.length ? apiAdBlocks : mergedFallbackAdBlocks;
   const adTimeSeconds = stats?.processing_stats?.estimated_ad_time_seconds
     ?? adBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const originalDurationSeconds = stats?.processing_stats?.original_duration_seconds
+    ?? (
+      stats?.post?.duration != null
+        ? stats.post.duration + adTimeSeconds
+        : fallbackDurationSeconds
+    );
   const adPercent = stats?.processing_stats?.ad_percentage
-    ?? (durationSeconds > 0 ? (adTimeSeconds / durationSeconds) * 100 : 0);
+    ?? (originalDurationSeconds > 0 ? (adTimeSeconds / originalDurationSeconds) * 100 : 0);
   const bleepBlocks = (stats?.processing_stats?.bleep_windows || []).map((window) => ({
     startTime: window.start_time,
     endTime: window.end_time,
@@ -134,7 +141,7 @@ export default function LLMProcessingStats({
   const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
     ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
   const bleepPercent = stats?.processing_stats?.bleeped_percentage
-    ?? (durationSeconds > 0 ? (bleepTimeSeconds / durationSeconds) * 100 : 0);
+    ?? (originalDurationSeconds > 0 ? (bleepTimeSeconds / originalDurationSeconds) * 100 : 0);
 
   useEffect(() => {
     if (!showSpeakerTab && activeTab === 'speakers') {
@@ -352,7 +359,7 @@ export default function LLMProcessingStats({
                         totalTimeLabel="Time Removed"
                         percentage={adPercent}
                         percentageLabel="Episode Reduced"
-                        durationSeconds={durationSeconds}
+                        durationSeconds={originalDurationSeconds}
                         segments={adBlocks}
                         metricAccentClassName="text-blue-600"
                         percentageAccentClassName="text-rose-600"
@@ -371,7 +378,7 @@ export default function LLMProcessingStats({
                         totalTimeLabel="Time Bleeped"
                         percentage={bleepPercent}
                         percentageLabel="Episode Bleeped"
-                        durationSeconds={durationSeconds}
+                        durationSeconds={originalDurationSeconds}
                         segments={bleepBlocks}
                         metricAccentClassName="text-amber-600"
                         percentageAccentClassName="text-amber-700"

@@ -6,7 +6,15 @@ from unittest import mock
 from flask import g
 
 from app.extensions import db
-from app.models import Feed, ModelCall, Post, ProcessingJob, TranscriptSegment, User
+from app.models import (
+    Feed,
+    Identification,
+    ModelCall,
+    Post,
+    ProcessingJob,
+    TranscriptSegment,
+    User,
+)
 from app.routes.post_routes import post_bp
 from app.runtime_config import config as runtime_config
 from shared.config import LocalWhisperConfig
@@ -901,6 +909,72 @@ def test_post_stats_include_bleep_windows(app):
     ]
     assert payload["processing_stats"]["bleeped_time_seconds"] == 1.0
     assert payload["processing_stats"]["bleeped_percentage"] == 1.0
+
+
+def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-original-duration-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Original Duration Episode",
+            duration=100,
+            bleep_windows=[
+                {"start_time": 4.0, "end_time": 5.0},
+                {"start_time": 44.0, "end_time": 45.0},
+            ],
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        ad_segment = TranscriptSegment(
+            post_id=post.id,
+            sequence_num=0,
+            start_time=10.0,
+            end_time=20.0,
+            text="Sponsored message",
+        )
+        model_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            model_name="gpt-4.1-mini",
+            prompt="Classify transcript segment",
+            status="success",
+        )
+        db.session.add_all([ad_segment, model_call])
+        db.session.commit()
+
+        db.session.add(
+            Identification(
+                transcript_segment_id=ad_segment.id,
+                model_call_id=model_call.id,
+                label="ad",
+                confidence=0.99,
+            )
+        )
+        db.session.commit()
+        guid = post.guid
+
+    client = app.test_client()
+    response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["original_duration_seconds"] == 110.0
+    assert payload["processing_stats"]["estimated_ad_time_seconds"] == 10.0
+    assert payload["processing_stats"]["ad_percentage"] == 9.1
+    assert payload["processing_stats"]["bleeped_time_seconds"] == 2.0
+    assert payload["processing_stats"]["bleeped_percentage"] == 1.8
 
 
 def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):

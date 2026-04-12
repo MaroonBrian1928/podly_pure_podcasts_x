@@ -88,16 +88,23 @@ export default function ChapterProcessingStats({
     ...(stats?.transcript_segments || []).map((segment) => segment.end_time),
     ...((stats?.processing_stats?.bleep_windows || []).map((window) => window.end_time)),
   ];
-  const durationSeconds = stats?.post?.duration
-    ?? (durationFallbackCandidates.length ? Math.max(...durationFallbackCandidates) : 0);
+  const fallbackDurationSeconds = durationFallbackCandidates.length
+    ? Math.max(...durationFallbackCandidates)
+    : 0;
   const bleepBlocks = (stats?.processing_stats?.bleep_windows || []).map((window) => ({
     startTime: window.start_time,
     endTime: window.end_time,
   }));
   const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
     ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const originalDurationSeconds = stats?.processing_stats?.original_duration_seconds
+    ?? (
+      stats?.post?.duration != null
+        ? stats.post.duration
+        : fallbackDurationSeconds
+    );
   const bleepPercent = stats?.processing_stats?.bleeped_percentage
-    ?? (durationSeconds > 0 ? (bleepTimeSeconds / durationSeconds) * 100 : 0);
+    ?? (originalDurationSeconds > 0 ? (bleepTimeSeconds / originalDurationSeconds) * 100 : 0);
 
   if (!hasProcessedAudio) {
     return null;
@@ -242,7 +249,7 @@ export default function ChapterProcessingStats({
                           totalTimeLabel="Time Bleeped"
                           percentage={bleepPercent}
                           percentageLabel="Episode Bleeped"
-                          durationSeconds={durationSeconds}
+                          durationSeconds={originalDurationSeconds}
                           segments={bleepBlocks}
                           metricAccentClassName="text-amber-600"
                           percentageAccentClassName="text-amber-700"

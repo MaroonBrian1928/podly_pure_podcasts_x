@@ -546,6 +546,34 @@ def _get_chapter_stats(post: Post, feed: Feed) -> dict[str, Any]:
     }
 
 
+def _resolve_original_duration_seconds(
+    *,
+    post_duration: float | None,
+    transcript_segments: list[TranscriptSegment],
+    bleep_windows: list[tuple[float, float]],
+    ad_time_seconds: float,
+) -> float:
+    cut_duration_seconds = float(post_duration or 0)
+    if cut_duration_seconds <= 0 and bleep_windows:
+        cut_duration_seconds = max(end for _, end in bleep_windows)
+
+    transcript_duration_seconds = (
+        max(float(seg.end_time) for seg in transcript_segments)
+        if transcript_segments
+        else 0.0
+    )
+
+    if post_duration:
+        # post.duration is the cut (ad-removed) audio length, so reconstruct the
+        # original episode length by adding back the removed ad time.
+        return cut_duration_seconds + ad_time_seconds
+
+    return max(
+        transcript_duration_seconds,
+        cut_duration_seconds,
+    )
+
+
 @post_bp.route("/api/posts/<string:p_guid>/stats", methods=["GET"])
 def api_post_stats(p_guid: str) -> flask.Response:
     """Get processing statistics for a post in JSON format."""
@@ -704,18 +732,23 @@ def api_post_stats(p_guid: str) -> flask.Response:
     ad_blocks = merge_time_windows(ad_windows_source, gap_seconds=1.0)
     ad_time_seconds = sum(end - start for start, end in ad_blocks if end > start)
 
-    duration_seconds = float(post.duration or 0)
-    if duration_seconds <= 0 and transcript_segments:
-        duration_seconds = max(float(seg.end_time) for seg in transcript_segments)
-    if duration_seconds <= 0 and bleep_windows:
-        duration_seconds = max(end for _, end in bleep_windows)
+    original_duration_seconds = _resolve_original_duration_seconds(
+        post_duration=post.duration,
+        transcript_segments=transcript_segments,
+        bleep_windows=bleep_windows,
+        ad_time_seconds=ad_time_seconds,
+    )
 
     ad_percentage = (
-        (ad_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
+        (ad_time_seconds / original_duration_seconds) * 100
+        if original_duration_seconds > 0
+        else 0.0
     )
     bleep_time_seconds = sum(end - start for start, end in bleep_windows if end > start)
     bleep_percentage = (
-        (bleep_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
+        (bleep_time_seconds / original_duration_seconds) * 100
+        if original_duration_seconds > 0
+        else 0.0
     )
 
     stats_data = {
@@ -739,6 +772,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             "ad_segments_count": ad_segments,
             "ad_percentage": round(ad_percentage, 1),
             "estimated_ad_time_seconds": round(ad_time_seconds, 1),
+            "original_duration_seconds": round(original_duration_seconds, 1),
             "ad_blocks": [
                 {
                     "start_time": round(start, 1),
