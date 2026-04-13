@@ -105,6 +105,7 @@ export default function ChapterProcessingStats({
     );
   const bleepPercent = stats?.processing_stats?.bleeped_percentage
     ?? (originalDurationSeconds > 0 ? (bleepTimeSeconds / originalDurationSeconds) * 100 : 0);
+  const hasBleepWindows = stats?.processing_stats?.has_bleep_windows ?? bleepBlocks.length > 0;
 
   if (!hasProcessedAudio) {
     return null;
@@ -240,7 +241,7 @@ export default function ChapterProcessingStats({
                         </div>
                       )}
 
-                      {isChapterInsert && (
+                      {isChapterInsert && hasBleepWindows && (
                         <ProcessingTimelineSummaryCard
                           title="Bleeps Added"
                           itemCount={bleepBlocks.length}

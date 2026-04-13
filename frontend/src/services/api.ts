@@ -288,6 +288,7 @@ export const feedsApi = {
         start_time: number;
         end_time: number;
       }>;
+      has_bleep_windows?: boolean;
       bleeped_time_seconds?: number;
       bleeped_percentage?: number;
       bleep_windows?: Array<{
@@ -473,6 +474,7 @@ export const feedsApi = {
         start_time: number;
         end_time: number;
       }>;
+      has_bleep_windows?: boolean;
       bleeped_time_seconds?: number;
       bleeped_percentage?: number;
       bleep_windows?: Array<{

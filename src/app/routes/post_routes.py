@@ -780,6 +780,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 }
                 for start, end in ad_blocks
             ],
+            "has_bleep_windows": bool(bleep_windows),
             "bleeped_time_seconds": round(bleep_time_seconds, 1),
             "bleeped_percentage": round(bleep_percentage, 1),
             "bleep_windows": [

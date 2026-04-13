@@ -142,6 +142,7 @@ export default function LLMProcessingStats({
     ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
   const bleepPercent = stats?.processing_stats?.bleeped_percentage
     ?? (originalDurationSeconds > 0 ? (bleepTimeSeconds / originalDurationSeconds) * 100 : 0);
+  const hasBleepWindows = stats?.processing_stats?.has_bleep_windows ?? bleepBlocks.length > 0;
 
   useEffect(() => {
     if (!showSpeakerTab && activeTab === 'speakers') {
@@ -370,24 +371,26 @@ export default function LLMProcessingStats({
                         legendSegmentLabel="Ads removed"
                       />
 
-                      <ProcessingTimelineSummaryCard
-                        title="Bleeps Added"
-                        itemCount={bleepBlocks.length}
-                        itemLabel="Bleep Windows"
-                        totalTimeSeconds={bleepTimeSeconds}
-                        totalTimeLabel="Time Bleeped"
-                        percentage={bleepPercent}
-                        percentageLabel="Episode Bleeped"
-                        durationSeconds={originalDurationSeconds}
-                        segments={bleepBlocks}
-                        metricAccentClassName="text-amber-600"
-                        percentageAccentClassName="text-amber-700"
-                        segmentClassName="bg-amber-500/80"
-                        summaryBaseLabel="not bleeped"
-                        summarySegmentLabel="bleeped"
-                        legendBaseLabel="Original audio"
-                        legendSegmentLabel="Bleeps"
-                      />
+                      {hasBleepWindows && (
+                        <ProcessingTimelineSummaryCard
+                          title="Bleeps Added"
+                          itemCount={bleepBlocks.length}
+                          itemLabel="Bleep Windows"
+                          totalTimeSeconds={bleepTimeSeconds}
+                          totalTimeLabel="Time Bleeped"
+                          percentage={bleepPercent}
+                          percentageLabel="Episode Bleeped"
+                          durationSeconds={originalDurationSeconds}
+                          segments={bleepBlocks}
+                          metricAccentClassName="text-amber-600"
+                          percentageAccentClassName="text-amber-700"
+                          segmentClassName="bg-amber-500/80"
+                          summaryBaseLabel="not bleeped"
+                          summarySegmentLabel="bleeped"
+                          legendBaseLabel="Original audio"
+                          legendSegmentLabel="Bleeps"
+                        />
+                      )}
 
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">AI Model Performance</h3>
