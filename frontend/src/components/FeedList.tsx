@@ -11,7 +11,9 @@ function getLatestEpisodeTimestamp(feed: Feed): number | null {
     return null;
   }
 
-  const timestamp = new Date(feed.latest_episode_release_date).getTime();
+  const d = feed.latest_episode_release_date;
+  const utc = d.includes('Z') ? d : d.replace(' ', 'T') + 'Z';
+  const timestamp = new Date(utc).getTime();
   return Number.isNaN(timestamp) ? null : timestamp;
 }
 

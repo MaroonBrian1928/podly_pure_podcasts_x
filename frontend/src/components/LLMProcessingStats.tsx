@@ -50,7 +50,8 @@ export default function LLMProcessingStats({
 
   const formatTimestamp = (timestamp: string | null) => {
     if (!timestamp) return 'N/A';
-    return new Date(timestamp).toLocaleString();
+    const utc = timestamp.includes('Z') ? timestamp : timestamp.replace(' ', 'T') + 'Z';
+    return new Date(utc).toLocaleString();
   };
 
   const formatBytes = (bytes: number | null) => {

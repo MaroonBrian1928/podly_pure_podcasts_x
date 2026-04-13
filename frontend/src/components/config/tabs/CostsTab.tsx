@@ -229,7 +229,7 @@ export default function CostsTab() {
                       </td>
                       <td className="py-2 pr-4 text-right text-gray-600">{c.retry_attempts}</td>
                       <td className="py-2 text-right text-gray-500 text-xs">
-                        {c.timestamp ? new Date(c.timestamp).toLocaleString() : '—'}
+                        {c.timestamp ? new Date(c.timestamp.includes('Z') ? c.timestamp : c.timestamp.replace(' ', 'T') + 'Z').toLocaleString() : '—'}
                       </td>
                     </tr>
                   ))}

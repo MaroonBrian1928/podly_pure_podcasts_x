@@ -57,7 +57,8 @@ function formatDateTime(value: string | null): string {
     return '—';
   }
   try {
-    return new Date(value).toLocaleString();
+    const utc = value.includes('Z') ? value : value.replace(' ', 'T') + 'Z';
+    return new Date(utc).toLocaleString();
   } catch (err) {
     console.error('Failed to format date', err);
     return value;
