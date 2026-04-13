@@ -284,9 +284,17 @@ export const feedsApi = {
       ad_percentage: number;
       estimated_ad_time_seconds: number;
       original_duration_seconds: number;
+      edited_duration_seconds?: number;
       ad_blocks?: Array<{
         start_time: number;
         end_time: number;
+      }>;
+      edited_ad_markers?: Array<{
+        edited_start_time: number;
+        edited_end_time: number;
+        original_start_time: number;
+        original_end_time: number;
+        removed_duration_seconds: number;
       }>;
       has_bleep_windows?: boolean;
       bleeped_time_seconds?: number;
@@ -294,6 +302,12 @@ export const feedsApi = {
       bleep_windows?: Array<{
         start_time: number;
         end_time: number;
+      }>;
+      edited_bleep_windows?: Array<{
+        edited_start_time: number;
+        edited_end_time: number;
+        original_start_time: number;
+        original_end_time: number;
       }>;
       speaker_breakdown?: Array<{
         speaker_label: string | null;
@@ -470,9 +484,17 @@ export const feedsApi = {
       ad_percentage: number;
       estimated_ad_time_seconds: number;
       original_duration_seconds: number;
+      edited_duration_seconds?: number;
       ad_blocks?: Array<{
         start_time: number;
         end_time: number;
+      }>;
+      edited_ad_markers?: Array<{
+        edited_start_time: number;
+        edited_end_time: number;
+        original_start_time: number;
+        original_end_time: number;
+        removed_duration_seconds: number;
       }>;
       has_bleep_windows?: boolean;
       bleeped_time_seconds?: number;
@@ -480,6 +502,12 @@ export const feedsApi = {
       bleep_windows?: Array<{
         start_time: number;
         end_time: number;
+      }>;
+      edited_bleep_windows?: Array<{
+        edited_start_time: number;
+        edited_end_time: number;
+        original_start_time: number;
+        original_end_time: number;
       }>;
       speaker_breakdown?: Array<{
         speaker_label: string | null;

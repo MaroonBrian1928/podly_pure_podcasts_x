@@ -198,3 +198,112 @@ def is_mixed_segment(
             return True
 
     return False
+
+
+def _map_time_to_edited_timeline(
+    time_seconds: float,
+    removed_windows: list[tuple[float, float]],
+) -> float:
+    removed_before = 0.0
+    for start, end in removed_windows:
+        if time_seconds >= end:
+            removed_before += end - start
+            continue
+
+        if time_seconds > start:
+            removed_before += time_seconds - start
+        break
+
+    return max(0.0, time_seconds - removed_before)
+
+
+def _subtract_removed_windows(
+    window: tuple[float, float],
+    removed_windows: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    remaining_windows = [window]
+
+    for removed_start, removed_end in sorted(removed_windows, key=lambda item: item[0]):
+        updated_windows: list[tuple[float, float]] = []
+        for segment_start, segment_end in remaining_windows:
+            if removed_end <= segment_start or removed_start >= segment_end:
+                updated_windows.append((segment_start, segment_end))
+                continue
+
+            if removed_start > segment_start:
+                updated_windows.append((segment_start, removed_start))
+            if removed_end < segment_end:
+                updated_windows.append((removed_end, segment_end))
+
+        remaining_windows = [
+            (segment_start, segment_end)
+            for segment_start, segment_end in updated_windows
+            if segment_end > segment_start
+        ]
+
+    return remaining_windows
+
+
+def build_edited_timeline_ad_markers(
+    ad_windows: list[tuple[float, float]],
+) -> list[dict[str, float]]:
+    sorted_windows = sorted(ad_windows, key=lambda item: item[0])
+    removed_before = 0.0
+    edited_markers: list[dict[str, float]] = []
+
+    for start_time, end_time in sorted_windows:
+        removed_duration_seconds = end_time - start_time
+        if removed_duration_seconds <= 0:
+            continue
+
+        edited_time = max(0.0, start_time - removed_before)
+        edited_markers.append(
+            {
+                "edited_start_time": round(edited_time, 3),
+                "edited_end_time": round(edited_time, 3),
+                "original_start_time": round(start_time, 3),
+                "original_end_time": round(end_time, 3),
+                "removed_duration_seconds": round(removed_duration_seconds, 3),
+            }
+        )
+        removed_before += removed_duration_seconds
+
+    return edited_markers
+
+
+def build_edited_timeline_bleep_windows(
+    bleep_windows: list[tuple[float, float]],
+    removed_windows: list[tuple[float, float]],
+) -> list[dict[str, float]]:
+    sorted_removed_windows = sorted(removed_windows, key=lambda item: item[0])
+    edited_windows: list[dict[str, float]] = []
+
+    for original_start_time, original_end_time in sorted(
+        bleep_windows, key=lambda item: item[0]
+    ):
+        retained_windows = _subtract_removed_windows(
+            (original_start_time, original_end_time),
+            sorted_removed_windows,
+        )
+        for retained_start_time, retained_end_time in retained_windows:
+            edited_start_time = _map_time_to_edited_timeline(
+                retained_start_time,
+                sorted_removed_windows,
+            )
+            edited_end_time = _map_time_to_edited_timeline(
+                retained_end_time,
+                sorted_removed_windows,
+            )
+            if edited_end_time <= edited_start_time:
+                continue
+
+            edited_windows.append(
+                {
+                    "edited_start_time": round(edited_start_time, 3),
+                    "edited_end_time": round(edited_end_time, 3),
+                    "original_start_time": round(retained_start_time, 3),
+                    "original_end_time": round(retained_end_time, 3),
+                }
+            )
+
+    return edited_windows

@@ -1005,10 +1005,34 @@ def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
     payload = response.get_json()
     assert payload is not None
     assert payload["processing_stats"]["original_duration_seconds"] == 110.0
+    assert payload["processing_stats"]["edited_duration_seconds"] == 100.0
     assert payload["processing_stats"]["estimated_ad_time_seconds"] == 10.0
     assert payload["processing_stats"]["ad_percentage"] == 9.1
+    assert payload["processing_stats"]["edited_ad_markers"] == [
+        {
+            "edited_start_time": 10.0,
+            "edited_end_time": 10.0,
+            "original_start_time": 10.0,
+            "original_end_time": 20.0,
+            "removed_duration_seconds": 10.0,
+        }
+    ]
     assert payload["processing_stats"]["bleeped_time_seconds"] == 2.0
     assert payload["processing_stats"]["bleeped_percentage"] == 1.8
+    assert payload["processing_stats"]["edited_bleep_windows"] == [
+        {
+            "edited_start_time": 4.0,
+            "edited_end_time": 5.0,
+            "original_start_time": 4.0,
+            "original_end_time": 5.0,
+        },
+        {
+            "edited_start_time": 34.0,
+            "edited_end_time": 35.0,
+            "original_start_time": 44.0,
+            "original_end_time": 45.0,
+        },
+    ]
 
 
 def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):

@@ -29,6 +29,8 @@ from app.posts import (
     clear_post_processing_data_keep_transcript,
 )
 from app.routes.post_stats_utils import (
+    build_edited_timeline_ad_markers,
+    build_edited_timeline_bleep_windows,
     build_speaker_breakdown,
     count_model_calls,
     count_primary_labels,
@@ -750,6 +752,12 @@ def api_post_stats(p_guid: str) -> flask.Response:
         if original_duration_seconds > 0
         else 0.0
     )
+    edited_duration_seconds = max(0.0, original_duration_seconds - ad_time_seconds)
+    edited_ad_markers = build_edited_timeline_ad_markers(ad_blocks)
+    edited_bleep_windows = build_edited_timeline_bleep_windows(
+        bleep_windows,
+        ad_blocks,
+    )
 
     stats_data = {
         "post": {
@@ -773,6 +781,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             "ad_percentage": round(ad_percentage, 1),
             "estimated_ad_time_seconds": round(ad_time_seconds, 1),
             "original_duration_seconds": round(original_duration_seconds, 1),
+            "edited_duration_seconds": round(edited_duration_seconds, 1),
             "ad_blocks": [
                 {
                     "start_time": round(start, 1),
@@ -780,6 +789,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 }
                 for start, end in ad_blocks
             ],
+            "edited_ad_markers": edited_ad_markers,
             "has_bleep_windows": bool(bleep_windows),
             "bleeped_time_seconds": round(bleep_time_seconds, 1),
             "bleeped_percentage": round(bleep_percentage, 1),
@@ -790,6 +800,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 }
                 for start, end in bleep_windows
             ],
+            "edited_bleep_windows": edited_bleep_windows,
             "speaker_breakdown": speaker_breakdown,
             "model_call_statuses": model_call_statuses,
             "model_types": model_types,

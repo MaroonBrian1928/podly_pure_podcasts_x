@@ -5,6 +5,10 @@ import ModalShell from './ModalShell';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
 import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
+import {
+  formatTimelineLabel,
+  formatTimelineRange,
+} from '../utils/processingTimeline';
 
 interface LLMProcessingStatsProps {
   episodeGuid: string;
@@ -132,17 +136,70 @@ export default function LLMProcessingStats({
         ? stats.post.duration + adTimeSeconds
         : fallbackDurationSeconds
     );
+  const editedDurationSeconds = stats?.processing_stats?.edited_duration_seconds
+    ?? Math.max(0, originalDurationSeconds - adTimeSeconds);
   const adPercent = stats?.processing_stats?.ad_percentage
     ?? (originalDurationSeconds > 0 ? (adTimeSeconds / originalDurationSeconds) * 100 : 0);
-  const bleepBlocks = (stats?.processing_stats?.bleep_windows || []).map((window) => ({
-    startTime: window.start_time,
-    endTime: window.end_time,
-  }));
   const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
-    ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
-  const bleepPercent = stats?.processing_stats?.bleeped_percentage
-    ?? (originalDurationSeconds > 0 ? (bleepTimeSeconds / originalDurationSeconds) * 100 : 0);
-  const hasBleepWindows = stats?.processing_stats?.has_bleep_windows ?? bleepBlocks.length > 0;
+    ?? (stats?.processing_stats?.bleep_windows || []).reduce(
+      (sum, block) => sum + Math.max(0, block.end_time - block.start_time),
+      0
+    );
+  const editedBleepPercent = editedDurationSeconds > 0
+    ? (bleepTimeSeconds / editedDurationSeconds) * 100
+    : 0;
+  const adTimelineSegments = (stats?.processing_stats?.edited_ad_markers || []).map((marker) => ({
+    startTime: marker.edited_start_time,
+    endTime: marker.edited_end_time,
+    kind: 'point' as const,
+    visualDurationSeconds: marker.removed_duration_seconds,
+    tooltipTitle: 'Removed Ad Block',
+    tooltipRows: [
+      {
+        label: 'Edited',
+        value: formatTimelineLabel(marker.edited_start_time),
+      },
+      {
+        label: 'Source Ad',
+        value: formatTimelineRange(marker.original_start_time, marker.original_end_time),
+      },
+      {
+        label: 'Removed',
+        value: formatTimelineLabel(marker.removed_duration_seconds),
+      },
+    ],
+    ariaLabel: [
+      'Removed ad block.',
+      `Edited splice ${formatTimelineLabel(marker.edited_start_time)}.`,
+      `Original range ${formatTimelineRange(marker.original_start_time, marker.original_end_time)}.`,
+      `Removed ${formatTimelineLabel(marker.removed_duration_seconds)}.`,
+    ].join(' '),
+  }));
+  const bleepTimelineSegments = (stats?.processing_stats?.edited_bleep_windows || []).map((window) => ({
+    startTime: (window.edited_start_time + window.edited_end_time) / 2,
+    endTime: (window.edited_start_time + window.edited_end_time) / 2,
+    kind: 'point' as const,
+    visualDurationSeconds: Math.max(0, window.edited_end_time - window.edited_start_time),
+    tooltipTitle: 'Bleeped Section',
+    tooltipRows: [
+      {
+        label: 'Edited',
+        value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
+      },
+      {
+        label: 'Source',
+        value: formatTimelineRange(window.original_start_time, window.original_end_time),
+      },
+    ],
+    ariaLabel: [
+      'Bleeped section.',
+      `Edited audio range ${formatTimelineRange(window.edited_start_time, window.edited_end_time)}.`,
+      `Source audio range ${formatTimelineRange(window.original_start_time, window.original_end_time)}.`,
+    ].join(' '),
+  }));
+  const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
+    ? bleepTimelineSegments.length > 0
+    : (stats?.processing_stats?.has_bleep_windows ?? false);
 
   useEffect(() => {
     if (!showSpeakerTab && activeTab === 'speakers') {
@@ -361,34 +418,38 @@ export default function LLMProcessingStats({
                         percentage={adPercent}
                         percentageLabel="Episode Reduced"
                         durationSeconds={originalDurationSeconds}
-                        segments={adBlocks}
-                        metricAccentClassName="text-blue-600"
-                        percentageAccentClassName="text-rose-600"
-                        segmentClassName="bg-rose-500/70"
-                        summaryBaseLabel="clean"
-                        summarySegmentLabel="removed"
+                        timelineDurationSeconds={originalDurationSeconds}
+                        minimumSegmentWidthPx={4}
+                        minimumPointWidthPx={7}
+                        segments={adTimelineSegments}
+                        metricAccentClassName="text-blue-600 dark:text-blue-200"
+                        percentageAccentClassName="text-rose-600 dark:text-rose-300"
+                        tooltipAccentClassName="text-rose-700 dark:text-rose-300"
+                        segmentClassName="bg-rose-500 dark:bg-rose-400"
                         legendBaseLabel="Content"
-                        legendSegmentLabel="Ads removed"
+                        legendSegmentLabel="Ad cuts"
                       />
 
                       {hasBleepWindows && (
                         <ProcessingTimelineSummaryCard
                           title="Bleeps Added"
-                          itemCount={bleepBlocks.length}
-                          itemLabel="Bleep Windows"
+                          itemCount={bleepTimelineSegments.length}
+                          itemLabel="Bleeped Sections"
                           totalTimeSeconds={bleepTimeSeconds}
                           totalTimeLabel="Time Bleeped"
-                          percentage={bleepPercent}
-                          percentageLabel="Episode Bleeped"
-                          durationSeconds={originalDurationSeconds}
-                          segments={bleepBlocks}
-                          metricAccentClassName="text-amber-600"
-                          percentageAccentClassName="text-amber-700"
-                          segmentClassName="bg-amber-500/80"
-                          summaryBaseLabel="not bleeped"
-                          summarySegmentLabel="bleeped"
-                          legendBaseLabel="Original audio"
-                          legendSegmentLabel="Bleeps"
+                          percentage={editedBleepPercent}
+                          percentageLabel="Edited Audio Bleeped"
+                          durationSeconds={editedDurationSeconds}
+                          timelineDurationSeconds={originalDurationSeconds}
+                          minimumSegmentWidthPx={2}
+                          minimumPointWidthPx={6}
+                          segments={bleepTimelineSegments}
+                          metricAccentClassName="text-amber-600 dark:text-amber-200"
+                          percentageAccentClassName="text-amber-700 dark:text-amber-300"
+                          tooltipAccentClassName="text-amber-700 dark:text-amber-300"
+                          segmentClassName="bg-amber-500 dark:bg-amber-400"
+                          legendBaseLabel="Unbleeped audio"
+                          legendSegmentLabel="Bleep markers"
                         />
                       )}
 

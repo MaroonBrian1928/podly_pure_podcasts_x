@@ -5,6 +5,9 @@ import ModalShell from './ModalShell';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
 import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
+import {
+  formatTimelineRange,
+} from '../utils/processingTimeline';
 
 interface ChapterProcessingStatsProps {
   episodeGuid: string;
@@ -103,9 +106,36 @@ export default function ChapterProcessingStats({
         ? stats.post.duration
         : fallbackDurationSeconds
     );
-  const bleepPercent = stats?.processing_stats?.bleeped_percentage
-    ?? (originalDurationSeconds > 0 ? (bleepTimeSeconds / originalDurationSeconds) * 100 : 0);
-  const hasBleepWindows = stats?.processing_stats?.has_bleep_windows ?? bleepBlocks.length > 0;
+  const editedDurationSeconds = stats?.processing_stats?.edited_duration_seconds
+    ?? originalDurationSeconds;
+  const editedBleepPercent = editedDurationSeconds > 0
+    ? (bleepTimeSeconds / editedDurationSeconds) * 100
+    : 0;
+  const bleepTimelineSegments = (stats?.processing_stats?.edited_bleep_windows || []).map((window) => ({
+    startTime: (window.edited_start_time + window.edited_end_time) / 2,
+    endTime: (window.edited_start_time + window.edited_end_time) / 2,
+    kind: 'point' as const,
+    visualDurationSeconds: Math.max(0, window.edited_end_time - window.edited_start_time),
+    tooltipTitle: 'Bleeped Section',
+    tooltipRows: [
+      {
+        label: 'Edited',
+        value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
+      },
+      {
+        label: 'Source',
+        value: formatTimelineRange(window.original_start_time, window.original_end_time),
+      },
+    ],
+    ariaLabel: [
+      'Bleeped section.',
+      `Edited audio range ${formatTimelineRange(window.edited_start_time, window.edited_end_time)}.`,
+      `Source audio range ${formatTimelineRange(window.original_start_time, window.original_end_time)}.`,
+    ].join(' '),
+  }));
+  const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
+    ? bleepTimelineSegments.length > 0
+    : (stats?.processing_stats?.has_bleep_windows ?? bleepBlocks.length > 0);
 
   if (!hasProcessedAudio) {
     return null;
@@ -244,21 +274,23 @@ export default function ChapterProcessingStats({
                       {isChapterInsert && hasBleepWindows && (
                         <ProcessingTimelineSummaryCard
                           title="Bleeps Added"
-                          itemCount={bleepBlocks.length}
-                          itemLabel="Bleep Windows"
+                          itemCount={bleepTimelineSegments.length}
+                          itemLabel="Bleeped Sections"
                           totalTimeSeconds={bleepTimeSeconds}
                           totalTimeLabel="Time Bleeped"
-                          percentage={bleepPercent}
-                          percentageLabel="Episode Bleeped"
-                          durationSeconds={originalDurationSeconds}
-                          segments={bleepBlocks}
-                          metricAccentClassName="text-amber-600"
-                          percentageAccentClassName="text-amber-700"
-                          segmentClassName="bg-amber-500/80"
-                          summaryBaseLabel="not bleeped"
-                          summarySegmentLabel="bleeped"
-                          legendBaseLabel="Original audio"
-                          legendSegmentLabel="Bleeps"
+                          percentage={editedBleepPercent}
+                          percentageLabel="Edited Audio Bleeped"
+                          durationSeconds={editedDurationSeconds}
+                          timelineDurationSeconds={originalDurationSeconds}
+                          minimumSegmentWidthPx={2}
+                          minimumPointWidthPx={6}
+                          segments={bleepTimelineSegments}
+                          metricAccentClassName="text-amber-600 dark:text-amber-200"
+                          percentageAccentClassName="text-amber-700 dark:text-amber-300"
+                          tooltipAccentClassName="text-amber-700 dark:text-amber-300"
+                          segmentClassName="bg-amber-500 dark:bg-amber-400"
+                          legendBaseLabel="Unbleeped audio"
+                          legendSegmentLabel="Bleep markers"
                         />
                       )}
 
