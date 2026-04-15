@@ -12,7 +12,6 @@ class JobManager:
     """Manage the lifecycle guarantees for a single `ProcessingJob` record."""
 
     ACTIVE_STATUSES = {"pending", "running"}
-    TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
     def __init__(
         self,
