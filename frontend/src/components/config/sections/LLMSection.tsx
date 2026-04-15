@@ -20,6 +20,28 @@ const LLM_MODEL_ALIASES: string[] = [
 export default function LLMSection() {
   const { pending, setField, getEnvHint, isFieldReadOnly, handleSave, isSaving } = useConfigContext();
   const [showBaseUrlInfo, setShowBaseUrlInfo] = useState(false);
+  const [testingFallback, setTestingFallback] = useState(false);
+
+  const handleTestFallbackLLM = () => {
+    if (!pending?.llm?.llm_fallback_model) return;
+    setTestingFallback(true);
+    const testPayload: LLMConfig = {
+      ...(pending.llm as LLMConfig),
+      llm_model: pending.llm.llm_fallback_model as string,
+      llm_api_key: (pending.llm.llm_fallback_api_key as string) || (pending.llm.llm_api_key as string) || '',
+    };
+    toast.promise(
+      configApi.testLLM({ llm: testPayload }).finally(() => setTestingFallback(false)),
+      {
+        loading: 'Testing fallback LLM connection...',
+        success: (res: { ok: boolean; message?: string }) => res?.message || 'Fallback LLM connection OK',
+        error: (err: unknown) => {
+          const e = err as { response?: { data?: { error?: string; message?: string } }; message?: string };
+          return e?.response?.data?.error || e?.response?.data?.message || e?.message || 'Fallback LLM connection failed';
+        },
+      }
+    );
+  };
 
   if (!pending) return null;
 
@@ -221,6 +243,40 @@ export default function LLMSection() {
         </div>
 
         <TestButton onClick={handleTestLLM} label="Test LLM" />
+      </Section>
+
+      <Section title="Fallback LLM">
+        <p className="text-xs text-gray-500 -mt-2 mb-2">
+          When the primary model exhausts all retries due to rate limiting or service unavailability,
+          podly will automatically retry with this model instead of failing the job.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Fallback Model">
+            <input
+              list="llm-model-datalist"
+              className="input"
+              type="text"
+              value={pending?.llm?.llm_fallback_model ?? ''}
+              onChange={(e) => setField(['llm', 'llm_fallback_model'], e.target.value || null)}
+              placeholder="e.g. gemini/gemini-2.0-flash (leave empty to disable)"
+            />
+          </Field>
+          <Field label="Fallback API Key" hint="Leave empty to reuse the primary API key">
+            <input
+              className="input"
+              type="text"
+              placeholder={pending?.llm?.llm_fallback_api_key_preview || 'Same as primary key'}
+              value={pending?.llm?.llm_fallback_api_key ?? ''}
+              onChange={(e) => setField(['llm', 'llm_fallback_api_key'], e.target.value)}
+            />
+          </Field>
+        </div>
+        {pending?.llm?.llm_fallback_model && (
+          <TestButton
+            onClick={handleTestFallbackLLM}
+            label={testingFallback ? 'Testing…' : 'Test Fallback LLM'}
+          />
+        )}
       </Section>
 
       <SaveButton onSave={handleSave} isPending={isSaving} />

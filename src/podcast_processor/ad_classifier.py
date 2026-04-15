@@ -1098,7 +1098,59 @@ class AdClassifier:
                     model_call_obj.error_message = str(e)
                     raise  # Re-raise non-retryable exceptions immediately
 
-        # If we get here, all retries were exhausted
+        # If we get here, all retries were exhausted.
+        # Before giving up, try the fallback model if one is configured and the
+        # errors were retryable (rate limit / service unavailable).
+        fallback_model = getattr(self.config, "llm_fallback_model", None)
+        if fallback_model and last_error and self._is_retryable_error(last_error):
+            self.logger.warning(
+                f"Primary model '{model_call_obj.model_name}' exhausted all retries "
+                f"for ModelCall {model_call_obj.id}. Trying fallback model '{fallback_model}'."
+            )
+            fallback_api_key = getattr(self.config, "llm_fallback_api_key", None)
+            try:
+                completion_args = self._prepare_api_call(model_call_obj, system_prompt)
+                if completion_args is not None:
+                    completion_args["model"] = fallback_model
+                    if fallback_api_key:
+                        completion_args["api_key"] = fallback_api_key
+                    if self.concurrency_limiter:
+                        with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
+                            response = litellm.completion(**completion_args)
+                    else:
+                        response = litellm.completion(**completion_args)
+                    response_first_choice = response.choices[0]
+                    assert isinstance(response_first_choice, Choices)
+                    content = response_first_choice.message.content
+                    assert content is not None
+                    success_res = writer_client.update(
+                        "ModelCall",
+                        model_call_obj.id,
+                        {
+                            "response": content,
+                            "status": "success",
+                            "error_message": f"[via fallback: {fallback_model}] primary model failed",
+                            "retry_attempts": model_call_obj.retry_attempts,
+                        },
+                        wait=True,
+                    )
+                    if not success_res or not success_res.success:
+                        raise RuntimeError(
+                            getattr(success_res, "error", "Failed to update ModelCall")
+                        )
+                    model_call_obj.status = "success"
+                    model_call_obj.response = content
+                    self.logger.info(
+                        f"Fallback model '{fallback_model}' succeeded for ModelCall {model_call_obj.id}."
+                    )
+                    return content
+            except Exception as fallback_err:
+                self.logger.error(
+                    f"Fallback model '{fallback_model}' also failed for ModelCall "
+                    f"{model_call_obj.id}: {fallback_err}"
+                )
+                last_error = fallback_err
+
         self._handle_retry_exhausted(model_call_obj, retry_count, last_error)
 
         if last_error:
