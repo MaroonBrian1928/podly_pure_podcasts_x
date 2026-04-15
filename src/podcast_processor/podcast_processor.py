@@ -11,6 +11,8 @@ import litellm
 from jinja2 import Template
 from sqlalchemy.orm import object_session
 
+from sqlalchemy import case
+
 from app.extensions import db
 from app.model_call_utils import whisper_model_call_filter
 from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
@@ -450,7 +452,7 @@ class PodcastProcessor:
             db.session.query(
                 db.func.count(ModelCall.id).label("total"),
                 db.func.count(
-                    db.case((ModelCall.status == "success", 1))
+                    case((ModelCall.status == "success", 1))
                 ).label("successful"),
             )
             .filter(
