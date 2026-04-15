@@ -201,7 +201,7 @@ class JobManager:
 
     def _mark_job_skipped(self, reason: str) -> ProcessingJob | None:
         job = self.get_active_job()
-        if job and job.status in {"pending", "running"}:
+        if job and job.status in self.ACTIVE_STATUSES:
             job.error_message = None
             total_steps = job.total_steps or job.current_step or 4
             self._status_manager.update_job_status(

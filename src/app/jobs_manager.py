@@ -160,26 +160,18 @@ class JobsManager:
         return response
 
     def _ensure_jobs_for_all_posts(self, run_id: str | None) -> int:
-        """Ensure every post has an associated ProcessingJob record.
+        """Ensure every whitelisted post without any existing job gets a new job.
 
-        Only creates jobs for whitelisted posts that have no existing job or whose
-        most-recent job is not in a terminal state (completed/failed/cancelled).
-        Posts with a cancelled job are intentionally skipped — they must be
-        re-whitelisted manually before reprocessing is attempted.
+        Uses an outer join to find posts with no ProcessingJob row at all. Posts
+        that already have any job (including cancelled ones) are excluded naturally
+        by the outer-join filter — cancelled jobs are intentionally left alone and
+        must be re-whitelisted manually before reprocessing is attempted.
         """
-        from sqlalchemy import and_, exists, select
-
-        # Subquery: posts that already have at least one cancelled job
-        cancelled_subq = select(ProcessingJob.post_guid).where(
-            ProcessingJob.status == "cancelled"
-        )
-
         posts_without_jobs = (
             Post.query.outerjoin(ProcessingJob, ProcessingJob.post_guid == Post.guid)
             .filter(
                 ProcessingJob.id.is_(None),
                 Post.whitelisted.is_(True),
-                ~Post.guid.in_(cancelled_subq),
             )
             .all()
         )
