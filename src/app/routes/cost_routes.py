@@ -204,7 +204,10 @@ def api_admin_costs_calls() -> flask.Response:
         {
             "id": c.id,
             "post_id": c.post_id,
-            "model_name": c.model_name,
+            # actual_model_name is set when the fallback model handled the call;
+            # fall back to model_name (the intended model) when null.
+            "model_name": c.actual_model_name or c.model_name,
+            "intended_model_name": c.model_name,
             "status": c.status,
             "timestamp": c.timestamp.isoformat() if c.timestamp else None,
             "retry_attempts": c.retry_attempts,

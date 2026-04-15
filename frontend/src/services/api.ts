@@ -671,7 +671,7 @@ export const configApi = {
     return response.data;
   },
   testLLM: async (
-    payload: Partial<{ llm: LLMConfig }>
+    payload: Partial<{ llm: LLMConfig; use_fallback_api_key: boolean }>
   ): Promise<{ ok: boolean; message?: string; error?: string }> => {
     const response = await api.post('/api/config/test-llm', payload ?? {});
     return response.data;

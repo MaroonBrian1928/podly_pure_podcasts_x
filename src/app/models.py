@@ -213,6 +213,9 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     last_segment_sequence_num = db.Column(db.Integer, nullable=False)
 
     model_name = db.Column(db.String, nullable=False)
+    # When the fallback model handled the call, actual_model_name records which
+    # model answered. NULL means the primary model (model_name) was used.
+    actual_model_name = db.Column(db.String, nullable=True)
     prompt = db.Column(db.Text, nullable=False)
     response = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
@@ -237,7 +240,8 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     )
 
     def __repr__(self) -> str:
-        return f"<ModelCall {self.id} P:{self.post_id} Segs:{self.first_segment_sequence_num}-{self.last_segment_sequence_num} M:{self.model_name} S:{self.status}>"
+        effective = self.actual_model_name or self.model_name
+        return f"<ModelCall {self.id} P:{self.post_id} Segs:{self.first_segment_sequence_num}-{self.last_segment_sequence_num} M:{effective} S:{self.status}>"
 
 
 class Identification(db.Model):  # type: ignore[name-defined, misc]

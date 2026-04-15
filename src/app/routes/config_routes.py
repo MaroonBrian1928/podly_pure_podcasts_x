@@ -630,9 +630,15 @@ def api_test_llm() -> flask.Response:
 
     payload: dict[str, Any] = request.get_json(silent=True) or {}
     llm: dict[str, Any] = dict(payload.get("llm", {}))
+    # When testing the fallback model, the frontend may send an empty api key
+    # because the stored fallback key is masked in the UI. This flag tells us
+    # to prefer the stored fallback key over the stored primary key.
+    use_fallback_api_key: bool = bool(payload.get("use_fallback_api_key", False))
 
-    api_key: str | None = llm.get("llm_api_key") or getattr(
-        runtime_config, "llm_api_key", None
+    api_key: str | None = (
+        llm.get("llm_api_key")
+        or (getattr(runtime_config, "llm_fallback_api_key", None) if use_fallback_api_key else None)
+        or getattr(runtime_config, "llm_api_key", None)
     )
     model_val = llm.get("llm_model")
     model: str = (
