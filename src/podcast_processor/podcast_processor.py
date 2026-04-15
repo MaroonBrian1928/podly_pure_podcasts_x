@@ -12,7 +12,7 @@ from jinja2 import Template
 from sqlalchemy.orm import object_session
 
 from app.extensions import db
-from app.models import Post, ProcessingJob, TranscriptSegment
+from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
 from podcast_processor.audio import clip_segments_exact
@@ -464,6 +464,17 @@ class PodcastProcessor:
         # Step 3: Classify ad segments
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
+
+        # Fail the job if every model call failed (e.g. rate limit / service unavailable).
+        # Without at least one successful call there are no identifications, so the
+        # episode would be "completed" with zero ads removed — silently wrong.
+        total_calls = ModelCall.query.filter_by(post_id=post.id).count()
+        successful_calls = ModelCall.query.filter_by(post_id=post.id, status="success").count()
+        if total_calls > 0 and successful_calls == 0:
+            raise RuntimeError(
+                "LLM classification failed: all model calls were unsuccessful "
+                "(rate limit or service unavailable). Reprocess to retry."
+            )
 
         # Step 4: Process audio (remove ad segments)
         self.status_manager.update_job_status(
