@@ -46,6 +46,10 @@ def _sanitize_config_for_client(cfg: dict[str, Any]) -> dict[str, Any]:
         if llm_api_key:
             llm["llm_api_key_preview"] = _mask_secret(llm_api_key)
 
+        llm_fallback_api_key = llm.pop("llm_fallback_api_key", None)
+        if llm_fallback_api_key:
+            llm["llm_fallback_api_key_preview"] = _mask_secret(llm_fallback_api_key)
+
         whisper_api_key = whisper.pop("api_key", None)
         if whisper_api_key:
             whisper["api_key_preview"] = _mask_secret(whisper_api_key)
@@ -113,6 +117,16 @@ def _hydrate_llm_config(data: dict[str, Any]) -> None:
         runtime_config,
         "llm_max_input_tokens_per_call",
         llm.get("llm_max_input_tokens_per_call"),
+    )
+    llm["llm_fallback_model"] = getattr(
+        runtime_config,
+        "llm_fallback_model",
+        llm.get("llm_fallback_model"),
+    )
+    llm["llm_fallback_api_key"] = getattr(
+        runtime_config,
+        "llm_fallback_api_key",
+        llm.get("llm_fallback_api_key"),
     )
     llm["llm_enable_token_rate_limiting"] = getattr(
         runtime_config,
@@ -521,6 +535,7 @@ def api_put_config() -> flask.Response:
     llm_payload = payload.get("llm")
     if isinstance(llm_payload, dict):
         llm_payload.pop("llm_api_key_preview", None)
+        llm_payload.pop("llm_fallback_api_key_preview", None)
 
     whisper_payload = payload.get("whisper")
     if isinstance(whisper_payload, dict):

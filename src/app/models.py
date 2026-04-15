@@ -384,6 +384,8 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Integer, nullable=False, default=DEFAULTS.LLM_DEFAULT_MAX_RETRY_ATTEMPTS
     )
     llm_max_input_tokens_per_call = db.Column(db.Integer, nullable=True)
+    llm_fallback_model = db.Column(db.Text, nullable=True)
+    llm_fallback_api_key = db.Column(db.Text, nullable=True)
     llm_enable_token_rate_limiting = db.Column(
         db.Boolean, nullable=False, default=DEFAULTS.LLM_ENABLE_TOKEN_RATE_LIMITING
     )

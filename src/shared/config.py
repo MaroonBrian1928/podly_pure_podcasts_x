@@ -88,6 +88,14 @@ class Config(BaseModel):
         default=DEFAULTS.LLM_MAX_INPUT_TOKENS_PER_CALL,
         description="Maximum input tokens per LLM call to stay under API limits",
     )
+    llm_fallback_model: str | None = Field(
+        default=DEFAULTS.LLM_FALLBACK_MODEL,
+        description="Fallback LLM model to use when all retries on the primary model fail with retryable errors (rate limit / service unavailable)",
+    )
+    llm_fallback_api_key: str | None = Field(
+        default=DEFAULTS.LLM_FALLBACK_API_KEY,
+        description="API key for the fallback model (leave empty to reuse the primary key)",
+    )
     # Token-based rate limiting
     llm_enable_token_rate_limiting: bool = Field(
         default=DEFAULTS.LLM_ENABLE_TOKEN_RATE_LIMITING,

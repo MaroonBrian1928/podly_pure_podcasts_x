@@ -119,6 +119,9 @@ export interface LLMConfig {
   enable_boundary_refinement: boolean;
   enable_word_level_boundary_refinder?: boolean;
   enable_llm_chapter_fallback_tagging?: boolean;
+  llm_fallback_model?: string | null;
+  llm_fallback_api_key?: string | null;
+  llm_fallback_api_key_preview?: string | null;
 }
 
 export type WhisperConfig =

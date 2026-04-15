@@ -205,6 +205,8 @@ def read_combined() -> dict[str, Any]:
             "llm_max_concurrent_calls": llm.llm_max_concurrent_calls,
             "llm_max_retry_attempts": llm.llm_max_retry_attempts,
             "llm_max_input_tokens_per_call": llm.llm_max_input_tokens_per_call,
+            "llm_fallback_model": llm.llm_fallback_model,
+            "llm_fallback_api_key": llm.llm_fallback_api_key,
             "llm_enable_token_rate_limiting": llm.llm_enable_token_rate_limiting,
             "llm_max_input_tokens_per_minute": llm.llm_max_input_tokens_per_minute,
             "enable_boundary_refinement": llm.enable_boundary_refinement,
@@ -246,6 +248,8 @@ def _update_section_llm(data: dict[str, Any]) -> None:
         "llm_max_concurrent_calls",
         "llm_max_retry_attempts",
         "llm_max_input_tokens_per_call",
+        "llm_fallback_model",
+        "llm_fallback_api_key",
         "llm_enable_token_rate_limiting",
         "llm_max_input_tokens_per_minute",
         "enable_boundary_refinement",
@@ -254,7 +258,7 @@ def _update_section_llm(data: dict[str, Any]) -> None:
     ]:
         if key in data:
             new_val = data[key]
-            if key == "llm_api_key" and _is_empty(new_val):
+            if key in ("llm_api_key", "llm_fallback_api_key") and _is_empty(new_val):
                 continue
             setattr(row, key, new_val)
     safe_commit(
@@ -505,6 +509,8 @@ def to_pydantic_config() -> PydanticConfig:
             or DEFAULTS.LLM_DEFAULT_MAX_RETRY_ATTEMPTS
         ),
         llm_max_input_tokens_per_call=data["llm"].get("llm_max_input_tokens_per_call"),
+        llm_fallback_model=data["llm"].get("llm_fallback_model") or None,
+        llm_fallback_api_key=data["llm"].get("llm_fallback_api_key") or None,
         llm_enable_token_rate_limiting=bool(
             data["llm"].get(
                 "llm_enable_token_rate_limiting",
