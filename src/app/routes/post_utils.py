@@ -34,13 +34,31 @@ def increment_download_count(post: Post) -> None:
 
 
 def ensure_whitelisted_for_download(post: Post, p_guid: str) -> flask.Response | None:
-    """Make sure a post is whitelisted before serving or queuing audio."""
+    """Make sure a post is whitelisted before serving or queuing audio.
+
+    Respects per-feed auto-whitelist overrides: if a feed has auto-whitelist
+    explicitly disabled, autoprocess_on_download will not override that decision.
+    """
     if post.whitelisted:
         return None
 
     if not getattr(runtime_config, "autoprocess_on_download", False):
         logger.warning(
             "Post %s not whitelisted and auto-process is disabled", post.guid
+        )
+        return flask.make_response(("Post not whitelisted", 403))
+
+    # Respect per-feed (and global) auto-whitelist settings even when
+    # autoprocess_on_download is enabled. A feed that has opted out of
+    # auto-whitelisting should not have episodes silently processed just
+    # because a podcast player tried to download them.
+    from app.feeds import _should_auto_whitelist_new_posts
+
+    feed = getattr(post, "feed", None)
+    if feed is not None and not _should_auto_whitelist_new_posts(feed):
+        logger.info(
+            "Post %s not auto-whitelisted on download: feed has auto-whitelist disabled",
+            p_guid,
         )
         return flask.make_response(("Post not whitelisted", 403))
 
