@@ -1,7 +1,7 @@
 """add llm_fallback_model and llm_fallback_api_key to llm_settings
 
 Revision ID: b2c3d4e5f6a7
-Revises: f7a4195e0953
+Revises: a7b8c9d0e1f2
 Create Date: 2026-04-15 00:00:00.000000
 
 """
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "b2c3d4e5f6a7"
-down_revision = "f7a4195e0953"
+down_revision = "a7b8c9d0e1f2"
 branch_labels = None
 depends_on = None
 
