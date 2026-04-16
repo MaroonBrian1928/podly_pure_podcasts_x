@@ -297,7 +297,10 @@ export interface CostSummary {
 export interface CallLogEntry {
   id: number;
   post_id: number;
+  /** Effective model that handled the call (may be the fallback model). */
   model_name: string;
+  /** Primary/intended model configured by the user. Present when the fallback model was used. */
+  intended_model_name?: string;
   status: string;
   timestamp: string | null;
   retry_attempts: number;

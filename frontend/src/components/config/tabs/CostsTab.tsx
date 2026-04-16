@@ -214,7 +214,17 @@ export default function CostsTab() {
                 <tbody>
                   {calls.calls.map((c) => (
                     <tr key={c.id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="py-2 pr-4 text-gray-800 font-mono text-xs">{c.model_name}</td>
+                      <td className="py-2 pr-4 text-gray-800 font-mono text-xs">
+                        {c.model_name}
+                        {c.intended_model_name && c.intended_model_name !== c.model_name && (
+                          <span
+                            className="ml-1.5 inline-block px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 font-sans"
+                            title={`Fallback — intended: ${c.intended_model_name}`}
+                          >
+                            fallback
+                          </span>
+                        )}
+                      </td>
                       <td className="py-2 pr-4">
                         <span
                           className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${c.status === 'completed'
