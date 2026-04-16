@@ -30,8 +30,14 @@ export default function LLMSection() {
       llm_model: pending.llm.llm_fallback_model as string,
       llm_api_key: (pending.llm.llm_fallback_api_key as string) || (pending.llm.llm_api_key as string) || '',
     };
+    // If the API key fields are empty (keys are stored/masked in DB), signal the
+    // backend to use the stored fallback key rather than the stored primary key.
+    const hasFallbackKeyInUI = !!(pending.llm.llm_fallback_api_key || pending.llm.llm_fallback_api_key_preview);
+    const payload = hasFallbackKeyInUI
+      ? { llm: testPayload, use_fallback_api_key: true }
+      : { llm: testPayload };
     toast.promise(
-      configApi.testLLM({ llm: testPayload }).finally(() => setTestingFallback(false)),
+      configApi.testLLM(payload).finally(() => setTestingFallback(false)),
       {
         loading: 'Testing fallback LLM connection...',
         success: (res: { ok: boolean; message?: string }) => res?.message || 'Fallback LLM connection OK',
