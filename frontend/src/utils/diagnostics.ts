@@ -203,11 +203,36 @@ export const initFrontendDiagnostics = () => {
 
   window.addEventListener('unhandledrejection', (event) => {
     const reason = (event as PromiseRejectionEvent).reason;
+
+    // Error objects have non-enumerable message/stack so plain JSON.stringify loses them.
+    // Explicitly extract the useful fields before passing to the sanitiser.
+    const extractError = (err: unknown): unknown => {
+      if (err instanceof Error) {
+        return {
+          errorType: err.constructor?.name ?? 'Error',
+          message: err.message,
+          stack: err.stack,
+          ...('cause' in err && err.cause !== undefined ? { cause: extractError((err as Error & { cause?: unknown }).cause) } : {}),
+          // Also capture any enumerable own properties (e.g. AxiosError fields)
+          ...Object.fromEntries(Object.entries(err)),
+        };
+      }
+      return err;
+    };
+
+    const details = extractError(reason);
+    const message =
+      reason instanceof Error
+        ? reason.message || reason.constructor?.name || 'Promise rejected'
+        : typeof reason === 'string'
+          ? reason
+          : 'Promise rejected';
+
     emitDiagnosticError({
       title: 'Unhandled promise rejection',
-      message: typeof reason === 'string' ? reason : 'Promise rejected',
+      message,
       kind: 'app',
-      details: reason,
+      details,
     });
   });
 };

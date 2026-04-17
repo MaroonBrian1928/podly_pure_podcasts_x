@@ -23,10 +23,18 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 0,
-      gcTime: 0,
+      // Keep inactive query cache alive for 30 s so in-flight fetches can
+      // settle before GC.  gcTime: 0 caused cancelled-query rejections to
+      // leak as unhandled promise rejections when a component unmounted
+      // while a background refetch was in progress.
+      gcTime: 30_000,
       refetchOnMount: 'always',
       refetchOnWindowFocus: 'always',
       refetchOnReconnect: 'always',
+      // Never throw errors into React error boundaries — keep them in the
+      // query's own `error` state so the UI can handle them gracefully.
+      throwOnError: false,
+      retry: false,
     },
   },
 });
