@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import { formatDuration } from '../utils/formatters';
 
 interface LLMProcessingStatsProps {
   episodeGuid: string;
@@ -24,17 +25,6 @@ export default function LLMProcessingStats({
     queryFn: () => feedsApi.getPostStats(episodeGuid),
     enabled: showModal && hasProcessedAudio,
   });
-
-  const formatDuration = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.round(seconds % 60);
-
-    if (hours > 0) {
-      return `${hours}h ${minutes}m ${secs}s`;
-    }
-    return `${minutes}m ${secs}s`;
-  };
 
   const formatTimelineLabel = (seconds: number) => {
     const totalSeconds = Math.max(0, Math.round(seconds));

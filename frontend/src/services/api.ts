@@ -434,6 +434,7 @@ export const feedsApi = {
       release_date: string | null;
       whitelisted: boolean;
       has_processed_audio: boolean;
+      processing_time_seconds: number | null;
     };
     processing_stats: {
       total_segments: number;

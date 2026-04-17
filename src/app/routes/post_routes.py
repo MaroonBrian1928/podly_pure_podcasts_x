@@ -13,7 +13,7 @@ from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
 from app.extensions import db
 from app.feeds import build_post_feed_description_html
-from app.jobs_manager import get_jobs_manager
+from app.jobs_manager import _processing_time_seconds, get_jobs_manager
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
     Feed,
@@ -551,12 +551,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
         .order_by(ProcessingJob.created_at.desc())
         .first()
     )
-    processing_time_seconds: float | None = None
-    if latest_job and latest_job.started_at:
-        end_ts = latest_job.completed_at or latest_job.started_at
-        processing_time_seconds = round(
-            (end_ts - latest_job.started_at).total_seconds(), 1
-        )
+    processing_time_seconds = _processing_time_seconds(latest_job) if latest_job else None
 
     stats_data = {
         "post": {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { jobsApi } from '../services/api';
 import type { CleanupPreview, Job, JobManagerRun, JobManagerStatus } from '../types';
 import { buildProcessingProgressModel } from '../utils/processingProgress';
+import { formatProcessingTime } from '../utils/formatters';
 
 function getStatusColor(status: string) {
   switch (status) {
@@ -65,16 +66,6 @@ function formatDateTime(value: string | null): string {
   }
 }
 
-function formatProcessingTime(seconds: number | null | undefined): string {
-  if (seconds == null || seconds < 0) return '—';
-  const totalSecs = Math.round(seconds);
-  const h = Math.floor(totalSecs / 3600);
-  const m = Math.floor((totalSecs % 3600) / 60);
-  const s = totalSecs % 60;
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
