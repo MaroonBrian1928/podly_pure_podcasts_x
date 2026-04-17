@@ -34,7 +34,9 @@ const queryClient = new QueryClient({
       // Never throw errors into React error boundaries — keep them in the
       // query's own `error` state so the UI can handle them gracefully.
       throwOnError: false,
-      retry: false,
+      // Retry once on transient network failures; avoids hammering the
+      // server on persistent errors while still recovering from brief blips.
+      retry: 1,
     },
   },
 });
