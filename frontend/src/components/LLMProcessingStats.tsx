@@ -153,6 +153,14 @@ export default function LLMProcessingStats({
                             </span>
                           </div>
                           <div className="text-left">
+                            <span className="font-medium text-gray-700">Processing Time:</span>
+                            <span className="ml-2 text-gray-600">
+                              {stats.post?.processing_time_seconds != null
+                                ? formatDuration(stats.post.processing_time_seconds)
+                                : '—'}
+                            </span>
+                          </div>
+                          <div className="text-left">
                             <span className="font-medium text-gray-700">Detection Method:</span>
                             <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
                               LLM Transcription

@@ -65,6 +65,17 @@ function formatDateTime(value: string | null): string {
   }
 }
 
+function formatProcessingTime(seconds: number | null | undefined): string {
+  if (seconds == null || seconds < 0) return '—';
+  const totalSecs = Math.round(seconds);
+  const h = Math.floor(totalSecs / 3600);
+  const m = Math.floor((totalSecs % 3600) / 60);
+  const s = totalSecs % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [managerStatus, setManagerStatus] = useState<JobManagerStatus | null>(null);
@@ -536,6 +547,15 @@ export default function JobsPage() {
                 <div>
                   <div className="text-gray-500">Started</div>
                   <div>{job.started_at ? formatDateTime(job.started_at) : '—'}</div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-gray-500">
+                    Processing time
+                    {job.status === 'running' && (
+                      <span className="ml-1 text-blue-500">(in progress)</span>
+                    )}
+                  </div>
+                  <div className="font-medium">{formatProcessingTime(job.processing_time_seconds)}</div>
                 </div>
                 {job.error_message ? (
                   <div className="col-span-2">

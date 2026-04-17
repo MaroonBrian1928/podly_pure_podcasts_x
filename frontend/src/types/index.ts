@@ -66,6 +66,8 @@ export interface Job {
   created_at: string | null;
   started_at: string | null;
   completed_at: string | null;
+  /** Total seconds from job start to completion (or elapsed so far if still running). Null if not yet started. */
+  processing_time_seconds: number | null;
   error_message: string | null;
 }
 

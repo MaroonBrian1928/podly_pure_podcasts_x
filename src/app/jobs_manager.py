@@ -20,6 +20,19 @@ from shared.processing_paths import find_existing_processed_audio_path
 logger = logging.getLogger("global_logger")
 
 
+def _processing_time_seconds(job: "ProcessingJob") -> float | None:
+    """Return elapsed processing seconds for a job.
+
+    For completed/failed/skipped jobs returns the exact duration.
+    For a running job returns elapsed time so far.
+    Returns None if the job has not started yet.
+    """
+    if job.started_at is None:
+        return None
+    end = job.completed_at if job.completed_at else datetime.now(UTC).replace(tzinfo=None)
+    return round((end - job.started_at).total_seconds(), 1)
+
+
 def _scheduler_app_context() -> Any:
     scheduler_app = scheduler.app
     if scheduler_app is None:
@@ -344,6 +357,7 @@ class JobsManager:
                         "completed_at": (
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
+                        "processing_time_seconds": _processing_time_seconds(job),
                         "error_message": job.error_message,
                     }
                 )
@@ -390,6 +404,7 @@ class JobsManager:
                         "completed_at": (
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
+                        "processing_time_seconds": _processing_time_seconds(job),
                         "error_message": job.error_message,
                     }
                 )

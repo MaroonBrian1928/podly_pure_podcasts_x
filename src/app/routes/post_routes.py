@@ -20,6 +20,7 @@ from app.models import (
     Identification,
     ModelCall,
     Post,
+    ProcessingJob,
     TranscriptSegment,
 )
 from app.posts import (
@@ -544,6 +545,19 @@ def api_post_stats(p_guid: str) -> flask.Response:
         (ad_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
     )
 
+    # Processing time: use the most recent terminal job for this post.
+    latest_job = (
+        ProcessingJob.query.filter_by(post_guid=post.guid)
+        .order_by(ProcessingJob.created_at.desc())
+        .first()
+    )
+    processing_time_seconds: float | None = None
+    if latest_job and latest_job.started_at:
+        end_ts = latest_job.completed_at or latest_job.started_at
+        processing_time_seconds = round(
+            (end_ts - latest_job.started_at).total_seconds(), 1
+        )
+
     stats_data = {
         "post": {
             "guid": post.guid,
@@ -555,6 +569,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             "whitelisted": post.whitelisted,
             "has_processed_audio": post.processed_audio_path is not None,
             "download_count": post.download_count,
+            "processing_time_seconds": processing_time_seconds,
         },
         "ad_detection_strategy": ad_detection_strategy,
         "processing_stats": {
