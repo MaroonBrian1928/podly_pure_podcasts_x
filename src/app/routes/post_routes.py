@@ -1253,3 +1253,128 @@ def download_post_legacy(p_guid: str) -> ResponseReturnValue:
 @post_bp.route("/post/<string:p_guid>/original.mp3", methods=["GET"])
 def download_original_post_legacy(p_guid: str) -> flask.Response:
     return api_download_original_post(p_guid)
+
+
+# ---------------------------------------------------------------------------
+# Process-request link — called from the episode description in RSS feeds
+# ---------------------------------------------------------------------------
+
+_PROCESS_PAGE_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Podly</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a; color: #f1f5f9;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; padding: 24px;
+    }}
+    .card {{
+      text-align: center; max-width: 320px; width: 100%;
+    }}
+    .icon {{ font-size: 52px; margin-bottom: 16px; }}
+    h1 {{ font-size: 20px; font-weight: 600; margin-bottom: 8px; }}
+    p {{ font-size: 14px; color: #94a3b8; line-height: 1.5; }}
+    .title {{ font-size: 13px; color: #64748b; margin-top: 12px; font-style: italic; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">{icon}</div>
+    <h1>{heading}</h1>
+    <p>{body}</p>
+    {title_line}
+  </div>
+  {script}
+</body>
+</html>"""
+
+_CLOSE_SCRIPT = '<script>setTimeout(function(){{window.close();}},1500);</script>'
+
+
+def _process_page(icon: str, heading: str, body: str, title: str | None = None, close: bool = True) -> str:
+    title_line = f'<p class="title">{title}</p>' if title else ""
+    script = _CLOSE_SCRIPT if close else ""
+    return _PROCESS_PAGE_TEMPLATE.format(
+        icon=icon, heading=heading, body=body, title_line=title_line, script=script
+    )
+
+
+@post_bp.route("/process/<string:p_guid>", methods=["GET"])
+def request_process_episode(p_guid: str) -> ResponseReturnValue:
+    """Handle a process-request tap from the episode description link.
+
+    Authenticated via a per-episode HMAC token embedded in the RSS
+    description — no user login required.  Returns a minimal HTML page
+    that auto-closes after ~1.5 s so the user is returned to their
+    podcast app immediately.
+    """
+    from app.process_token import verify_process_token
+
+    token = request.args.get("token", "")
+    if not verify_process_token(p_guid, token):
+        page = _process_page(
+            "🔒", "Invalid link",
+            "This link is not valid. Please refresh your podcast feed and try again.",
+            close=False,
+        )
+        return flask.make_response(page, 403)
+
+    post = Post.query.filter_by(guid=p_guid).first()
+    if not post:
+        page = _process_page(
+            "❓", "Episode not found",
+            "Could not find this episode. It may have been removed.",
+            close=True,
+        )
+        return flask.make_response(page, 404)
+
+    post_title = post.title or p_guid
+
+    # Already fully processed — nothing to do.
+    if post.processed_audio_path is not None:
+        page = _process_page(
+            "✅", "Already processed",
+            "This episode has already been processed and is ready to play.",
+            title=post_title,
+        )
+        return flask.make_response(page, 200)
+
+    # Whitelist the post if needed, then queue processing.
+    try:
+        if not post.whitelisted:
+            writer_client.action(
+                "whitelist_post", {"post_id": post.id}, wait=True
+            )
+            post.whitelisted = True
+            logger.info("Whitelisted post %s via process-request link", p_guid)
+
+        get_jobs_manager().start_post_processing(
+            p_guid,
+            priority="interactive",
+            requested_by_user_id=None,
+            billing_user_id=None,
+        )
+        logger.info("Queued processing for %s via process-request link", p_guid)
+
+        page = _process_page(
+            "▶️", "Processing started!",
+            "Your episode is being processed. Come back in a few minutes to listen.",
+            title=post_title,
+        )
+        return flask.make_response(page, 202)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to queue processing for %s via link: %s", p_guid, exc)
+        page = _process_page(
+            "⚠️", "Something went wrong",
+            "Could not start processing. Please try again or use the Podly web app.",
+            title=post_title,
+            close=False,
+        )
+        return flask.make_response(page, 500)

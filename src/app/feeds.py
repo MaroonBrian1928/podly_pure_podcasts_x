@@ -221,6 +221,27 @@ def _normalize_feed_text(value: str | None) -> str:
 def build_post_feed_description_html(post: Post) -> str:
     """Build the description shown in Podly-generated RSS items for a post."""
     description_parts: list[str] = []
+
+    # For episodes that have not yet been processed, prepend a one-tap link so
+    # the user can trigger processing directly from their podcast app without
+    # needing to open the Podly web UI.  The link is authenticated via a
+    # per-episode HMAC token — no login required.
+    if post.processed_audio_path is None:
+        try:
+            from app.process_token import make_process_token
+
+            base_url = _get_base_url()
+            token = make_process_token(post.guid)
+            process_url = html.escape(
+                f"{base_url}/process/{post.guid}?token={token}", quote=True
+            )
+            description_parts.append(
+                f'<p>▶️ <a href="{process_url}">Process with Podly</a></p>'
+            )
+        except Exception:  # noqa: BLE001
+            # Never break RSS generation over a missing process link.
+            pass
+
     if post.description:
         description_parts.append(_normalize_feed_text(post.description))
 
