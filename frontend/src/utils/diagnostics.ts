@@ -189,6 +189,16 @@ export const initFrontendDiagnostics = () => {
   }
 
   window.addEventListener('error', (event) => {
+    // Cross-origin scripts (iOS content blockers, browser extensions, injected
+    // third-party code) are reported by the browser as "Script error." with an
+    // empty filename and zero line/column numbers — the browser intentionally
+    // hides all details for security.  These are never actionable, so we log
+    // them quietly and skip the modal.
+    if (event.message === 'Script error.' && !event.filename && event.lineno === 0) {
+      diagnostics.add('warn', 'Cross-origin script error suppressed (likely iOS extension/content-blocker)');
+      return;
+    }
+
     emitDiagnosticError({
       title: 'Unhandled error',
       message: event.message || 'Unknown error',
