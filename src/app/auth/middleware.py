@@ -36,6 +36,10 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/images/",
     "/fonts/",
     "/.well-known/",
+    # Process-request links are embedded in RSS feeds and tapped by podcast
+    # app users who have no session cookie.  Security is handled by the
+    # per-episode HMAC token in the query string, not by session auth.
+    "/process/",
 )
 
 _PUBLIC_EXTENSIONS: tuple[str, ...] = (
