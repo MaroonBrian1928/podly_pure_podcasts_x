@@ -212,65 +212,72 @@ export const initFrontendDiagnostics = () => {
   });
 
   window.addEventListener('unhandledrejection', (event) => {
-    const reason = (event as PromiseRejectionEvent).reason;
+    // Wrap the entire handler in try/catch — if anything here throws (e.g.
+    // extractError itself fails) we must not create a new unhandled rejection,
+    // which would trigger this handler recursively.
+    try {
+      const reason = (event as PromiseRejectionEvent).reason;
 
-    // Error objects have non-enumerable message/stack so plain JSON.stringify
-    // loses them.  Explicitly extract safe, useful fields before passing to
-    // the sanitiser.  We allow-list rather than spreading all enumerable
-    // properties to avoid leaking sensitive AxiosError fields (auth headers,
-    // request config, full response bodies, etc.).
-    const extractError = (
-      err: unknown,
-      seen = new WeakSet<object>(),
-      depth = 0,
-    ): unknown => {
-      if (depth > 5) return '[MaxDepthExceeded]';
-      if (err instanceof Error) {
-        if (seen.has(err)) return '[CircularError]';
-        seen.add(err);
+      // Error objects have non-enumerable message/stack so plain JSON.stringify
+      // loses them.  Explicitly extract safe, useful fields before passing to
+      // the sanitiser.  We allow-list rather than spreading all enumerable
+      // properties to avoid leaking sensitive AxiosError fields (auth headers,
+      // request config, full response bodies, etc.).
+      const extractError = (
+        err: unknown,
+        seen = new WeakSet<object>(),
+        depth = 0,
+      ): unknown => {
+        if (depth > 5) return '[MaxDepthExceeded]';
+        if (err instanceof Error) {
+          if (seen.has(err)) return '[CircularError]';
+          seen.add(err);
 
-        const axiosErr = err as Error & {
-          code?: string;
-          response?: { status?: number; statusText?: string };
-          config?: { method?: string; url?: string };
-        };
+          const axiosErr = err as Error & {
+            code?: string;
+            response?: { status?: number; statusText?: string };
+            config?: { method?: string; url?: string };
+          };
 
-        const causeVal =
-          'cause' in err && err.cause !== undefined
-            ? { cause: extractError((err as Error & { cause?: unknown }).cause, seen, depth + 1) }
-            : {};
+          const causeVal =
+            'cause' in err && err.cause !== undefined
+              ? { cause: extractError((err as Error & { cause?: unknown }).cause, seen, depth + 1) }
+              : {};
 
-        return {
-          // Allow-listed safe fields — put explicit keys last so they
-          // always take precedence over anything in enumerable properties.
-          ...(axiosErr.code !== undefined ? { code: axiosErr.code } : {}),
-          ...(axiosErr.response?.status !== undefined ? { httpStatus: axiosErr.response.status } : {}),
-          ...(axiosErr.response?.statusText !== undefined ? { httpStatusText: axiosErr.response.statusText } : {}),
-          ...(axiosErr.config?.method !== undefined ? { requestMethod: axiosErr.config.method } : {}),
-          ...(axiosErr.config?.url !== undefined ? { requestUrl: axiosErr.config.url } : {}),
-          ...causeVal,
-          // Explicit fields last so they are never overwritten.
-          errorType: err.constructor?.name ?? 'Error',
-          message: err.message,
-          stack: err.stack,
-        };
-      }
-      return err;
-    };
+          return {
+            // Allow-listed safe fields — put explicit keys last so they
+            // always take precedence over anything in enumerable properties.
+            ...(axiosErr.code !== undefined ? { code: axiosErr.code } : {}),
+            ...(axiosErr.response?.status !== undefined ? { httpStatus: axiosErr.response.status } : {}),
+            ...(axiosErr.response?.statusText !== undefined ? { httpStatusText: axiosErr.response.statusText } : {}),
+            ...(axiosErr.config?.method !== undefined ? { requestMethod: axiosErr.config.method } : {}),
+            ...(axiosErr.config?.url !== undefined ? { requestUrl: axiosErr.config.url } : {}),
+            ...causeVal,
+            // Explicit fields last so they are never overwritten.
+            errorType: err.constructor?.name ?? 'Error',
+            message: err.message,
+            stack: err.stack,
+          };
+        }
+        return err;
+      };
 
-    const details = extractError(reason);
-    const message =
-      reason instanceof Error
-        ? reason.message || reason.constructor?.name || 'Promise rejected'
-        : typeof reason === 'string'
-          ? reason
-          : 'Promise rejected';
+      const details = extractError(reason);
+      const message =
+        reason instanceof Error
+          ? reason.message || reason.constructor?.name || 'Promise rejected'
+          : typeof reason === 'string'
+            ? reason
+            : 'Promise rejected';
 
-    emitDiagnosticError({
-      title: 'Unhandled promise rejection',
-      message,
-      kind: 'app',
-      details,
-    });
+      emitDiagnosticError({
+        title: 'Unhandled promise rejection',
+        message,
+        kind: 'app',
+        details,
+      });
+    } catch {
+      // ignore — do not create a new unhandled rejection
+    }
   });
 };

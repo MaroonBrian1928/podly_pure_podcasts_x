@@ -23,11 +23,13 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 0,
-      // Keep inactive query cache alive for 30 s so in-flight fetches can
+      // Keep inactive query cache alive for 5 s so in-flight fetches can
       // settle before GC.  gcTime: 0 caused cancelled-query rejections to
       // leak as unhandled promise rejections when a component unmounted
-      // while a background refetch was in progress.
-      gcTime: 30_000,
+      // while a background refetch was in progress.  30 s was overly long
+      // and caused stale data to flash on remount; 5 s is a safe middle
+      // ground.
+      gcTime: 5_000,
       refetchOnMount: 'always',
       refetchOnWindowFocus: 'always',
       refetchOnReconnect: 'always',
@@ -36,7 +38,10 @@ const queryClient = new QueryClient({
       throwOnError: false,
       // Retry once on transient network failures; avoids hammering the
       // server on persistent errors while still recovering from brief blips.
+      // retryDelay: 0 makes the retry immediate — no artificial 1 s pause
+      // before the UI shows an error or recovers.
       retry: 1,
+      retryDelay: () => 0,
     },
   },
 });

@@ -20,16 +20,22 @@ from shared.processing_paths import find_existing_processed_audio_path
 logger = logging.getLogger("global_logger")
 
 
-def _processing_time_seconds(job: "ProcessingJob") -> float | None:
+def _processing_time_seconds(
+    job: "ProcessingJob",
+    now: datetime | None = None,
+) -> float | None:
     """Return elapsed processing seconds for a job.
 
     For completed/failed/skipped jobs returns the exact duration.
-    For a running job returns elapsed time so far.
+    For a running job returns elapsed time so far (using *now* as the
+    current timestamp — callers that iterate over many jobs should
+    compute this once before the loop to keep timestamps consistent).
     Returns None if the job has not started yet.
     """
     if job.started_at is None:
         return None
-    end = job.completed_at if job.completed_at else datetime.now(UTC).replace(tzinfo=None)
+    _now = now if now is not None else datetime.now(UTC).replace(tzinfo=None)
+    end = job.completed_at if job.completed_at else _now
     return round((end - job.started_at).total_seconds(), 1)
 
 
@@ -334,6 +340,8 @@ class JobsManager:
                 .all()
             )
 
+            # Compute once so all running-job elapsed times share the same reference.
+            now = datetime.now(UTC).replace(tzinfo=None)
             results: list[dict[str, Any]] = []
             for job, post, prio in rows:
                 results.append(
@@ -357,7 +365,7 @@ class JobsManager:
                         "completed_at": (
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
-                        "processing_time_seconds": _processing_time_seconds(job),
+                        "processing_time_seconds": _processing_time_seconds(job, now),
                         "error_message": job.error_message,
                     }
                 )
@@ -381,6 +389,8 @@ class JobsManager:
                 .all()
             )
 
+            # Compute once so all running-job elapsed times share the same reference.
+            now = datetime.now(UTC).replace(tzinfo=None)
             results: list[dict[str, Any]] = []
             for job, post, prio in rows:
                 results.append(
@@ -404,7 +414,7 @@ class JobsManager:
                         "completed_at": (
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
-                        "processing_time_seconds": _processing_time_seconds(job),
+                        "processing_time_seconds": _processing_time_seconds(job, now),
                         "error_message": job.error_message,
                     }
                 )

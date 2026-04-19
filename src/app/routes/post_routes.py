@@ -1,4 +1,3 @@
-import html as _html
 import json
 import logging
 import math
@@ -10,7 +9,7 @@ import flask
 from flask import Blueprint, g, jsonify, request, send_file
 from flask.typing import ResponseReturnValue
 
-from app.auth.guards import require_admin
+from app.auth.guards import is_auth_enabled, require_admin
 from app.auth.service import update_user_last_active
 from app.extensions import db
 from app.feeds import build_post_feed_description_html
@@ -24,6 +23,7 @@ from app.models import (
     Post,
     ProcessingJob,
     TranscriptSegment,
+    UserFeed,
 )
 from app.posts import (
     clear_post_processing_data,
@@ -547,12 +547,21 @@ def api_post_stats(p_guid: str) -> flask.Response:
         (ad_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
     )
 
-    # Processing time: use the most recent terminal job for this post.
-    latest_job = (
-        ProcessingJob.query.filter_by(post_guid=post.guid)
-        .order_by(ProcessingJob.created_at.desc())
-        .first()
-    )
+    # Processing time: for completed episodes prefer the most recent *completed* job
+    # so that a failed re-attempt doesn't mask the earlier successful run.  For
+    # episodes that are still in progress, fall back to any job to show elapsed time.
+    if post.processed_audio_path is not None:
+        latest_job = (
+            ProcessingJob.query.filter_by(post_guid=post.guid, status="completed")
+            .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
+    else:
+        latest_job = (
+            ProcessingJob.query.filter_by(post_guid=post.guid)
+            .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
     processing_time_seconds = _processing_time_seconds(latest_job) if latest_job else None
 
     stats_data = {
@@ -1261,55 +1270,20 @@ def download_original_post_legacy(p_guid: str) -> flask.Response:
 # Process-request link — called from the episode description in RSS feeds
 # ---------------------------------------------------------------------------
 
-_PROCESS_PAGE_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Podly</title>
-  <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a; color: #f1f5f9;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; padding: 24px;
-    }}
-    .card {{
-      text-align: center; max-width: 320px; width: 100%;
-    }}
-    .icon {{ font-size: 52px; margin-bottom: 16px; }}
-    h1 {{ font-size: 20px; font-weight: 600; margin-bottom: 8px; }}
-    p {{ font-size: 14px; color: #94a3b8; line-height: 1.5; }}
-    .title {{ font-size: 13px; color: #64748b; margin-top: 12px; font-style: italic; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">{icon}</div>
-    <h1>{heading}</h1>
-    <p>{body}</p>
-    {title_line}
-  </div>
-  {script}
-</body>
-</html>"""
-
-_CLOSE_SCRIPT = '<script>setTimeout(function(){{window.close();}},1500);</script>'
-
 
 def _process_page(icon: str, heading: str, body: str, title: str | None = None, close: bool = True) -> str:
-    # Escape all caller-supplied strings to prevent XSS — post titles in
-    # particular can contain arbitrary characters from the RSS feed.
-    title_line = f'<p class="title">{_html.escape(title)}</p>' if title else ""
-    script = _CLOSE_SCRIPT if close else ""
-    return _PROCESS_PAGE_TEMPLATE.format(
+    """Render process_page.html via Jinja2.
+
+    All user-supplied strings (icon, heading, body, title) are auto-escaped
+    by Flask's template engine, so no manual escaping is needed here.
+    """
+    return flask.render_template(
+        "process_page.html",
         icon=icon,
-        heading=_html.escape(heading),
-        body=_html.escape(body),
-        title_line=title_line,
-        script=script,
+        heading=heading,
+        body=body,
+        title=title,
+        close=close,
     )
 
 
@@ -1342,6 +1316,32 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
 
     post_title = post.title or p_guid
 
+    # When auth is enabled, verify the feed still has at least one active
+    # subscriber before allowing processing.  This guards against tokens
+    # embedded in feeds that were shared with users whose subscriptions have
+    # since been revoked.  We also use the first subscriber for billing
+    # attribution since the link itself carries no user identity.
+    billing_user_id: int | None = None
+    if is_auth_enabled():
+        feed = db.session.get(Feed, post.feed_id)
+        subscribers = (
+            UserFeed.query.filter_by(feed_id=post.feed_id)
+            .order_by(UserFeed.created_at)
+            .all()
+        )
+        if feed is None or not subscribers:
+            logger.warning(
+                "Process-request denied for %s: feed has no active subscribers", p_guid
+            )
+            page = _process_page(
+                "🔒", "Feed not available",
+                "This feed no longer has active subscribers.",
+                close=False,
+            )
+            return flask.make_response(page, 403)
+        # Attribute processing cost to the earliest (primary) subscriber.
+        billing_user_id = subscribers[0].user_id
+
     # Already fully processed — nothing to do.
     if post.processed_audio_path is not None:
         page = _process_page(
@@ -1363,8 +1363,8 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
         get_jobs_manager().start_post_processing(
             p_guid,
             priority="interactive",
-            requested_by_user_id=None,
-            billing_user_id=None,
+            requested_by_user_id=billing_user_id,
+            billing_user_id=billing_user_id,
         )
         logger.info("Queued processing for %s via process-request link", p_guid)
 
