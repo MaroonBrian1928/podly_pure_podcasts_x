@@ -17,6 +17,7 @@ from sqlalchemy import func
 
 from app.extensions import db
 from app.models import Feed, Post, ProcessingJob, User, UserFeed
+from app.process_token import make_process_token
 from app.runtime_config import config
 from app.writer.client import writer_client
 from podcast_processor.audio import get_audio_duration_ms
@@ -228,8 +229,6 @@ def build_post_feed_description_html(post: Post) -> str:
     # per-episode HMAC token — no login required.
     if post.processed_audio_path is None:
         try:
-            from app.process_token import make_process_token
-
             base_url = _get_base_url()
             token = make_process_token(post.guid)
             process_url = html.escape(

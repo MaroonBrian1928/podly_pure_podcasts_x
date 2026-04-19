@@ -19,8 +19,16 @@ from flask import current_app
 
 
 def make_process_token(post_guid: str) -> str:
-    """Return a 32-hex-char HMAC-SHA256 token for *post_guid*."""
-    secret = current_app.config.get("SECRET_KEY", "")
+    """Return a 32-hex-char HMAC-SHA256 token for *post_guid*.
+
+    Raises RuntimeError if SECRET_KEY is not configured — an empty key
+    would make all tokens predictable and is therefore rejected.
+    """
+    secret = current_app.config.get("SECRET_KEY")
+    if not secret:
+        raise RuntimeError(
+            "SECRET_KEY is not configured; cannot generate a secure process token"
+        )
     key = secret.encode() if isinstance(secret, str) else bytes(secret)
     return hmac.new(key, post_guid.encode(), hashlib.sha256).hexdigest()[:32]
 

@@ -1,3 +1,4 @@
+import html as _html
 import json
 import logging
 import math
@@ -14,6 +15,7 @@ from app.auth.service import update_user_last_active
 from app.extensions import db
 from app.feeds import build_post_feed_description_html
 from app.jobs_manager import _processing_time_seconds, get_jobs_manager
+from app.process_token import verify_process_token
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
     Feed,
@@ -1298,10 +1300,16 @@ _CLOSE_SCRIPT = '<script>setTimeout(function(){{window.close();}},1500);</script
 
 
 def _process_page(icon: str, heading: str, body: str, title: str | None = None, close: bool = True) -> str:
-    title_line = f'<p class="title">{title}</p>' if title else ""
+    # Escape all caller-supplied strings to prevent XSS — post titles in
+    # particular can contain arbitrary characters from the RSS feed.
+    title_line = f'<p class="title">{_html.escape(title)}</p>' if title else ""
     script = _CLOSE_SCRIPT if close else ""
     return _PROCESS_PAGE_TEMPLATE.format(
-        icon=icon, heading=heading, body=body, title_line=title_line, script=script
+        icon=icon,
+        heading=_html.escape(heading),
+        body=_html.escape(body),
+        title_line=title_line,
+        script=script,
     )
 
 
@@ -1314,8 +1322,6 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
     that auto-closes after ~1.5 s so the user is returned to their
     podcast app immediately.
     """
-    from app.process_token import verify_process_token
-
     token = request.args.get("token", "")
     if not verify_process_token(p_guid, token):
         page = _process_page(
