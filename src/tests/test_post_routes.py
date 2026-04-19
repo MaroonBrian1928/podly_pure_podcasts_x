@@ -7,6 +7,7 @@ from flask import g
 
 from app.extensions import db
 from app.models import (
+    AudioSegment,
     Feed,
     Identification,
     ModelCall,
@@ -1165,6 +1166,97 @@ def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):
         entry["stage"] == "audio" and entry["step_name"] == "Processing audio"
         for entry in payload["related_logs"]["entries"]
     )
+
+
+def test_post_stats_include_audio_segments(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-audio-segments-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Audio Segments Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        model_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=2,
+            model_name="ina:speech_music_noise",
+            prompt="INA speech segmenter analysis",
+            status="success",
+        )
+        db.session.add(model_call)
+        db.session.commit()
+        model_call_id = model_call.id
+
+        db.session.add_all(
+            [
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=model_call.id,
+                    start_time=0.0,
+                    end_time=1.5,
+                    label="music",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=model_call.id,
+                    start_time=1.5,
+                    end_time=3.0,
+                    label="speech",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=model_call.id,
+                    start_time=3.0,
+                    end_time=4.0,
+                    label="noise",
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    client = app.test_client()
+    response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["audio_segments_count"] == 3
+    assert payload["audio_segments"] == [
+        {
+            "id": payload["audio_segments"][0]["id"],
+            "start_time": 0.0,
+            "end_time": 1.5,
+            "label": "music",
+            "model_call_id": model_call_id,
+        },
+        {
+            "id": payload["audio_segments"][1]["id"],
+            "start_time": 1.5,
+            "end_time": 3.0,
+            "label": "speech",
+            "model_call_id": model_call_id,
+        },
+        {
+            "id": payload["audio_segments"][2]["id"],
+            "start_time": 3.0,
+            "end_time": 4.0,
+            "label": "noise",
+            "model_call_id": model_call_id,
+        },
+    ]
 
 
 def test_post_stats_exposes_retry_count_separately_from_attempt_count(app):

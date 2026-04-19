@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ from podcast_processor.chapter_writer import (
     recalculate_chapter_times,
     write_adjusted_chapters,
 )
+from podcast_processor.ina_client import AudioSegmentResult, analyze_audio
 from podcast_processor.podcast_downloader import PodcastDownloader, sanitize_title
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from podcast_processor.profanity_filter import extract_profanity_windows
@@ -371,6 +373,169 @@ class PodcastProcessor:
         self.make_dirs(working_paths)
         return processed_audio_path
 
+    def _ina_enabled(self) -> bool:
+        raw_value = os.environ.get("INA_ENABLED", "")
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _ina_base_url(self) -> str | None:
+        raw_value = os.environ.get("INA_BASE_URL")
+        if raw_value is None:
+            return None
+        base_url = raw_value.strip()
+        return base_url or None
+
+    def _ina_timeout_sec(self) -> int:
+        raw_value = os.environ.get("INA_TIMEOUT_SEC")
+        if raw_value is None:
+            return 3600
+        try:
+            return max(1, int(raw_value))
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Invalid INA_TIMEOUT_SEC=%r; defaulting to 3600 seconds",
+                raw_value,
+            )
+            return 3600
+
+    def _start_optional_ina_analysis(
+        self,
+        post: Post,
+    ) -> tuple[
+        concurrent.futures.ThreadPoolExecutor | None,
+        concurrent.futures.Future[list[AudioSegmentResult]] | None,
+    ]:
+        unprocessed_audio_path = getattr(post, "unprocessed_audio_path", None)
+        if not self._ina_enabled():
+            return None, None
+        if not unprocessed_audio_path or not isinstance(unprocessed_audio_path, str):
+            return None, None
+        if not self._ina_base_url():
+            self.logger.warning(
+                "INA_ENABLED is true but INA_BASE_URL is not set; skipping INA analysis"
+            )
+            return None, None
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            self._run_ina_analysis,
+            int(post.id),
+            unprocessed_audio_path,
+        )
+        return executor, future
+
+    def _await_optional_ina_analysis(
+        self,
+        executor: concurrent.futures.ThreadPoolExecutor | None,
+        future: concurrent.futures.Future[list[AudioSegmentResult]] | None,
+    ) -> None:
+        if future is None:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=False)
+            return
+
+        try:
+            future.result(timeout=self._ina_timeout_sec() + 30)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("INA analysis failed: %s", exc, exc_info=True)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=False)
+
+    def _run_ina_analysis(
+        self,
+        post_id: int,
+        audio_path: str,
+    ) -> list[AudioSegmentResult]:
+        self.logger.info("[INA] Starting INA analysis for post %s", post_id)
+        model_call_id: int | None = None
+        try:
+            upsert_res = writer_client.action(
+                "upsert_model_call",
+                {
+                    "post_id": post_id,
+                    "model_name": "ina:speech_music_noise",
+                    "first_segment_sequence_num": 0,
+                    "last_segment_sequence_num": 0,
+                    "prompt": "INA speech segmenter analysis",
+                },
+                wait=True,
+            )
+            if upsert_res and upsert_res.success:
+                model_call_id = (upsert_res.data or {}).get("model_call_id")
+
+            base_url = self._ina_base_url()
+            if base_url is None:
+                raise RuntimeError(
+                    "INA_BASE_URL is required when INA analysis is enabled"
+                )
+
+            results, raw_response = analyze_audio(
+                audio_path=audio_path,
+                base_url=base_url,
+                timeout=self._ina_timeout_sec(),
+            )
+
+            write_res = writer_client.action(
+                "replace_audio_segments",
+                {
+                    "post_id": post_id,
+                    "segments": [
+                        {
+                            "label": result.label,
+                            "start_time": result.start_time,
+                            "end_time": result.end_time,
+                        }
+                        for result in results
+                    ],
+                    "model_call_id": model_call_id,
+                },
+                wait=True,
+            )
+            if not write_res or not write_res.success:
+                raise RuntimeError(
+                    getattr(write_res, "error", "Failed to persist INA audio segments")
+                )
+
+            if model_call_id is not None:
+                writer_client.update(
+                    "ModelCall",
+                    int(model_call_id),
+                    {
+                        "status": "success",
+                        "response": raw_response,
+                        "error_message": None,
+                        "first_segment_sequence_num": 0,
+                        "last_segment_sequence_num": max(len(results) - 1, 0),
+                    },
+                    wait=True,
+                )
+
+            self.logger.info(
+                "[INA] INA analysis complete for post %s: %s segments",
+                post_id,
+                len(results),
+            )
+            return results
+        except Exception as exc:
+            if model_call_id is not None:
+                try:
+                    writer_client.action(
+                        "mark_model_call_failed",
+                        {
+                            "model_call_id": int(model_call_id),
+                            "error_message": str(exc),
+                            "status": "failed_permanent",
+                        },
+                        wait=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    self.logger.warning(
+                        "[INA] Failed to mark model call %s as failed",
+                        model_call_id,
+                        exc_info=True,
+                    )
+            raise
+
     def _perform_processing_steps(
         self,
         post: Post,
@@ -399,35 +564,43 @@ class PodcastProcessor:
                 "chapter-based ad removal"
             )
 
-        if ad_detection_strategy == "chapter":
-            self._perform_chapter_based_processing(
-                post, job, processed_audio_path, cancel_callback, chapter_filter_strings
-            )
-        elif ad_detection_strategy == "chapter_insert":
-            if enable_profanity_bleeping:
-                self._perform_chapter_insertion_only_processing(
+        ina_executor, ina_future = self._start_optional_ina_analysis(post)
+        try:
+            if ad_detection_strategy == "chapter":
+                self._perform_chapter_based_processing(
                     post,
                     job,
                     processed_audio_path,
                     cancel_callback,
+                    chapter_filter_strings,
+                )
+            elif ad_detection_strategy == "chapter_insert":
+                if enable_profanity_bleeping:
+                    self._perform_chapter_insertion_only_processing(
+                        post,
+                        job,
+                        processed_audio_path,
+                        cancel_callback,
+                        enable_profanity_bleeping,
+                    )
+                else:
+                    self._perform_chapter_insertion_only_processing(
+                        post,
+                        job,
+                        processed_audio_path,
+                        cancel_callback,
+                    )
+            else:
+                self._perform_llm_based_processing(
+                    post,
+                    job,
+                    processed_audio_path,
+                    cancel_callback,
+                    enable_llm_chapter_fallback_tagging,
                     enable_profanity_bleeping,
                 )
-            else:
-                self._perform_chapter_insertion_only_processing(
-                    post,
-                    job,
-                    processed_audio_path,
-                    cancel_callback,
-                )
-        else:
-            self._perform_llm_based_processing(
-                post,
-                job,
-                processed_audio_path,
-                cancel_callback,
-                enable_llm_chapter_fallback_tagging,
-                enable_profanity_bleeping,
-            )
+        finally:
+            self._await_optional_ina_analysis(ina_executor, ina_future)
 
     def _resolve_llm_chapter_fallback_tagging_enabled(
         self,

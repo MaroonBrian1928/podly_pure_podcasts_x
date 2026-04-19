@@ -18,6 +18,7 @@ interface LLMProcessingStatsProps {
 
 type TabId =
   | 'overview'
+  | 'audio'
   | 'speakers'
   | 'model-calls'
   | 'transcript'
@@ -89,6 +90,32 @@ export default function LLMProcessingStats({
   const hasSpeakerLabels = (stats?.transcript_segments || []).some(
     (segment) => Boolean(segment.speaker_label)
   );
+  const hasAudioSegments = (stats?.audio_segments?.length || 0) > 0;
+  const nonSpeechAudioSegments = (stats?.audio_segments || []).filter(
+    (segment) => segment.label !== 'speech'
+  );
+  const mergedTranscriptRows = [
+    ...(stats?.transcript_segments || []).map((segment) => ({
+      kind: 'transcript' as const,
+      startTime: segment.start_time,
+      id: `transcript-${segment.id}`,
+      segment,
+    })),
+    ...nonSpeechAudioSegments.map((segment) => ({
+      kind: 'audio' as const,
+      startTime: segment.start_time,
+      id: `audio-${segment.id}`,
+      segment,
+    })),
+  ].sort((left, right) => {
+    if (left.startTime !== right.startTime) {
+      return left.startTime - right.startTime;
+    }
+    if (left.kind === right.kind) {
+      return 0;
+    }
+    return left.kind === 'audio' ? -1 : 1;
+  });
   const showSpeakerTab = hasSpeakerLabels
     && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
   const contentViewKey = isLoading
@@ -200,12 +227,39 @@ export default function LLMProcessingStats({
   const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
     ? bleepTimelineSegments.length > 0
     : (stats?.processing_stats?.has_bleep_windows ?? false);
+  const getAudioLabelStyle = (label: string) => {
+    switch (label) {
+      case 'music':
+        return 'bg-rose-100 text-rose-800';
+      case 'noise':
+        return 'bg-amber-100 text-amber-800';
+      case 'noEnergy':
+        return 'bg-slate-100 text-slate-700';
+      default:
+        return 'bg-gray-100 text-gray-700';
+    }
+  };
+  const getAudioMarkerStyle = (label: string) => {
+    switch (label) {
+      case 'music':
+        return 'bg-rose-50 text-rose-700';
+      case 'noise':
+        return 'bg-amber-50 text-amber-700';
+      case 'noEnergy':
+        return 'bg-slate-100 text-slate-600';
+      default:
+        return 'bg-gray-50 text-gray-600';
+    }
+  };
 
   useEffect(() => {
     if (!showSpeakerTab && activeTab === 'speakers') {
       setActiveTab('overview');
     }
-  }, [activeTab, showSpeakerTab]);
+    if (!hasAudioSegments && activeTab === 'audio') {
+      setActiveTab('overview');
+    }
+  }, [activeTab, hasAudioSegments, showSpeakerTab]);
 
   if (!hasProcessedAudio) {
     return null;
@@ -241,6 +295,7 @@ export default function LLMProcessingStats({
               <nav className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
+                  ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
                   ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
                   { id: 'model-calls', label: 'Model Calls' },
                   { id: 'transcript', label: 'Transcript Segments' },
@@ -257,6 +312,7 @@ export default function LLMProcessingStats({
                     } shrink-0 whitespace-nowrap`}
                   >
                     {tab.label}
+                    {stats && tab.id === 'audio' && ` (${stats.audio_segments?.length || 0})`}
                     {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
                     {stats && tab.id === 'model-calls' && stats.model_calls && ` (${stats.model_calls.length})`}
                     {stats && tab.id === 'transcript' && stats.transcript_segments && ` (${stats.transcript_segments.length})`}
@@ -585,6 +641,42 @@ export default function LLMProcessingStats({
                     </div>
                   )}
 
+                  {activeTab === 'audio' && hasAudioSegments && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Audio Segments ({stats.audio_segments?.length || 0})</h3>
+                      <div className="bg-white border rounded-lg overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {(stats.audio_segments || []).map((segment) => (
+                                <tr key={segment.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {segment.start_time}s - {segment.end_time}s
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {formatDuration(Math.max(0, segment.end_time - segment.start_time))}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getAudioLabelStyle(segment.label)}`}>
+                                      {segment.label}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {activeTab === 'transcript' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Transcript Segments ({stats.transcript_segments?.length || 0})</h3>
@@ -604,11 +696,25 @@ export default function LLMProcessingStats({
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {(stats.transcript_segments || []).map((segment) => {
+                              {mergedTranscriptRows.map((row) => {
+                                if (row.kind === 'audio') {
+                                  return (
+                                    <tr key={row.id} className={getAudioMarkerStyle(row.segment.label)}>
+                                      <td
+                                        colSpan={hasSpeakerLabels ? 6 : 5}
+                                        className="px-4 py-2 text-center text-xs font-medium uppercase tracking-wide"
+                                      >
+                                        [{row.segment.label}] {row.segment.start_time}s - {row.segment.end_time}s
+                                      </td>
+                                    </tr>
+                                  );
+                                }
+
+                                const segment = row.segment;
                                 const adConfidence = getAdConfidence(segment);
 
                                 return (
-                                  <tr key={segment.id} className={`hover:bg-gray-50 ${
+                                  <tr key={row.id} className={`hover:bg-gray-50 ${
                                     segment.primary_label === 'ad' ? 'bg-red-50' : ''
                                   }`}>
                                     <td className="px-4 py-3 text-sm text-gray-900">{segment.sequence_num}</td>

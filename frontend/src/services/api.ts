@@ -279,6 +279,7 @@ export const feedsApi = {
       total_segments: number;
       total_model_calls: number;
       total_identifications: number;
+      audio_segments_count?: number;
       content_segments: number;
       ad_segments_count: number;
       ad_percentage: number;
@@ -347,6 +348,13 @@ export const feedsApi = {
         confidence: number | null;
         model_call_id: number;
       }>;
+    }>;
+    audio_segments: Array<{
+      id: number;
+      start_time: number;
+      end_time: number;
+      label: string;
+      model_call_id: number | null;
     }>;
     identifications: Array<{
       id: number;
@@ -479,6 +487,7 @@ export const feedsApi = {
       total_segments: number;
       total_model_calls: number;
       total_identifications: number;
+      audio_segments_count?: number;
       content_segments: number;
       ad_segments_count: number;
       ad_percentage: number;
@@ -547,6 +556,13 @@ export const feedsApi = {
         confidence: number | null;
         model_call_id: number;
       }>;
+    }>;
+    audio_segments: Array<{
+      id: number;
+      start_time: number;
+      end_time: number;
+      label: string;
+      model_call_id: number | null;
     }>;
     identifications: Array<{
       id: number;

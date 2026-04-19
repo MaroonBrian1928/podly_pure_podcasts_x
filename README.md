@@ -57,6 +57,21 @@ adds speaker embeddings to the diarization payload and requires diarization to
 be enabled. See [.env.local.example](.env.local.example) for the full set of
 environment variables.
 
+Podly can also optionally call a separate INA-compatible audio segmenter to
+detect non-speech regions such as music, noise, and silence-like gaps:
+
+```env
+INA_ENABLED=false
+INA_BASE_URL=http://localhost:8001
+INA_TIMEOUT_SEC=3600
+```
+
+Set `INA_ENABLED=true` and point `INA_BASE_URL` at a service that exposes
+`POST /segment`. INA analysis is best-effort: processing still completes if the
+INA service is unavailable, but the extra audio segment metadata will be
+missing from stats/debug views. This is separate from remote Whisper
+speaker diarization, which continues to use the `WHISPER_REMOTE_*` flags above.
+
 ## Optional UI Flags
 
 These environment variables let you hide specific UI surfaces without changing

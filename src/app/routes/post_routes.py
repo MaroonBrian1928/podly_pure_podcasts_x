@@ -17,6 +17,7 @@ from app.feeds import build_post_feed_description_html
 from app.jobs_manager import get_jobs_manager
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
+    AudioSegment,
     Feed,
     Identification,
     ModelCall,
@@ -599,6 +600,11 @@ def api_post_stats(p_guid: str) -> flask.Response:
     )
 
     transcript_segments = post.segments.all()
+    audio_segments = (
+        AudioSegment.query.filter_by(post_id=post.id)
+        .order_by(AudioSegment.start_time)
+        .all()
+    )
 
     identifications = (
         Identification.query.join(TranscriptSegment)
@@ -720,6 +726,17 @@ def api_post_stats(p_guid: str) -> flask.Response:
             }
         )
 
+    audio_segments_data = [
+        {
+            "id": segment.id,
+            "start_time": round(float(segment.start_time), 1),
+            "end_time": round(float(segment.end_time), 1),
+            "label": segment.label,
+            "model_call_id": segment.model_call_id,
+        }
+        for segment in audio_segments
+    ]
+
     # Build chapter data for chapter-based processing
     chapters_data = None
     if (
@@ -776,6 +793,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             "total_segments": len(transcript_segments),
             "total_model_calls": len(model_calls),
             "total_identifications": len(identifications),
+            "audio_segments_count": len(audio_segments),
             "content_segments": content_segments,
             "ad_segments_count": ad_segments,
             "ad_percentage": round(ad_percentage, 1),
@@ -807,6 +825,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
         },
         "model_calls": model_call_details,
         "transcript_segments": transcript_segments_data,
+        "audio_segments": audio_segments_data,
         "identifications": identifications_data,
         "related_logs": _build_related_logs(post=post, recent_jobs=recent_jobs),
         "chapters": chapters_data,
@@ -836,6 +855,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             },
             "record_counts": {
                 "transcript_segments": len(transcript_segments),
+                "audio_segments": len(audio_segments),
                 "model_calls": len(model_calls),
                 "identifications": len(identifications),
             },

@@ -7,6 +7,7 @@ from app.extensions import db
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
+    AudioSegment,
     Identification,
     ModelCall,
     Post,
@@ -102,6 +103,8 @@ def clear_post_processing_data_action(params: dict[str, Any]) -> dict[str, Any]:
             TranscriptSegment.id.in_(ids_batch)
         ).delete(synchronize_session=False)
 
+    db.session.query(AudioSegment).filter_by(post_id=post.id).delete()
+
     # Model calls
     db.session.query(ModelCall).filter_by(post_id=post.id).delete()
 
@@ -170,6 +173,10 @@ def clear_post_processing_data_keep_transcript_action(
         )
         total_identifications_deleted += int(deleted or 0)
         last_transcript_segment_id = int(ids_batch[-1])
+
+    db.session.query(AudioSegment).filter_by(post_id=post.id).delete(
+        synchronize_session=False
+    )
 
     # Keep Whisper model calls so transcription can be reused; drop all others.
     non_whisper_model_calls_deleted = (

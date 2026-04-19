@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from app.extensions import db
 from app.models import (
+    AudioSegment,
     Feed,
     Identification,
     ModelCall,
@@ -44,6 +45,15 @@ def test_clear_post_processing_data_action_clears_chapter_data(app) -> None:
         )
         db.session.add(post)
         db.session.commit()
+        db.session.add(
+            AudioSegment(
+                post_id=post.id,
+                start_time=0.0,
+                end_time=2.0,
+                label="music",
+            )
+        )
+        db.session.commit()
 
         result = clear_post_processing_data_action({"post_id": post.id})
         db.session.commit()
@@ -55,6 +65,7 @@ def test_clear_post_processing_data_action_clears_chapter_data(app) -> None:
         assert post.duration is None
         assert post.chapter_data is None
         assert post.transcript_word_timestamps is None
+        assert AudioSegment.query.filter_by(post_id=post.id).count() == 0
 
 
 def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) -> None:
@@ -88,6 +99,15 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
             refined_ad_boundaries_updated_at=datetime.now(UTC).replace(tzinfo=None),
         )
         db.session.add(post)
+        db.session.commit()
+        db.session.add(
+            AudioSegment(
+                post_id=post.id,
+                start_time=2.0,
+                end_time=4.0,
+                label="noise",
+            )
+        )
         db.session.commit()
 
         seg = TranscriptSegment(
@@ -160,6 +180,7 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
         assert post.refined_ad_boundaries_updated_at is None
 
         assert TranscriptSegment.query.filter_by(post_id=post.id).count() == 1
+        assert AudioSegment.query.filter_by(post_id=post.id).count() == 0
         assert (
             ModelCall.query.filter_by(
                 post_id=post.id,

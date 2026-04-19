@@ -163,6 +163,34 @@ class TranscriptSegment(db.Model):  # type: ignore[name-defined, misc]
         return f"<TranscriptSegment {self.id} P:{self.post_id} S:{self.sequence_num} T:{self.start_time:.1f}-{self.end_time:.1f}>"
 
 
+class AudioSegment(db.Model):  # type: ignore[name-defined, misc]
+    __tablename__ = "audio_segment"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    post_id = db.Column(db.Integer, db.ForeignKey("post.id"), nullable=False)
+    model_call_id = db.Column(db.Integer, db.ForeignKey("model_call.id"), nullable=True)
+    label = db.Column(db.String(32), nullable=False)
+    start_time = db.Column(db.Float, nullable=False)
+    end_time = db.Column(db.Float, nullable=False)
+
+    post = db.relationship(
+        "Post",
+        backref=db.backref(
+            "audio_segments", lazy="dynamic", order_by="AudioSegment.start_time"
+        ),
+    )
+
+    __table_args__ = (
+        db.Index("ix_audio_segment_post_id_start_time", "post_id", "start_time"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AudioSegment {self.id} P:{self.post_id} "
+            f"L:{self.label} T:{self.start_time:.1f}-{self.end_time:.1f}>"
+        )
+
+
 class User(db.Model):  # type: ignore[name-defined, misc]
     __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)

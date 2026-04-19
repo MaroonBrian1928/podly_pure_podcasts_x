@@ -8,7 +8,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Identification, ModelCall, Post, TranscriptSegment
+from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
 
 
 def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -351,3 +351,55 @@ def replace_identifications_action(params: dict[str, Any]) -> dict[str, Any]:
 
     db.session.flush()
     return {"deleted": len(delete_ids), "inserted": int(inserted)}
+
+
+def replace_audio_segments_action(params: dict[str, Any]) -> dict[str, Any]:
+    post_id = params.get("post_id")
+    segments = params.get("segments")
+    model_call_id = params.get("model_call_id")
+
+    if post_id is None:
+        raise ValueError("post_id is required")
+    if not isinstance(segments, list):
+        raise ValueError("segments must be a list")
+
+    post_id_i = int(post_id)
+    post = db.session.get(Post, post_id_i)
+    if post is None:
+        raise ValueError(f"Post {post_id_i} not found")
+
+    db.session.query(AudioSegment).filter(AudioSegment.post_id == post_id_i).delete(
+        synchronize_session=False
+    )
+
+    payload: list[dict[str, Any]] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+
+        try:
+            start_time = float(seg["start_time"])
+            end_time = float(seg["end_time"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "audio segments require numeric start_time and end_time"
+            ) from exc
+
+        if end_time <= start_time:
+            continue
+
+        row: dict[str, Any] = {
+            "post_id": post_id_i,
+            "start_time": start_time,
+            "end_time": end_time,
+            "label": str(seg["label"]),
+        }
+        if model_call_id is not None:
+            row["model_call_id"] = int(model_call_id)
+        payload.append(row)
+
+    if payload:
+        db.session.execute(sqlite_insert(AudioSegment).values(payload))
+
+    db.session.flush()
+    return {"post_id": post_id_i, "segment_count": len(payload)}

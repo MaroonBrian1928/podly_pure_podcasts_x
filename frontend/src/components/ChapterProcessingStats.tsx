@@ -15,7 +15,7 @@ interface ChapterProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'chapters' | 'speakers' | 'transcript' | 'logs';
+type TabId = 'overview' | 'audio' | 'chapters' | 'speakers' | 'transcript' | 'logs';
 
 export default function ChapterProcessingStats({
   episodeGuid,
@@ -34,6 +34,7 @@ export default function ChapterProcessingStats({
   const showTranscriptTab = isChapterInsert;
   const showSpeakerTab = isChapterInsert
     && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
+  const hasAudioSegments = (stats?.audio_segments?.length || 0) > 0;
   const modelEntries = Object.entries(stats?.processing_stats?.model_types || {});
 
   useEffect(() => {
@@ -43,7 +44,10 @@ export default function ChapterProcessingStats({
     if (!showSpeakerTab && activeTab === 'speakers') {
       setActiveTab('overview');
     }
-  }, [showSpeakerTab, showTranscriptTab, activeTab]);
+    if (!hasAudioSegments && activeTab === 'audio') {
+      setActiveTab('overview');
+    }
+  }, [activeTab, hasAudioSegments, showSpeakerTab, showTranscriptTab]);
 
   const formatDuration = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -171,6 +175,7 @@ export default function ChapterProcessingStats({
               <nav className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
+                  ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
                   { id: 'chapters', label: 'Chapters' },
                   ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
                   { id: 'logs', label: 'Related Logs' },
@@ -186,6 +191,7 @@ export default function ChapterProcessingStats({
                     } shrink-0 whitespace-nowrap`}
                   >
                     {tab.label}
+                    {stats && tab.id === 'audio' && ` (${stats.audio_segments?.length || 0})`}
                     {stats && tab.id === 'chapters' && stats.chapters && ` (${stats.chapters.chapters?.length || 0})`}
                     {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
                     {stats && tab.id === 'logs' && ` (${stats.related_logs?.entries.length || 0})`}
@@ -466,6 +472,44 @@ export default function ChapterProcessingStats({
                           No chapter data available.
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {activeTab === 'audio' && hasAudioSegments && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">
+                        Audio Segments ({stats.audio_segments?.length || 0})
+                      </h3>
+                      <div className="bg-white border rounded-lg overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {(stats.audio_segments || []).map((segment) => (
+                                <tr key={segment.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {segment.start_time}s - {segment.end_time}s
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {formatDuration(Math.max(0, segment.end_time - segment.start_time))}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-slate-100 text-slate-700">
+                                      {segment.label}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     </div>
                   )}
 
