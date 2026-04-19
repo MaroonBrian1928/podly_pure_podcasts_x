@@ -2,10 +2,14 @@ import logging
 from typing import Any
 
 from app.extensions import db
-from app.models import Identification, ModelCall, Post, TranscriptSegment
+from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
 from app.writer.client import writer_client
 from podcast_processor.ad_merger import AdMerger
 from podcast_processor.audio import clip_segments_with_fade, get_audio_duration_ms
+from shared.audio_segment_utils import (
+    bridge_ad_windows_with_audio,
+    extract_audio_windows,
+)
 from shared.config import Config
 
 
@@ -116,8 +120,32 @@ class AudioProcessor:
 
         # Convert to time tuples for merge_ad_segments()
         ad_segments_times = [(g.start_time, g.end_time) for g in ad_groups]
+        audio_windows = self._get_bridgeable_audio_windows(post)
+        if audio_windows:
+            ad_segments_times = bridge_ad_windows_with_audio(
+                ad_segments_times,
+                audio_windows,
+            )
         ad_segments_times.sort(key=lambda x: x[0])
         return ad_segments_times
+
+    def _get_bridgeable_audio_windows(self, post: Post) -> list[tuple[float, float]]:
+        try:
+            audio_segments = (
+                self.db_session.query(AudioSegment)
+                .filter(AudioSegment.post_id == post.id)
+                .order_by(AudioSegment.start_time.asc())
+                .all()
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.warning(
+                "Failed to load INA audio segments while building cut windows for post %s",
+                post.id,
+                exc_info=True,
+            )
+            return []
+
+        return extract_audio_windows(audio_segments)
 
     def _apply_refined_boundaries(self, post: Post, ad_groups: Any) -> None:
         post_row = self._safe_get_post_row(post)

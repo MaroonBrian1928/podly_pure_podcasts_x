@@ -31,6 +31,7 @@ INA / AUDIO TAG GUIDANCE:
 - A speaker who appears only briefly can be a weak ad hint, but never use speaker novelty alone to mark an ad.
 - Music between content sections without sponsor language is usually a segment transition, not an ad.
 - [MUSIC] is a supporting boundary cue, not proof of an ad by itself.
+- If a [MUSIC] region is sandwiched between transcript segments that are clearly part of the same ad block, treat the music region as part of that ad block for continuity.
 - [SILENCE] can indicate a break, but it is not ad evidence on its own.
 - [NOENERGY] can support boundary detection around ad entrances and exits, but it is not ad evidence on its own.
 - [SILENCE] and [NOENERGY] without sponsor language usually indicate a pause, edit, or transition rather than advertisement content.
@@ -44,6 +45,7 @@ DECISION RULES:
 5) Prefer labeling as content unless multiple strong ad cues appear with clear external branding.
 6) Speaker labels: some segments may include [speaker=...] metadata. Treat a brief switch to a less-common speaker as only a weak ad hint; do not mark ads from speaker changes alone because host-read ads and guest segments are common.
 7) Transition handling: when confidence shifts near an ad entrance or exit, keep the uncertain edge segments in the ad block if the surrounding context supports it, but lower their confidence accordingly.
+8) Output anchor rule: use transcript segment timestamps for ad_segments. Audio markers help with continuity, but if a [MUSIC], [SILENCE], or [NOENERGY] region falls between speech lines, anchor your prediction to the surrounding transcript speech segments rather than inventing standalone timestamps inside the gap.
 
 This transcript excerpt is broken into segments starting with a timestamp [X] (seconds), and some lines may also include optional [speaker=Y], [MUSIC], [SILENCE], or [NOENERGY] metadata. Output every segment that is advertisement content.
 

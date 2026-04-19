@@ -2,6 +2,7 @@ import logging
 import math
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import litellm
@@ -12,7 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy import and_
 
 from app.extensions import db
-from app.models import Identification, ModelCall, Post, TranscriptSegment
+from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
 from app.writer.client import writer_client
 from podcast_processor.boundary_refiner import BoundaryRefiner
 from podcast_processor.cue_detector import CueDetector
@@ -26,6 +27,7 @@ from podcast_processor.model_output import (
     clean_and_parse_model_output,
 )
 from podcast_processor.prompt import (
+    build_prompt_audio_markers,
     build_speaker_context_for_prompt,
     transcript_excerpt_for_prompt,
 )
@@ -693,6 +695,10 @@ class AdClassifier:
             )
             for db_seg in all_transcript_segments
         ]
+        audio_markers = self._load_chunk_audio_markers(
+            post=post,
+            current_chunk_db_segments=current_chunk_db_segments,
+        )
 
         return user_prompt_template.render(
             podcast_title=post.title,
@@ -702,8 +708,69 @@ class AdClassifier:
                 segments=temp_pydantic_segments_for_prompt,
                 includes_start=includes_start,
                 includes_end=includes_end,
+                audio_markers=audio_markers,
             ),
         )
+
+    def _load_chunk_audio_markers(
+        self,
+        *,
+        post: Post,
+        current_chunk_db_segments: list[TranscriptSegment],
+    ) -> list[Any]:
+        if not current_chunk_db_segments or getattr(post, "id", None) is None:
+            return []
+
+        chunk_start = float(current_chunk_db_segments[0].start_time)
+        chunk_end = float(current_chunk_db_segments[-1].end_time)
+
+        try:
+            audio_segments = (
+                self.db_session.query(AudioSegment)
+                .filter(
+                    AudioSegment.post_id == post.id,
+                    AudioSegment.end_time >= chunk_start,
+                    AudioSegment.start_time <= chunk_end,
+                )
+                .order_by(AudioSegment.start_time.asc())
+                .all()
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.warning(
+                "Failed to load INA audio markers for prompt on post %s",
+                post.id,
+                exc_info=True,
+            )
+            return []
+
+        if not isinstance(audio_segments, list):
+            return []
+
+        clipped_segments: list[Any] = []
+        for audio_segment in audio_segments:
+            start_time = getattr(audio_segment, "start_time", None)
+            end_time = getattr(audio_segment, "end_time", None)
+            if start_time is None or end_time is None:
+                continue
+
+            try:
+                clipped_start = max(float(start_time), chunk_start)
+                clipped_end = min(float(end_time), chunk_end)
+            except (TypeError, ValueError):
+                continue
+
+            if clipped_end <= clipped_start:
+                continue
+
+            clipped_segments.append(
+                SimpleNamespace(
+                    start_time=clipped_start,
+                    end_time=clipped_end,
+                    label=getattr(audio_segment, "label", None),
+                )
+            )
+
+        return build_prompt_audio_markers(clipped_segments)
 
     def _get_or_create_model_call(
         self,

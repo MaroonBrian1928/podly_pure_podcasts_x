@@ -1259,6 +1259,133 @@ def test_post_stats_include_audio_segments(app):
     ]
 
 
+def test_post_stats_bridge_music_only_gap_into_ad_blocks(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-audio-bridge-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Audio Bridge Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        llm_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=6,
+            last_segment_sequence_num=10,
+            model_name="groq/openai/gpt-oss-120b",
+            prompt="Classify ads",
+            status="success",
+        )
+        ina_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            model_name="ina:speech_music_noise",
+            prompt="INA speech segmenter analysis",
+            status="success",
+        )
+        db.session.add_all([llm_call, ina_call])
+        db.session.commit()
+
+        transcript_segments = [
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=8,
+                start_time=27.3,
+                end_time=29.0,
+                text="No such thing.",
+                speaker_label="SPEAKER_01",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=9,
+                start_time=40.3,
+                end_time=41.6,
+                text="This is an iHeart Podcast.",
+                speaker_label="SPEAKER_12",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=10,
+                start_time=42.8,
+                end_time=43.7,
+                text="Guaranteed human.",
+                speaker_label="SPEAKER_12",
+            ),
+        ]
+        db.session.add_all(transcript_segments)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                Identification(
+                    transcript_segment_id=transcript_segments[0].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.98,
+                ),
+                Identification(
+                    transcript_segment_id=transcript_segments[1].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.97,
+                ),
+                Identification(
+                    transcript_segment_id=transcript_segments[2].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.97,
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=27.4,
+                    end_time=39.0,
+                    label="music",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=39.0,
+                    end_time=40.2,
+                    label="noEnergy",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=41.1,
+                    end_time=42.6,
+                    label="music",
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    client = app.test_client()
+    response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["ad_blocks"] == [
+        {
+            "start_time": 27.3,
+            "end_time": 43.7,
+        }
+    ]
+
+
 def test_post_stats_exposes_retry_count_separately_from_attempt_count(app):
     app.testing = True
     app.register_blueprint(post_bp)

@@ -1,11 +1,22 @@
+from dataclasses import dataclass
+from typing import Any
+
 from podcast_processor.cue_detector import CueDetector
 from podcast_processor.model_output import AdSegmentPrediction, AdSegmentPredictionList
 from podcast_processor.transcribe import Segment
+from shared.audio_segment_utils import prompt_audio_marker_label
 
 DEFAULT_SYSTEM_PROMPT_PATH = "src/system_prompt.txt"
 DEFAULT_USER_PROMPT_TEMPLATE_PATH = "src/user_prompt.jinja"
 
 _cue_detector = CueDetector()
+
+
+@dataclass(frozen=True)
+class PromptAudioMarker:
+    start: float
+    end: float
+    label: str
 
 
 def _format_segment_prefix(segment: Segment) -> str:
@@ -15,12 +26,63 @@ def _format_segment_prefix(segment: Segment) -> str:
     return prefix
 
 
+def build_prompt_audio_markers(audio_segments: list[Any]) -> list[PromptAudioMarker]:
+    markers: list[PromptAudioMarker] = []
+
+    for audio_segment in audio_segments:
+        label = prompt_audio_marker_label(getattr(audio_segment, "label", None))
+        if label is None:
+            continue
+
+        start_raw = getattr(audio_segment, "start_time", None)
+        end_raw = getattr(audio_segment, "end_time", None)
+        if start_raw is None or end_raw is None:
+            continue
+
+        try:
+            start_time = float(start_raw)
+            end_time = float(end_raw)
+        except (TypeError, ValueError):
+            continue
+
+        if end_time <= start_time:
+            continue
+
+        markers.append(PromptAudioMarker(start=start_time, end=end_time, label=label))
+
+    return markers
+
+
 def transcript_excerpt_for_prompt(
-    segments: list[Segment], includes_start: bool, includes_end: bool
+    segments: list[Segment],
+    includes_start: bool,
+    includes_end: bool,
+    audio_markers: list[PromptAudioMarker] | None = None,
 ) -> str:
+    entries: list[tuple[float, int, str]] = []
+
+    for audio_marker in audio_markers or []:
+        duration_seconds = max(0.0, float(audio_marker.end) - float(audio_marker.start))
+        entries.append(
+            (
+                float(audio_marker.start),
+                0,
+                f"[{audio_marker.start}] [{audio_marker.label}] ({duration_seconds:.1f}s)",
+            )
+        )
+
+    for segment in segments:
+        entries.append(
+            (
+                float(segment.start),
+                1,
+                f"{_format_segment_prefix(segment)} "
+                f"{_cue_detector.highlight_cues(segment.text)}",
+            )
+        )
+
     excerpts = [
-        f"{_format_segment_prefix(segment)} {_cue_detector.highlight_cues(segment.text)}"
-        for segment in segments
+        entry[2] for entry in sorted(entries, key=lambda item: (item[0], item[1]))
     ]
     if includes_start:
         excerpts.insert(0, "[TRANSCRIPT START]")

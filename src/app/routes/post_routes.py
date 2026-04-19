@@ -52,6 +52,10 @@ from app.writer.client import writer_client
 from podcast_processor.chapter_filter import parse_filter_strings
 from podcast_processor.transcription_manager import TranscriptionManager
 from shared import defaults as DEFAULTS
+from shared.audio_segment_utils import (
+    bridge_ad_windows_with_audio,
+    extract_audio_windows,
+)
 from shared.processing_paths import (
     get_in_root,
     get_instance_dir,
@@ -748,6 +752,12 @@ def api_post_stats(p_guid: str) -> flask.Response:
 
     # Calculate ad blocks and statistics for LLM-based processing
     ad_windows_source = refined_windows or ad_windows_from_segments
+    audio_windows = extract_audio_windows(audio_segments)
+    if audio_windows:
+        ad_windows_source = bridge_ad_windows_with_audio(
+            ad_windows_source,
+            audio_windows,
+        )
     ad_blocks = merge_time_windows(ad_windows_source, gap_seconds=1.0)
     ad_time_seconds = sum(end - start for start, end in ad_blocks if end > start)
 

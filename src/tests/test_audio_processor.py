@@ -5,7 +5,14 @@ import pytest
 from flask import Flask
 
 from app.extensions import db
-from app.models import Feed, Identification, Post, TranscriptSegment
+from app.models import (
+    AudioSegment,
+    Feed,
+    Identification,
+    ModelCall,
+    Post,
+    TranscriptSegment,
+)
 from podcast_processor.audio_processor import AudioProcessor
 from shared.config import Config
 from shared.test_utils import create_standard_test_config
@@ -194,3 +201,134 @@ def test_process_audio(
             # it is within the minimum separation threshold of the episode end.
             assert removed_segments == [(5000, 30000)]
             mock_clip.assert_called_once()
+
+
+def test_get_ad_segments_bridges_music_only_gap_with_ina_markers(app: Flask) -> None:
+    with app.app_context():
+        test_config = create_standard_test_config()
+        test_config.output.min_ad_segment_separation_seconds = 5
+        processor = AudioProcessor(
+            config=test_config,
+            logger=logging.getLogger("test_audio_processor"),
+            db_session=db.session,
+        )
+
+        feed = Feed(title="Test Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="bridge-audio-guid",
+            title="Bridge Audio Episode",
+            download_url="https://example.com/audio.mp3",
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        llm_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=6,
+            last_segment_sequence_num=10,
+            model_name="groq/openai/gpt-oss-120b",
+            prompt="Classify ads",
+            status="success",
+        )
+        ina_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            model_name="ina:speech_music_noise",
+            prompt="INA speech segmenter analysis",
+            status="success",
+        )
+        db.session.add_all([llm_call, ina_call])
+        db.session.commit()
+
+        segments = [
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=6,
+                start_time=26.0,
+                end_time=26.5,
+                text="There's no such thing.",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=8,
+                start_time=27.3,
+                end_time=29.0,
+                text="No such thing.",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=9,
+                start_time=40.3,
+                end_time=41.6,
+                text="This is an iHeart Podcast.",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=10,
+                start_time=42.8,
+                end_time=43.7,
+                text="Guaranteed human.",
+            ),
+        ]
+        db.session.add_all(segments)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                Identification(
+                    transcript_segment_id=segments[0].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.98,
+                ),
+                Identification(
+                    transcript_segment_id=segments[1].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.98,
+                ),
+                Identification(
+                    transcript_segment_id=segments[2].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.97,
+                ),
+                Identification(
+                    transcript_segment_id=segments[3].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.97,
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=27.4,
+                    end_time=39.0,
+                    label="music",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=39.0,
+                    end_time=40.2,
+                    label="noEnergy",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=41.1,
+                    end_time=42.6,
+                    label="music",
+                ),
+            ]
+        )
+        db.session.commit()
+
+        segments = processor.get_ad_segments(post)
+
+        assert segments == [(26.0, 43.7)]
