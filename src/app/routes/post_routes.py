@@ -551,9 +551,12 @@ def api_post_stats(p_guid: str) -> flask.Response:
     # so that a failed re-attempt doesn't mask the earlier successful run.  For
     # episodes that are still in progress, fall back to any job to show elapsed time.
     if post.processed_audio_path is not None:
+        # Include "skipped" — a legitimate terminal status when audio was
+        # recovered from disk rather than re-processed from scratch.
         latest_job = (
-            ProcessingJob.query.filter_by(post_guid=post.guid, status="completed")
-            .order_by(ProcessingJob.created_at.desc())
+            ProcessingJob.query.filter_by(post_guid=post.guid)
+            .filter(ProcessingJob.status.in_(("completed", "skipped")))
+            .order_by(ProcessingJob.completed_at.desc().nullslast())
             .first()
         )
     else:
@@ -1324,12 +1327,12 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
     billing_user_id: int | None = None
     if is_auth_enabled():
         feed = db.session.get(Feed, post.feed_id)
-        subscribers = (
+        earliest_subscriber = (
             UserFeed.query.filter_by(feed_id=post.feed_id)
             .order_by(UserFeed.created_at)
-            .all()
+            .first()
         )
-        if feed is None or not subscribers:
+        if feed is None or earliest_subscriber is None:
             logger.warning(
                 "Process-request denied for %s: feed has no active subscribers", p_guid
             )
@@ -1340,7 +1343,7 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
             )
             return flask.make_response(page, 403)
         # Attribute processing cost to the earliest (primary) subscriber.
-        billing_user_id = subscribers[0].user_id
+        billing_user_id = earliest_subscriber.user_id
 
     # Already fully processed — nothing to do.
     if post.processed_audio_path is not None:

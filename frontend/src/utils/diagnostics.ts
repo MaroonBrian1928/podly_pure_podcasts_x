@@ -259,6 +259,39 @@ export const initFrontendDiagnostics = () => {
             stack: err.stack,
           };
         }
+
+        // Plain-object rejections (e.g. `Promise.reject({ status: 401 })`) are
+        // treated with the same safe-field allow-list as Error instances so that
+        // arbitrary response bodies or user data can't slip into diagnostics.
+        if (err && typeof err === 'object') {
+          if (seen.has(err as object)) return '[CircularObject]';
+          seen.add(err as object);
+
+          const obj = err as {
+            code?: unknown;
+            message?: unknown;
+            name?: unknown;
+            status?: unknown;
+            statusText?: unknown;
+            response?: { status?: unknown; statusText?: unknown };
+            config?: { method?: unknown; url?: unknown };
+            cause?: unknown;
+          };
+
+          return {
+            errorType: typeof obj.name === 'string' ? obj.name : 'Object',
+            ...(typeof obj.message === 'string' ? { message: obj.message } : {}),
+            ...(typeof obj.code === 'string' ? { code: obj.code } : {}),
+            ...(typeof obj.status === 'number' ? { httpStatus: obj.status } : {}),
+            ...(typeof obj.statusText === 'string' ? { httpStatusText: obj.statusText } : {}),
+            ...(typeof obj.response?.status === 'number' ? { httpStatus: obj.response.status } : {}),
+            ...(typeof obj.response?.statusText === 'string' ? { httpStatusText: obj.response.statusText } : {}),
+            ...(typeof obj.config?.method === 'string' ? { requestMethod: obj.config.method } : {}),
+            ...(typeof obj.config?.url === 'string' ? { requestUrl: obj.config.url } : {}),
+            ...(obj.cause !== undefined ? { cause: extractError(obj.cause, seen, depth + 1) } : {}),
+          };
+        }
+
         return err;
       };
 
