@@ -19,7 +19,7 @@ RUN set -e && \
 
 # Backend stage
 FROM ${BASE_IMAGE} AS backend
-COPY --from=ghcr.io/astral-sh/uv:0.10.2 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
 # Environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
