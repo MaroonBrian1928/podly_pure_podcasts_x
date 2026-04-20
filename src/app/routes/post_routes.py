@@ -1295,8 +1295,8 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
 
     Authenticated via a per-episode HMAC token embedded in the RSS
     description — no user login required.  Returns a minimal HTML page
-    that auto-closes after ~1.5 s so the user is returned to their
-    podcast app immediately.
+    that confirms processing has started; users return to their podcast
+    app using the in-app browser's native controls.
     """
     token = request.args.get("token", "")
     if not verify_process_token(p_guid, token):
