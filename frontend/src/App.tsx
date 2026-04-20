@@ -64,10 +64,15 @@ function AppShell() {
     queryKey: ['job-manager', 'status', 'nav'],
     queryFn: jobsApi.getJobManagerStatus,
     enabled: !requireAuth || user?.role === 'admin',
-    refetchInterval: 10_000,
+    refetchInterval: (query) => {
+      const run = (query.state.data as typeof jobManagerStatus)?.run;
+      const active = (run?.running_jobs ?? 0) + (run?.queued_jobs ?? 0);
+      return active > 0 ? 15_000 : 60_000;
+    },
     retry: false,
   });
-  const runningJobsCount = jobManagerStatus?.run?.running_jobs ?? 0;
+  const activeJobsCount = (jobManagerStatus?.run?.running_jobs ?? 0) + (jobManagerStatus?.run?.queued_jobs ?? 0);
+  const activeJobsLabel = activeJobsCount > 99 ? '99+' : String(activeJobsCount);
 
   // Close mobile menu on route change
   useEffect(() => {
@@ -150,11 +155,11 @@ function AppShell() {
                 </Link>
               )}
               {showJobsLink && (
-                <Link to="/jobs" className="relative text-sm font-medium text-gray-700 hover:text-gray-900">
+                <Link to="/jobs" className="flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-gray-900">
                   Jobs
-                  {runningJobsCount > 0 && (
-                    <span className="absolute -top-2 -right-3 flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">
-                      {runningJobsCount}
+                  {activeJobsCount > 0 && (
+                    <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 dark:bg-red-600 text-white text-[10px] font-bold leading-none">
+                      {activeJobsLabel}
                     </span>
                   )}
                 </Link>
@@ -222,12 +227,13 @@ function AppShell() {
 
               <ThemeToggle />
 
-              {showJobsLink && runningJobsCount > 0 && (
+              {showJobsLink && activeJobsCount > 0 && (
                 <Link
                   to="/jobs"
-                  className="flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold leading-none"
+                  aria-label={`${activeJobsCount} active jobs`}
+                  className="flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 dark:bg-red-600 text-white text-[11px] font-bold leading-none"
                 >
-                  {runningJobsCount}
+                  {activeJobsLabel}
                 </Link>
               )}
 
@@ -272,9 +278,9 @@ function AppShell() {
                         className="flex items-center justify-between px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
                       >
                         Jobs
-                        {runningJobsCount > 0 && (
-                          <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">
-                            {runningJobsCount}
+                        {activeJobsCount > 0 && (
+                          <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 dark:bg-red-600 text-white text-[10px] font-bold leading-none">
+                            {activeJobsLabel}
                           </span>
                         )}
                       </Link>
