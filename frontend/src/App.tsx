@@ -12,7 +12,7 @@ import LoginPage from './pages/LoginPage';
 import LandingPage from './pages/LandingPage';
 import BillingPage from './pages/BillingPage';
 import AudioPlayer from './components/AudioPlayer';
-import { billingApi } from './services/api';
+import { billingApi, jobsApi } from './services/api';
 import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsContext';
 import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
@@ -59,6 +59,15 @@ function AppShell() {
     enabled: !!user && requireAuth && isAuthenticated,
     retry: false,
   });
+
+  const { data: jobManagerStatus } = useQuery({
+    queryKey: ['job-manager', 'status', 'nav'],
+    queryFn: jobsApi.getJobManagerStatus,
+    enabled: !requireAuth || user?.role === 'admin',
+    refetchInterval: 10_000,
+    retry: false,
+  });
+  const runningJobsCount = jobManagerStatus?.run?.running_jobs ?? 0;
 
   // Close mobile menu on route change
   useEffect(() => {
@@ -141,8 +150,13 @@ function AppShell() {
                 </Link>
               )}
               {showJobsLink && (
-                <Link to="/jobs" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <Link to="/jobs" className="relative text-sm font-medium text-gray-700 hover:text-gray-900">
                   Jobs
+                  {runningJobsCount > 0 && (
+                    <span className="absolute -top-2 -right-3 flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">
+                      {runningJobsCount}
+                    </span>
+                  )}
                 </Link>
               )}
               {showConfigLink && (
@@ -208,6 +222,15 @@ function AppShell() {
 
               <ThemeToggle />
 
+              {showJobsLink && runningJobsCount > 0 && (
+                <Link
+                  to="/jobs"
+                  className="flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold leading-none"
+                >
+                  {runningJobsCount}
+                </Link>
+              )}
+
               {/* Hamburger Button */}
               <div className="relative" ref={mobileMenuRef}>
                 <button
@@ -246,9 +269,14 @@ function AppShell() {
                     {showJobsLink && (
                       <Link
                         to="/jobs"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        className="flex items-center justify-between px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
                       >
                         Jobs
+                        {runningJobsCount > 0 && (
+                          <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">
+                            {runningJobsCount}
+                          </span>
+                        )}
                       </Link>
                     )}
                     {showConfigLink && (
