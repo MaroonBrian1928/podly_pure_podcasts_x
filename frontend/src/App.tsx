@@ -13,6 +13,7 @@ import LandingPage from './pages/LandingPage';
 import BillingPage from './pages/BillingPage';
 import AudioPlayer from './components/AudioPlayer';
 import { billingApi, jobsApi } from './services/api';
+import type { JobManagerStatus } from './types';
 import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsContext';
 import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
@@ -65,7 +66,7 @@ function AppShell() {
     queryFn: jobsApi.getJobManagerStatus,
     enabled: !requireAuth || user?.role === 'admin',
     refetchInterval: (query) => {
-      const run = (query.state.data as typeof jobManagerStatus)?.run;
+      const run = (query.state.data as JobManagerStatus | undefined)?.run;
       const active = (run?.running_jobs ?? 0) + (run?.queued_jobs ?? 0);
       return active > 0 ? 15_000 : 60_000;
     },
