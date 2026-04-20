@@ -4,6 +4,7 @@ import os
 import shutil
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,7 @@ class PodcastProcessor:
         cached_feed_title = post.feed.title
         cached_job_id = job.id
         cached_current_step = job.current_step
+        cached_started_at = job.started_at
         cached_ad_detection_strategy = getattr(
             post.feed, "ad_detection_strategy", "llm"
         )
@@ -269,6 +271,7 @@ class PodcastProcessor:
                     cached_enable_llm_chapter_fallback_tagging,
                     feed_title=cached_feed_title or "",
                     post_title=cached_post_title or "",
+                    started_at=cached_started_at,
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
@@ -299,6 +302,7 @@ class PodcastProcessor:
                 success=False,
                 error_message=error_msg,
                 tag_label=self.config.feed_tag_label,
+                processing_time_seconds=self._elapsed_seconds(cached_started_at),
             )
             raise
 
@@ -320,6 +324,7 @@ class PodcastProcessor:
                 success=False,
                 error_message=f"Unexpected error: {e!s}",
                 tag_label=self.config.feed_tag_label,
+                processing_time_seconds=self._elapsed_seconds(cached_started_at),
             )
             raise
 
@@ -386,6 +391,7 @@ class PodcastProcessor:
         enable_llm_chapter_fallback_tagging: bool | None = None,
         feed_title: str = "",
         post_title: str = "",
+        started_at: datetime | None = None,
     ) -> None:
         """
         Perform the main processing steps based on the ad detection strategy.
@@ -399,16 +405,17 @@ class PodcastProcessor:
             chapter_filter_strings: Comma-separated filter strings for chapter strategy
             feed_title: Cached feed title for the success notification
             post_title: Cached post title for the success notification
+            started_at: Cached job start time for processing time calculation
         """
         if ad_detection_strategy == "chapter":
             self._perform_chapter_based_processing(
                 post, job, processed_audio_path, cancel_callback, chapter_filter_strings,
-                feed_title=feed_title, post_title=post_title,
+                feed_title=feed_title, post_title=post_title, started_at=started_at,
             )
         elif ad_detection_strategy == "chapter_insert":
             self._perform_chapter_insertion_only_processing(
                 post, job, processed_audio_path, cancel_callback,
-                feed_title=feed_title, post_title=post_title,
+                feed_title=feed_title, post_title=post_title, started_at=started_at,
             )
         else:
             self._perform_llm_based_processing(
@@ -419,6 +426,7 @@ class PodcastProcessor:
                 enable_llm_chapter_fallback_tagging,
                 feed_title=feed_title,
                 post_title=post_title,
+                started_at=started_at,
             )
 
     def _resolve_llm_chapter_fallback_tagging_enabled(
@@ -449,6 +457,7 @@ class PodcastProcessor:
         enable_llm_chapter_fallback_tagging: bool | None = None,
         feed_title: str = "",
         post_title: str = "",
+        started_at: datetime | None = None,
     ) -> None:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
@@ -583,6 +592,7 @@ class PodcastProcessor:
             chapter_data=chapter_data_json,
             feed_title=feed_title,
             post_title=post_title,
+            started_at=started_at,
         )
 
     def _perform_chapter_insertion_only_processing(
@@ -593,6 +603,7 @@ class PodcastProcessor:
         cancel_callback: Callable[[], bool] | None = None,
         feed_title: str = "",
         post_title: str = "",
+        started_at: datetime | None = None,
     ) -> None:
         """
         Resolve and write chapters without ad detection or ad removal.
@@ -684,6 +695,7 @@ class PodcastProcessor:
             chapter_data=chapter_data_json,
             feed_title=feed_title,
             post_title=post_title,
+            started_at=started_at,
         )
 
     def _refine_transcript_sourced_chapters(
@@ -748,6 +760,13 @@ class PodcastProcessor:
         return chapters_for_output
 
     @staticmethod
+    def _elapsed_seconds(started_at: datetime | None) -> float | None:
+        if started_at is None:
+            return None
+        now = datetime.now(UTC).replace(tzinfo=None)
+        return round((now - started_at).total_seconds(), 1)
+
+    @staticmethod
     def _segment_overlaps_removed_audio(
         segment_start_ms: int,
         segment_end_ms: int,
@@ -808,6 +827,7 @@ class PodcastProcessor:
         chapter_filter_strings: str | None = None,
         feed_title: str = "",
         post_title: str = "",
+        started_at: datetime | None = None,
     ) -> None:
         """
         Perform chapter-based ad detection: read chapters, filter by title, remove ads.
@@ -900,7 +920,7 @@ class PodcastProcessor:
 
         self._finalize_processing(
             post, job, processed_audio_path, chapter_data=json.dumps(chapter_data),
-            feed_title=feed_title, post_title=post_title,
+            feed_title=feed_title, post_title=post_title, started_at=started_at,
         )
 
     def _finalize_processing(
@@ -911,12 +931,13 @@ class PodcastProcessor:
         chapter_data: str | None = None,
         feed_title: str = "",
         post_title: str = "",
+        started_at: datetime | None = None,
     ) -> None:
         """
         Finalize processing: update database, mark job complete, and send notification.
 
-        feed_title and post_title are used for the success notification; they must be
-        passed in as cached strings because the ORM session may be expired by this point.
+        feed_title, post_title, and started_at must be passed as cached values because
+        the ORM session may be expired by this point.
         """
         # Update the database with the processed audio path
         self._remove_unprocessed_audio(post)
@@ -946,6 +967,7 @@ class PodcastProcessor:
             episode_title=post_title,
             success=True,
             tag_label=self.config.feed_tag_label,
+            processing_time_seconds=self._elapsed_seconds(started_at),
         )
 
     def _raise_if_cancelled(
