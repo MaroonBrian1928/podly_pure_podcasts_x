@@ -1274,7 +1274,7 @@ def download_original_post_legacy(p_guid: str) -> flask.Response:
 # ---------------------------------------------------------------------------
 
 
-def _process_page(icon: str, heading: str, body: str, title: str | None = None, close: bool = True) -> str:
+def _process_page(icon: str, heading: str, body: str, title: str | None = None) -> str:
     """Render process_page.html via Jinja2.
 
     All user-supplied strings (icon, heading, body, title) are auto-escaped
@@ -1286,7 +1286,6 @@ def _process_page(icon: str, heading: str, body: str, title: str | None = None, 
         heading=heading,
         body=body,
         title=title,
-        close=close,
     )
 
 
@@ -1296,15 +1295,14 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
 
     Authenticated via a per-episode HMAC token embedded in the RSS
     description — no user login required.  Returns a minimal HTML page
-    that auto-closes after ~1.5 s so the user is returned to their
-    podcast app immediately.
+    that confirms processing has started; users return to their podcast
+    app using the in-app browser's native controls.
     """
     token = request.args.get("token", "")
     if not verify_process_token(p_guid, token):
         page = _process_page(
             "🔒", "Invalid link",
             "This link is not valid. Please refresh your podcast feed and try again.",
-            close=False,
         )
         return flask.make_response(page, 403)
 
@@ -1313,7 +1311,6 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
         page = _process_page(
             "❓", "Episode not found",
             "Could not find this episode. It may have been removed.",
-            close=True,
         )
         return flask.make_response(page, 404)
 
@@ -1339,7 +1336,6 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
             page = _process_page(
                 "🔒", "Feed not available",
                 "This feed no longer has active subscribers.",
-                close=False,
             )
             return flask.make_response(page, 403)
         # Attribute processing cost to the earliest (primary) subscriber.
@@ -1384,6 +1380,5 @@ def request_process_episode(p_guid: str) -> ResponseReturnValue:
             "⚠️", "Something went wrong",
             "Could not start processing. Please try again or use the Podly web app.",
             title=post_title,
-            close=False,
         )
         return flask.make_response(page, 500)
