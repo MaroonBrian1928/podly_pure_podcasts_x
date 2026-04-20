@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 def _format_processing_time(seconds: float | None) -> str | None:
-    if seconds is None:
+    if seconds is None or seconds < 0:
         return None
-    minutes, secs = divmod(int(seconds), 60)
+    minutes, secs = divmod(int(round(seconds)), 60)
     if minutes:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
