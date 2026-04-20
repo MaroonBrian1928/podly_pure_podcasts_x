@@ -20,6 +20,15 @@ import urllib.request
 logger = logging.getLogger(__name__)
 
 
+def _format_processing_time(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def send_episode_notification(
     *,
     apprise_url: str,
@@ -29,6 +38,7 @@ def send_episode_notification(
     success: bool,
     error_message: str | None = None,
     tag_label: str,
+    processing_time_seconds: float | None = None,
 ) -> None:
     """Send an episode processing notification via the Apprise API.
 
@@ -52,18 +62,18 @@ def send_episode_notification(
     notify_url = apprise_url.rstrip("/") + "/notify/" + safe_key
 
     label = tag_label.strip()
-    prefix = f"[{label}] " if label else ""
+    status_icon = "✅" if success else "⚠️"
+    prefix = f"{label}: " if label else ""
+    title = f"{prefix}{status_icon} {feed_title}"
 
-    if success:
-        title = f"{prefix}Processed: {feed_title}"
-        body = f"Episode ready: {episode_title}"
-        msg_type = "success"
-    else:
-        title = f"{prefix}Processing failed: {feed_title}"
-        body = f"Episode: {episode_title}"
-        if error_message:
-            body += f"\nError: {error_message}"
-        msg_type = "failure"
+    time_str = _format_processing_time(processing_time_seconds)
+    body = f"Episode: {episode_title}"
+    if time_str:
+        body += f" | Processing time: {time_str}"
+    if not success and error_message:
+        body += f"\nError: {error_message}"
+
+    msg_type = "success" if success else "failure"
 
     payload = json.dumps({"title": title, "body": body, "type": msg_type}).encode()
 

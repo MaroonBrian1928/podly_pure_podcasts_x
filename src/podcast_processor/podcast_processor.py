@@ -4,6 +4,7 @@ import os
 import shutil
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -291,6 +292,8 @@ class PodcastProcessor:
             self.status_manager.update_job_status(
                 job, "failed", cached_current_step, error_msg
             )
+            _now = datetime.now(UTC).replace(tzinfo=None)
+            _pt = round((_now - job.started_at).total_seconds(), 1) if job.started_at else None
             send_episode_notification(
                 apprise_url=self.config.notification_apprise_url,
                 apprise_key=self.config.notification_apprise_key,
@@ -299,6 +302,7 @@ class PodcastProcessor:
                 success=False,
                 error_message=error_msg,
                 tag_label=self.config.feed_tag_label,
+                processing_time_seconds=_pt,
             )
             raise
 
@@ -312,6 +316,8 @@ class PodcastProcessor:
             self.status_manager.update_job_status(
                 job, "failed", cached_current_step, f"Unexpected error: {e!s}"
             )
+            _now = datetime.now(UTC).replace(tzinfo=None)
+            _pt = round((_now - job.started_at).total_seconds(), 1) if job.started_at else None
             send_episode_notification(
                 apprise_url=self.config.notification_apprise_url,
                 apprise_key=self.config.notification_apprise_key,
@@ -320,6 +326,7 @@ class PodcastProcessor:
                 success=False,
                 error_message=f"Unexpected error: {e!s}",
                 tag_label=self.config.feed_tag_label,
+                processing_time_seconds=_pt,
             )
             raise
 
@@ -939,6 +946,8 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job, "completed", 4, "Processing complete", 100.0
         )
+        _now = datetime.now(UTC).replace(tzinfo=None)
+        _pt = round((_now - job.started_at).total_seconds(), 1) if job.started_at else None
         send_episode_notification(
             apprise_url=self.config.notification_apprise_url,
             apprise_key=self.config.notification_apprise_key,
@@ -946,6 +955,7 @@ class PodcastProcessor:
             episode_title=post_title,
             success=True,
             tag_label=self.config.feed_tag_label,
+            processing_time_seconds=_pt,
         )
 
     def _raise_if_cancelled(
