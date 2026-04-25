@@ -180,11 +180,37 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
 
             partial_errors = [e for e in [start_err, end_err] if e]
 
+            if refined_start >= float(ad_end):
+                refined_start = float(ad_start)
+                start_changed = False
+                start_reason = ""
+                partial_errors.append("start_out_of_window")
+
+            if refined_end <= float(ad_start):
+                refined_end = float(ad_end)
+                end_changed = False
+                end_reason = ""
+                partial_errors.append("end_out_of_window")
+
             # If caller didn't provide reasons, default to unchanged for untouched sides.
             start_reason = self._default_reason(start_reason, changed=start_changed)
             end_reason = self._default_reason(end_reason, changed=end_changed)
 
-            # Guardrail: never return an invalid window.
+            # Guardrail: never return an invalid window. If only one side caused
+            # the issue, keep the valid side and revert the other to the
+            # original detection instead of failing the whole refinement.
+            if refined_end <= refined_start:
+                if start_changed and not end_changed:
+                    refined_start = float(ad_start)
+                    start_changed = False
+                    start_reason = ""
+                    partial_errors.append("start_invalid_window")
+                elif end_changed and not start_changed:
+                    refined_end = float(ad_end)
+                    end_changed = False
+                    end_reason = ""
+                    partial_errors.append("end_invalid_window")
+
             if refined_end <= refined_start:
                 self._update_model_call(
                     model_call_id,

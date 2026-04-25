@@ -1386,6 +1386,235 @@ def test_post_stats_bridge_music_only_gap_into_ad_blocks(app):
     ]
 
 
+def test_post_stats_expand_preroll_ad_block_with_edge_audio(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-preroll-edge-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Preroll Edge Episode",
+            refined_ad_boundaries=[
+                {
+                    "orig_start": 15.1,
+                    "orig_end": 65.4,
+                    "refined_start": 15.059,
+                    "refined_end": 65.374,
+                }
+            ],
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        llm_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=1,
+            model_name="gemini/gemini-3-flash-preview",
+            prompt="Classify ads",
+            status="success",
+        )
+        ina_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=2,
+            model_name="ina:speech_music_noise",
+            prompt="INA speech segmenter analysis",
+            status="success",
+        )
+        db.session.add_all([llm_call, ina_call])
+        db.session.commit()
+
+        transcript_segments = [
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=15.1,
+                end_time=21.1,
+                text="Ad segment",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=1,
+                start_time=57.0,
+                end_time=65.4,
+                text="Ad segment",
+            ),
+        ]
+        db.session.add_all(transcript_segments)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                Identification(
+                    transcript_segment_id=transcript_segments[0].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.98,
+                ),
+                Identification(
+                    transcript_segment_id=transcript_segments[1].id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.97,
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=0.0,
+                    end_time=6.96,
+                    label="speech",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=6.96,
+                    end_time=12.38,
+                    label="music",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    model_call_id=ina_call.id,
+                    start_time=12.38,
+                    end_time=30.06,
+                    label="speech",
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    client = app.test_client()
+    response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["ad_blocks"] == [
+        {
+            "start_time": 0.0,
+            "end_time": 65.4,
+        }
+    ]
+    assert payload["processing_stats"]["edited_ad_markers"] == [
+        {
+            "edited_start_time": 0.0,
+            "edited_end_time": 0.0,
+            "original_start_time": 0.0,
+            "original_end_time": 65.374,
+            "removed_duration_seconds": 65.374,
+        }
+    ]
+
+
+def test_post_stats_use_cut_ready_windows_with_unrefined_trailing_fragment(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-refined-plus-trailing-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Refined Plus Trailing Episode",
+            refined_ad_boundaries=[
+                {
+                    "orig_start": 15.1,
+                    "orig_end": 60.9,
+                    "refined_start": 15.059,
+                    "refined_end": 60.85,
+                }
+            ],
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        llm_call = ModelCall(
+            post_id=post.id,
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=2,
+            model_name="gemini/gemini-3-flash-preview",
+            prompt="Classify ads",
+            status="success",
+        )
+        db.session.add(llm_call)
+        db.session.commit()
+
+        transcript_segments = [
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=15.1,
+                end_time=21.1,
+                text="Ad segment",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=1,
+                start_time=57.0,
+                end_time=60.9,
+                text="Ad segment",
+            ),
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=2,
+                start_time=72.0,
+                end_time=75.0,
+                text="Ad segment",
+            ),
+        ]
+        db.session.add_all(transcript_segments)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                Identification(
+                    transcript_segment_id=segment.id,
+                    model_call_id=llm_call.id,
+                    label="ad",
+                    confidence=0.98,
+                )
+                for segment in transcript_segments
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    client = app.test_client()
+    response = client.get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["ad_blocks"] == [
+        {
+            "start_time": 15.1,
+            "end_time": 75.0,
+        }
+    ]
+    assert payload["processing_stats"]["edited_ad_markers"] == [
+        {
+            "edited_start_time": 15.059,
+            "edited_end_time": 15.059,
+            "original_start_time": 15.059,
+            "original_end_time": 75.0,
+            "removed_duration_seconds": 59.941,
+        }
+    ]
+
+
 def test_post_stats_exposes_retry_count_separately_from_attempt_count(app):
     app.testing = True
     app.register_blueprint(post_bp)
