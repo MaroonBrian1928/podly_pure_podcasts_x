@@ -12,10 +12,12 @@ from typing import Any
 
 import litellm
 from jinja2 import Template
+from sqlalchemy import case, func
 from sqlalchemy.orm import object_session
 
 from app.extensions import db
-from app.models import Post, ProcessingJob, TranscriptSegment
+from app.model_call_utils import whisper_model_call_filter
+from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
@@ -837,6 +839,30 @@ class PodcastProcessor:
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
 
+        # Fail the job if every LLM classification call failed (e.g. rate limit /
+        # service unavailable). Whisper transcription calls are excluded — only
+        # LLM ad-classification calls count. Without at least one successful
+        # classification call there are no identifications, so the episode would
+        # be "completed" with zero ads removed — silently wrong.
+        call_counts = self._get_llm_classification_model_call_counts(int(post.id))
+        if call_counts is None:
+            self.logger.debug(
+                "Skipping LLM classification model call status check for post %s "
+                "because no processor database session is available.",
+                post.id,
+            )
+        elif call_counts.total == 0:
+            self.logger.debug(
+                "No LLM classification model calls recorded for post %s — "
+                "no segments to classify or classification was skipped.",
+                post.id,
+            )
+        elif call_counts.successful == 0:
+            raise ProcessorException(
+                f"LLM classification failed: all {call_counts.total} model call(s) were "
+                "unsuccessful (rate limit or service unavailable). Reprocess to retry."
+            )
+
         # Step 4: Process audio (remove ad segments)
         self.status_manager.update_job_status(
             job, "running", 4, "Processing audio", 90.0
@@ -950,6 +976,25 @@ class PodcastProcessor:
             processed_audio_path,
             chapter_data=chapter_data_json,
             bleep_windows=bleep_windows,
+        )
+
+    def _get_llm_classification_model_call_counts(self, post_id: int) -> Any | None:
+        session = getattr(self, "db_session", None)
+        if session is None:
+            return None
+
+        return (
+            session.query(
+                func.count(ModelCall.id).label("total"),
+                func.count(case((ModelCall.status == "success", 1))).label(
+                    "successful"
+                ),
+            )
+            .filter(
+                ModelCall.post_id == post_id,
+                ~whisper_model_call_filter(),
+            )
+            .one()
         )
 
     def _perform_chapter_insertion_only_processing(
