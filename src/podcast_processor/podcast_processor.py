@@ -11,8 +11,11 @@ import litellm
 from jinja2 import Template
 from sqlalchemy.orm import object_session
 
+from sqlalchemy import case
+
 from app.extensions import db
-from app.models import Post, ProcessingJob, TranscriptSegment
+from app.model_call_utils import whisper_model_call_filter
+from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
 from podcast_processor.audio import clip_segments_exact
@@ -439,6 +442,36 @@ class PodcastProcessor:
         # Step 3: Classify ad segments
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
+
+        # Fail the job if every LLM classification call failed (e.g. rate limit /
+        # service unavailable). Whisper transcription calls are excluded — only
+        # LLM ad-classification calls count. Without at least one successful
+        # classification call there are no identifications, so the episode would
+        # be "completed" with zero ads removed — silently wrong.
+        call_counts = (
+            db.session.query(
+                db.func.count(ModelCall.id).label("total"),
+                db.func.count(
+                    case((ModelCall.status == "success", 1))
+                ).label("successful"),
+            )
+            .filter(
+                ModelCall.post_id == post.id,
+                ~whisper_model_call_filter(),
+            )
+            .one()
+        )
+        if call_counts.total == 0:
+            self.logger.debug(
+                "No LLM classification model calls recorded for post %s — "
+                "no segments to classify or classification was skipped.",
+                post.id,
+            )
+        elif call_counts.successful == 0:
+            raise ProcessorException(
+                f"LLM classification failed: all {call_counts.total} model call(s) were "
+                "unsuccessful (rate limit or service unavailable). Reprocess to retry."
+            )
 
         # Step 4: Process audio (remove ad segments)
         self.status_manager.update_job_status(
