@@ -1,0 +1,93 @@
+# Remove Embedded Local Whisper And Simplify Docker To One Compose File
+
+## Summary
+Remove Podly’s embedded local Whisper support and collapse Docker packaging to a single CPU-only app image. There will be no `lite` build, no GPU variants, no separate compose overlays, and no in-container PyTorch/Whisper path. Local transcription remains supported by running a dedicated OpenAI-compatible transcription service and configuring Podly with `WHISPER_TYPE=remote`.
+
+## Backend And Config
+- Remove local Whisper runtime:
+  - Delete `LocalWhisperTranscriber`.
+  - Remove `LocalWhisperConfig`, `WHISPER_LOCAL_MODEL`, and active `"local"` whisper mode support.
+  - Remove the local transcriber branch from `TranscriptionManager`.
+  - Remove `openai-whisper` from `pyproject.toml`.
+
+- Reject stale local config:
+  - `WHISPER_TYPE=local` should fail with a clear message.
+  - DB/runtime `whisper_type="local"` should fail with a clear message.
+  - Old-style local fallback via `whisper_model` / `remote_whisper=False` should no longer produce local config.
+
+- Remove local settings persistence:
+  - Remove `WhisperSettings.local_model` from the model.
+  - Remove local model read/write/update/hydration paths.
+  - Keep historical migrations unchanged.
+  - After model changes, ask the user to run:
+    `./scripts/create_migration.sh "remove local whisper settings"`
+
+- Keep only intentional old-data compatibility:
+  - If needed, keep `local_*` matching in `whisper_model_call_filter()` only for historical ModelCall cleanup/stats, with a comment explaining it is not active support.
+
+## Docker And Scripts
+- Simplify dependency files:
+  - Delete `pyproject.lite.toml` and `uv.lite.lock`.
+  - Delete or simplify `scripts/generate_lockfiles.sh` so it only runs `uv lock`.
+  - Update any references to lite lock/project files.
+
+- Simplify `Dockerfile`:
+  - Remove `BASE_IMAGE`, CUDA/ROCM, `USE_GPU*`, and `LITE_BUILD` build args.
+  - Always use `python:3.11-slim`.
+  - Always install from `pyproject.toml` and `uv.lock`.
+  - Remove conditional full/lite install logic.
+  - Remove all explicit PyTorch install steps.
+
+- Collapse Compose files:
+  - Keep one `compose.yml`.
+  - Delete `compose.dev.cpu.yml`, `compose.dev.nvidia.yml`, and `compose.dev.rocm.yml`.
+  - The single service should include both:
+    - `image: ghcr.io/podly-pure-podcasts/podly-pure-podcasts:${BRANCH:-main-latest}`
+    - `build: { context: ., dockerfile: Dockerfile }`
+  - Keep existing volumes, `.env.local`, ports, UID/GID env, server threads, restart policy, and healthcheck.
+  - Remove `CUDA_VISIBLE_DEVICES` and all GPU build args/env.
+
+- Simplify `run_podly_docker.sh`:
+  - Remove GPU detection and flags: `--gpu`, `--cpu`, `--cuda`, `--rocm`.
+  - Remove `--lite`.
+  - Remove branch suffixes for `-lite`, `-gpu-nvidia`, and `-gpu-amd`.
+  - Production mode should use the single published tag and avoid local builds, e.g. pull/up with no build.
+  - Dev/rebuild mode should use the same `compose.yml` but run build/up with local build.
+  - Keep useful flags: `--build`, `--test-build`, `--dev`, `--rebuild`, `--production`, `--branch`, `--detach`.
+
+- Simplify publishing:
+  - Update `.github/workflows/docker-publish.yml` to build one standard image variant per architecture.
+  - Remove workflow inputs and matrix entries for lite, gpu-nvidia, and gpu-amd.
+  - Update `scripts/manual_publish.sh` to publish the single standard multi-arch image.
+
+## Frontend And Docs
+- Remove local Whisper UI:
+  - Remove `local` from the `WhisperConfig` TypeScript union.
+  - Remove local availability state/fetching and `/api/config/whisper-capabilities` usage.
+  - Remove local option and local model field from Whisper settings.
+  - Keep only `remote` and `groq` user-selectable modes.
+
+- Update docs:
+  - Remove all `--lite`, `--gpu`, CUDA, ROCM, and local Whisper Docker guidance.
+  - Remove beginner/docs claims that Docker includes local Whisper.
+  - Document the new path: use `WHISPER_TYPE=remote` with `WHISPER_REMOTE_BASE_URL` for `whisper-x-fastapi`, `speaches.ai`, or another OpenAI-compatible transcription endpoint.
+
+## Verification
+- Backend:
+  - `mise exec -- uv lock`
+  - `mise exec -- ./scripts/ci.sh`
+
+- Frontend:
+  - `cd frontend && npm run build`
+  - `cd frontend && npm run lint`
+
+- Docker:
+  - `docker compose -f compose.yml config`
+  - `docker compose -f compose.yml build`
+  - Test `run_podly_docker.sh --build`
+  - Test `run_podly_docker.sh --dev --build`
+  - Test production path uses one tag: `${BRANCH_SUFFIX}-latest`
+
+- Final cleanup search:
+  - `rg "LocalWhisper|WHISPER_LOCAL|openai-whisper|local_model|pyproject.lite|uv.lite|LITE_BUILD|USE_GPU|gpu-nvidia|gpu-amd|compose.dev|--lite|--gpu|--cuda|--rocm|base\\.en"`
+  - Only intentional historical migration references and old-data compatibility comments should remain.
