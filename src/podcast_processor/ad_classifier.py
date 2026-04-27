@@ -756,7 +756,7 @@ class AdClassifier:
             try:
                 clipped_start = max(float(start_time), chunk_start)
                 clipped_end = min(float(end_time), chunk_end)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
 
             if clipped_end <= clipped_start:

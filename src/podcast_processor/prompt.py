@@ -42,7 +42,7 @@ def build_prompt_audio_markers(audio_segments: list[Any]) -> list[PromptAudioMar
         try:
             start_time = float(start_raw)
             end_time = float(end_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
 
         if end_time <= start_time:

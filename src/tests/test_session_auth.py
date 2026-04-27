@@ -20,7 +20,7 @@ from app.routes.feed_routes import feed_bp
 
 
 @pytest.fixture
-def auth_app() -> Generator[Flask, None, None]:
+def auth_app() -> Generator[Flask]:
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY="test-secret",

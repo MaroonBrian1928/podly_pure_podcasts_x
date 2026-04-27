@@ -66,7 +66,7 @@ def api_admin_costs() -> flask.Response:
     try:
         year = int(request.args.get("year", now.year))
         month = int(request.args.get("month", now.month))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return flask.make_response(jsonify({"error": "Invalid year or month"}), 400)
 
     month_start, month_end = _month_range(year, month)
@@ -224,7 +224,7 @@ def api_admin_costs_calls() -> flask.Response:
     try:
         page = max(1, int(request.args.get("page", 1)))
         per_page = min(200, max(1, int(request.args.get("per_page", 50))))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return flask.make_response(jsonify({"error": "Invalid pagination params"}), 400)
 
     total = db.session.query(ModelCall).count()

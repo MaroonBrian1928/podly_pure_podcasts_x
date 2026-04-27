@@ -68,7 +68,7 @@ def build_speaker_breakdown(transcript_segments: Iterable[Any]) -> list[dict[str
         try:
             start_time = float(start_raw)
             end_time = float(end_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
 
         duration_seconds = end_time - start_time

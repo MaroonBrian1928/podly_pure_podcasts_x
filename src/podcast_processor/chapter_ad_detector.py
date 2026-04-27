@@ -36,7 +36,7 @@ class ChapterAdDetector:
         cls,
         filter_strings_csv: str,
         logger: logging.Logger | None = None,
-    ) -> "ChapterAdDetector":
+    ) -> ChapterAdDetector:
         """
         Create detector from comma-separated filter strings.
 

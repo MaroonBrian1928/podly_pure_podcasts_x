@@ -102,7 +102,7 @@ class ConcurrencyContext:
         self.timeout = timeout
         self.acquired = False
 
-    def __enter__(self) -> "ConcurrencyContext":
+    def __enter__(self) -> ConcurrencyContext:
         """Acquire a concurrency slot."""
         self.acquired = self.limiter.acquire(timeout=self.timeout)
         if not self.acquired:

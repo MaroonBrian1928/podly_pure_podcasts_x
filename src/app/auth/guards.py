@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 def require_admin(
     action: str = "perform this action",
-) -> tuple["User | None", flask.Response | None]:
+) -> tuple[User | None, flask.Response | None]:
     """Ensure the current user is an admin when auth is enabled.
 
     When auth is disabled (AUTH_SETTINGS.require_auth == False),

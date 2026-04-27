@@ -55,7 +55,7 @@ Remove Podly’s embedded local Whisper support and collapse Docker packaging to
 
 - Simplify `Dockerfile`:
   - Remove `BASE_IMAGE`, CUDA/ROCM, `USE_GPU*`, and `LITE_BUILD` build args.
-  - Always use `python:3.11-slim`.
+  - Always use the current standard Python slim image.
   - Always install from `pyproject.toml` and `uv.lock`.
   - Remove conditional full/lite install logic.
   - Remove all explicit PyTorch install steps.

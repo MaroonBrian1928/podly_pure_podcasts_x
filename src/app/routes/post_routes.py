@@ -276,13 +276,13 @@ def api_feed_posts(feed_id: int) -> flask.Response:
     # Pagination and filtering
     try:
         page = int(request.args.get("page", 1))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         page = 1
     page = max(page, 1)
 
     try:
         page_size = int(request.args.get("page_size", 25))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         page_size = 25
     page_size = max(1, min(page_size, 200))
 
@@ -519,7 +519,7 @@ def _get_chapter_stats(post: Post, feed: Feed) -> dict[str, Any]:
                 "filter_strings": data.get("filter_strings", []),
                 "chapters": all_chapters,
             }
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             pass
 
     # Fallback: read from processed audio (only shows kept chapters)

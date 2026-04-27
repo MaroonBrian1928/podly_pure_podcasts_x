@@ -1,20 +1,20 @@
 import multiprocessing
 import os
 from multiprocessing.managers import BaseManager
-from queue import Queue
+from queue import Queue as QueueType
 from typing import Any
 
 
 class QueueManager(BaseManager):
-    def get_command_queue(self) -> Queue[Any]:
+    def get_command_queue(self) -> QueueType[Any]:
         raise NotImplementedError
 
-    def Queue(self) -> Queue[Any]:
+    def Queue(self) -> QueueType[Any]:
         raise NotImplementedError
 
 
 # Define the queue globally so it can be registered
-_command_queue: Queue[Any] = Queue()
+_command_queue: QueueType[Any] = QueueType()
 
 
 def _get_default_authkey() -> bytes:
@@ -34,7 +34,7 @@ def _ensure_process_authkey(authkey: bytes) -> None:
         pass
 
 
-def get_queue() -> Queue[Any]:
+def get_queue() -> QueueType[Any]:
     return _command_queue
 
 
@@ -47,7 +47,7 @@ def make_server_manager(
     _ensure_process_authkey(authkey)
     QueueManager.register("get_command_queue", callable=get_queue)
     # Register Queue so we can pass it around for replies
-    QueueManager.register("Queue", callable=Queue)
+    QueueManager.register("Queue", callable=QueueType)
     manager = QueueManager(address=address, authkey=authkey)
     return manager
 

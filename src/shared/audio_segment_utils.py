@@ -57,7 +57,7 @@ def extract_audio_windows(
         try:
             start_time = float(start_raw)
             end_time = float(end_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
 
         if end_time <= start_time:

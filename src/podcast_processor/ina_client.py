@@ -29,7 +29,7 @@ def _parse_segment_payload(item: Any) -> AudioSegmentResult | None:
     try:
         start_time = float(start)
         end_time = float(end)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
     if end_time <= start_time:

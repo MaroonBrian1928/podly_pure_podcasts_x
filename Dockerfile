@@ -12,7 +12,7 @@ RUN set -e && \
     test -d dist && \
     echo "Frontend build successful - dist directory created"
 
-FROM python:3.11-slim AS backend
+FROM python:3.14-slim AS backend
 COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1

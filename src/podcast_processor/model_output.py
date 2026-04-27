@@ -121,7 +121,7 @@ def _merge_duplicate_ad_segments(text: str) -> str:
             text.count('"ad_segments"'),
         )
         return json.dumps(merged)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return text
 
 

@@ -392,7 +392,7 @@ class PodcastProcessor:
             return 3600
         try:
             return max(1, int(raw_value))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             self.logger.warning(
                 "Invalid INA_TIMEOUT_SEC=%r; defaulting to 3600 seconds",
                 raw_value,

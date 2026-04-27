@@ -7,7 +7,7 @@ name = "podly-pure-podcasts"
 version = "0.0.0"
 description = "Ad-block for podcasts. Create an ad-free RSS feed."
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "speechrecognition",
     "openai",
@@ -67,7 +67,7 @@ testpaths = []  # No test paths - tests converted to standalone scripts
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py314"
 src = ["src"]
 
 [tool.ruff.lint]
@@ -113,7 +113,7 @@ ignore = [
 "scripts/**/*.py" = ["ANN"]
 
 [tool.ty.environment]
-python-version = "3.11"
+python-version = "3.14"
 
 [tool.ty.src]
 include = ["src"]

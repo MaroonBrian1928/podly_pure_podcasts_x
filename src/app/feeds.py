@@ -850,7 +850,7 @@ def _parse_datetime_string(value: str | None, field: str) -> datetime.datetime |
         return None
     try:
         return parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.debug("Failed to parse %s string for release date", field)
         return None
 
@@ -860,7 +860,7 @@ def _parse_struct_time(value: Any | None, field: str) -> datetime.datetime | Non
         return None
     try:
         dt = datetime.datetime(*value[:6])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.debug("Failed to parse %s for release date", field)
         return None
     gmtoff = getattr(value, "tm_gmtoff", None)
