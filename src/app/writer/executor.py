@@ -188,7 +188,6 @@ class CommandExecutor:
                             "[WRITER] Rolling back TRANSACTION command id=%s", cmd.id
                         )
                         db.session.rollback()
-                    db.session.expunge_all()
                     return result
 
                 # Single operation
@@ -207,7 +206,6 @@ class CommandExecutor:
                 else:
                     logger.info("[WRITER] Rolling back single command id=%s", cmd.id)
                     db.session.rollback()
-                db.session.expunge_all()
                 return result
 
             except Exception as e:
@@ -218,8 +216,27 @@ class CommandExecutor:
                     exc_info=True,
                 )
                 db.session.rollback()
-                db.session.expunge_all()
                 return WriteResult(cmd.id, False, error=str(e))
+            finally:
+                self._cleanup_session(cmd.id)
+
+    def _cleanup_session(self, command_id: str) -> None:
+        try:
+            db.session.expunge_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[WRITER] Failed to expunge session for command id=%s: %s",
+                command_id,
+                exc,
+            )
+        try:
+            db.session.remove()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[WRITER] Failed to remove session for command id=%s: %s",
+                command_id,
+                exc,
+            )
 
     def _execute_single_command(self, cmd: WriteCommand) -> WriteResult:
         if cmd.type == WriteCommandType.ACTION:

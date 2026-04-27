@@ -1,5 +1,10 @@
 import logging
+import os
+import subprocess
+import sys
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, cast
 
@@ -10,12 +15,14 @@ from app.extensions import db as _db
 from app.extensions import scheduler
 from app.feeds import refresh_feed
 from app.job_manager import JobManager as SingleJobManager
+from app.memory_pressure import release_memory_to_os
 from app.models import Feed, JobsManagerRun, Post, ProcessingJob
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from shared.processing_paths import find_existing_processed_audio_path
 
 logger = logging.getLogger("global_logger")
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 
 
 def _scheduler_app_context() -> Any:
@@ -23,6 +30,18 @@ def _scheduler_app_context() -> Any:
     if scheduler_app is None:
         raise RuntimeError("Scheduler app is not initialized")
     return scheduler_app.app_context()
+
+
+def _env_float(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.2f", name, raw, default)
+        return default
+    return max(minimum, value)
 
 
 class JobsManager:
@@ -652,7 +671,7 @@ class JobsManager:
                 reset_session(_db.session, logger, "worker_loop_exception", exc)
 
     def _process_job(self, job_id: str, post_guid: str) -> None:
-        """Execute a single job using the processor.
+        """Execute a single job in a short-lived child process.
 
         Uses a global processing lock to absolutely guarantee single-job execution.
         """
@@ -683,69 +702,22 @@ class JobsManager:
                         logger.debug(
                             "Worker starting job_id=%s post_guid=%s", job_id, post_guid
                         )
-                        worker_post = Post.query.filter_by(guid=post_guid).first()
-                        if not worker_post:
-                            logger.error(
-                                "Post with GUID %s not found; failing job %s",
-                                post_guid,
-                                job_id,
-                            )
-                            job = _db.session.get(ProcessingJob, job_id)
-                            if job:
-                                self._status_manager.update_job_status(
-                                    job,
-                                    "failed",
-                                    job.current_step or 0,
-                                    "Post not found",
-                                    0.0,
-                                )
-                            return
-
-                        def _cancelled() -> bool:
-                            # Expire the job before re-querying to get fresh state
-                            _db.session.expire_all()
-                            current_job = _db.session.get(ProcessingJob, job_id)
-                            return (
-                                current_job is None or current_job.status == "cancelled"
-                            )
-
-                        from app.processor import get_processor
-
-                        get_processor().process(
-                            worker_post, job_id=job_id, cancel_callback=_cancelled
+                        process = self._launch_processing_worker(job_id, post_guid)
+                        exit_code = self._wait_for_processing_worker(
+                            process, job_id, post_guid
                         )
-                    except Exception as exc:
-                        if exc.__class__.__name__ == "ProcessorException":
-                            logger.info(
-                                "Job %s finished with processor exception: %s",
+                        if exit_code:
+                            self._fail_job_if_nonterminal(
                                 job_id,
-                                exc,
+                                f"Processing worker exited with status {exit_code}",
                             )
-                            return
+                    except Exception as exc:
                         logger.error(
                             "Unexpected error in job %s: %s", job_id, exc, exc_info=True
                         )
-                        try:
-                            _db.session.expire_all()
-                            failed_job = _db.session.get(ProcessingJob, job_id)
-                            if failed_job and failed_job.status not in [
-                                "completed",
-                                "cancelled",
-                                "failed",
-                            ]:
-                                self._status_manager.update_job_status(
-                                    failed_job,
-                                    "failed",
-                                    failed_job.current_step or 0,
-                                    f"Job execution failed: {exc}",
-                                    failed_job.progress_percentage or 0.0,
-                                )
-                        except Exception as cleanup_error:
-                            logger.error(
-                                "Failed to update job status after error: %s",
-                                cleanup_error,
-                                exc_info=True,
-                            )
+                        self._fail_job_if_nonterminal(
+                            job_id, f"Job execution failed: {exc}"
+                        )
                     finally:
                         # Always clean up session state after job processing to release any locks
                         try:
@@ -758,10 +730,117 @@ class JobsManager:
                             logger.warning(
                                 "Failed to remove session after job: %s", exc
                             )
+                        release_memory_to_os(
+                            f"web supervisor after processing job {job_id}", logger
+                        )
             logger.info(
                 "[JOB_PROCESS] Released processing lock: job_id=%s post_guid=%s",
                 job_id,
                 post_guid,
+            )
+
+    def _launch_processing_worker(
+        self, job_id: str, post_guid: str
+    ) -> subprocess.Popen[bytes]:
+        command = [
+            sys.executable,
+            "-m",
+            "app.processing_worker",
+            "--job-id",
+            job_id,
+            "--post-guid",
+            post_guid,
+        ]
+        logger.info(
+            "Launching processing worker: job_id=%s post_guid=%s command=%s",
+            job_id,
+            post_guid,
+            command,
+        )
+        return subprocess.Popen(command, env=self._processing_worker_env())
+
+    def _processing_worker_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        src_root = Path(__file__).resolve().parents[1]
+        existing_pythonpath = env.get("PYTHONPATH")
+        src_root_str = str(src_root)
+        if existing_pythonpath:
+            entries = existing_pythonpath.split(os.pathsep)
+            if src_root_str not in entries:
+                env["PYTHONPATH"] = os.pathsep.join([src_root_str, existing_pythonpath])
+        else:
+            env["PYTHONPATH"] = src_root_str
+        return env
+
+    def _wait_for_processing_worker(
+        self,
+        process: Any,
+        job_id: str,
+        post_guid: str,
+    ) -> int:
+        poll_seconds = _env_float("PODLY_PROCESS_WORKER_POLL_SEC", 2.0, minimum=0.1)
+        grace_seconds = _env_float(
+            "PODLY_PROCESS_WORKER_TERMINATE_GRACE_SEC", 10.0, minimum=0.0
+        )
+
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
+                logger.info(
+                    "Processing worker exited: job_id=%s post_guid=%s exit_code=%s",
+                    job_id,
+                    post_guid,
+                    exit_code,
+                )
+                return int(exit_code)
+
+            status = self._job_status(job_id)
+            if status == "cancelled":
+                logger.info(
+                    "Processing worker job cancelled; terminating child: "
+                    "job_id=%s post_guid=%s pid=%s",
+                    job_id,
+                    post_guid,
+                    getattr(process, "pid", None),
+                )
+                process.terminate()
+                try:
+                    return int(process.wait(timeout=grace_seconds))
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Processing worker did not exit after cancellation; killing: "
+                        "job_id=%s post_guid=%s pid=%s",
+                        job_id,
+                        post_guid,
+                        getattr(process, "pid", None),
+                    )
+                    process.kill()
+                    return int(process.wait())
+
+            time.sleep(poll_seconds)
+
+    def _job_status(self, job_id: str) -> str | None:
+        _db.session.expire_all()
+        job = _db.session.get(ProcessingJob, job_id)
+        return None if job is None else job.status
+
+    def _fail_job_if_nonterminal(self, job_id: str, message: str) -> None:
+        try:
+            _db.session.expire_all()
+            failed_job = _db.session.get(ProcessingJob, job_id)
+            if failed_job and failed_job.status not in TERMINAL_JOB_STATUSES:
+                self._status_manager.update_job_status(
+                    failed_job,
+                    "failed",
+                    failed_job.current_step or 0,
+                    message,
+                    failed_job.progress_percentage or 0.0,
+                )
+        except Exception as cleanup_error:
+            logger.error(
+                "Failed to update job status after error: %s",
+                cleanup_error,
+                exc_info=True,
             )
 
 

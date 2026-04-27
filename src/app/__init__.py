@@ -133,6 +133,20 @@ def create_writer_app() -> Flask:
     )
 
 
+def create_processing_app() -> Flask:
+    """Create the per-job processing Flask app.
+
+    Processing workers need app config and database reads, but they do not own
+    HTTP routes, startup migrations, or the scheduler.
+    """
+    return _create_configured_app(
+        app_role="processing",
+        run_startup=False,
+        start_scheduler=False,
+        register_http=False,
+    )
+
+
 def _create_configured_app(
     *,
     app_role: str,
@@ -369,7 +383,7 @@ def _configure_readonly_sessions(app: Flask) -> None:
         try:
             if not has_app_context():
                 return
-            if current_app.config.get("PODLY_APP_ROLE") != "web":
+            if current_app.config.get("PODLY_APP_ROLE") not in {"web", "processing"}:
                 return
         except Exception:  # noqa: BLE001
             return
@@ -392,7 +406,7 @@ def _configure_readonly_sessions(app: Flask) -> None:
         try:
             if not has_app_context():
                 return
-            if current_app.config.get("PODLY_APP_ROLE") != "web":
+            if current_app.config.get("PODLY_APP_ROLE") not in {"web", "processing"}:
                 return
         except Exception:  # noqa: BLE001
             return
@@ -408,9 +422,9 @@ def _initialize_extensions(app: Flask) -> None:
     db.init_app(app)
     migrate.init_app(app, db)
 
-    # Configure read-only mode for web/API Flask app to prevent database locks
+    # Configure read-only mode for web/API and processing Flask apps to prevent database locks
     # Only the writer service should acquire write locks
-    if app.config.get("PODLY_APP_ROLE") == "web":
+    if app.config.get("PODLY_APP_ROLE") in {"web", "processing"}:
         _configure_readonly_sessions(app)
 
 
