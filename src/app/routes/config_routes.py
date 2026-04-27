@@ -1,16 +1,13 @@
 import logging
 import os
+import sys
 from typing import Any
 
 import flask
-import litellm
 from flask import Blueprint, jsonify, request
-from groq import Groq
-from openai import OpenAI
 
 from app.auth.guards import require_admin
 from app.config_store import read_combined, to_pydantic_config
-from app.processor import ProcessorSingleton
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from shared.llm_utils import model_uses_max_completion_tokens
@@ -566,7 +563,7 @@ def api_put_config() -> flask.Response:
 
         for field_name in runtime_config.__class__.model_fields.keys():
             setattr(runtime_config, field_name, getattr(db_cfg, field_name))
-        ProcessorSingleton.reset_instance()
+        _reset_processor_if_loaded()
 
         return flask.jsonify(_sanitize_config_for_client(data))
     except Exception as e:  # noqa: BLE001
@@ -610,6 +607,8 @@ def api_test_llm() -> flask.Response:
         )
 
     try:
+        import litellm
+
         # Configure litellm for this probe
         litellm.api_key = api_key
         if base_url:
@@ -714,6 +713,8 @@ def _test_remote_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
     if not api_key:
         return _make_error_response("Missing whisper.api_key")
 
+    from openai import OpenAI
+
     _ = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout).models.list()
     return _make_success_response("Remote whisper connection OK", base_url=base_url)
 
@@ -730,6 +731,8 @@ def _test_groq_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
 
     if not groq_api_key:
         return _make_error_response("Missing whisper.api_key")
+
+    from groq import Groq
 
     _ = Groq(api_key=groq_api_key).models.list()
     return _make_success_response("Groq whisper connection OK")
@@ -764,6 +767,15 @@ def api_test_whisper() -> flask.Response:
     except Exception as e:  # noqa: BLE001
         logger.error(f"Whisper connection test failed: {e}")
         return _make_error_response(str(e))
+
+
+def _reset_processor_if_loaded() -> None:
+    processor_module = sys.modules.get("app.processor")
+    if processor_module is None:
+        return
+    processor_singleton = getattr(processor_module, "ProcessorSingleton", None)
+    if processor_singleton is not None:
+        processor_singleton.reset_instance()
 
 
 @config_bp.route("/api/config/api_configured_check", methods=["GET"])

@@ -11,9 +11,7 @@ from app.extensions import scheduler
 from app.feeds import refresh_feed
 from app.job_manager import JobManager as SingleJobManager
 from app.models import Feed, JobsManagerRun, Post, ProcessingJob
-from app.processor import get_processor
 from app.writer.client import writer_client
-from podcast_processor.podcast_processor import ProcessorException
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from shared.processing_paths import find_existing_processed_audio_path
 
@@ -711,14 +709,19 @@ class JobsManager:
                                 current_job is None or current_job.status == "cancelled"
                             )
 
+                        from app.processor import get_processor
+
                         get_processor().process(
                             worker_post, job_id=job_id, cancel_callback=_cancelled
                         )
-                    except ProcessorException as exc:
-                        logger.info(
-                            "Job %s finished with processor exception: %s", job_id, exc
-                        )
                     except Exception as exc:
+                        if exc.__class__.__name__ == "ProcessorException":
+                            logger.info(
+                                "Job %s finished with processor exception: %s",
+                                job_id,
+                                exc,
+                            )
+                            return
                         logger.error(
                             "Unexpected error in job %s: %s", job_id, exc, exc_info=True
                         )

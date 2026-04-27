@@ -1,4 +1,5 @@
 import logging
+import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -68,12 +69,10 @@ def update_combined_config_action(params: dict[str, Any]) -> dict[str, Any]:
     # Ensure the running process sees the new config immediately
     hydrate_runtime_config_inplace()
 
-    # Reset processor instance to pick up new config (e.g. litellm globals)
-    # Import locally to avoid cyclic dependencies
-    import importlib
-
-    processor = importlib.import_module("app.processor")
-    processor.ProcessorSingleton.reset_instance()
+    # Reset the processor only if this process has already loaded it.
+    processor_module = sys.modules.get("app.processor")
+    if processor_module is not None:
+        processor_module.ProcessorSingleton.reset_instance()
 
     if not isinstance(updated, dict):
         return {"updated": True}

@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,22 +16,13 @@ from app.auth import AuthSettings, load_auth_settings
 from app.auth.bootstrap import bootstrap_admin_user
 from app.auth.discord_settings import load_discord_settings
 from app.auth.middleware import init_auth_middleware
-from app.background import add_background_job, schedule_cleanup_job
 from app.config_store import (
     ensure_defaults_and_hydrate,
     hydrate_runtime_config_inplace,
 )
 from app.extensions import db, migrate, scheduler
-from app.jobs_manager import (
-    get_jobs_manager,
-)
 from app.logger import setup_logger
-from app.processor import (
-    ProcessorSingleton,
-)
-from app.routes import register_routes
 from app.runtime_config import config, is_test
-from app.writer.client import writer_client as writer_client
 from shared import defaults as DEFAULTS
 from shared.processing_paths import get_in_root, get_srv_root
 
@@ -137,6 +129,7 @@ def create_writer_app() -> Flask:
         app_role="writer",
         run_startup=True,
         start_scheduler=False,
+        register_http=False,
     )
 
 
@@ -145,6 +138,7 @@ def _create_configured_app(
     app_role: str,
     run_startup: bool,
     start_scheduler: bool,
+    register_http: bool = True,
 ) -> Flask:
     # Setup directories early but only when actually creating the app (not during migrations)
     if not is_test:
@@ -154,13 +148,15 @@ def _create_configured_app(
     app.config["PODLY_APP_ROLE"] = app_role
     auth_settings = _load_auth_settings()
     _apply_auth_settings(app, auth_settings)
-    _configure_session(app, auth_settings)
-    _configure_cors(app)
+    if register_http:
+        _configure_session(app, auth_settings)
+        _configure_cors(app)
     _configure_scheduler(app)
     _configure_database(app)
     _configure_external_loggers()
     _initialize_extensions(app)
-    _register_routes_and_middleware(app)
+    if register_http:
+        _register_routes_and_middleware(app)
 
     app.config["developer_mode"] = config.developer_mode
 
@@ -419,6 +415,8 @@ def _initialize_extensions(app: Flask) -> None:
 
 
 def _register_routes_and_middleware(app: Flask) -> None:
+    from app.routes import register_routes
+
     register_routes(app)
     init_auth_middleware(app)
 
@@ -460,7 +458,7 @@ def _run_app_startup(auth_settings: AuthSettings) -> None:
     try:
         ensure_defaults_and_hydrate()
 
-        ProcessorSingleton.reset_instance()
+        _reset_processor_if_loaded()
     except Exception as exc:  # noqa: BLE001
         app_logger.error(f"Failed to initialize settings: {exc}")
 
@@ -469,10 +467,22 @@ def _hydrate_web_config() -> None:
     """Hydrate runtime config for web app (read-only)."""
     hydrate_runtime_config_inplace()
 
-    ProcessorSingleton.reset_instance()
+    _reset_processor_if_loaded()
+
+
+def _reset_processor_if_loaded() -> None:
+    processor_module = sys.modules.get("app.processor")
+    if processor_module is None:
+        return
+    processor_singleton = getattr(processor_module, "ProcessorSingleton", None)
+    if processor_singleton is not None:
+        processor_singleton.reset_instance()
 
 
 def _start_scheduler_and_jobs(app: Flask) -> None:
+    from app.background import add_background_job, schedule_cleanup_job
+    from app.jobs_manager import get_jobs_manager
+
     _clear_scheduler_jobstore()
     setup_scheduler(app)
 

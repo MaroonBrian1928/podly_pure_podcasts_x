@@ -1,5 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from app.runtime_config import config
-from podcast_processor.podcast_processor import PodcastProcessor
+
+if TYPE_CHECKING:
+    from podcast_processor.podcast_processor import PodcastProcessor
 
 
 class ProcessorSingleton:
@@ -11,6 +17,8 @@ class ProcessorSingleton:
     def get_instance(cls) -> PodcastProcessor:
         """Get or create the PodcastProcessor instance."""
         if cls._instance is None:
+            from podcast_processor.podcast_processor import PodcastProcessor
+
             cls._instance = PodcastProcessor(config)
         return cls._instance
 

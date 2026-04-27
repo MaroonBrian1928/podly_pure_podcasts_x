@@ -48,9 +48,7 @@ from app.routes.post_utils import (
 )
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
-from podcast_processor.audio_processor import AudioProcessor
 from podcast_processor.chapter_filter import parse_filter_strings
-from podcast_processor.transcription_manager import TranscriptionManager
 from shared import defaults as DEFAULTS
 from shared.processing_paths import (
     get_in_root,
@@ -744,6 +742,8 @@ def api_post_stats(p_guid: str) -> flask.Response:
         chapters_data = _get_chapter_stats(post, feed)
 
     # Keep stats aligned with the audio cutter's final cut-ready windows.
+    from podcast_processor.audio_processor import AudioProcessor
+
     ad_blocks = AudioProcessor(
         config=runtime_config,
         logger=logger,
@@ -1271,6 +1271,8 @@ def api_reprocess_post_keep_transcript(p_guid: str) -> ResponseReturnValue:
             ),
             400,
         )
+
+    from podcast_processor.transcription_manager import TranscriptionManager
 
     transcription_manager = TranscriptionManager(
         logger=logger,
