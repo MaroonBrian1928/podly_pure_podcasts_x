@@ -37,3 +37,17 @@ def test_release_memory_to_os_can_be_disabled(monkeypatch) -> None:
     memory_pressure.release_memory_to_os("test", logging.getLogger("test"))
 
     assert calls == []
+
+
+def test_collect_incremental_uses_generation_one(monkeypatch) -> None:
+    calls: list[int] = []
+
+    monkeypatch.setattr(
+        memory_pressure.gc,
+        "collect",
+        lambda generation=2: calls.append(generation) or 5,
+    )
+
+    memory_pressure.collect_incremental("test", logging.getLogger("test"))
+
+    assert calls == [1]

@@ -2,7 +2,13 @@ import logging
 from typing import Any
 
 from app.extensions import db
+from app.memory_pressure import collect_incremental
 from app.models import ModelCall, Post, TranscriptSegment
+from app.writer.batching import (
+    batch_count_for,
+    get_writer_batch_size,
+    iter_writer_batches,
+)
 from app.writer.client import writer_client
 from shared.config import (
     Config,
@@ -169,6 +175,79 @@ class TranscriptionManager:
     def _transcriber_supports_word_timestamps(self) -> bool:
         return isinstance(self.transcriber, OpenAIWhisperTranscriber)
 
+    def _persist_transcription_chunks(
+        self,
+        *,
+        post: Post,
+        model_call_id: int,
+        segments: list[Segment],
+        transcript_word_timestamps: list[dict[str, Any]] | None,
+    ) -> None:
+        start_res = writer_client.action(
+            "start_transcription_replace",
+            {"post_id": post.id, "model_call_id": model_call_id},
+            wait=True,
+        )
+        if not start_res or not start_res.success:
+            raise RuntimeError(
+                getattr(start_res, "error", "Failed to start transcription replace")
+            )
+
+        batch_size = get_writer_batch_size()
+        total_batches = batch_count_for(len(segments), batch_size=batch_size)
+        inserted_count = 0
+        self.logger.info(
+            "[TRANSCRIBE_WRITE] post_id=%s model_call_id=%s segments=%s batches=%s batch_size=%s",
+            post.id,
+            model_call_id,
+            len(segments),
+            total_batches,
+            batch_size,
+        )
+
+        for batch_index, batch in enumerate(
+            iter_writer_batches(enumerate(segments), batch_size=batch_size), start=1
+        ):
+            segment_batch = [
+                {
+                    "sequence_num": i,
+                    "start_time": round(seg.start, 1),
+                    "end_time": round(seg.end, 1),
+                    "text": seg.text,
+                    "speaker_label": seg.speaker_label,
+                }
+                for i, seg in batch
+            ]
+            write_res = writer_client.action(
+                "insert_transcript_segments",
+                {"post_id": post.id, "segments": segment_batch},
+                wait=True,
+            )
+            if not write_res or not write_res.success:
+                raise RuntimeError(
+                    getattr(write_res, "error", "Failed to insert transcript segments")
+                )
+            inserted_count += int((write_res.data or {}).get("inserted") or 0)
+            collect_incremental(
+                f"transcription manager batch {batch_index}/{total_batches}",
+                self.logger,
+            )
+
+        finish_res = writer_client.action(
+            "finish_transcription_replace",
+            {
+                "post_id": post.id,
+                "model_call_id": model_call_id,
+                "segment_count": inserted_count,
+                "transcript_word_timestamps": transcript_word_timestamps,
+            },
+            wait=True,
+        )
+        if not finish_res or not finish_res.success:
+            raise RuntimeError(
+                getattr(finish_res, "error", "Failed to finish transcription replace")
+            )
+
     def transcribe(self, post: Post) -> list[TranscriptSegment]:
         db_segments, _ = self.transcribe_for_processing(
             post,
@@ -253,33 +332,14 @@ class TranscriptionManager:
                 f"[TRANSCRIBE_COMPLETE] Transcription by {self.transcriber.model_name} for post {post.id} resulted in {len(pydantic_segments)} segments."
             )
 
-            segments_payload = [
-                {
-                    "sequence_num": i,
-                    "start_time": round(seg.start, 1),
-                    "end_time": round(seg.end, 1),
-                    "text": seg.text,
-                    "speaker_label": seg.speaker_label,
-                }
-                for i, seg in enumerate(pydantic_segments or [])
-            ]
-
-            write_res = writer_client.action(
-                "replace_transcription",
-                {
-                    "post_id": post.id,
-                    "segments": segments_payload,
-                    "model_call_id": current_whisper_call.id,
-                    "transcript_word_timestamps": serialize_segment_word_timestamps(
-                        pydantic_segments
-                    ),
-                },
-                wait=True,
+            self._persist_transcription_chunks(
+                post=post,
+                model_call_id=current_whisper_call.id,
+                segments=pydantic_segments or [],
+                transcript_word_timestamps=serialize_segment_word_timestamps(
+                    pydantic_segments
+                ),
             )
-            if not write_res or not write_res.success:
-                raise RuntimeError(
-                    getattr(write_res, "error", "Failed to persist transcription")
-                )
 
             segment_query = (
                 self.segment_query

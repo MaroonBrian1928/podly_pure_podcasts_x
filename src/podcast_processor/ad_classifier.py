@@ -13,7 +13,13 @@ from pydantic import ValidationError
 from sqlalchemy import and_
 
 from app.extensions import db
+from app.memory_pressure import collect_incremental
 from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
+from app.writer.batching import (
+    batch_count_for,
+    get_writer_batch_size,
+    iter_writer_batches,
+)
 from app.writer.client import writer_client
 from podcast_processor.boundary_refiner import BoundaryRefiner
 from podcast_processor.cue_detector import CueDetector
@@ -951,17 +957,7 @@ class AdClassifier:
         if not to_insert:
             return 0, matched_segments
 
-        res = writer_client.action(
-            "insert_identifications",
-            {"identifications": to_insert},
-            wait=True,
-        )
-        if not res or not res.success:
-            raise RuntimeError(
-                getattr(res, "error", "Failed to insert identifications")
-            )
-
-        inserted = int((res.data or {}).get("inserted") or 0)
+        inserted = self._insert_identifications_batched(to_insert)
         return inserted, matched_segments
 
     def _adjust_confidence(
@@ -1312,18 +1308,58 @@ class AdClassifier:
         self, identifications: list[dict[str, Any]]
     ) -> int:
         """Bulk insert identifications"""
+        return self._insert_identifications_batched(identifications)
+
+    def _insert_identifications_batched(
+        self, identifications: list[dict[str, Any]]
+    ) -> int:
         if not identifications:
             return 0
+
+        batch_size = get_writer_batch_size()
+        total_batches = batch_count_for(len(identifications), batch_size=batch_size)
+        inserted = 0
+        self.logger.info(
+            "[IDENTIFICATION_WRITE] rows=%s batches=%s batch_size=%s",
+            len(identifications),
+            total_batches,
+            batch_size,
+        )
+        for batch_index, batch in enumerate(
+            iter_writer_batches(identifications, batch_size=batch_size), start=1
+        ):
+            res = writer_client.action(
+                "insert_identifications",
+                {"identifications": list(batch)},
+                wait=True,
+            )
+            if not res or not res.success:
+                raise RuntimeError(
+                    getattr(res, "error", "Failed to insert identifications")
+                )
+            inserted += int((res.data or {}).get("inserted") or 0)
+            collect_incremental(
+                f"ad classifier identification batch {batch_index}/{total_batches}",
+                self.logger,
+            )
+        return inserted
+
+    def _replace_identifications_batched(
+        self,
+        *,
+        delete_ids: list[int],
+        new_identifications: list[dict[str, Any]],
+    ) -> int:
         res = writer_client.action(
-            "insert_identifications",
-            {"identifications": identifications},
+            "replace_identifications",
+            {"delete_ids": delete_ids, "new_identifications": []},
             wait=True,
         )
         if not res or not res.success:
             raise RuntimeError(
-                getattr(res, "error", "Failed to insert identifications")
+                getattr(res, "error", "Failed to delete replaced identifications")
             )
-        return int((res.data or {}).get("inserted") or 0)
+        return self._insert_identifications_batched(new_identifications)
 
     def expand_neighbors_bulk(
         self,
@@ -1645,12 +1681,7 @@ class AdClassifier:
                     }
                 )
 
-        res = writer_client.action(
-            "replace_identifications",
-            {"delete_ids": delete_ids, "new_identifications": new_identifications},
-            wait=True,
+        self._replace_identifications_batched(
+            delete_ids=delete_ids,
+            new_identifications=new_identifications,
         )
-        if not res or not res.success:
-            raise RuntimeError(
-                getattr(res, "error", "Failed to replace identifications")
-            )

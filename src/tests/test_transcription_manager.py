@@ -7,6 +7,7 @@ from flask import Flask
 
 from app.extensions import db
 from app.models import Feed, ModelCall, Post, TranscriptSegment
+from podcast_processor import transcription_manager as transcription_manager_module
 from podcast_processor.transcribe import Segment, Transcriber, WordTimestamp
 from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config, TestWhisperConfig
@@ -202,6 +203,62 @@ def test_transcribe_new(
         assert TranscriptSegment.query.filter_by(post_id=post.id).count() == 2
         assert ModelCall.query.filter_by(post_id=post.id).count() == 1
         assert ModelCall.query.filter_by(post_id=post.id).first().status == "success"
+
+
+def test_transcribe_new_writes_transcript_in_chunks(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PODLY_WRITER_BATCH_SIZE", "1")
+    action_names: list[str] = []
+    original_action = transcription_manager_module.writer_client.action
+
+    def spy_action(action_name: str, params: dict, wait: bool = True):
+        action_names.append(action_name)
+        return original_action(action_name, params, wait=wait)
+
+    monkeypatch.setattr(
+        transcription_manager_module.writer_client, "action", spy_action
+    )
+
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-chunked.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-chunked",
+            download_url="http://example.com/audio-chunked.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=MockTranscriber(
+                [
+                    Segment(start=0.0, end=1.0, text="one"),
+                    Segment(start=1.0, end=2.0, text="two"),
+                    Segment(start=2.0, end=3.0, text="three"),
+                ]
+            ),
+        )
+
+        db_segments, _ = manager.transcribe_for_processing(post)
+
+        assert [segment.text for segment in db_segments] == ["one", "two", "three"]
+        assert action_names == [
+            "upsert_whisper_model_call",
+            "start_transcription_replace",
+            "insert_transcript_segments",
+            "insert_transcript_segments",
+            "insert_transcript_segments",
+            "finish_transcription_replace",
+        ]
 
 
 def test_transcribe_handles_error(

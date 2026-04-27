@@ -59,3 +59,17 @@ def release_memory_to_os(
         collected,
         trimmed,
     )
+
+
+def collect_incremental(
+    context: str,
+    log: logging.Logger | None = None,
+) -> None:
+    """Run a low-pause incremental collection during long batch loops."""
+    active_logger = log or logger
+    collected = gc.collect(1)
+    active_logger.debug(
+        "Incremental memory cleanup after %s: gc_collected=%s",
+        context,
+        collected,
+    )

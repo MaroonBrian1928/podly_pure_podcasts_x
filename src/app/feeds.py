@@ -14,6 +14,7 @@ import PyRSS2Gen
 from flask import current_app, g, request
 
 from app.extensions import db
+from app.memory_pressure import release_memory_to_os
 from app.models import Feed, Post, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
@@ -337,10 +338,10 @@ def fetch_feed(url: str) -> feedparser.FeedParserDict:
     return feed_data
 
 
-def refresh_feed(feed: Feed) -> None:
-    logger.info(f"Refreshing feed with ID: {feed.id}")
-    feed_data = fetch_feed(feed.rss_url)
-
+def _build_refresh_feed_payload(
+    feed: Feed,
+    feed_data: feedparser.FeedParserDict,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     updates = {}
     image_info = feed_data.feed.get("image")
     if image_info and "href" in image_info:
@@ -360,78 +361,112 @@ def refresh_feed(feed: Feed) -> None:
     for entry in feed_data.entries:
         existing_post = existing_posts.get(entry.id)
         if existing_post is None:
-            logger.debug("found new podcast: %s", entry.title)
-            p = make_post(feed, entry)
-            # do not allow automatic download of any backcatalog added to the feed
-            if (
-                oldest_post is not None
-                and p.release_date
-                and oldest_post.release_date
-                and p.release_date.date() < oldest_post.release_date.date()
-            ):
-                p.whitelisted = False
-                logger.debug(
-                    f"skipping post from archive due to \
+            new_posts.append(_new_post_refresh_payload(feed, entry, oldest_post))
+        else:
+            post_update = _existing_post_refresh_payload(existing_post, entry, feed)
+            if post_update:
+                existing_post_updates.append(post_update)
+
+    del existing_posts
+    return updates, new_posts, existing_post_updates
+
+
+def _new_post_refresh_payload(
+    feed: Feed,
+    entry: feedparser.FeedParserDict,
+    oldest_post: Post | None,
+) -> dict[str, Any]:
+    logger.debug("found new podcast: %s", entry.title)
+    post = make_post(feed, entry)
+    # do not allow automatic download of any backcatalog added to the feed
+    if (
+        oldest_post is not None
+        and post.release_date
+        and oldest_post.release_date
+        and post.release_date.date() < oldest_post.release_date.date()
+    ):
+        post.whitelisted = False
+        logger.debug(
+            f"skipping post from archive due to \
 number_of_episodes_to_whitelist_from_archive_of_new_feed setting: {entry.title}"
-                )
-            else:
-                p.whitelisted = _should_auto_whitelist_new_posts(feed, p)
-
-            post_data = {
-                "guid": p.guid,
-                "title": p.title,
-                "description": p.description,
-                "download_url": p.download_url,
-                "release_date": p.release_date.isoformat() if p.release_date else None,
-                "duration": p.duration,
-                "image_url": p.image_url,
-                "whitelisted": p.whitelisted,
-                "feed_id": feed.id,
-            }
-            new_posts.append(post_data)
-            continue
-
-        post_update: dict[str, Any] = {"post_id": existing_post.id}
-
-        updated_title = str(getattr(entry, "title", "") or "").strip()
-        if updated_title and existing_post.title != updated_title:
-            post_update["title"] = updated_title
-
-        updated_description = _extract_post_description(entry)
-        if existing_post.description != updated_description:
-            post_update["description"] = updated_description
-
-        updated_image_url = _extract_episode_image_url(entry, feed)
-        if existing_post.image_url != updated_image_url:
-            post_update["image_url"] = updated_image_url
-
-        parsed_duration = get_duration(entry)
-        if (
-            existing_post.processed_audio_path is None
-            and parsed_duration is not None
-            and existing_post.duration != parsed_duration
-        ):
-            post_update["duration"] = parsed_duration
-
-        if len(post_update) > 1:
-            existing_post_updates.append(post_update)
-
-    if updates or new_posts or existing_post_updates:
-        writer_client.action(
-            "refresh_feed",
-            {
-                "feed_id": feed.id,
-                "updates": updates,
-                "new_posts": new_posts,
-                "existing_post_updates": existing_post_updates,
-            },
-            wait=True,
         )
-        # Refreshes are written through the separate writer service, so expire the
-        # current request session before serializing the feed response.
-        db.session.expire_all()
+    else:
+        post.whitelisted = _should_auto_whitelist_new_posts(feed, post)
 
-    logger.info(f"Feed with ID: {feed.id} refreshed")
+    return {
+        "guid": post.guid,
+        "title": post.title,
+        "description": post.description,
+        "download_url": post.download_url,
+        "release_date": post.release_date.isoformat() if post.release_date else None,
+        "duration": post.duration,
+        "image_url": post.image_url,
+        "whitelisted": post.whitelisted,
+        "feed_id": feed.id,
+    }
+
+
+def _existing_post_refresh_payload(
+    existing_post: Post,
+    entry: feedparser.FeedParserDict,
+    feed: Feed,
+) -> dict[str, Any]:
+    post_update: dict[str, Any] = {"post_id": existing_post.id}
+
+    updated_title = str(getattr(entry, "title", "") or "").strip()
+    if updated_title and existing_post.title != updated_title:
+        post_update["title"] = updated_title
+
+    updated_description = _extract_post_description(entry)
+    if existing_post.description != updated_description:
+        post_update["description"] = updated_description
+
+    updated_image_url = _extract_episode_image_url(entry, feed)
+    if existing_post.image_url != updated_image_url:
+        post_update["image_url"] = updated_image_url
+
+    parsed_duration = get_duration(entry)
+    if (
+        existing_post.processed_audio_path is None
+        and parsed_duration is not None
+        and existing_post.duration != parsed_duration
+    ):
+        post_update["duration"] = parsed_duration
+
+    return post_update if len(post_update) > 1 else {}
+
+
+def refresh_feed(feed: Feed) -> None:
+    logger.info(f"Refreshing feed with ID: {feed.id}")
+    feed_id = feed.id
+    feed_data = fetch_feed(feed.rss_url)
+    new_posts: list[dict[str, Any]] = []
+    existing_post_updates: list[dict[str, Any]] = []
+    updates: dict[str, Any] = {}
+
+    try:
+        updates, new_posts, existing_post_updates = _build_refresh_feed_payload(
+            feed, feed_data
+        )
+        if updates or new_posts or existing_post_updates:
+            writer_client.action(
+                "refresh_feed",
+                {
+                    "feed_id": feed_id,
+                    "updates": updates,
+                    "new_posts": new_posts,
+                    "existing_post_updates": existing_post_updates,
+                },
+                wait=True,
+            )
+            # Refreshes are written through the separate writer service, so expire the
+            # current request session before serializing the feed response.
+            db.session.expire_all()
+    finally:
+        del feed_data, updates, new_posts, existing_post_updates
+        release_memory_to_os(f"feed refresh feed_id={feed_id}", logger)
+
+    logger.info(f"Feed with ID: {feed_id} refreshed")
 
 
 def add_or_refresh_feed(url: str) -> Feed:
@@ -581,18 +616,17 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
 
 
 def _feed_item_duration_seconds(post: Post) -> int | None:
+    parsed_duration = _parse_duration_seconds(getattr(post, "duration", None))
+    if parsed_duration is not None:
+        return parsed_duration
+
     processed_audio_path = getattr(post, "processed_audio_path", None)
     if processed_audio_path:
         duration_ms = get_audio_duration_ms(processed_audio_path)
         if duration_ms is not None and duration_ms > 0:
             return round(duration_ms / 1000.0)
 
-    raw_duration = getattr(post, "duration", None)
-    if raw_duration is None:
-        return None
-
-    duration_seconds = int(raw_duration)
-    return duration_seconds if duration_seconds > 0 else None
+    return None
 
 
 def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem:
@@ -668,8 +702,12 @@ def generate_feed_xml(feed: Feed) -> Any:
     rss_feed.rss_attrs["xmlns:itunes"] = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     rss_feed.rss_attrs["xmlns:content"] = "http://purl.org/rss/1.0/modules/content/"
 
+    xml_content = rss_feed.to_xml("utf-8")
+    del rss_feed, items, posts
+    release_memory_to_os(f"feed XML feed_id={feed.id}", logger)
+
     logger.info(f"XML generated for feed with ID: {feed.id}")
-    return rss_feed.to_xml("utf-8")
+    return xml_content
 
 
 def generate_aggregate_feed_xml(user: User | None) -> Any:
@@ -711,8 +749,12 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     rss_feed.rss_attrs["xmlns:itunes"] = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     rss_feed.rss_attrs["xmlns:content"] = "http://purl.org/rss/1.0/modules/content/"
 
+    xml_content = rss_feed.to_xml("utf-8")
+    del rss_feed, items, posts
+    release_memory_to_os(f"aggregate feed XML user_id={user_id}", logger)
+
     logger.info(f"Aggregate XML generated for: {username}")
-    return rss_feed.to_xml("utf-8")
+    return xml_content
 
 
 def get_user_aggregate_posts(user_id: int, limit_per_feed: int = 3) -> list[Post]:

@@ -10,12 +10,14 @@ import PyRSS2Gen
 import pytest
 
 from app.feeds import (
+    _feed_item_duration_seconds,
     _get_base_url,
     _should_auto_whitelist_new_posts,
     add_feed,
     db,
     feed_item,
     fetch_feed,
+    generate_aggregate_feed_xml,
     generate_feed_xml,
     get_duration,
     get_guid,
@@ -850,9 +852,7 @@ def test_feed_item_falls_back_to_processed_audio_duration(mock_post, app):
     assert "<itunes:duration>1:09:54</itunes:duration>" in xml
 
 
-def test_feed_item_prefers_processed_audio_duration_over_stored_duration(
-    mock_post, app
-):
+def test_feed_item_prefers_stored_duration_over_processed_audio_probe(mock_post, app):
     mock_post.duration = 3723
     mock_post.processed_audio_path = "/tmp/test-output.mp3"
 
@@ -868,12 +868,10 @@ def test_feed_item_prefers_processed_audio_duration_over_stored_duration(
     mock_request.environ = mock_environ
     mock_request.is_secure = False
 
-    with (
-        app.app_context(),
-        mock.patch("app.feeds.request", mock_request),
-        mock.patch("app.feeds.get_audio_duration_ms", return_value=3_600_000),
-    ):
-        item = feed_item(mock_post)
+    mock_probe = mock.Mock(return_value=3_600_000)
+    with app.app_context(), mock.patch("app.feeds.request", mock_request):
+        with mock.patch("app.feeds.get_audio_duration_ms", mock_probe):
+            item = feed_item(mock_post)
 
     rss = PyRSS2Gen.RSS2(
         title="Test Feed",
@@ -886,7 +884,8 @@ def test_feed_item_prefers_processed_audio_duration_over_stored_duration(
     xml = rss.to_xml("utf-8")
     if isinstance(xml, bytes):
         xml = xml.decode("utf-8")
-    assert "<itunes:duration>1:00:00</itunes:duration>" in xml
+    assert "<itunes:duration>1:02:03</itunes:duration>" in xml
+    mock_probe.assert_not_called()
 
 
 def test_get_base_url_without_reverse_proxy():
@@ -955,16 +954,45 @@ def test_get_base_url_localhost():
     assert result == "http://localhost:5001"
 
 
+def test_feed_item_duration_prefers_stored_duration(monkeypatch):
+    post = Post(
+        duration=123.7,
+        processed_audio_path="/tmp/processed.mp3",
+    )
+    mock_probe = mock.Mock(return_value=456000)
+    monkeypatch.setattr("app.feeds.get_audio_duration_ms", mock_probe)
+
+    assert _feed_item_duration_seconds(post) == 123
+    mock_probe.assert_not_called()
+
+
+def test_feed_item_duration_probes_processed_audio_when_duration_missing(monkeypatch):
+    post = Post(
+        duration=None,
+        processed_audio_path="/tmp/processed.mp3",
+    )
+    mock_probe = mock.Mock(return_value=456700)
+    monkeypatch.setattr("app.feeds.get_audio_duration_ms", mock_probe)
+
+    assert _feed_item_duration_seconds(post) == 457
+    mock_probe.assert_called_once_with("/tmp/processed.mp3")
+
+
 @mock.patch("app.feeds.feed_item")
 @mock.patch("app.feeds.PyRSS2Gen.Image")
 @mock.patch("app.feeds.PyRSS2Gen.RSS2")
 def test_generate_feed_xml_filters_processed_whitelisted(
-    mock_rss_2, mock_image, mock_feed_item, app
+    mock_rss_2, mock_image, mock_feed_item, app, monkeypatch
 ):
     # Use real models to verify query filtering logic
     with app.app_context():
         original_flag = getattr(runtime_config, "autoprocess_on_download", False)
         runtime_config.autoprocess_on_download = False
+        trim_contexts = []
+        monkeypatch.setattr(
+            "app.feeds.release_memory_to_os",
+            lambda context, log=None: trim_contexts.append(context),
+        )
         try:
             feed = Feed(rss_url="http://example.com/feed", title="Feed 1")
             db.session.add(feed)
@@ -1012,6 +1040,7 @@ def test_generate_feed_xml_filters_processed_whitelisted(
             mock_rss_2.assert_called_once()
             mock_rss.to_xml.assert_called_once_with("utf-8")
             assert result == "<rss></rss>"
+            assert trim_contexts == [f"feed XML feed_id={feed.id}"]
         finally:
             runtime_config.autoprocess_on_download = original_flag
 
@@ -1020,11 +1049,16 @@ def test_generate_feed_xml_filters_processed_whitelisted(
 @mock.patch("app.feeds.PyRSS2Gen.Image")
 @mock.patch("app.feeds.PyRSS2Gen.RSS2")
 def test_generate_feed_xml_includes_all_when_autoprocess_enabled(
-    mock_rss_2, mock_image, mock_feed_item, app
+    mock_rss_2, mock_image, mock_feed_item, app, monkeypatch
 ):
     with app.app_context():
         original_flag = getattr(runtime_config, "autoprocess_on_download", False)
         runtime_config.autoprocess_on_download = True
+        trim_contexts = []
+        monkeypatch.setattr(
+            "app.feeds.release_memory_to_os",
+            lambda context, log=None: trim_contexts.append(context),
+        )
         try:
             feed = Feed(rss_url="http://example.com/feed", title="Feed 1")
             db.session.add(feed)
@@ -1075,8 +1109,46 @@ def test_generate_feed_xml_includes_all_when_autoprocess_enabled(
             mock_rss_2.assert_called_once()
             mock_rss.to_xml.assert_called_once_with("utf-8")
             assert result == "<rss></rss>"
+            assert trim_contexts == [f"feed XML feed_id={feed.id}"]
         finally:
             runtime_config.autoprocess_on_download = original_flag
+
+
+@mock.patch("app.feeds.get_user_aggregate_posts")
+@mock.patch("app.feeds.feed_item")
+@mock.patch("app.feeds.PyRSS2Gen.Image")
+@mock.patch("app.feeds.PyRSS2Gen.RSS2")
+def test_generate_aggregate_feed_xml_releases_transient_memory(
+    mock_rss_2,
+    mock_image,
+    mock_feed_item,
+    mock_get_user_aggregate_posts,
+    app,
+    monkeypatch,
+):
+    with app.app_context():
+        user = mock.MagicMock(id=5, username="test-user")
+        posts = [MockPost(guid="one"), MockPost(guid="two")]
+        mock_get_user_aggregate_posts.return_value = posts
+        mock_feed_item.side_effect = lambda post, prepend_feed_title=False: (
+            mock.MagicMock(post_guid=post.guid)
+        )
+        mock_rss = mock_rss_2.return_value
+        mock_rss.to_xml.return_value = "<rss></rss>"
+        trim_contexts = []
+        monkeypatch.setattr(
+            "app.feeds.release_memory_to_os",
+            lambda context, log=None: trim_contexts.append(context),
+        )
+
+        result = generate_aggregate_feed_xml(user)
+
+        assert result == "<rss></rss>"
+        assert [call.args[0] for call in mock_feed_item.call_args_list] == posts
+        assert all(
+            call.kwargs["prepend_feed_title"] for call in mock_feed_item.call_args_list
+        )
+        assert trim_contexts == ["aggregate feed XML user_id=5"]
 
 
 @mock.patch("app.feeds.Post")

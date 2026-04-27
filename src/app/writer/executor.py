@@ -13,6 +13,19 @@ from app.writer.protocol import WriteCommand, WriteCommandType, WriteResult
 logger = logging.getLogger("writer")
 
 
+def _command_action_name(cmd: WriteCommand) -> str | None:
+    if cmd.type != WriteCommandType.ACTION:
+        return None
+    if not isinstance(cmd.data, dict):
+        return None
+    action = cmd.data.get("action")
+    return action if isinstance(action, str) else None
+
+
+def _is_dequeue_job_poll(cmd: WriteCommand) -> bool:
+    return _command_action_name(cmd) == "dequeue_job"
+
+
 class CommandExecutor:
     def __init__(self, app: Flask):
         self.app = app
@@ -141,6 +154,18 @@ class CommandExecutor:
             "replace_transcription", writer_actions.replace_transcription_action
         )
         self.register_action(
+            "start_transcription_replace",
+            writer_actions.start_transcription_replace_action,
+        )
+        self.register_action(
+            "insert_transcript_segments",
+            writer_actions.insert_transcript_segments_action,
+        )
+        self.register_action(
+            "finish_transcription_replace",
+            writer_actions.finish_transcription_replace_action,
+        )
+        self.register_action(
             "mark_model_call_failed", writer_actions.mark_model_call_failed_action
         )
         self.register_action(
@@ -170,12 +195,16 @@ class CommandExecutor:
     def process_command(self, cmd: WriteCommand) -> WriteResult:
         with self.app.app_context():
             try:
-                logger.info(
-                    "[WRITER] Processing command: id=%s type=%s model=%s",
-                    cmd.id,
-                    cmd.type,
-                    cmd.model,
-                )
+                action_name = _command_action_name(cmd)
+                is_dequeue_poll = _is_dequeue_job_poll(cmd)
+                if not is_dequeue_poll:
+                    logger.info(
+                        "[WRITER] Processing command: id=%s type=%s model=%s action=%s",
+                        cmd.id,
+                        cmd.type,
+                        cmd.model,
+                        action_name,
+                    )
                 if cmd.type == WriteCommandType.TRANSACTION:
                     result = self._handle_transaction(cmd)
                     if result.success:
@@ -194,11 +223,7 @@ class CommandExecutor:
                 result = self._execute_single_command(cmd)
                 if result.success:
                     # Suppress commit log for empty dequeue_job actions (polling)
-                    is_polling_noop = (
-                        cmd.type == WriteCommandType.ACTION
-                        and cmd.data.get("action") == "dequeue_job"
-                        and not result.data
-                    )
+                    is_polling_noop = is_dequeue_poll and not result.data
 
                     if not is_polling_noop:
                         logger.info("[WRITER] Committing single command id=%s", cmd.id)

@@ -44,11 +44,20 @@ from .jobs import dequeue_job_action as dequeue_job_action
 from .jobs import mark_cancelled_action as mark_cancelled_action
 from .jobs import reassign_pending_jobs_action as reassign_pending_jobs_action
 from .jobs import update_job_status_action as update_job_status_action
+from .processor import (
+    finish_transcription_replace_action as finish_transcription_replace_action,
+)
 from .processor import insert_identifications_action as insert_identifications_action
+from .processor import (
+    insert_transcript_segments_action as insert_transcript_segments_action,
+)
 from .processor import mark_model_call_failed_action as mark_model_call_failed_action
 from .processor import replace_audio_segments_action as replace_audio_segments_action
 from .processor import replace_identifications_action as replace_identifications_action
 from .processor import replace_transcription_action as replace_transcription_action
+from .processor import (
+    start_transcription_replace_action as start_transcription_replace_action,
+)
 from .processor import upsert_model_call_action as upsert_model_call_action
 from .processor import (
     upsert_whisper_model_call_action as upsert_whisper_model_call_action,

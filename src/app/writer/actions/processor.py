@@ -8,7 +8,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
+from app.memory_pressure import collect_incremental
 from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
+from app.writer.batching import (
+    batch_count_for,
+    get_writer_batch_size,
+    iter_writer_batches,
+)
 
 
 def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -232,6 +238,35 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(segments, list):
         raise ValueError("segments must be a list")
 
+    start_result = start_transcription_replace_action(
+        {"post_id": post_id, "model_call_id": model_call_id}
+    )
+    post_id_i = int(start_result["post_id"])
+
+    segment_count = insert_transcript_segments_action(
+        {"post_id": post_id_i, "segments": segments}
+    )["inserted"]
+
+    finish_transcription_replace_action(
+        {
+            "post_id": post_id_i,
+            "model_call_id": model_call_id,
+            "segment_count": segment_count,
+            "transcript_word_timestamps": transcript_word_timestamps,
+        }
+    )
+
+    db.session.flush()
+    return {"post_id": post_id_i, "segment_count": int(segment_count)}
+
+
+def start_transcription_replace_action(params: dict[str, Any]) -> dict[str, Any]:
+    post_id = params.get("post_id")
+    model_call_id = params.get("model_call_id")
+
+    if post_id is None:
+        raise ValueError("post_id is required")
+
     post_id_i = int(post_id)
     post = db.session.get(Post, post_id_i)
     if post is None:
@@ -252,6 +287,34 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
         TranscriptSegment.post_id == post_id_i
     ).delete(synchronize_session=False)
 
+    post.transcript_word_timestamps = None
+
+    if model_call_id is not None:
+        mc = db.session.get(ModelCall, int(model_call_id))
+        if mc is not None:
+            mc.first_segment_sequence_num = 0
+            mc.last_segment_sequence_num = -1
+            mc.response = None
+            mc.status = "pending"
+            mc.error_message = None
+
+    db.session.flush()
+    return {"post_id": post_id_i, "deleted_segments": len(seg_ids)}
+
+
+def insert_transcript_segments_action(params: dict[str, Any]) -> dict[str, Any]:
+    post_id = params.get("post_id")
+    segments = params.get("segments")
+
+    if post_id is None:
+        raise ValueError("post_id is required")
+    if not isinstance(segments, list):
+        raise ValueError("segments must be a list")
+
+    post_id_i = int(post_id)
+    if db.session.get(Post, post_id_i) is None:
+        raise ValueError(f"Post {post_id_i} not found")
+
     payload = []
     for i, seg in enumerate(segments):
         if not isinstance(seg, dict):
@@ -270,8 +333,37 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    if payload:
-        db.session.execute(sqlite_insert(TranscriptSegment).values(payload))
+    batch_size = get_writer_batch_size()
+    total_batches = batch_count_for(len(payload), batch_size=batch_size)
+    inserted = 0
+    for batch_index, batch in enumerate(
+        iter_writer_batches(payload, batch_size=batch_size), start=1
+    ):
+        db.session.execute(sqlite_insert(TranscriptSegment).values(list(batch)))
+        inserted += len(batch)
+        collect_incremental(
+            f"insert_transcript_segments batch {batch_index}/{total_batches}"
+        )
+
+    db.session.flush()
+    return {"post_id": post_id_i, "inserted": inserted}
+
+
+def finish_transcription_replace_action(params: dict[str, Any]) -> dict[str, Any]:
+    post_id = params.get("post_id")
+    model_call_id = params.get("model_call_id")
+    segment_count = int(params.get("segment_count") or 0)
+    transcript_word_timestamps = _normalize_transcript_word_timestamps_payload(
+        params.get("transcript_word_timestamps")
+    )
+
+    if post_id is None:
+        raise ValueError("post_id is required")
+
+    post_id_i = int(post_id)
+    post = db.session.get(Post, post_id_i)
+    if post is None:
+        raise ValueError(f"Post {post_id_i} not found")
 
     post.transcript_word_timestamps = transcript_word_timestamps
 
@@ -279,13 +371,13 @@ def replace_transcription_action(params: dict[str, Any]) -> dict[str, Any]:
         mc = db.session.get(ModelCall, int(model_call_id))
         if mc is not None:
             mc.first_segment_sequence_num = 0
-            mc.last_segment_sequence_num = len(payload) - 1
-            mc.response = f"{len(payload)} segments transcribed."
+            mc.last_segment_sequence_num = segment_count - 1
+            mc.response = f"{segment_count} segments transcribed."
             mc.status = "success"
             mc.error_message = None
 
     db.session.flush()
-    return {"post_id": post_id_i, "segment_count": len(payload)}
+    return {"post_id": post_id_i, "segment_count": segment_count}
 
 
 def mark_model_call_failed_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -327,10 +419,22 @@ def insert_identifications_action(params: dict[str, Any]) -> dict[str, Any]:
     if not values:
         return {"inserted": 0}
 
-    stmt = sqlite_insert(Identification).values(values).prefix_with("OR IGNORE")
-    result = db.session.execute(stmt)
+    inserted = 0
+    batch_size = get_writer_batch_size()
+    total_batches = batch_count_for(len(values), batch_size=batch_size)
+    for batch_index, batch in enumerate(
+        iter_writer_batches(values, batch_size=batch_size), start=1
+    ):
+        stmt = (
+            sqlite_insert(Identification).values(list(batch)).prefix_with("OR IGNORE")
+        )
+        result = db.session.execute(stmt)
+        inserted += int(getattr(result, "rowcount", 0) or 0)
+        collect_incremental(
+            f"insert_identifications batch {batch_index}/{total_batches}"
+        )
     db.session.flush()
-    return {"inserted": int(getattr(result, "rowcount", 0) or 0)}
+    return {"inserted": inserted}
 
 
 def replace_identifications_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -399,7 +503,15 @@ def replace_audio_segments_action(params: dict[str, Any]) -> dict[str, Any]:
         payload.append(row)
 
     if payload:
-        db.session.execute(sqlite_insert(AudioSegment).values(payload))
+        batch_size = get_writer_batch_size()
+        total_batches = batch_count_for(len(payload), batch_size=batch_size)
+        for batch_index, batch in enumerate(
+            iter_writer_batches(payload, batch_size=batch_size), start=1
+        ):
+            db.session.execute(sqlite_insert(AudioSegment).values(list(batch)))
+            collect_incremental(
+                f"replace_audio_segments batch {batch_index}/{total_batches}"
+            )
 
     db.session.flush()
     return {"post_id": post_id_i, "segment_count": len(payload)}

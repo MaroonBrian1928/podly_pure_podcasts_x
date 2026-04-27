@@ -13,10 +13,13 @@ logger = setup_logger("writer", "src/instance/logs/app.log", level=logging.INFO)
 
 MEMORY_TRIM_ACTIONS = {
     "insert_identifications",
+    "insert_transcript_segments",
+    "finish_transcription_replace",
     "refresh_feed",
     "replace_audio_segments",
     "replace_identifications",
     "replace_transcription",
+    "start_transcription_replace",
     "upsert_model_call",
 }
 
