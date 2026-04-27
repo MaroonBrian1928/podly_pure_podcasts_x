@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -39,7 +39,7 @@ class OutputConfig(BaseModel):
         self.min_ad_segement_separation_seconds = value
 
 
-WhisperConfigTypes = Literal["remote", "local", "test", "groq"]
+WhisperConfigTypes = Literal["remote", "test", "groq"]
 
 
 class TestWhisperConfig(BaseModel):
@@ -71,11 +71,6 @@ class GroqWhisperConfig(BaseModel):
     language: str = DEFAULTS.WHISPER_GROQ_LANGUAGE
     model: str = DEFAULTS.WHISPER_GROQ_MODEL
     max_retries: int = DEFAULTS.WHISPER_GROQ_MAX_RETRIES
-
-
-class LocalWhisperConfig(BaseModel):
-    whisper_type: Literal["local"] = "local"
-    model: str = DEFAULTS.WHISPER_LOCAL_MODEL
 
 
 class Config(BaseModel):
@@ -143,13 +138,7 @@ class Config(BaseModel):
         description="Number of days to retain processed post data before cleanup. None disables cleanup.",
     )
     # removed job_timeout
-    whisper: (
-        LocalWhisperConfig
-        | RemoteWhisperConfig
-        | TestWhisperConfig
-        | GroqWhisperConfig
-        | None
-    ) = Field(
+    whisper: RemoteWhisperConfig | TestWhisperConfig | GroqWhisperConfig | None = Field(
         default=None,
         discriminator="whisper_type",
     )
@@ -159,9 +148,9 @@ class Config(BaseModel):
         description="deprecated in favor of [Remote|Local]WhisperConfig",
     )
     whisper_model: str | None = Field(
-        default=DEFAULTS.WHISPER_LOCAL_MODEL,
+        default=None,
         deprecated=True,
-        description="deprecated in favor of [Remote|Local]WhisperConfig",
+        description="deprecated in favor of RemoteWhisperConfig",
     )
     automatically_whitelist_new_episodes: bool = (
         DEFAULTS.APP_AUTOMATICALLY_WHITELIST_NEW_EPISODES
@@ -173,6 +162,20 @@ class Config(BaseModel):
     user_limit_total: int | None = DEFAULTS.APP_USER_LIMIT_TOTAL
     autoprocess_on_download: bool = DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_local_whisper_config(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        whisper = data.get("whisper")
+        if isinstance(whisper, dict) and whisper.get("whisper_type") == "local":
+            raise ValueError(
+                "WHISPER_TYPE=local is no longer supported. Run a dedicated "
+                "OpenAI-compatible transcription service and configure "
+                "WHISPER_TYPE=remote with WHISPER_REMOTE_BASE_URL."
+            )
+        return data
 
     def redacted(self) -> Config:
         return self.model_copy(
@@ -200,11 +203,16 @@ class Config(BaseModel):
                 api_key=self.llm_api_key,
                 base_url=self.openai_base_url or "https://api.openai.com/v1",
             )
+        elif "remote_whisper" not in self.model_fields_set and (
+            "whisper_model" not in self.model_fields_set or self.whisper_model is None
+        ):
+            self.whisper = GroqWhisperConfig(api_key="")
         else:
-            assert self.whisper_model is not None, (
-                "must supply whisper model to use local whisper"
+            raise ValueError(
+                "Old-style local Whisper config is no longer supported. "
+                "Use whisper={whisper_type='remote', ...} or set "
+                "remote_whisper=true with remote credentials."
             )
-            self.whisper = LocalWhisperConfig(model=self.whisper_model)
 
         self.whisper_model = None
         self.remote_whisper = None

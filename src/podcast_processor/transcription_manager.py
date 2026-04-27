@@ -7,14 +7,12 @@ from app.writer.client import writer_client
 from shared.config import (
     Config,
     GroqWhisperConfig,
-    LocalWhisperConfig,
     RemoteWhisperConfig,
     TestWhisperConfig,
 )
 
 from .transcribe import (
     GroqWhisperTranscriber,
-    LocalWhisperTranscriber,
     OpenAIWhisperTranscriber,
     Segment,
     TestWhisperTranscriber,
@@ -56,8 +54,6 @@ class TranscriptionManager:
             return TestWhisperTranscriber(self.logger)
         if isinstance(self.config.whisper, RemoteWhisperConfig):
             return OpenAIWhisperTranscriber(self.logger, self.config.whisper)
-        if isinstance(self.config.whisper, LocalWhisperConfig):
-            return LocalWhisperTranscriber(self.logger, self.config.whisper.model)
         if isinstance(self.config.whisper, GroqWhisperConfig):
             return GroqWhisperTranscriber(self.logger, self.config.whisper)
         raise ValueError(f"unhandled whisper config {self.config.whisper}")

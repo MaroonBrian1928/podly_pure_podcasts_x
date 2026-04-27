@@ -75,7 +75,6 @@ export interface UseConfigStateReturn {
   llmStatus: ConnectionStatus;
   whisperStatus: ConnectionStatus;
   hasEdits: boolean;
-  localWhisperAvailable: boolean | null;
   isSaving: boolean;
 
   // Actions
@@ -105,7 +104,7 @@ export interface UseConfigStateReturn {
   handleDismissEnvWarning: () => void;
 
   // Whisper type change handler
-  handleWhisperTypeChange: (nextType: 'local' | 'remote' | 'groq') => void;
+  handleWhisperTypeChange: (nextType: 'remote' | 'groq') => void;
 
   // Groq quick setup mutation
   applyGroqKey: (key: string) => Promise<void>;
@@ -140,7 +139,6 @@ export function useConfigState(): UseConfigStateReturn {
 
   const [pending, setPending] = useState<CombinedConfig | null>(null);
   const [hasEdits, setHasEdits] = useState(false);
-  const [localWhisperAvailable, setLocalWhisperAvailable] = useState<boolean | null>(null);
 
   // Connection statuses
   const [llmStatus, setLlmStatus] = useState<ConnectionStatus>({
@@ -319,31 +317,6 @@ export function useConfigState(): UseConfigStateReturn {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending]);
 
-  // Probe whisper capabilities
-  useEffect(() => {
-    let cancelled = false;
-    configApi
-      .getWhisperCapabilities()
-      .then((res) => {
-        if (!cancelled) setLocalWhisperAvailable(!!res.local_available);
-      })
-      .catch(() => {
-        if (!cancelled) setLocalWhisperAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // If local is unavailable but selected, switch to safe default
-  useEffect(() => {
-    if (!pending || localWhisperAvailable !== false) return;
-    const currentType = pending.whisper.whisper_type;
-    if (currentType === 'local') {
-      setField(['whisper', 'whisper_type'], 'remote');
-    }
-  }, [localWhisperAvailable, pending, setField]);
-
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -415,7 +388,7 @@ export function useConfigState(): UseConfigStateReturn {
   };
 
   // Whisper type change handler
-  const handleWhisperTypeChange = (nextType: 'local' | 'remote' | 'groq') => {
+  const handleWhisperTypeChange = (nextType: 'remote' | 'groq') => {
     updatePending((prevConfig) => {
       const prevWhisper = {
         ...(prevConfig.whisper as unknown as Record<string, unknown>),
@@ -423,8 +396,7 @@ export function useConfigState(): UseConfigStateReturn {
       const prevModelRaw = (prevWhisper?.model as string | undefined) ?? '';
       const prevModel = String(prevModelRaw).toLowerCase();
 
-      const isNonGroqDefault =
-        prevModel === 'base' || prevModel === 'base.en' || prevModel === 'whisper-1';
+      const isNonGroqDefault = !prevModel || prevModel === 'whisper-1';
       const isDeprecatedGroq = prevModel === 'distil-whisper-large-v3-en';
 
       let nextModel: string | undefined = prevWhisper?.model as string | undefined;
@@ -434,12 +406,8 @@ export function useConfigState(): UseConfigStateReturn {
           nextModel = 'whisper-large-v3-turbo';
         }
       } else if (nextType === 'remote') {
-        if (!nextModel || prevModel === 'base' || prevModel === 'base.en') {
+        if (!nextModel) {
           nextModel = 'whisper-1';
-        }
-      } else if (nextType === 'local') {
-        if (!nextModel || prevModel === 'whisper-1' || prevModel.startsWith('whisper-large')) {
-          nextModel = 'base.en';
         }
       }
 
@@ -463,12 +431,6 @@ export function useConfigState(): UseConfigStateReturn {
           nextWhisper.diarize && typeof prevWhisper.speaker_embeddings === 'boolean'
             ? prevWhisper.speaker_embeddings
             : false;
-      } else if (nextType === 'local') {
-        nextWhisper.model = nextModel ?? 'base.en';
-        delete nextWhisper.api_key;
-      } else if (nextType === 'test') {
-        delete nextWhisper.model;
-        delete nextWhisper.api_key;
       }
 
       return {
@@ -550,7 +512,6 @@ export function useConfigState(): UseConfigStateReturn {
     llmStatus,
     whisperStatus,
     hasEdits,
-    localWhisperAvailable,
     isSaving: saveMutation.isPending,
 
     // Actions

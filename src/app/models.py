@@ -448,12 +448,7 @@ class WhisperSettings(db.Model):  # type: ignore[name-defined, misc]
     id = db.Column(db.Integer, primary_key=True, default=1)
     whisper_type = db.Column(
         db.Text, nullable=False, default=DEFAULTS.WHISPER_DEFAULT_TYPE
-    )  # local|remote|groq|test
-
-    # Local
-    local_model = db.Column(
-        db.Text, nullable=False, default=DEFAULTS.WHISPER_LOCAL_MODEL
-    )
+    )  # remote|groq|test
 
     # Remote
     remote_model = db.Column(

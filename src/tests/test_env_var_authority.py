@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from app.extensions import db
 from app.models import (
     AppSettings,
@@ -44,7 +46,6 @@ def _create_default_settings() -> None:
         WhisperSettings(
             id=1,
             whisper_type=DEFAULTS.WHISPER_DEFAULT_TYPE,
-            local_model=DEFAULTS.WHISPER_LOCAL_MODEL,
             remote_model=DEFAULTS.WHISPER_REMOTE_MODEL,
             remote_base_url=DEFAULTS.WHISPER_REMOTE_BASE_URL,
             remote_language=DEFAULTS.WHISPER_REMOTE_LANGUAGE,
@@ -394,6 +395,32 @@ class TestParseHelpers:
 
 class TestWhisperRuntimeOverlay:
     """Test that whisper env vars are applied to runtime config."""
+
+    def test_local_whisper_env_overlay_is_rejected(
+        self, app: Any, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("WHISPER_TYPE", "local")
+
+        with app.app_context():
+            from app.config_store import hydrate_runtime_config_inplace
+
+            _create_default_settings()
+
+            with pytest.raises(RuntimeError, match="WHISPER_TYPE=local"):
+                hydrate_runtime_config_inplace()
+
+    def test_stored_local_whisper_type_is_rejected(self, app: Any) -> None:
+        with app.app_context():
+            from app.config_store import to_pydantic_config
+
+            _create_default_settings()
+            row = WhisperSettings.query.get(1)
+            assert row is not None
+            row.whisper_type = "local"
+            db.session.commit()
+
+            with pytest.raises(RuntimeError, match="Stored whisper_type='local'"):
+                to_pydantic_config()
 
     def test_remote_whisper_env_overlay(self, app: Any, monkeypatch: Any) -> None:
         """Verify remote whisper env vars are overlaid on runtime config."""

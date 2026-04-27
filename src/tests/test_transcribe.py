@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 @pytest.mark.skip
 def test_remote_transcribe() -> None:
-    # import here instead of the toplevel because torch is not installed properly in CI.
+    # Import here to keep this skipped integration check out of test collection.
     from podcast_processor.transcribe import (
         OpenAIWhisperTranscriber,
     )
@@ -24,19 +24,6 @@ def test_remote_transcribe() -> None:
     transcriber = OpenAIWhisperTranscriber(logger, config)
 
     transcription = transcriber.transcribe("file.mp3")
-    assert transcription == []
-
-
-@pytest.mark.skip
-def test_local_transcribe() -> None:
-    # import here instead of the toplevel because torch is not installed properly in CI.
-    from podcast_processor.transcribe import (
-        LocalWhisperTranscriber,
-    )
-
-    logger = logging.getLogger("global_logger")
-    transcriber = LocalWhisperTranscriber(logger, "base.en")
-    transcription = transcriber.transcribe("src/tests/file.mp3")
     assert transcription == []
 
 
@@ -81,7 +68,7 @@ def test_groq_transcribe(mocker: Any) -> None:
 
 
 def test_offset() -> None:
-    # import here instead of the toplevel because torch is not installed properly in CI.
+    # Import here to keep the test focused on the shared offset helper.
     from podcast_processor.transcribe import (
         OpenAIWhisperTranscriber,
         Segment,

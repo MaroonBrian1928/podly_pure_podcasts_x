@@ -140,22 +140,6 @@ class Transcriber(ABC):
         pass
 
 
-class LocalTranscriptSegment(BaseModel):
-    id: int
-    seek: int
-    start: float
-    end: float
-    text: str
-    tokens: list[int]
-    temperature: float
-    avg_logprob: float
-    compression_ratio: float
-    no_speech_prob: float
-
-    def to_segment(self) -> Segment:
-        return Segment(start=self.start, end=self.end, text=self.text)
-
-
 class TestWhisperTranscriber(Transcriber):
     def __init__(self, logger: logging.Logger):
         self.logger = logger
@@ -174,56 +158,6 @@ class TestWhisperTranscriber(Transcriber):
             Segment(start=0, end=1, text="This is a test"),
             Segment(start=1, end=2, text="This is another test"),
         ]
-
-
-class LocalWhisperTranscriber(Transcriber):
-    def __init__(self, logger: logging.Logger, whisper_model: str):
-        self.logger = logger
-        self.whisper_model = whisper_model
-
-    @property
-    def model_name(self) -> str:
-        return f"local_{self.whisper_model}"
-
-    @staticmethod
-    def convert_to_pydantic(
-        transcript_data: list[Any],
-    ) -> list[LocalTranscriptSegment]:
-        return [LocalTranscriptSegment(**item) for item in transcript_data]
-
-    @staticmethod
-    def local_seg_to_seg(local_segments: list[LocalTranscriptSegment]) -> list[Segment]:
-        return [seg.to_segment() for seg in local_segments]
-
-    def transcribe(
-        self, audio_file_path: str, *, include_word_timestamps: bool = False
-    ) -> list[Segment]:
-        del include_word_timestamps
-        # Import whisper only when needed to avoid CUDA dependencies during module import
-        try:
-            import whisper
-        except ImportError as e:
-            self.logger.error(f"Failed to import whisper: {e}")
-            raise ImportError(
-                "whisper library is required for LocalWhisperTranscriber"
-            ) from e
-
-        self.logger.info("Using local whisper")
-        models = whisper.available_models()
-        self.logger.info(f"Available models: {models}")
-
-        model = whisper.load_model(name=self.whisper_model)
-
-        self.logger.info("Beginning transcription")
-        start = time.time()
-        result = model.transcribe(audio_file_path, fp16=False, language="English")
-        end = time.time()
-        elapsed = end - start
-        self.logger.info(f"Transcription completed in {elapsed}")
-        segments = result["segments"]
-        typed_segments = self.convert_to_pydantic(segments)
-
-        return self.local_seg_to_seg(typed_segments)
 
 
 class OpenAIWhisperTranscriber(Transcriber):

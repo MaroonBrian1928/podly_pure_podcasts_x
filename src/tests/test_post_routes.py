@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.routes.post_routes import post_bp
 from app.runtime_config import config as runtime_config
-from shared.config import LocalWhisperConfig
+from shared.config import RemoteWhisperConfig
 
 
 def test_download_endpoints_increment_counter(app, tmp_path):
@@ -607,25 +607,25 @@ def test_feed_posts_include_podly_description_html(app):
     assert "Podly Post JSON" not in item["podly_description_html"]
 
 
-def test_reprocess_keep_transcript_accepts_local_whisper_model_call(app):
+def test_reprocess_keep_transcript_accepts_active_whisper_model_call(app):
     app.testing = True
     app.register_blueprint(post_bp)
     original_whisper = runtime_config.whisper
-    runtime_config.whisper = LocalWhisperConfig(model="base.en")
+    runtime_config.whisper = RemoteWhisperConfig(api_key="test-key", model="whisper-1")
 
     try:
         with app.app_context():
             feed = Feed(
-                title="Local Whisper Feed", rss_url="https://example.com/feed.xml"
+                title="Remote Whisper Feed", rss_url="https://example.com/feed.xml"
             )
             db.session.add(feed)
             db.session.commit()
 
             post = Post(
                 feed_id=feed.id,
-                guid="local-whisper-guid",
+                guid="remote-whisper-guid",
                 download_url="https://example.com/audio.mp3",
-                title="Local Whisper Episode",
+                title="Remote Whisper Episode",
                 whitelisted=True,
             )
             db.session.add(post)
@@ -645,7 +645,7 @@ def test_reprocess_keep_transcript_accepts_local_whisper_model_call(app):
                     post_id=post.id,
                     first_segment_sequence_num=0,
                     last_segment_sequence_num=0,
-                    model_name="local_base.en",
+                    model_name="whisper-1",
                     prompt="Whisper transcription job",
                     status="success",
                 )
@@ -683,7 +683,7 @@ def test_reprocess_keep_transcript_rejects_transcript_for_old_whisper_model(app)
     app.register_blueprint(post_bp)
 
     with app.app_context():
-        feed = Feed(title="Local Whisper Feed", rss_url="https://example.com/feed.xml")
+        feed = Feed(title="Remote Whisper Feed", rss_url="https://example.com/feed.xml")
         db.session.add(feed)
         db.session.commit()
 
@@ -711,7 +711,7 @@ def test_reprocess_keep_transcript_rejects_transcript_for_old_whisper_model(app)
                 post_id=post.id,
                 first_segment_sequence_num=0,
                 last_segment_sequence_num=0,
-                model_name="local_base.en",
+                model_name="whisper-1",
                 prompt="Whisper transcription job",
                 status="success",
             )
@@ -721,7 +721,9 @@ def test_reprocess_keep_transcript_rejects_transcript_for_old_whisper_model(app)
 
     client = app.test_client()
     original_whisper = runtime_config.whisper
-    runtime_config.whisper = LocalWhisperConfig(model="small.en")
+    runtime_config.whisper = RemoteWhisperConfig(
+        api_key="test-key", model="whisper-large-v3"
+    )
 
     try:
         with mock.patch(

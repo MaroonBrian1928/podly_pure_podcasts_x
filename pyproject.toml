@@ -27,7 +27,6 @@ dependencies = [
     "waitress",
     "validators",
     "beartype",
-    "openai-whisper",
     "flask-sqlalchemy",
     "flask-migrate",
     "Flask-APScheduler",

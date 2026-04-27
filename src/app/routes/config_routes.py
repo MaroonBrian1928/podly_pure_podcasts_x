@@ -157,9 +157,7 @@ def _hydrate_whisper_config(data: dict[str, Any]) -> None:
 def _overlay_whisper_dict(target: dict[str, Any], source: dict[str, Any]) -> None:
     wtype = source.get("whisper_type")
     target["whisper_type"] = wtype or target.get("whisper_type")
-    if wtype == "local":
-        target["model"] = source.get("model", target.get("model"))
-    elif wtype == "remote":
+    if wtype == "remote":
         _overlay_remote_whisper_fields(target, source)
     elif wtype == "groq":
         _overlay_groq_whisper_fields(target, source)
@@ -168,9 +166,7 @@ def _overlay_whisper_dict(target: dict[str, Any], source: dict[str, Any]) -> Non
 def _overlay_whisper_object(target: dict[str, Any], source: Any) -> None:
     wtype = source.whisper_type
     target["whisper_type"] = wtype
-    if wtype == "local":
-        target["model"] = getattr(source, "model", target.get("model"))
-    elif wtype == "remote":
+    if wtype == "remote":
         _overlay_remote_whisper_fields(target, source)
     elif wtype == "groq":
         _overlay_groq_whisper_fields(target, source)
@@ -372,15 +368,6 @@ def _register_groq_whisper_overrides(overrides: dict[str, Any]) -> None:
         )
 
 
-def _register_local_whisper_overrides(overrides: dict[str, Any]) -> None:
-    """Register local whisper environment overrides."""
-    local_model = os.environ.get("WHISPER_LOCAL_MODEL")
-    if local_model:
-        _register_override(
-            overrides, "whisper.model", "WHISPER_LOCAL_MODEL", local_model
-        )
-
-
 def _determine_whisper_type_for_metadata(data: dict[str, Any]) -> str | None:
     """Determine whisper type for environment metadata (with auto-detection)."""
     whisper_cfg = data.get("whisper", {}) or {}
@@ -420,8 +407,6 @@ def _build_env_override_metadata(data: dict[str, Any]) -> dict[str, Any]:
         _register_remote_whisper_overrides(overrides)
     elif wtype == "groq":
         _register_groq_whisper_overrides(overrides)
-    elif wtype == "local":
-        _register_local_whisper_overrides(overrides)
 
     return overrides
 
@@ -477,10 +462,6 @@ def _get_whisper_overridden_fields() -> set[str]:
         overridden.add("whisper.model")
     if os.environ.get("GROQ_MAX_RETRIES"):
         overridden.add("whisper.max_retries")
-
-    # Local whisper
-    if os.environ.get("WHISPER_LOCAL_MODEL"):
-        overridden.add("whisper.model")
 
     return overridden
 
@@ -715,34 +696,6 @@ def _determine_whisper_type(whisper_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def _test_local_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
-    """Test local whisper configuration."""
-    model_name = _get_whisper_config_value(whisper_cfg, "model", "base.en")
-    try:
-        import whisper
-    except ImportError as e:
-        return _make_error_response(f"whisper not installed: {e}")
-
-    try:
-        available = whisper.available_models()
-    except Exception as e:  # pragma: no cover - library call  # noqa: BLE001
-        available = []
-        logger.warning(f"Failed to list local whisper models: {e}")
-
-    if model_name not in available:
-        return flask.make_response(
-            jsonify(
-                {
-                    "ok": False,
-                    "error": f"Model '{model_name}' not available. Install or adjust model.",
-                    "available_models": available,
-                }
-            ),
-            400,
-        )
-    return _make_success_response(f"Local whisper OK (model {model_name})")
-
-
 def _test_remote_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
     """Test remote whisper configuration."""
     api_key_any = _get_whisper_config_value(whisper_cfg, "api_key")
@@ -798,7 +751,11 @@ def api_test_whisper() -> flask.Response:
 
     try:
         if wtype == "local":
-            return _test_local_whisper(whisper_cfg)
+            return _make_error_response(
+                "WHISPER_TYPE=local is no longer supported. Configure "
+                "WHISPER_TYPE=remote with WHISPER_REMOTE_BASE_URL for a dedicated "
+                "OpenAI-compatible transcription service."
+            )
         if wtype == "remote":
             return _test_remote_whisper(whisper_cfg)
         if wtype == "groq":
@@ -807,34 +764,6 @@ def api_test_whisper() -> flask.Response:
     except Exception as e:  # noqa: BLE001
         logger.error(f"Whisper connection test failed: {e}")
         return _make_error_response(str(e))
-
-
-@config_bp.route("/api/config/whisper-capabilities", methods=["GET"])
-def api_get_whisper_capabilities() -> flask.Response:
-    """Report Whisper capabilities for the current runtime.
-
-    Currently returns a boolean indicating whether local Whisper is importable.
-    This enables the frontend to hide the 'local' option when unavailable.
-    """
-    _, error_response = require_admin()
-    if error_response:
-        return error_response
-
-    local_available = False
-    try:  # pragma: no cover - simple import feature check
-        import whisper
-
-        # If import succeeds, we consider local whisper available.
-        # Optionally probe models list, but ignore failures here.
-        try:
-            _ = whisper.available_models()
-        except Exception:  # noqa: BLE001
-            pass
-        local_available = True
-    except Exception:  # noqa: BLE001
-        local_available = False
-
-    return flask.jsonify({"local_available": local_available})
 
 
 @config_bp.route("/api/config/api_configured_check", methods=["GET"])

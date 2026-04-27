@@ -18,7 +18,6 @@ ENABLE_LLM_CHAPTER_FALLBACK_TAGGING = False
 
 # Whisper defaults
 WHISPER_DEFAULT_TYPE = "groq"
-WHISPER_LOCAL_MODEL = "base.en"
 WHISPER_REMOTE_BASE_URL = "https://api.openai.com/v1"
 WHISPER_REMOTE_MODEL = "whisper-1"
 WHISPER_REMOTE_LANGUAGE = "en"

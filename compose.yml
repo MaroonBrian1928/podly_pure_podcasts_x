@@ -4,6 +4,9 @@ services:
     ports:
       - "5001:5001"
     image: ghcr.io/podly-pure-podcasts/podly-pure-podcasts:${BRANCH:-main-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
     volumes:
       - ./src/instance:/app/src/instance
     env_file:
@@ -11,7 +14,6 @@ services:
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:--1}
       - SERVER_THREADS=${SERVER_THREADS:-1}
     restart: unless-stopped
     healthcheck:

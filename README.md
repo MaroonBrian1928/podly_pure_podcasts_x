@@ -43,6 +43,11 @@ You have a few options to get started:
 
 ## Whisper Configuration
 
+Podly does not run embedded local Whisper inside the app container. Use Groq or
+set `WHISPER_TYPE=remote` with `WHISPER_REMOTE_BASE_URL` pointed at an
+OpenAI-compatible transcription service such as `whisper-x-fastapi`,
+`speaches.ai`, or another compatible endpoint.
+
 If you are using `WHISPER_TYPE=remote`, Podly also supports OpenAI-compatible
 transcription flags for diarization:
 
@@ -92,8 +97,6 @@ PODLY_HIDE_REPORT_ISSUE_BUTTON=false
 
 | Cost    | Hosting  | Transcription | LLM    |
 |---------|----------|---------------|--------|
-| **free**| local    | local         | local  |
-| **$2**  | local    | local         | remote |
 | **$5**  | local    | remote        | remote |
 | **$10** | public (railway)  | remote        | remote |
 | **Pay What You Want** | [preview server](https://podly.up.railway.app/)    | n/a         | n/a  |

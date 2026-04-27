@@ -3,6 +3,28 @@
 ## Summary
 Remove Podly’s embedded local Whisper support and collapse Docker packaging to a single CPU-only app image. There will be no `lite` build, no GPU variants, no separate compose overlays, and no in-container PyTorch/Whisper path. Local transcription remains supported by running a dedicated OpenAI-compatible transcription service and configuring Podly with `WHISPER_TYPE=remote`.
 
+## Progress
+- [x] Backend and config removal
+- [x] Docker and scripts simplification
+- [x] Frontend local Whisper UI removal
+- [x] Docs update
+- [x] Lockfile and deleted-file cleanup
+- [ ] Verification
+
+### Verification Notes
+- [x] `mise exec -- uv lock`
+- [x] `mise exec -- ./scripts/ci.sh`
+- [x] `mise exec -- npm run build` in `frontend/`
+- [ ] `mise exec -- npm run lint` in `frontend/`
+  - Fails on existing unrelated lint errors in `FeedList.tsx`, `AuthContext.tsx`, and `BillingPage.tsx`; this change did not address those files.
+- [x] `docker compose -f compose.yml config`
+- [x] `docker compose -f compose.yml build`
+- [x] `./run_podly_docker.sh --build`
+- [x] `./run_podly_docker.sh --dev --build`
+- [x] Final cleanup search
+- [x] Follow-up local Whisper audit
+  - Removed stale test-only `whisper`/`torch` module mocks and old Torch comments from transcription tests.
+
 ## Backend And Config
 - Remove local Whisper runtime:
   - Delete `LocalWhisperTranscriber`.

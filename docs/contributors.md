@@ -6,12 +6,12 @@
 
 ```bash
 chmod +x run_podly_docker.sh
-./run_podly_docker.sh --build
-./run_podly_docker.sh # foreground with logs 
-./run_podly_docker.sh -d # or detached
+./run_podly_docker.sh --production # foreground with logs
+./run_podly_docker.sh --production -d # or detached
 ```
 
-This automatically detects NVIDIA GPUs and uses them if available.
+This uses the single CPU-only Docker image and keeps transcription external to
+the Podly container.
 
 After the server starts:
 
@@ -33,11 +33,11 @@ Once the server is running:
 
 Podly supports multiple options for audio transcription:
 
-1. **Local Whisper (Default)**
-   - Slower but self-contained
-2. **OpenAI Hosted Whisper**
+1. **OpenAI-compatible remote Whisper**
+   - Configure `WHISPER_TYPE=remote` and `WHISPER_REMOTE_BASE_URL`
+   - Works with services such as `whisper-x-fastapi`, `speaches.ai`, or another OpenAI-compatible transcription endpoint
+2. **Groq Hosted Whisper**
    - Fast and accurate; billed per-feed via Stripe
-3. **Groq Hosted Whisper**
    - Fast and cost-effective
 
 Select your preferred method in the Config page (`/config`).
@@ -143,28 +143,25 @@ If no Conventional Commit is present, the release pipeline will have nothing to 
 
 ## Docker Support
 
-Podly can be run in Docker with support for both NVIDIA GPU and non-NVIDIA environments.
+Podly can be run in Docker using the single standard image.
 
 ### Docker Options
 
 ```bash
-./run_podly_docker.sh --dev          # rebuild containers for local changes
+./run_podly_docker.sh --dev          # build local image and start for local changes
 ./run_podly_docker.sh --production   # use published images
-./run_podly_docker.sh --lite         # smaller image without local Whisper
-./run_podly_docker.sh --cpu          # force CPU mode
-./run_podly_docker.sh --gpu          # force GPU mode
-./run_podly_docker.sh --build        # build only
+./run_podly_docker.sh --dev --build  # build local image only
 ./run_podly_docker.sh --test-build   # test build
 ./run_podly_docker.sh -d             # detached
 ```
 
 ### Development vs Production Modes
 
-**Development Mode** (default):
+**Development Mode**:
 
 - Uses local Docker builds
-- Requires rebuilding after code changes: `./run_podly_docker.sh --dev`
-- Mounts essential directories (config, input/output, database) and live code for development
+- Rebuilds after code changes: `./run_podly_docker.sh --dev`
+- Mounts the instance directory and uses the local Docker build
 - Good for: development, testing, customization
 
 **Production Mode**:
@@ -175,7 +172,7 @@ Podly can be run in Docker with support for both NVIDIA GPU and non-NVIDIA envir
 - Good for: deployment, quick setup, consistent environments
 
 ```bash
-# Start with existing local container
+# Start with the published image
 ./run_podly_docker.sh
 
 # Rebuild and start after making code changes
@@ -190,7 +187,6 @@ Podly can be run in Docker with support for both NVIDIA GPU and non-NVIDIA envir
 **Environment Variables**:
 
 - `PUID`/`PGID`: User/group IDs for file permissions (automatically set by run script)
-- `CUDA_VISIBLE_DEVICES`: GPU device selection for CUDA acceleration
 - `CORS_ORIGINS`: Backend CORS configuration (defaults to accept requests from any origin)
 
 **Env Var Precedence for Config Settings**:
@@ -210,20 +206,11 @@ Q: What does "whitelisted" mean in the UI?
 
 A: It means an episode is eligible for download and ad removal. By default, new episodes are automatically whitelisted (`automatically_whitelist_new_episodes`), and only a limited number of old episodes are auto-whitelisted (`number_of_episodes_to_whitelist_from_archive_of_new_feed`). Adjust these settings in the Config page (/config).
 
-Q: How can I enable whisper GPU acceleration?
+Q: How can I run transcription outside the Podly container?
 
-A: There are two ways to enable GPU acceleration:
-
-1. **Using Docker**:
-
-   - Use the provided Docker setup with `run_podly_docker.sh` which automatically detects and uses NVIDIA GPUs if available
-   - You can force GPU mode with `./run_podly_docker.sh --gpu` or force CPU mode with `./run_podly_docker.sh --cpu`
-
-2. **In a local environment**:
-   - Install the CUDA version of PyTorch to your virtual environment:
-   ```bash
-   pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-   ```
+A: Run an OpenAI-compatible transcription service such as `whisper-x-fastapi`,
+`speaches.ai`, or a hosted provider, then set `WHISPER_TYPE=remote` and
+`WHISPER_REMOTE_BASE_URL` to that service.
 
 ## Contributing
 
@@ -268,7 +255,7 @@ Both scripts provide equivalent core functionality with some unique features:
 
 - **Development mode**: `./run_podly_docker.sh --dev` - rebuilds containers with code changes
 - **Production mode**: `./run_podly_docker.sh --production` - uses pre-built images
-- **Docker-specific options**: `--build`, `--test-build`, `--gpu`, `--cpu`, `--cuda=VERSION`, `--rocm=VERSION`, `--branch=BRANCH`
+- **Docker-specific options**: `--build`, `--test-build`, `--branch=BRANCH`
 
 **Functional Equivalence**:
 Both scripts provide the same core user experience:

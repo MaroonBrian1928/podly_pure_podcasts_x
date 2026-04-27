@@ -2,7 +2,7 @@
 Shared configuration helpers to avoid code duplication.
 """
 
-from .config import Config, OutputConfig, ProcessingConfig
+from .config import Config, OutputConfig, ProcessingConfig, TestWhisperConfig
 
 
 def create_standard_test_config(
@@ -36,4 +36,5 @@ def create_standard_test_config(
             num_segments_to_input_to_prompt=num_segments_to_input_to_prompt,
             max_overlap_segments=max_overlap_segments,
         ),
+        whisper=TestWhisperConfig(),
     )

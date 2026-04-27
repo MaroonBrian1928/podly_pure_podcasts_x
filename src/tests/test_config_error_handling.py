@@ -3,7 +3,7 @@ Tests for configuration error handling and validation.
 """
 
 import importlib
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -127,6 +127,38 @@ class TestConfigurationErrorHandling:
             ),
         )
         assert config.enable_llm_chapter_fallback_tagging is True
+
+    def test_local_whisper_config_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="WHISPER_TYPE=local"):
+            Config(
+                llm_api_key="test-key",
+                output=OutputConfig(
+                    fade_ms=3000,
+                    min_ad_segement_separation_seconds=60,
+                    min_ad_segment_length_seconds=14,
+                    min_confidence=0.8,
+                ),
+                processing=ProcessingConfig(num_segments_to_input_to_prompt=30),
+                whisper=cast(
+                    Any,
+                    {"whisper_type": "local", "model": "legacy-local-model"},
+                ),
+            )
+
+    def test_old_style_local_whisper_fallback_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Old-style local Whisper"):
+            Config(
+                llm_api_key="test-key",
+                remote_whisper=False,
+                whisper_model="legacy-local-model",
+                output=OutputConfig(
+                    fade_ms=3000,
+                    min_ad_segement_separation_seconds=60,
+                    min_ad_segment_length_seconds=14,
+                    min_confidence=0.8,
+                ),
+                processing=ProcessingConfig(num_segments_to_input_to_prompt=30),
+            )
 
 
 class TestEnvKeyValidation:

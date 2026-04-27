@@ -126,7 +126,6 @@ export interface LLMConfig {
 }
 
 export type WhisperConfig =
-  | { whisper_type: 'local'; model: string }
   | {
     whisper_type: 'remote';
     model: string;

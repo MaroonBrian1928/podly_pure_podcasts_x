@@ -785,11 +785,6 @@ export const configApi = {
     const response = await api.post('/api/config/test-whisper', payload ?? {});
     return response.data;
   },
-  getWhisperCapabilities: async (): Promise<{ local_available: boolean }> => {
-    const response = await api.get('/api/config/whisper-capabilities');
-    const local_available = !!response.data?.local_available;
-    return { local_available };
-  },
 };
 
 export const billingApi = {

@@ -20,7 +20,6 @@ from shared import defaults as DEFAULTS
 from shared.config import Config as PydanticConfig
 from shared.config import (
     GroqWhisperConfig,
-    LocalWhisperConfig,
     RemoteWhisperConfig,
     TestWhisperConfig,
 )
@@ -114,7 +113,6 @@ def ensure_defaults() -> None:
         WhisperSettings,
         {
             "whisper_type": DEFAULTS.WHISPER_DEFAULT_TYPE,
-            "local_model": DEFAULTS.WHISPER_LOCAL_MODEL,
             "remote_model": DEFAULTS.WHISPER_REMOTE_MODEL,
             "remote_base_url": DEFAULTS.WHISPER_REMOTE_BASE_URL,
             "remote_language": DEFAULTS.WHISPER_REMOTE_LANGUAGE,
@@ -173,7 +171,11 @@ def read_combined() -> dict[str, Any]:
 
     whisper_payload: dict[str, Any] = {"whisper_type": whisper.whisper_type}
     if whisper.whisper_type == "local":
-        whisper_payload.update({"model": whisper.local_model})
+        raise RuntimeError(
+            "Stored whisper_type='local' is no longer supported. Configure "
+            "WHISPER_TYPE=remote with WHISPER_REMOTE_BASE_URL for a dedicated "
+            "OpenAI-compatible transcription service."
+        )
     elif whisper.whisper_type == "remote":
         whisper_payload.update(
             {
@@ -273,16 +275,12 @@ def _update_section_whisper(data: dict[str, Any]) -> None:
     row = WhisperSettings.query.get(1)
     assert row is not None
     if "whisper_type" in data and data["whisper_type"] in {
-        "local",
         "remote",
         "groq",
         "test",
     }:
         row.whisper_type = data["whisper_type"]
-    if row.whisper_type == "local":
-        if "model" in data:
-            row.local_model = data["model"]
-    elif row.whisper_type == "remote":
+    if row.whisper_type == "remote":
         for key_map in [
             ("model", "remote_model"),
             ("api_key", "remote_api_key"),
@@ -454,17 +452,17 @@ def update_combined(payload: dict[str, Any]) -> dict[str, Any]:
 def to_pydantic_config() -> PydanticConfig:
     data = read_combined()
     # Map whisper section to discriminated union config
-    whisper_obj: (
-        LocalWhisperConfig
-        | RemoteWhisperConfig
-        | TestWhisperConfig
-        | GroqWhisperConfig
-        | None
-    ) = None
+    whisper_obj: RemoteWhisperConfig | TestWhisperConfig | GroqWhisperConfig | None = (
+        None
+    )
     w = data["whisper"]
     wtype = w.get("whisper_type")
     if wtype == "local":
-        whisper_obj = LocalWhisperConfig(model=w.get("model", "base.en"))
+        raise RuntimeError(
+            "Stored whisper_type='local' is no longer supported. Configure "
+            "WHISPER_TYPE=remote with WHISPER_REMOTE_BASE_URL for a dedicated "
+            "OpenAI-compatible transcription service."
+        )
     elif wtype == "remote":
         whisper_obj = RemoteWhisperConfig(
             model=w.get("model", "whisper-1"),
@@ -758,43 +756,12 @@ def _apply_whisper_env_overrides(cfg: PydanticConfig) -> None:
         _apply_remote_whisper_runtime_overrides(cfg.whisper)
     elif wtype == "groq" and isinstance(cfg.whisper, GroqWhisperConfig):
         _apply_groq_whisper_runtime_overrides(cfg.whisper)
-    elif wtype == "local":
-        loc_model = os.environ.get("WHISPER_LOCAL_MODEL")
-        if isinstance(cfg.whisper, LocalWhisperConfig) and loc_model:
-            cfg.whisper.model = loc_model
 
 
 def _apply_llm_model_override(cfg: PydanticConfig) -> None:
     env_llm_model = os.environ.get("LLM_MODEL")
     if env_llm_model:
         cfg.llm_model = env_llm_model
-
-
-def _configure_local_whisper(cfg: PydanticConfig) -> None:
-    """Configure local whisper type."""
-    # Validate that local whisper is available
-    try:
-        import whisper as _  # noqa: F401
-    except ImportError as e:
-        error_msg = (
-            f"WHISPER_TYPE is set to 'local' but whisper library is not available. "
-            f"Either install whisper with 'pip install openai-whisper' or set WHISPER_TYPE to 'remote' or 'groq'. "
-            f"Import error: {e}"
-        )
-        logger.error(error_msg)
-        raise RuntimeError(error_msg) from e
-
-    existing_model_any = getattr(cfg.whisper, "model", "base.en")
-    existing_model = (
-        existing_model_any if isinstance(existing_model_any, str) else "base.en"
-    )
-    loc_model_env = os.environ.get("WHISPER_LOCAL_MODEL")
-    loc_model: str = (
-        loc_model_env
-        if isinstance(loc_model_env, str) and loc_model_env
-        else existing_model
-    )
-    cfg.whisper = LocalWhisperConfig(model=loc_model)
 
 
 def _configure_remote_whisper(cfg: PydanticConfig) -> None:
@@ -970,7 +937,11 @@ def _apply_whisper_type_override(cfg: PydanticConfig) -> None:
 
     wtype = env_whisper_type.strip().lower()
     if wtype == "local":
-        _configure_local_whisper(cfg)
+        raise RuntimeError(
+            "WHISPER_TYPE=local is no longer supported. Run a dedicated "
+            "OpenAI-compatible transcription service and configure "
+            "WHISPER_TYPE=remote with WHISPER_REMOTE_BASE_URL."
+        )
     elif wtype == "remote":
         _configure_remote_whisper(cfg)
     elif wtype == "groq":

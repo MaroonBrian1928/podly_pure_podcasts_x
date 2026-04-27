@@ -16,5 +16,7 @@ def whisper_model_call_filter() -> Any:
     return or_(
         ModelCall.prompt == WHISPER_TRANSCRIPTION_PROMPT,
         ModelCall.model_name.like("%whisper%"),
+        # Historical local Whisper calls used local_<model>; keep matching only
+        # for cleanup/stats compatibility, not as active local Whisper support.
         ModelCall.model_name.like("local_%"),
     )

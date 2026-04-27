@@ -21,13 +21,8 @@ if [[ -n "${GHCR_TOKEN:-}" ]]; then
   echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${OWNER}" --password-stdin
 fi
 
-# Build and push multi-arch CPU image (lite)
+# Build and push the standard multi-arch image
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t "${IMAGE}:${BRANCH}-lite" \
-  --build-arg BASE_IMAGE=python:3.11-slim \
-  --build-arg USE_GPU=false \
-  --build-arg USE_GPU_NVIDIA=false \
-  --build-arg USE_GPU_AMD=false \
-  --build-arg LITE_BUILD=true \
+  -t "${IMAGE}:${BRANCH}-latest" \
   --push .
