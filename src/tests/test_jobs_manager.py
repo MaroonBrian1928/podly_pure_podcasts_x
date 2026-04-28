@@ -126,6 +126,47 @@ def test_ensure_jobs_creates_job_when_processed_path_is_missing_file(
     assert created_guids == [post.guid]
 
 
+def test_start_refresh_all_feeds_refreshes_each_feed_in_short_session(
+    app, monkeypatch
+) -> None:
+    first_feed = _create_feed()
+    second_feed = Feed(
+        title="Second Feed",
+        rss_url="https://example.com/second.xml",
+    )
+    db.session.add(second_feed)
+    db.session.commit()
+
+    refreshed_ids: list[int] = []
+
+    def fake_refresh_feed(feed: Feed) -> None:
+        feed_count_in_session = sum(
+            isinstance(obj, Feed) for obj in db.session.identity_map.values()
+        )
+        assert feed_count_in_session == 1
+        refreshed_ids.append(feed.id)
+
+    monkeypatch.setattr(jobs_manager_module, "_scheduler_app_context", app.app_context)
+    monkeypatch.setattr(jobs_manager_module, "refresh_feed", fake_refresh_feed)
+    monkeypatch.setattr(jobs_manager_module, "collect_incremental", lambda *_args: None)
+    monkeypatch.setattr(
+        jobs_manager_module, "release_memory_to_os", lambda *_args: None
+    )
+
+    manager = JobsManager.__new__(JobsManager)
+    monkeypatch.setattr(manager, "_cleanup_inconsistent_posts", lambda: None)
+    monkeypatch.setattr(
+        manager,
+        "enqueue_pending_jobs",
+        lambda trigger, context: {"status": "ok", "trigger": trigger},
+    )
+
+    result = manager.start_refresh_all_feeds(trigger="scheduled")
+
+    assert result == {"status": "ok", "trigger": "scheduled"}
+    assert refreshed_ids == [first_feed.id, second_feed.id]
+
+
 class FakeStatusManager:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, int, str, float | None]] = []

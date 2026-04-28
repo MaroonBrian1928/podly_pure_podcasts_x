@@ -15,7 +15,7 @@ from app.extensions import db as _db
 from app.extensions import scheduler
 from app.feeds import refresh_feed
 from app.job_manager import JobManager as SingleJobManager
-from app.memory_pressure import release_memory_to_os
+from app.memory_pressure import collect_incremental, release_memory_to_os
 from app.models import Feed, JobsManagerRun, Post, ProcessingJob
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
@@ -560,17 +560,53 @@ class JobsManager:
         Refresh feeds and enqueue per-post processing into internal worker pool.
         """
         with _scheduler_app_context():
-            feeds = Feed.query.all()
-            for feed in feeds:
-                refresh_feed(feed)
+            feed_ids = [feed_id for (feed_id,) in _db.session.query(Feed.id).all()]
 
-            # Clean up posts with missing audio files
-            self._cleanup_inconsistent_posts()
+        for feed_id in feed_ids:
+            self._refresh_feed_in_short_context(feed_id)
 
-            # Process new posts
-            return self.enqueue_pending_jobs(trigger=trigger, context=context)
+        # Clean up posts with missing audio files
+        self._cleanup_inconsistent_posts()
+
+        # Process new posts
+        return self.enqueue_pending_jobs(trigger=trigger, context=context)
 
     # ------------------------ Helpers ------------------------
+    def _refresh_feed_in_short_context(self, feed_id: int) -> None:
+        """Refresh one feed without keeping the whole scheduled batch in memory."""
+        with _scheduler_app_context():
+            try:
+                feed = _db.session.get(Feed, feed_id)
+                if feed is None:
+                    logger.warning(
+                        "Skipping missing feed during refresh: id=%s", feed_id
+                    )
+                    return
+                refresh_feed(feed)
+            finally:
+                try:
+                    _db.session.expunge_all()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Failed to expunge session after feed refresh id=%s: %s",
+                        feed_id,
+                        exc,
+                        exc_info=True,
+                    )
+                try:
+                    _db.session.remove()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Failed to remove session after feed refresh id=%s: %s",
+                        feed_id,
+                        exc,
+                        exc_info=True,
+                    )
+                collect_incremental(f"scheduled feed refresh feed_id={feed_id}", logger)
+                release_memory_to_os(
+                    f"scheduled feed refresh context feed_id={feed_id}", logger
+                )
+
     def _cleanup_inconsistent_posts(self) -> None:
         """Clean up posts with missing audio files."""
         try:
