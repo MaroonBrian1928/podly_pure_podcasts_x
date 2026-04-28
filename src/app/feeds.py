@@ -14,11 +14,10 @@ import PyRSS2Gen
 from flask import current_app, g, request
 
 from app.extensions import db
-from app.memory_pressure import release_memory_to_os
+from app.memory_pressure import release_memory_to_os, request_memory_trim_after_context
 from app.models import Feed, Post, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
-from podcast_processor.audio import get_audio_duration_ms
 from podcast_processor.podcast_downloader import find_audio_link
 
 logger = logging.getLogger("global_logger")
@@ -465,6 +464,7 @@ def refresh_feed(feed: Feed) -> None:
     finally:
         del feed_data, updates, new_posts, existing_post_updates
         release_memory_to_os(f"feed refresh feed_id={feed_id}", logger)
+        request_memory_trim_after_context(f"feed refresh feed_id={feed_id}")
 
     logger.info(f"Feed with ID: {feed_id} refreshed")
 
@@ -620,12 +620,6 @@ def _feed_item_duration_seconds(post: Post) -> int | None:
     if parsed_duration is not None:
         return parsed_duration
 
-    processed_audio_path = getattr(post, "processed_audio_path", None)
-    if processed_audio_path:
-        duration_ms = get_audio_duration_ms(processed_audio_path)
-        if duration_ms is not None and duration_ms > 0:
-            return round(duration_ms / 1000.0)
-
     return None
 
 
@@ -705,6 +699,7 @@ def generate_feed_xml(feed: Feed) -> Any:
     xml_content = rss_feed.to_xml("utf-8")
     del rss_feed, items, posts
     release_memory_to_os(f"feed XML feed_id={feed.id}", logger)
+    request_memory_trim_after_context(f"feed XML feed_id={feed.id}")
 
     logger.info(f"XML generated for feed with ID: {feed.id}")
     return xml_content
@@ -752,6 +747,7 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     xml_content = rss_feed.to_xml("utf-8")
     del rss_feed, items, posts
     release_memory_to_os(f"aggregate feed XML user_id={user_id}", logger)
+    request_memory_trim_after_context(f"aggregate feed XML user_id={user_id}")
 
     logger.info(f"Aggregate XML generated for: {username}")
     return xml_content

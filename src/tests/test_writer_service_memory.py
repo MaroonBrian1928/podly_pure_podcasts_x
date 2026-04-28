@@ -13,7 +13,7 @@ def test_memory_trim_context_detects_large_writer_actions() -> None:
     )
 
     assert service._memory_trim_context_for_command(cmd) == (
-        "writer action replace_transcription"
+        "writer large action replace_transcription"
     )
 
 
@@ -26,6 +26,19 @@ def test_memory_trim_context_ignores_polling_actions() -> None:
     )
 
     assert service._memory_trim_context_for_command(cmd) is None
+
+
+def test_memory_trim_context_detects_other_writer_actions() -> None:
+    cmd = WriteCommand(
+        id="cmd-1",
+        type=WriteCommandType.ACTION,
+        model=None,
+        data={"action": "mark_model_call_failed", "params": {}},
+    )
+
+    assert service._memory_trim_context_for_command(cmd) == (
+        "writer action mark_model_call_failed"
+    )
 
 
 def test_writer_executor_detects_dequeue_job_polling_commands() -> None:

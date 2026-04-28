@@ -36,9 +36,11 @@ def _memory_trim_context_for_command(cmd: object) -> str | None:
     if getattr(cmd, "type", None) != WriteCommandType.ACTION:
         return None
     action = _action_name(cmd)
-    if action not in MEMORY_TRIM_ACTIONS:
+    if action == "dequeue_job":
         return None
-    return f"writer action {action}"
+    if action not in MEMORY_TRIM_ACTIONS:
+        return f"writer action {action or 'unknown'}"
+    return f"writer large action {action}"
 
 
 def _discard_processed_command_payload(cmd: WriteCommand) -> None:
@@ -120,8 +122,9 @@ def run_writer_service() -> None:
             logger.error("Error in writer loop: %s", e, exc_info=True)
             time.sleep(1)
         finally:
-            if trim_context is not None and cmd is not None:
+            if cmd is not None:
                 _discard_processed_command_payload(cmd)
                 cmd = None
                 result = None
+            if trim_context is not None:
                 release_memory_to_os(trim_context, logger)

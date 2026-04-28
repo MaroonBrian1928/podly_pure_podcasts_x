@@ -815,7 +815,7 @@ def test_feed_item_normalizes_problematic_source_whitespace(mock_post, app):
     assert ">Link</a> afterjoiner</p>" in xml
 
 
-def test_feed_item_falls_back_to_processed_audio_duration(mock_post, app):
+def test_feed_item_omits_duration_when_stored_duration_missing(mock_post, app):
     mock_post.duration = None
     mock_post.processed_audio_path = "/tmp/test-output.mp3"
 
@@ -831,11 +831,7 @@ def test_feed_item_falls_back_to_processed_audio_duration(mock_post, app):
     mock_request.environ = mock_environ
     mock_request.is_secure = False
 
-    with (
-        app.app_context(),
-        mock.patch("app.feeds.request", mock_request),
-        mock.patch("app.feeds.get_audio_duration_ms", return_value=4_194_000),
-    ):
+    with app.app_context(), mock.patch("app.feeds.request", mock_request):
         item = feed_item(mock_post)
 
     rss = PyRSS2Gen.RSS2(
@@ -849,7 +845,7 @@ def test_feed_item_falls_back_to_processed_audio_duration(mock_post, app):
     xml = rss.to_xml("utf-8")
     if isinstance(xml, bytes):
         xml = xml.decode("utf-8")
-    assert "<itunes:duration>1:09:54</itunes:duration>" in xml
+    assert "<itunes:duration>" not in xml
 
 
 def test_feed_item_prefers_stored_duration_over_processed_audio_probe(mock_post, app):
@@ -868,10 +864,8 @@ def test_feed_item_prefers_stored_duration_over_processed_audio_probe(mock_post,
     mock_request.environ = mock_environ
     mock_request.is_secure = False
 
-    mock_probe = mock.Mock(return_value=3_600_000)
     with app.app_context(), mock.patch("app.feeds.request", mock_request):
-        with mock.patch("app.feeds.get_audio_duration_ms", mock_probe):
-            item = feed_item(mock_post)
+        item = feed_item(mock_post)
 
     rss = PyRSS2Gen.RSS2(
         title="Test Feed",
@@ -885,7 +879,6 @@ def test_feed_item_prefers_stored_duration_over_processed_audio_probe(mock_post,
     if isinstance(xml, bytes):
         xml = xml.decode("utf-8")
     assert "<itunes:duration>1:02:03</itunes:duration>" in xml
-    mock_probe.assert_not_called()
 
 
 def test_get_base_url_without_reverse_proxy():
@@ -954,28 +947,22 @@ def test_get_base_url_localhost():
     assert result == "http://localhost:5001"
 
 
-def test_feed_item_duration_prefers_stored_duration(monkeypatch):
+def test_feed_item_duration_prefers_stored_duration():
     post = Post(
         duration=123.7,
         processed_audio_path="/tmp/processed.mp3",
     )
-    mock_probe = mock.Mock(return_value=456000)
-    monkeypatch.setattr("app.feeds.get_audio_duration_ms", mock_probe)
 
     assert _feed_item_duration_seconds(post) == 123
-    mock_probe.assert_not_called()
 
 
-def test_feed_item_duration_probes_processed_audio_when_duration_missing(monkeypatch):
+def test_feed_item_duration_skips_probe_when_duration_missing():
     post = Post(
         duration=None,
         processed_audio_path="/tmp/processed.mp3",
     )
-    mock_probe = mock.Mock(return_value=456700)
-    monkeypatch.setattr("app.feeds.get_audio_duration_ms", mock_probe)
 
-    assert _feed_item_duration_seconds(post) == 457
-    mock_probe.assert_called_once_with("/tmp/processed.mp3")
+    assert _feed_item_duration_seconds(post) is None
 
 
 @mock.patch("app.feeds.feed_item")

@@ -435,6 +435,7 @@ def _register_routes_and_middleware(app: Flask) -> None:
     init_auth_middleware(app)
 
     _register_api_logging(app)
+    _register_memory_cleanup(app)
 
 
 def _register_api_logging(app: Flask) -> None:
@@ -464,6 +465,31 @@ def _register_api_logging(app: Flask) -> None:
         )
 
         return response
+
+
+def _register_memory_cleanup(app: Flask) -> None:
+    from app.memory_pressure import (
+        consume_memory_trim_contexts,
+        release_memory_to_os,
+    )
+
+    @app.teardown_appcontext
+    def _release_memory_after_app_context(exc: BaseException | None) -> None:
+        trim_contexts = consume_memory_trim_contexts()
+        if not trim_contexts:
+            return
+
+        try:
+            db.session.remove()
+        except Exception as remove_exc:  # noqa: BLE001
+            app_logger.debug(
+                "Failed to remove DB session before memory trim: %s",
+                remove_exc,
+                exc_info=True,
+            )
+
+        context = ", ".join(trim_contexts[-3:])
+        release_memory_to_os(f"app context teardown after {context}", app_logger)
 
 
 def _run_app_startup(auth_settings: AuthSettings) -> None:

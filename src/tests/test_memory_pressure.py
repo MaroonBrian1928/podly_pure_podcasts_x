@@ -5,6 +5,18 @@ import logging
 from app import memory_pressure
 
 
+def test_memory_trim_after_context_round_trips(app) -> None:
+    with app.app_context():
+        memory_pressure.request_memory_trim_after_context("feed refresh")
+        memory_pressure.request_memory_trim_after_context("feed XML")
+
+        assert memory_pressure.consume_memory_trim_contexts() == [
+            "feed refresh",
+            "feed XML",
+        ]
+        assert memory_pressure.consume_memory_trim_contexts() == []
+
+
 def test_release_memory_to_os_runs_gc_and_malloc_trim(monkeypatch) -> None:
     calls: list[str] = []
 

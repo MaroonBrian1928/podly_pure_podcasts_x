@@ -8,7 +8,10 @@ import sys
 from functools import lru_cache
 from typing import Any
 
+from flask import g
+
 logger = logging.getLogger("global_logger")
+_TRIM_CONTEXTS_ATTR = "_podly_memory_trim_after_context"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -59,6 +62,29 @@ def release_memory_to_os(
         collected,
         trimmed,
     )
+
+
+def request_memory_trim_after_context(context: str) -> None:
+    """Request a second trim after Flask tears down session/app-context state."""
+    try:
+        contexts = getattr(g, _TRIM_CONTEXTS_ATTR, None)
+        if contexts is None:
+            contexts = []
+            setattr(g, _TRIM_CONTEXTS_ATTR, contexts)
+        contexts.append(context)
+    except RuntimeError:
+        release_memory_to_os(context, logger)
+
+
+def consume_memory_trim_contexts() -> list[str]:
+    try:
+        contexts = getattr(g, _TRIM_CONTEXTS_ATTR, None)
+        if not contexts:
+            return []
+        setattr(g, _TRIM_CONTEXTS_ATTR, [])
+        return list(contexts)
+    except RuntimeError:
+        return []
 
 
 def collect_incremental(
