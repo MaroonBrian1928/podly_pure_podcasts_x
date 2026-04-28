@@ -163,7 +163,7 @@ def change_password_route() -> RouteResult:
     if getattr(user, "auth_provider", "local") != "local":
         return (
             jsonify({"error": "Password change is not available for SSO accounts."}),
-            400,
+            403,
         )
 
     payload = request.get_json(silent=True) or {}

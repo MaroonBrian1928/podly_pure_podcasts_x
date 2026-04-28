@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -52,20 +53,23 @@ def update_discord_settings_action(params: dict[str, Any]) -> dict[str, Any]:
     return {"updated": True}
 
 
+_OIDC_ENV_LOCKS: dict[str, str] = {
+    "issuer": "OIDC_ISSUER",
+    "client_id": "OIDC_CLIENT_ID",
+    "client_secret": "OIDC_CLIENT_SECRET",
+    "redirect_uri": "OIDC_REDIRECT_URI",
+    "allow_registration": "OIDC_ALLOW_REGISTRATION",
+}
+
+
 def update_oidc_settings_action(params: dict[str, Any]) -> dict[str, Any]:
     settings = db.session.get(OidcSettings, 1)
     if settings is None:
         settings = OidcSettings(id=1)
         db.session.add(settings)
 
-    for field in (
-        "issuer",
-        "client_id",
-        "client_secret",
-        "redirect_uri",
-        "allow_registration",
-    ):
-        if field in params:
+    for field, env_var in _OIDC_ENV_LOCKS.items():
+        if field in params and not os.environ.get(env_var):
             setattr(settings, field, params.get(field))
 
     settings.updated_at = datetime.now(UTC).replace(tzinfo=None)

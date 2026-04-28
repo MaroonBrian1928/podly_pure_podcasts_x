@@ -679,7 +679,7 @@ export const oidcApi = {
       redirect_uri: string | null;
       allow_registration: boolean;
     };
-    env_overrides: Record<string, { env_var: string; value?: string; is_secret?: string }>;
+    env_overrides: Record<string, { env_var: string; value?: string; is_secret?: boolean }>;
   }> => {
     const response = await api.get('/api/auth/oidc/config');
     return response.data;

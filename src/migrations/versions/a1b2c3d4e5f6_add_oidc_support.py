@@ -49,8 +49,8 @@ def upgrade():
         sa.Column("client_secret", sa.Text(), nullable=True),
         sa.Column("redirect_uri", sa.Text(), nullable=True),
         sa.Column("allow_registration", sa.Boolean(), nullable=False, server_default="1"),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id"),
     )
 

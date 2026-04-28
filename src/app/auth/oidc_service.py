@@ -6,7 +6,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -49,8 +49,20 @@ def generate_pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
+_DISCOVERY_REQUIRED_KEYS = ("authorization_endpoint", "token_endpoint", "userinfo_endpoint")
+
+
+def _validate_issuer_url(issuer: str) -> None:
+    parsed = urlparse(issuer)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise OidcAuthError(
+            f"OIDC issuer must be an https URL, got: {issuer!r}"
+        )
+
+
 def _get_discovery(issuer: str) -> dict[str, Any]:
     """Fetch the OIDC discovery document, cached per issuer for process lifetime."""
+    _validate_issuer_url(issuer)
     if issuer in _discovery_cache:
         return _discovery_cache[issuer]
     url = issuer.rstrip("/") + "/.well-known/openid-configuration"
@@ -58,6 +70,11 @@ def _get_discovery(issuer: str) -> dict[str, Any]:
         response = client.get(url)
         response.raise_for_status()
         data: dict[str, Any] = response.json()
+    missing = [k for k in _DISCOVERY_REQUIRED_KEYS if k not in data]
+    if missing:
+        raise OidcAuthError(
+            f"OIDC discovery document missing required keys: {missing}"
+        )
     _discovery_cache[issuer] = data
     return data
 

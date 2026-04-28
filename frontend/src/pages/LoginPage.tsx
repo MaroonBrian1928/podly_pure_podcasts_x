@@ -16,6 +16,7 @@ export default function LoginPage() {
   const [discordLoading, setDiscordLoading] = useState(false);
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [oidcLoading, setOidcLoading] = useState(false);
+  const [ssoStatusResolved, setSsoStatusResolved] = useState(false);
   const [showPasswordLogin, setShowPasswordLogin] = useState(false);
 
   // Check for OAuth callback errors in URL
@@ -50,6 +51,7 @@ export default function LoginPage() {
       setDiscordEnabled(discordOn);
       setOidcEnabled(oidcOn);
       setShowPasswordLogin(!discordOn && !oidcOn);
+      setSsoStatusResolved(true);
     });
   }, []);
 
@@ -99,6 +101,14 @@ export default function LoginPage() {
       setOidcLoading(false);
     }
   };
+
+  if (!ssoStatusResolved) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <span className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">

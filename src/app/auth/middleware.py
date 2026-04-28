@@ -25,6 +25,9 @@ _PUBLIC_PATHS: set[str] = {
     "/api/auth/discord/status",
     "/api/auth/discord/login",
     "/api/auth/discord/callback",
+    "/api/auth/oidc/status",
+    "/api/auth/oidc/login",
+    "/api/auth/oidc/callback",
     "/api/landing/status",
     # Stripe webhooks must bypass auth to allow Stripe to deliver events
     "/api/billing/stripe-webhook",

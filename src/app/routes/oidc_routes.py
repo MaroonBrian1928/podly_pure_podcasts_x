@@ -4,16 +4,20 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+from urllib.parse import quote_plus
+
 from flask import (
     Blueprint,
     Response,
     current_app,
     jsonify,
+    redirect,
     request,
     session,
 )
 
 from app.auth.guards import require_admin
+from app.auth.service import update_user_last_active
 from app.auth.oidc_service import (
     OidcAuthError,
     OidcRegistrationDisabledError,
@@ -69,7 +73,7 @@ def oidc_config_get() -> Response | tuple[Response, int]:
 
     settings = _get_oidc_settings()
 
-    env_overrides: dict[str, dict[str, str]] = {}
+    env_overrides: dict[str, dict[str, str | bool]] = {}
     for env_var, key in [
         ("OIDC_ISSUER", "issuer"),
         ("OIDC_CLIENT_ID", "client_id"),
@@ -84,7 +88,7 @@ def oidc_config_get() -> Response | tuple[Response, int]:
     if _has_env_override("OIDC_CLIENT_SECRET"):
         env_overrides["client_secret"] = {
             "env_var": "OIDC_CLIENT_SECRET",
-            "is_secret": "true",
+            "is_secret": True,
         }
 
     return jsonify(
@@ -130,7 +134,13 @@ def oidc_config_put() -> Response | tuple[Response, int]:
         if "allow_registration" in payload and not _has_env_override(
             "OIDC_ALLOW_REGISTRATION"
         ):
-            update_params["allow_registration"] = bool(payload["allow_registration"])
+            val = payload["allow_registration"]
+            if isinstance(val, str):
+                update_params["allow_registration"] = val.strip().lower() in (
+                    "true", "1", "yes"
+                )
+            else:
+                update_params["allow_registration"] = bool(val)
 
         if update_params:
             result = writer_client.action(
@@ -184,40 +194,32 @@ def oidc_login() -> Response | tuple[Response, int]:
 def oidc_callback() -> Response:
     settings = _get_oidc_settings()
     if not settings or not settings.enabled:
-        return Response(
-            response="",
-            status=302,
-            headers={"Location": "/?error=oidc_not_configured"},
-        )
+        return redirect("/?error=oidc_not_configured")
 
     state = request.args.get("state")
     expected_state = session.pop(SESSION_OAUTH_STATE_KEY, None)
     if not state or state != expected_state:
-        return Response(
-            response="", status=302, headers={"Location": "/?error=invalid_state"}
-        )
+        return redirect("/?error=invalid_state")
 
     code_verifier = session.pop(SESSION_PKCE_VERIFIER_KEY, None)
     if not code_verifier:
-        return Response(
-            response="", status=302, headers={"Location": "/?error=invalid_state"}
-        )
+        return redirect("/?error=invalid_state")
 
     error = request.args.get("error")
     if error:
-        return Response(
-            response="", status=302, headers={"Location": f"/?error={error}"}
-        )
+        # URL-encode the provider error value before embedding in redirect
+        return redirect(f"/?error={quote_plus(error)}")
 
     code = request.args.get("code")
     if not code:
-        return Response(
-            response="", status=302, headers={"Location": "/?error=missing_code"}
-        )
+        return redirect("/?error=missing_code")
 
     try:
         token_data = exchange_code_for_token(settings, code, code_verifier)
-        access_token = token_data["access_token"]
+        access_token = token_data.get("access_token")
+        if not access_token:
+            logger.warning("OIDC token response missing access_token")
+            return redirect("/?error=auth_failed")
 
         userinfo = get_userinfo(settings, access_token)
 
@@ -226,27 +228,20 @@ def oidc_callback() -> Response:
         session.clear()
         session[SESSION_USER_KEY] = user.id
         session.permanent = True
+        update_user_last_active(user.id)
 
         logger.info(
             "OIDC login successful for user %s (sub=%s)",
             user.username,
             userinfo.sub,
         )
-        return Response(response="", status=302, headers={"Location": "/"})
+        return redirect("/")
 
     except OidcRegistrationDisabledError:
-        return Response(
-            response="",
-            status=302,
-            headers={"Location": "/?error=registration_disabled"},
-        )
+        return redirect("/?error=registration_disabled")
     except OidcAuthError as e:
         logger.warning("OIDC auth error: %s", e)
-        return Response(
-            response="", status=302, headers={"Location": "/?error=auth_failed"}
-        )
+        return redirect("/?error=auth_failed")
     except Exception as e:
         logger.exception("OIDC auth failed unexpectedly: %s", e)
-        return Response(
-            response="", status=302, headers={"Location": "/?error=auth_failed"}
-        )
+        return redirect("/?error=auth_failed")

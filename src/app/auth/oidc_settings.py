@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -8,6 +9,8 @@ if TYPE_CHECKING:
     from flask import Flask
 
     from app.models import OidcSettings as OidcSettingsModel
+
+logger = logging.getLogger("global_logger")
 
 
 @dataclass(slots=True, frozen=True)
@@ -66,12 +69,19 @@ def _load_from_database() -> OidcSettingsModel | None:
         from app.models import OidcSettings as OidcSettingsModel
 
         return db.session.get(OidcSettingsModel, 1)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to load OIDC settings from database: %s", exc)
         return None
 
 
 def reload_oidc_settings(app: Flask) -> OidcSettings:
     """Reload OIDC settings and update app config."""
+    old_settings: OidcSettings | None = app.config.get("OIDC_SETTINGS")
     settings = load_oidc_settings()
     app.config["OIDC_SETTINGS"] = settings
+
+    if old_settings is None or old_settings.issuer != settings.issuer:
+        from app.auth.oidc_service import _discovery_cache
+        _discovery_cache.clear()
+
     return settings
