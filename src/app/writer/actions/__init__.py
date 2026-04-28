@@ -55,6 +55,7 @@ from .processor import (
 from .system import ensure_active_run_action as ensure_active_run_action
 from .system import update_combined_config_action as update_combined_config_action
 from .system import update_discord_settings_action as update_discord_settings_action
+from .system import update_oidc_settings_action as update_oidc_settings_action
 from .users import create_user_action as create_user_action
 from .users import delete_user_action as delete_user_action
 from .users import set_manual_feed_allowance_action as set_manual_feed_allowance_action
@@ -66,3 +67,4 @@ from .users import set_user_role_action as set_user_role_action
 from .users import update_user_last_active_action as update_user_last_active_action
 from .users import update_user_password_action as update_user_password_action
 from .users import upsert_discord_user_action as upsert_discord_user_action
+from .users import upsert_oidc_user_action as upsert_oidc_user_action

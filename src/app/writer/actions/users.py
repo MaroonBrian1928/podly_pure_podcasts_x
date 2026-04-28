@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
+from app.auth.passwords import hash_password
 from app.extensions import db
 from app.models import FeedAccessToken, User
 
@@ -136,6 +137,52 @@ def upsert_discord_user_action(params: dict[str, Any]) -> dict[str, Any]:
         role="user",
         discord_id=str(discord_id),
         discord_username=str(discord_username),
+    )
+    db.session.add(new_user)
+    db.session.flush()
+    return {"user_id": new_user.id, "created": True}
+
+
+def upsert_oidc_user_action(params: dict[str, Any]) -> dict[str, Any]:
+    oidc_sub = params.get("oidc_sub")
+    oidc_email = params.get("oidc_email")
+    preferred_username = params.get("preferred_username")
+    name = params.get("name")
+    allow_registration = bool(params.get("allow_registration", True))
+
+    if not oidc_sub:
+        raise ValueError("oidc_sub is required")
+
+    existing_user: User | None = User.query.filter_by(oidc_sub=str(oidc_sub)).first()
+    if existing_user:
+        if oidc_email:
+            existing_user.oidc_email = str(oidc_email)
+        db.session.flush()
+        return {"user_id": existing_user.id, "created": False}
+
+    if not allow_registration:
+        raise ValueError("Self-registration via OIDC is disabled")
+
+    # Derive a username from preferred_username, name, or the sub claim
+    base = (
+        (preferred_username or name or str(oidc_sub)).lower().replace(" ", "_")[:50]
+    )
+    username = base
+    counter = 1
+    while User.query.filter_by(username=username).first():
+        username = f"{base}_{counter}"
+        counter += 1
+
+    import secrets
+
+    new_user = User(
+        username=username,
+        # Random hash that can never be matched via verify_password
+        password_hash=hash_password(secrets.token_urlsafe(32)),
+        role="user",
+        auth_provider="oidc",
+        oidc_sub=str(oidc_sub),
+        oidc_email=str(oidc_email) if oidc_email else None,
     )
     db.session.add(new_user)
     db.session.flush()

@@ -5,6 +5,7 @@ from .billing_routes import billing_bp
 from .config_routes import config_bp
 from .cost_routes import costs_bp
 from .discord_routes import discord_bp
+from .oidc_routes import oidc_bp
 from .feed_routes import feed_bp
 from .jobs_routes import jobs_bp
 from .main_routes import main_bp
@@ -21,4 +22,5 @@ def register_routes(app: Flask) -> None:
     app.register_blueprint(auth_bp)
     app.register_blueprint(billing_bp)
     app.register_blueprint(discord_bp)
+    app.register_blueprint(oidc_bp)
     app.register_blueprint(costs_bp)

@@ -130,6 +130,12 @@ class CommandExecutor:
         self.register_action(
             "upsert_discord_user", writer_actions.upsert_discord_user_action
         )
+        self.register_action(
+            "upsert_oidc_user", writer_actions.upsert_oidc_user_action
+        )
+        self.register_action(
+            "update_oidc_settings", writer_actions.update_oidc_settings_action
+        )
 
         self.register_action(
             "upsert_model_call", writer_actions.upsert_model_call_action

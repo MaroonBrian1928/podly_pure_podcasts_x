@@ -4,7 +4,7 @@ from typing import Any
 
 from app.extensions import db
 from app.jobs_manager_run_service import get_or_create_singleton_run
-from app.models import DiscordSettings
+from app.models import DiscordSettings, OidcSettings
 
 logger = logging.getLogger("writer")
 
@@ -42,6 +42,27 @@ def update_discord_settings_action(params: dict[str, Any]) -> dict[str, Any]:
         "client_secret",
         "redirect_uri",
         "guild_ids",
+        "allow_registration",
+    ):
+        if field in params:
+            setattr(settings, field, params.get(field))
+
+    settings.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    db.session.flush()
+    return {"updated": True}
+
+
+def update_oidc_settings_action(params: dict[str, Any]) -> dict[str, Any]:
+    settings = db.session.get(OidcSettings, 1)
+    if settings is None:
+        settings = OidcSettings(id=1)
+        db.session.add(settings)
+
+    for field in (
+        "issuer",
+        "client_id",
+        "client_secret",
+        "redirect_uri",
         "allow_registration",
     ):
         if field in params:

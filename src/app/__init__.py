@@ -14,6 +14,7 @@ from app import models as models
 from app.auth import AuthSettings, load_auth_settings
 from app.auth.bootstrap import bootstrap_admin_user
 from app.auth.discord_settings import load_discord_settings
+from app.auth.oidc_settings import load_oidc_settings
 from app.auth.middleware import init_auth_middleware
 from app.background import add_background_job, schedule_cleanup_job
 from app.config_store import (
@@ -173,12 +174,21 @@ def _create_configured_app(
         discord_settings = load_discord_settings()
         app.config["DISCORD_SETTINGS"] = discord_settings
 
+        oidc_settings = load_oidc_settings()
+        app.config["OIDC_SETTINGS"] = oidc_settings
+
     app.config["AUTH_SETTINGS"] = auth_settings.without_password()
 
     if app.config["DISCORD_SETTINGS"].enabled:
         app_logger.info(
             "Discord SSO enabled (guild restriction: %s)",
             "yes" if app.config["DISCORD_SETTINGS"].guild_ids else "no",
+        )
+
+    if app.config.get("OIDC_SETTINGS") and app.config["OIDC_SETTINGS"].enabled:
+        app_logger.info(
+            "OIDC SSO enabled (issuer: %s)",
+            app.config["OIDC_SETTINGS"].issuer,
         )
 
     _validate_env_key_conflicts()
