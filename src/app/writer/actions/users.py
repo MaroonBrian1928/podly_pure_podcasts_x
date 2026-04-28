@@ -1,8 +1,12 @@
+import re
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from app.extensions import db
 from app.models import FeedAccessToken, User
+from app.runtime_config import config as runtime_config
 
 
 def create_user_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -139,6 +143,80 @@ def upsert_discord_user_action(params: dict[str, Any]) -> dict[str, Any]:
     )
     db.session.add(new_user)
     db.session.flush()
+    return {"user_id": new_user.id, "created": True}
+
+
+def _check_oidc_user_limit() -> None:
+    try:
+        limit = getattr(runtime_config, "user_limit_total", None)
+        if limit is None:
+            return
+        limit_int = int(limit)
+    except Exception:  # noqa: BLE001
+        return
+    if limit_int <= 0:
+        return
+    if User.query.count() >= limit_int:
+        raise ValueError(
+            f"User limit reached ({User.query.count()}/{limit_int}). "
+            "Delete a user or increase the limit."
+        )
+
+
+def upsert_oidc_user_action(params: dict[str, Any]) -> dict[str, Any]:
+    oidc_sub = params.get("oidc_sub")
+    oidc_email = params.get("oidc_email")
+    preferred_username = params.get("preferred_username")
+    name = params.get("name")
+    allow_registration = bool(params.get("allow_registration", True))
+
+    if not oidc_sub:
+        raise ValueError("oidc_sub is required")
+
+    existing_user: User | None = User.query.filter_by(oidc_sub=str(oidc_sub)).first()
+    if existing_user:
+        if oidc_email:
+            existing_user.oidc_email = str(oidc_email)
+        existing_user.auth_provider = "oidc"
+        db.session.flush()
+        return {"user_id": existing_user.id, "created": False}
+
+    if not allow_registration:
+        raise ValueError("Self-registration via OIDC is disabled")
+
+    _check_oidc_user_limit()
+
+    # Derive a sanitized username from preferred_username, name, or the sub claim
+    raw = (preferred_username or name or str(oidc_sub)).lower()
+    base = re.sub(r"[^a-z0-9_-]", "_", raw).strip("_-")[:50] or "user"
+    username = base
+    counter = 1
+    while User.query.filter_by(username=username).first():
+        username = f"{base}_{counter}"
+        counter += 1
+
+    new_user = User(
+        username=username,
+        password_hash="",
+        role="user",
+        auth_provider="oidc",
+        oidc_sub=str(oidc_sub),
+        oidc_email=str(oidc_email) if oidc_email else None,
+    )
+    db.session.add(new_user)
+    try:
+        savepoint = db.session.begin_nested()
+        db.session.flush()
+    except IntegrityError:
+        savepoint.rollback()
+        recovered = User.query.filter_by(oidc_sub=str(oidc_sub)).first()
+        if recovered is None:
+            raise
+        if oidc_email:
+            recovered.oidc_email = str(oidc_email)
+        recovered.auth_provider = "oidc"
+        db.session.flush()
+        return {"user_id": recovered.id, "created": False}
     return {"user_id": new_user.id, "created": True}
 
 

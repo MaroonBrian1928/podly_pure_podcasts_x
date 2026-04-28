@@ -145,6 +145,7 @@ def auth_me() -> RouteResult:
                 "feed_subscription_status": getattr(
                     user, "feed_subscription_status", "inactive"
                 ),
+                "auth_provider": getattr(user, "auth_provider", "local"),
             }
         }
     )
@@ -158,6 +159,12 @@ def change_password_route() -> RouteResult:
     user = _require_authenticated_user()
     if user is None:
         return _unauthorized_response()
+
+    if getattr(user, "auth_provider", "local") != "local":
+        return (
+            jsonify({"error": "Password change is not available for SSO accounts."}),
+            403,
+        )
 
     payload = request.get_json(silent=True) or {}
     current_password = payload.get("current_password") or ""
@@ -210,6 +217,7 @@ def list_users_route() -> RouteResult:
                     "feed_subscription_status": getattr(
                         u, "feed_subscription_status", "inactive"
                     ),
+                    "auth_provider": getattr(u, "auth_provider", "local"),
                 }
                 for u in users
             ]

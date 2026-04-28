@@ -175,10 +175,17 @@ class User(db.Model):  # type: ignore[name-defined, misc]
     updated_at = db.Column(
         db.DateTime, default=_utc_now_naive, onupdate=_utc_now_naive, nullable=False
     )
+    # SSO provider — "local", "discord", or "oidc"
+    auth_provider = db.Column(db.String(32), nullable=False, default="local")
+
     # Discord SSO fields
     discord_id = db.Column(db.String(32), unique=True, nullable=True, index=True)
     discord_username = db.Column(db.String(100), nullable=True)
     last_active = db.Column(db.DateTime, nullable=True)
+
+    # OIDC SSO fields
+    oidc_sub = db.Column(db.String(255), unique=True, nullable=True, index=True)
+    oidc_email = db.Column(db.String(255), nullable=True)
 
     # Admin override for feed allowance (if set, overrides plan-based allowance)
     manual_feed_allowance = db.Column(db.Integer, nullable=True)
@@ -600,6 +607,20 @@ class DiscordSettings(db.Model):  # type: ignore[name-defined, misc]
     client_secret = db.Column(db.Text, nullable=True)
     redirect_uri = db.Column(db.Text, nullable=True)
     guild_ids = db.Column(db.Text, nullable=True)  # Comma-separated list
+    allow_registration = db.Column(db.Boolean, nullable=False, default=True)
+
+    created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+    updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+
+
+class OidcSettings(db.Model):  # type: ignore[name-defined, misc]
+    __tablename__ = "oidc_settings"
+
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    issuer = db.Column(db.Text, nullable=True)
+    client_id = db.Column(db.Text, nullable=True)
+    client_secret = db.Column(db.Text, nullable=True)
+    redirect_uri = db.Column(db.Text, nullable=True)
     allow_registration = db.Column(db.Boolean, nullable=False, default=True)
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
