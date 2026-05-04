@@ -407,6 +407,20 @@ class JobsManager:
                 "message": f"Cancelled {len(job_ids)} jobs",
             }
 
+    def cancel_all_jobs(self) -> dict[str, Any]:
+        with _scheduler_app_context():
+            active_jobs = ProcessingJob.query.filter(
+                ProcessingJob.status.in_(["pending", "running"])
+            ).all()
+            job_ids = [job.id for job in active_jobs]
+            for job in active_jobs:
+                self._status_manager.mark_cancelled(job.id, "Cancelled by user request")
+            return {
+                "status": "cancelled",
+                "job_ids": job_ids,
+                "message": f"Cancelled {len(job_ids)} jobs",
+            }
+
     def cleanup_stale_jobs(self, older_than: timedelta) -> int:
         try:
             result = writer_client.action(

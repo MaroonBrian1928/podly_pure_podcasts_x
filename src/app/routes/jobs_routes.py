@@ -70,6 +70,30 @@ def api_cancel_job(job_id: str) -> ResponseReturnValue:
         )
 
 
+@jobs_bp.route("/api/jobs/cancel-all", methods=["POST"])
+def api_cancel_all_jobs() -> ResponseReturnValue:
+    _, error_response = require_admin("cancel all jobs")
+    if error_response:
+        return error_response
+
+    try:
+        result = get_jobs_manager().cancel_all_jobs()
+        db.session.expire_all()
+        return flask.jsonify(result), 200
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to cancel all jobs: {e}")
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "CANCEL_FAILED",
+                    "message": f"Failed to cancel all jobs: {e!s}",
+                }
+            ),
+            500,
+        )
+
+
 @jobs_bp.route("/api/jobs/cleanup/preview", methods=["GET"])
 def api_cleanup_preview() -> ResponseReturnValue:
     _, error_response = require_admin("preview cleanup candidates")

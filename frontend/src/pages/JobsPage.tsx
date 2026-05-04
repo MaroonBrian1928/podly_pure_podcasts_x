@@ -71,6 +71,7 @@ export default function JobsPage() {
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'active' | 'all'>('active');
   const [cancellingJobs, setCancellingJobs] = useState<Set<string>>(new Set());
+  const [cancellingAll, setCancellingAll] = useState(false);
   const previousHasActiveWork = useRef<boolean>(false);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreview | null>(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
@@ -159,6 +160,18 @@ export default function JobsPage() {
     },
     [refresh]
   );
+
+  const cancelAllJobs = useCallback(async () => {
+    setCancellingAll(true);
+    try {
+      await jobsApi.cancelAllJobs();
+      await refresh();
+    } catch (e) {
+      setError(`Failed to cancel all jobs: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    } finally {
+      setCancellingAll(false);
+    }
+  }, [refresh]);
 
   const runCleanupNow = useCallback(async () => {
     setCleanupRunning(true);
@@ -353,6 +366,15 @@ export default function JobsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {hasActiveWork && (
+            <button
+              onClick={() => { void cancelAllJobs(); }}
+              disabled={cancellingAll}
+              className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed"
+            >
+              {cancellingAll ? 'Stopping…' : 'Stop All'}
+            </button>
+          )}
           <button
             onClick={() => { void refresh(); }}
             className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
