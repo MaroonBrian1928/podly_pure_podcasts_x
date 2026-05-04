@@ -41,7 +41,31 @@ def api_list_all_jobs() -> ResponseReturnValue:
 @jobs_bp.route("/api/job-manager/status", methods=["GET"])
 def api_job_manager_status() -> ResponseReturnValue:
     run_snapshot = build_run_status_snapshot(db.session)
-    return flask.jsonify({"run": run_snapshot})
+    return flask.jsonify({"run": run_snapshot, "paused": get_jobs_manager().is_paused()})
+
+
+@jobs_bp.route("/api/jobs/pause", methods=["POST"])
+def api_pause_processing() -> ResponseReturnValue:
+    _, error_response = require_admin("pause processing")
+    if error_response:
+        return error_response
+    try:
+        return flask.jsonify(get_jobs_manager().pause_processing())
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to pause processing: {e}")
+        return flask.jsonify({"status": "error", "message": f"Failed to pause: {e!s}"}), 500
+
+
+@jobs_bp.route("/api/jobs/resume", methods=["POST"])
+def api_resume_processing() -> ResponseReturnValue:
+    _, error_response = require_admin("resume processing")
+    if error_response:
+        return error_response
+    try:
+        return flask.jsonify(get_jobs_manager().resume_processing())
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to resume processing: {e}")
+        return flask.jsonify({"status": "error", "message": f"Failed to resume: {e!s}"}), 500
 
 
 @jobs_bp.route("/api/jobs/<string:job_id>/cancel", methods=["POST"])
@@ -65,6 +89,30 @@ def api_cancel_job(job_id: str) -> ResponseReturnValue:
                     "status": "error",
                     "error_code": "CANCEL_FAILED",
                     "message": f"Failed to cancel job: {e!s}",
+                }
+            ),
+            500,
+        )
+
+
+@jobs_bp.route("/api/jobs/cancel-all", methods=["POST"])
+def api_cancel_all_jobs() -> ResponseReturnValue:
+    _, error_response = require_admin("cancel all jobs")
+    if error_response:
+        return error_response
+
+    try:
+        result = get_jobs_manager().cancel_all_jobs()
+        db.session.expire_all()
+        return flask.jsonify(result), 200
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to cancel all jobs: {e}")
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "CANCEL_FAILED",
+                    "message": f"Failed to cancel all jobs: {e!s}",
                 }
             ),
             500,

@@ -70,6 +70,8 @@ class JobsManager:
         # Persistent worker thread coordination
         self._stop_event = Event()
         self._work_event = Event()
+        self._pause_lock = Lock()
+        self._paused = False
         self._worker_thread = Thread(
             target=self._worker_loop, name="jobs-manager-worker", daemon=True
         )
@@ -467,6 +469,36 @@ class JobsManager:
                 "message": f"Cancelled {len(job_ids)} jobs",
             }
 
+    def pause_processing(self) -> dict[str, Any]:
+        with self._pause_lock:
+            self._paused = True
+        return {"status": "paused", "message": "Processing paused. Current job will finish; no new jobs will start."}
+
+    def resume_processing(self) -> dict[str, Any]:
+        with self._pause_lock:
+            self._paused = False
+        self._wake_worker()
+        return {"status": "resumed", "message": "Processing resumed."}
+
+    def is_paused(self) -> bool:
+        with self._pause_lock:
+            return self._paused
+
+    def cancel_all_jobs(self) -> dict[str, Any]:
+        result = writer_client.action(
+            "mark_cancelled_bulk",
+            {"reason": "Cancelled by user request"},
+            wait=True,
+        )
+        job_ids: list[str] = []
+        if result and result.success and result.data:
+            job_ids = result.data.get("job_ids", [])
+        return {
+            "status": "cancelled",
+            "job_ids": job_ids,
+            "message": f"Cancelled {len(job_ids)} jobs",
+        }
+
     def cancel_queued_jobs(self) -> dict[str, Any]:
         """Cancel all queued (pending) jobs."""
         with _scheduler_app_context():
@@ -693,6 +725,11 @@ class JobsManager:
         )
         while not self._stop_event.is_set():
             try:
+                with self._pause_lock:
+                    paused = self._paused
+                if paused:
+                    self._wait_for_work()
+                    continue
                 job_details = self._dequeue_next_job()
                 if not job_details:
                     self._wait_for_work()

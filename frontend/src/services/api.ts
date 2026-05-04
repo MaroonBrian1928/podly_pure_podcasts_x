@@ -798,12 +798,24 @@ export const jobsApi = {
     const response = await api.post(`/api/jobs/${jobId}/cancel`);
     return response.data;
   },
+  cancelAllJobs: async (): Promise<{ status: string; job_ids: string[]; message: string }> => {
+    const response = await api.post('/api/jobs/cancel-all');
+    return response.data;
+  },
   cancelQueuedJobs: async (): Promise<{ status: string; cancelled_count: number; message: string }> => {
     const response = await api.post('/api/jobs/cancel-queued');
     return response.data;
   },
   cancelFeedQueuedJobs: async (feedId: number): Promise<{ status: string; cancelled_count: number; message: string }> => {
     const response = await api.post(`/api/feeds/${feedId}/jobs/cancel-queued`);
+    return response.data;
+  },
+  pauseProcessing: async (): Promise<{ status: string; message: string }> => {
+    const response = await api.post('/api/jobs/pause');
+    return response.data;
+  },
+  resumeProcessing: async (): Promise<{ status: string; message: string }> => {
+    const response = await api.post('/api/jobs/resume');
     return response.data;
   },
   getJobManagerStatus: async (): Promise<JobManagerStatus> => {

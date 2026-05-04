@@ -3,6 +3,7 @@ from typing import Any
 
 from app.extensions import db as _db
 from app.models import Post, ProcessingJob
+from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from shared.processing_paths import find_existing_processed_audio_path
@@ -221,14 +222,57 @@ class JobManager:
             )
         return job
 
+    def _check_queue_limits(self, post: Post) -> dict[str, Any] | None:
+        max_total = runtime_config.max_queue_size
+        if max_total is not None:
+            active_count = ProcessingJob.query.filter(
+                ProcessingJob.status.in_(["pending", "running"])
+            ).count()
+            if active_count >= max_total:
+                return {
+                    "status": "error",
+                    "error_code": "QUEUE_FULL",
+                    "message": (
+                        f"Processing queue is full ({active_count}/{max_total}). "
+                        "Wait for existing jobs to finish before adding more."
+                    ),
+                }
+
+        max_per_feed = runtime_config.max_queue_size_per_feed
+        if max_per_feed is not None and post.feed_id is not None:
+            feed_count = (
+                ProcessingJob.query.join(Post, ProcessingJob.post_guid == Post.guid)
+                .filter(
+                    ProcessingJob.status.in_(["pending", "running"]),
+                    Post.feed_id == post.feed_id,
+                )
+                .count()
+            )
+            if feed_count >= max_per_feed:
+                return {
+                    "status": "error",
+                    "error_code": "FEED_QUEUE_FULL",
+                    "message": (
+                        f"Too many queued jobs for this podcast ({feed_count}/{max_per_feed}). "
+                        "Wait for existing jobs to finish before adding more."
+                    ),
+                }
+
+        return None
+
     def start_processing(self, priority: str) -> dict[str, Any]:
         """
         Handle the end-to-end lifecycle for a single post processing request.
         Ensures a job exists and is marked ready for the worker thread.
         """
-        _, early_result = self._load_and_validate_post()
+        post, early_result = self._load_and_validate_post()
         if early_result:
             return early_result
+
+        if post is not None and not self.get_active_job():
+            limit_error = self._check_queue_limits(post)
+            if limit_error:
+                return limit_error
 
         _db.session.expire_all()
 

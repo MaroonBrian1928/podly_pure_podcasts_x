@@ -91,6 +91,7 @@ export interface JobManagerRun {
 
 export interface JobManagerStatus {
   run: JobManagerRun | null;
+  paused: boolean;
 }
 
 export interface CleanupPreview {

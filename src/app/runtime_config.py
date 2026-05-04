@@ -49,6 +49,8 @@ else:
         user_limit_total=DEFAULTS.APP_USER_LIMIT_TOTAL,
         developer_mode=os.environ.get("DEVELOPER_MODE", "false").lower() == "true",
         autoprocess_on_download=DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
+        max_queue_size=DEFAULTS.APP_MAX_QUEUE_SIZE,
+        max_queue_size_per_feed=DEFAULTS.APP_MAX_QUEUE_SIZE_PER_FEED,
         feed_tag_label=DEFAULTS.APP_FEED_TAG_LABEL,
         feed_tag_position=DEFAULTS.APP_FEED_TAG_POSITION,
         feed_tag_override=DEFAULTS.APP_FEED_TAG_OVERRIDE,

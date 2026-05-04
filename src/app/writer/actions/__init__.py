@@ -43,6 +43,7 @@ from .jobs import create_job_if_missing_action as create_job_if_missing_action
 from .jobs import dequeue_job_action as dequeue_job_action
 from .jobs import mark_cancelled_action as mark_cancelled_action
 from .jobs import cancel_pending_jobs_for_feed_action as cancel_pending_jobs_for_feed_action
+from .jobs import mark_cancelled_bulk_action as mark_cancelled_bulk_action
 from .jobs import reassign_pending_jobs_action as reassign_pending_jobs_action
 from .jobs import update_job_status_action as update_job_status_action
 from .processor import insert_identifications_action as insert_identifications_action
