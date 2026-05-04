@@ -153,6 +153,26 @@ def mark_cancelled_action(params: dict[str, Any]) -> dict[str, Any]:
     return {"job_id": job.id, "status": "cancelled"}
 
 
+def mark_cancelled_bulk_action(params: dict[str, Any]) -> dict[str, Any]:
+    reason = params.get("reason", "Cancelled by user request")
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    active_jobs = ProcessingJob.query.filter(
+        ProcessingJob.status.in_(["pending", "running"])
+    ).all()
+
+    job_ids = [job.id for job in active_jobs]
+    for job in active_jobs:
+        job.status = "cancelled"
+        job.error_message = reason
+        job.completed_at = now
+
+    if active_jobs:
+        recalculate_run_counts(db.session)
+
+    return {"job_ids": job_ids, "cancelled_count": len(job_ids)}
+
+
 def reassign_pending_jobs_action(params: dict[str, Any]) -> int:
     run_id = params.get("run_id")
     if not run_id:

@@ -155,10 +155,12 @@ class Config(BaseModel):
     autoprocess_on_download: bool = DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD
     max_queue_size: int | None = Field(
         default=DEFAULTS.APP_MAX_QUEUE_SIZE,
+        gt=0,
         description="Maximum total jobs in pending/running state. None = unlimited.",
     )
     max_queue_size_per_feed: int | None = Field(
         default=DEFAULTS.APP_MAX_QUEUE_SIZE_PER_FEED,
+        gt=0,
         description="Maximum pending/running jobs per podcast feed. None = unlimited.",
     )
 
