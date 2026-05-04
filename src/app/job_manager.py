@@ -200,7 +200,7 @@ class JobManager:
         return job
 
     def _check_queue_limits(self, post: Post) -> dict[str, Any] | None:
-        max_total = getattr(runtime_config, "max_queue_size", None)
+        max_total = runtime_config.max_queue_size
         if max_total is not None:
             active_count = ProcessingJob.query.filter(
                 ProcessingJob.status.in_(["pending", "running"])
@@ -215,7 +215,7 @@ class JobManager:
                     ),
                 }
 
-        max_per_feed = getattr(runtime_config, "max_queue_size_per_feed", None)
+        max_per_feed = runtime_config.max_queue_size_per_feed
         if max_per_feed is not None and post.feed_id is not None:
             feed_count = (
                 ProcessingJob.query.join(Post, ProcessingJob.post_guid == Post.guid)

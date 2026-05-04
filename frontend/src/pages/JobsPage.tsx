@@ -183,13 +183,13 @@ export default function JobsPage() {
       } else {
         await jobsApi.pauseProcessing();
       }
-      await loadStatus();
+      await refresh();
     } catch (e) {
       setError(`Failed to toggle pause: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
       setTogglingPause(false);
     }
-  }, [managerStatus?.paused, loadStatus]);
+  }, [managerStatus?.paused, refresh]);
 
   const runCleanupNow = useCallback(async () => {
     setCleanupRunning(true);

@@ -51,6 +51,7 @@ class JobsManager:
         # Persistent worker thread coordination
         self._stop_event = Event()
         self._work_event = Event()
+        self._pause_lock = Lock()
         self._paused = False
         self._worker_thread = Thread(
             target=self._worker_loop, name="jobs-manager-worker", daemon=True
@@ -409,16 +410,19 @@ class JobsManager:
             }
 
     def pause_processing(self) -> dict[str, Any]:
-        self._paused = True
+        with self._pause_lock:
+            self._paused = True
         return {"status": "paused", "message": "Processing paused. Current job will finish; no new jobs will start."}
 
     def resume_processing(self) -> dict[str, Any]:
-        self._paused = False
+        with self._pause_lock:
+            self._paused = False
         self._wake_worker()
         return {"status": "resumed", "message": "Processing resumed."}
 
     def is_paused(self) -> bool:
-        return self._paused
+        with self._pause_lock:
+            return self._paused
 
     def cancel_all_jobs(self) -> dict[str, Any]:
         with _scheduler_app_context():
@@ -605,7 +609,9 @@ class JobsManager:
         )
         while not self._stop_event.is_set():
             try:
-                if self._paused:
+                with self._pause_lock:
+                    paused = self._paused
+                if paused:
                     self._wait_for_work()
                     continue
                 job_details = self._dequeue_next_job()

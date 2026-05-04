@@ -48,7 +48,11 @@ def api_pause_processing() -> ResponseReturnValue:
     _, error_response = require_admin("pause processing")
     if error_response:
         return error_response
-    return flask.jsonify(get_jobs_manager().pause_processing())
+    try:
+        return flask.jsonify(get_jobs_manager().pause_processing())
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to pause processing: {e}")
+        return flask.jsonify({"status": "error", "message": f"Failed to pause: {e!s}"}), 500
 
 
 @jobs_bp.route("/api/jobs/resume", methods=["POST"])
@@ -56,7 +60,11 @@ def api_resume_processing() -> ResponseReturnValue:
     _, error_response = require_admin("resume processing")
     if error_response:
         return error_response
-    return flask.jsonify(get_jobs_manager().resume_processing())
+    try:
+        return flask.jsonify(get_jobs_manager().resume_processing())
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to resume processing: {e}")
+        return flask.jsonify({"status": "error", "message": f"Failed to resume: {e!s}"}), 500
 
 
 @jobs_bp.route("/api/jobs/<string:job_id>/cancel", methods=["POST"])
