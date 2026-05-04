@@ -246,7 +246,7 @@ class JobManager:
         if early_result:
             return early_result
 
-        if post is not None:
+        if post is not None and not self.get_active_job():
             limit_error = self._check_queue_limits(post)
             if limit_error:
                 return limit_error
