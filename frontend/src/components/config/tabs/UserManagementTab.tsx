@@ -217,7 +217,7 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
       return [];
     }
     return [...managedUsers].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      (a, b) => new Date(b.created_at.includes('Z') ? b.created_at : b.created_at.replace(' ', 'T') + 'Z').getTime() - new Date(a.created_at.includes('Z') ? a.created_at : a.created_at.replace(' ', 'T') + 'Z').getTime()
     );
   }, [managedUsers]);
   const adminCount = useMemo(
@@ -397,9 +397,9 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
                       <div>
                         <div className="text-sm font-semibold text-gray-900">{managed.username}</div>
                         <div className="text-xs text-gray-500">
-                          Added {new Date(managed.created_at).toLocaleString()} • Role {managed.role} • Feeds {allowance} • Status {subscriptionStatus}
+                          Added {new Date(managed.created_at.includes('Z') ? managed.created_at : managed.created_at.replace(' ', 'T') + 'Z').toLocaleString()} • Role {managed.role} • Feeds {allowance} • Status {subscriptionStatus}
                           {managed.last_active && (
-                            <> • Last Active {new Date(managed.last_active).toLocaleString()}</>
+                            <> • Last Active {new Date(managed.last_active.includes('Z') ? managed.last_active : managed.last_active.replace(' ', 'T') + 'Z').toLocaleString()}</>
                           )}
                         </div>
                       </div>

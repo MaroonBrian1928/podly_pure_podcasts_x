@@ -317,13 +317,15 @@ class AudioProcessor:
             return [*ad_segments[:-1], (ad_segments[-1][0], audio_duration_seconds)]
         return ad_segments
 
-    def process_audio(self, post: Post, output_path: str) -> None:
+    def process_audio(self, post: Post, output_path: str) -> list[tuple[int, int]]:
         """
         Process the podcast audio by removing ad segments.
 
         Args:
             post: The Post object containing the podcast to process
             output_path: Path where the processed audio file should be saved
+        Returns:
+            The merged ad segments that were removed, as millisecond windows.
         """
         ad_segments = self.get_ad_segments(post)
 
@@ -332,9 +334,6 @@ class AudioProcessor:
             raise ValueError(
                 f"Could not determine duration for audio: {post.unprocessed_audio_path}"
             )
-
-        # Store duration in seconds
-        post.duration = duration_ms / 1000.0
 
         merged_ad_segments = self.merge_ad_segments(
             duration_ms=duration_ms,
@@ -356,6 +355,19 @@ class AudioProcessor:
             use_vbr=True,
         )
 
+        processed_duration_ms = get_audio_duration_ms(output_path)
+        if processed_duration_ms is None:
+            self.logger.warning(
+                "Could not determine processed audio duration for post %s at %s; "
+                "falling back to source duration",
+                post.id,
+                output_path,
+            )
+            processed_duration_ms = duration_ms
+
+        # Persist the final MP3 runtime so downstream RSS/stats reflect ad-removed
+        # audio rather than the source episode length.
+        post.duration = processed_duration_ms / 1000.0
         post.processed_audio_path = output_path
         result = writer_client.update(
             "Post",
@@ -373,3 +385,4 @@ class AudioProcessor:
         self.logger.info(
             f"Audio processing complete for post {post.id}, saved to {output_path}"
         )
+        return merged_ad_segments

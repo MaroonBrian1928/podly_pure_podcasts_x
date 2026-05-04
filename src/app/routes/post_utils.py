@@ -34,13 +34,31 @@ def increment_download_count(post: Post) -> None:
 
 
 def ensure_whitelisted_for_download(post: Post, p_guid: str) -> flask.Response | None:
-    """Make sure a post is whitelisted before serving or queuing processing."""
+    """Make sure a post is whitelisted before serving or queuing audio.
+
+    Respects per-feed auto-whitelist overrides: if a feed has auto-whitelist
+    explicitly disabled, autoprocess_on_download will not override that decision.
+    """
     if post.whitelisted:
         return None
 
     if not getattr(runtime_config, "autoprocess_on_download", False):
         logger.warning(
             "Post %s not whitelisted and auto-process is disabled", post.guid
+        )
+        return flask.make_response(("Post not whitelisted", 403))
+
+    # Respect per-feed (and global) auto-whitelist settings even when
+    # autoprocess_on_download is enabled. A feed that has opted out of
+    # auto-whitelisting should not have episodes silently processed just
+    # because a podcast player tried to download them.
+    from app.feeds import _should_auto_whitelist_new_posts
+
+    feed = getattr(post, "feed", None)
+    if feed is not None and not _should_auto_whitelist_new_posts(feed):
+        logger.info(
+            "Post %s not auto-whitelisted on download: feed has auto-whitelist disabled",
+            p_guid,
         )
         return flask.make_response(("Post not whitelisted", 403))
 
@@ -51,7 +69,7 @@ def ensure_whitelisted_for_download(post: Post, p_guid: str) -> flask.Response |
             wait=True,
         )
         post.whitelisted = True
-        logger.info("Auto-whitelisted post %s on download request", p_guid)
+        logger.info("Auto-whitelisted post %s on audio request", p_guid)
         return None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -67,7 +85,7 @@ def missing_processed_audio_response(post: Post, p_guid: str) -> flask.Response:
         return flask.make_response(("Processed audio not found", 404))
 
     logger.info(
-        "Auto-processing on download is enabled; queuing processing for %s",
+        "Auto-processing on audio request is enabled; queuing processing for %s",
         p_guid,
     )
     requester = getattr(getattr(flask.g, "current_user", None), "id", None)
@@ -87,7 +105,7 @@ def missing_processed_audio_response(post: Post, p_guid: str) -> flask.Response:
     }.get(status or "pending", 202)
     message = job_response.get(
         "message",
-        "Processing queued because audio was not ready for download",
+        "Processing queued because audio was not ready yet",
     )
     return flask.make_response(
         flask.jsonify({**job_response, "message": message}),

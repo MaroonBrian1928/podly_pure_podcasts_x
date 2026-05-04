@@ -1,5 +1,4 @@
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 from threading import Event, Lock, Thread
 from typing import Any, cast
@@ -16,8 +15,28 @@ from app.processor import get_processor
 from app.writer.client import writer_client
 from podcast_processor.podcast_processor import ProcessorException
 from podcast_processor.processing_status_manager import ProcessingStatusManager
+from shared.processing_paths import find_existing_processed_audio_path
 
 logger = logging.getLogger("global_logger")
+
+
+def _processing_time_seconds(
+    job: "ProcessingJob",
+    now: datetime | None = None,
+) -> float | None:
+    """Return elapsed processing seconds for a job.
+
+    For completed/failed/skipped jobs returns the exact duration.
+    For a running job returns elapsed time so far (using *now* as the
+    current timestamp — callers that iterate over many jobs should
+    compute this once before the loop to keep timestamps consistent).
+    Returns None if the job has not started yet.
+    """
+    if job.started_at is None:
+        return None
+    _now = now if now is not None else datetime.now(UTC).replace(tzinfo=None)
+    end = job.completed_at if job.completed_at else _now
+    return round((end - job.started_at).total_seconds(), 1)
 
 
 def _scheduler_app_context() -> Any:
@@ -162,18 +181,45 @@ class JobsManager:
         return response
 
     def _ensure_jobs_for_all_posts(self, run_id: str | None) -> int:
-        """Ensure every post has an associated ProcessingJob record."""
+        """Ensure every whitelisted post without any existing job gets a new job.
+
+        Uses an outer join to find posts with no ProcessingJob row at all. Posts
+        that already have any job (including cancelled ones) are excluded naturally
+        by the outer-join filter — cancelled jobs are intentionally left alone and
+        must be re-whitelisted manually before reprocessing is attempted.
+        """
         posts_without_jobs = (
             Post.query.outerjoin(ProcessingJob, ProcessingJob.post_guid == Post.guid)
-            .filter(ProcessingJob.id.is_(None), Post.whitelisted.is_(True))
+            .filter(
+                ProcessingJob.id.is_(None),
+                Post.whitelisted.is_(True),
+            )
             .all()
         )
 
         created = 0
         for post in posts_without_jobs:
             # Avoid recreating jobs for posts that already have processed audio.
-            # Startup clears ProcessingJob rows, so we must key off post/file state too.
-            if post.processed_audio_path and os.path.exists(post.processed_audio_path):
+            existing_processed_path = find_existing_processed_audio_path(
+                processed_audio_path=post.processed_audio_path,
+                unprocessed_audio_path=post.unprocessed_audio_path,
+                feed_title=getattr(post.feed, "title", None),
+                post_title=post.title,
+            )
+            if existing_processed_path:
+                processed_path_str = str(existing_processed_path)
+                if post.processed_audio_path != processed_path_str:
+                    result = writer_client.update(
+                        "Post",
+                        post.id,
+                        {"processed_audio_path": processed_path_str},
+                        wait=True,
+                    )
+                    if not result or not result.success:
+                        logger.warning(
+                            "Failed to update recovered processed path for post %s",
+                            post.guid,
+                        )
                 continue
 
             SingleJobManager(
@@ -202,9 +248,13 @@ class JobsManager:
             )
 
             if not job:
-                if post.processed_audio_path and os.path.exists(
-                    post.processed_audio_path
-                ):
+                existing_processed_path = find_existing_processed_audio_path(
+                    processed_audio_path=post.processed_audio_path,
+                    unprocessed_audio_path=post.unprocessed_audio_path,
+                    feed_title=getattr(post.feed, "title", None),
+                    post_title=post.title,
+                )
+                if existing_processed_path:
                     return {
                         "status": "skipped",
                         "step": 4,
@@ -234,10 +284,14 @@ class JobsManager:
             }
             if job.started_at:
                 response["started_at"] = job.started_at.isoformat()
-            if (
-                job.status in {"completed", "skipped"}
-                and post.processed_audio_path
-                and os.path.exists(post.processed_audio_path)
+            if job.status in {
+                "completed",
+                "skipped",
+            } and find_existing_processed_audio_path(
+                processed_audio_path=post.processed_audio_path,
+                unprocessed_audio_path=post.unprocessed_audio_path,
+                feed_title=getattr(post.feed, "title", None),
+                post_title=post.title,
             ):
                 response["download_url"] = f"/api/posts/{post_guid}/download"
             if job.status == "failed" and job.error_message:
@@ -288,6 +342,8 @@ class JobsManager:
                 .all()
             )
 
+            # Compute once so all running-job elapsed times share the same reference.
+            now = datetime.now(UTC).replace(tzinfo=None)
             results: list[dict[str, Any]] = []
             for job, post, prio in rows:
                 results.append(
@@ -311,6 +367,7 @@ class JobsManager:
                         "completed_at": (
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
+                        "processing_time_seconds": _processing_time_seconds(job, now),
                         "error_message": job.error_message,
                     }
                 )
@@ -334,6 +391,8 @@ class JobsManager:
                 .all()
             )
 
+            # Compute once so all running-job elapsed times share the same reference.
+            now = datetime.now(UTC).replace(tzinfo=None)
             results: list[dict[str, Any]] = []
             for job, post, prio in rows:
                 results.append(
@@ -357,6 +416,7 @@ class JobsManager:
                         "completed_at": (
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
+                        "processing_time_seconds": _processing_time_seconds(job, now),
                         "error_message": job.error_message,
                     }
                 )
@@ -439,6 +499,43 @@ class JobsManager:
             "message": f"Cancelled {len(job_ids)} jobs",
         }
 
+    def cancel_queued_jobs(self) -> dict[str, Any]:
+        """Cancel all queued (pending) jobs."""
+        with _scheduler_app_context():
+            queued_jobs = (
+                ProcessingJob.query.filter(ProcessingJob.status == "pending")
+                .order_by(ProcessingJob.created_at.asc())
+                .all()
+            )
+
+            cancelled_job_ids: list[str] = []
+            for job in queued_jobs:
+                self._status_manager.mark_cancelled(job.id, "Cancelled by user request")
+                cancelled_job_ids.append(job.id)
+
+            return {
+                "status": "cancelled",
+                "cancelled_count": len(cancelled_job_ids),
+                "message": f"Cancelled {len(cancelled_job_ids)} queued jobs",
+            }
+
+    def cancel_feed_queued_jobs(self, feed_id: int) -> dict[str, Any]:
+        """Cancel all queued (pending) jobs for posts belonging to a specific feed."""
+        with _scheduler_app_context():
+            result = writer_client.action(
+                "cancel_pending_jobs_for_feed", {"feed_id": feed_id}, wait=True
+            )
+            if not result or not result.success:
+                error_msg = getattr(result, "error", "writer action failed") if result else "no response from writer"
+                raise RuntimeError(f"cancel_pending_jobs_for_feed failed: {error_msg}")
+
+            cancelled_count = result.data.get("cancelled_count", 0) if result.data else 0
+            return {
+                "status": "cancelled",
+                "cancelled_count": cancelled_count,
+                "message": f"Cancelled {cancelled_count} queued jobs for feed {feed_id}",
+            }
+
     def cleanup_stale_jobs(self, older_than: timedelta) -> int:
         try:
             result = writer_client.action(
@@ -500,6 +597,24 @@ class JobsManager:
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error clearing all jobs: {e}")
             return {"status": "error", "message": f"Failed to clear jobs: {e!s}"}
+
+    def clear_active_jobs(self) -> dict[str, Any]:
+        """
+        Clear only pending and running jobs on startup.
+        Completed, failed, skipped, and cancelled jobs are preserved for history.
+        """
+        try:
+            result = writer_client.action("clear_active_jobs", {}, wait=True)
+            count = result.data if result and result.success else 0
+            logger.info(f"Cleared {count} active (pending/running) jobs on startup")
+            return {
+                "status": "success",
+                "cleared_jobs": count,
+                "message": f"Cleared {count} active jobs from database",
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error clearing active jobs: {e}")
+            return {"status": "error", "message": f"Failed to clear active jobs: {e!s}"}
 
     def start_refresh_all_feeds(
         self,

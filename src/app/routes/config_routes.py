@@ -46,6 +46,10 @@ def _sanitize_config_for_client(cfg: dict[str, Any]) -> dict[str, Any]:
         if llm_api_key:
             llm["llm_api_key_preview"] = _mask_secret(llm_api_key)
 
+        llm_fallback_api_key = llm.pop("llm_fallback_api_key", None)
+        if llm_fallback_api_key:
+            llm["llm_fallback_api_key_preview"] = _mask_secret(llm_fallback_api_key)
+
         whisper_api_key = whisper.pop("api_key", None)
         if whisper_api_key:
             whisper["api_key_preview"] = _mask_secret(whisper_api_key)
@@ -114,6 +118,16 @@ def _hydrate_llm_config(data: dict[str, Any]) -> None:
         "llm_max_input_tokens_per_call",
         llm.get("llm_max_input_tokens_per_call"),
     )
+    llm["llm_fallback_model"] = getattr(
+        runtime_config,
+        "llm_fallback_model",
+        llm.get("llm_fallback_model"),
+    )
+    llm["llm_fallback_api_key"] = getattr(
+        runtime_config,
+        "llm_fallback_api_key",
+        llm.get("llm_fallback_api_key"),
+    )
     llm["llm_enable_token_rate_limiting"] = getattr(
         runtime_config,
         "llm_enable_token_rate_limiting",
@@ -123,6 +137,21 @@ def _hydrate_llm_config(data: dict[str, Any]) -> None:
         runtime_config,
         "llm_max_input_tokens_per_minute",
         llm.get("llm_max_input_tokens_per_minute"),
+    )
+    llm["enable_boundary_refinement"] = getattr(
+        runtime_config,
+        "enable_boundary_refinement",
+        llm.get("enable_boundary_refinement"),
+    )
+    llm["enable_word_level_boundary_refinder"] = getattr(
+        runtime_config,
+        "enable_word_level_boundary_refinder",
+        llm.get("enable_word_level_boundary_refinder"),
+    )
+    llm["enable_llm_chapter_fallback_tagging"] = getattr(
+        runtime_config,
+        "enable_llm_chapter_fallback_tagging",
+        llm.get("enable_llm_chapter_fallback_tagging"),
     )
 
 
@@ -210,6 +239,46 @@ def _hydrate_app_config(data: dict[str, Any]) -> None:
         "autoprocess_on_download",
         app_cfg.get("autoprocess_on_download"),
     )
+    app_cfg["feed_tag_label"] = getattr(
+        runtime_config,
+        "feed_tag_label",
+        app_cfg.get("feed_tag_label"),
+    )
+    app_cfg["feed_tag_position"] = getattr(
+        runtime_config,
+        "feed_tag_position",
+        app_cfg.get("feed_tag_position"),
+    )
+    app_cfg["feed_tag_override"] = getattr(
+        runtime_config,
+        "feed_tag_override",
+        app_cfg.get("feed_tag_override"),
+    )
+    app_cfg["episode_status_indicator_enabled"] = getattr(
+        runtime_config,
+        "episode_status_indicator_enabled",
+        app_cfg.get("episode_status_indicator_enabled"),
+    )
+    app_cfg["episode_status_processed_symbol"] = getattr(
+        runtime_config,
+        "episode_status_processed_symbol",
+        app_cfg.get("episode_status_processed_symbol"),
+    )
+    app_cfg["episode_status_error_symbol"] = getattr(
+        runtime_config,
+        "episode_status_error_symbol",
+        app_cfg.get("episode_status_error_symbol"),
+    )
+    app_cfg["notification_apprise_url"] = getattr(
+        runtime_config,
+        "notification_apprise_url",
+        app_cfg.get("notification_apprise_url"),
+    )
+    app_cfg["notification_apprise_key"] = getattr(
+        runtime_config,
+        "notification_apprise_key",
+        app_cfg.get("notification_apprise_key"),
+    )
 
 
 def _first_env(env_names: list[str]) -> tuple[str | None, str | None]:
@@ -229,10 +298,14 @@ def _register_override(
     *,
     secret: bool = False,
 ) -> None:
-    """Register an environment override in the metadata dict."""
+    """Register an environment override in the metadata dict.
+
+    Fields with env overrides are marked as read_only since env vars are
+    authoritative and cannot be modified via the UI.
+    """
     if not env_var or value is None:
         return
-    entry: dict[str, Any] = {"env_var": env_var}
+    entry: dict[str, Any] = {"env_var": env_var, "read_only": True}
     if secret:
         entry["is_secret"] = True
         entry["value_preview"] = _mask_secret(value)
@@ -241,20 +314,30 @@ def _register_override(
     overrides[path] = entry
 
 
+# Simple 1:1 env var → field path mappings for LLM settings.
+# Shared across metadata registration, override detection, and field stripping.
+_SIMPLE_LLM_ENV_MAP: dict[str, str] = {
+    "OPENAI_BASE_URL": "llm.openai_base_url",
+    "LLM_MODEL": "llm.llm_model",
+    "OPENAI_TIMEOUT": "llm.openai_timeout",
+    "OPENAI_MAX_TOKENS": "llm.openai_max_tokens",
+    "LLM_MAX_CONCURRENT_CALLS": "llm.llm_max_concurrent_calls",
+    "LLM_MAX_RETRY_ATTEMPTS": "llm.llm_max_retry_attempts",
+    "LLM_ENABLE_TOKEN_RATE_LIMITING": "llm.llm_enable_token_rate_limiting",
+    "LLM_MAX_INPUT_TOKENS_PER_CALL": "llm.llm_max_input_tokens_per_call",
+    "LLM_MAX_INPUT_TOKENS_PER_MINUTE": "llm.llm_max_input_tokens_per_minute",
+}
+
+
 def _register_llm_overrides(overrides: dict[str, Any]) -> None:
     """Register LLM-related environment overrides."""
     env_var, env_value = _first_env(["LLM_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY"])
     _register_override(overrides, "llm.llm_api_key", env_var, env_value, secret=True)
 
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    if base_url:
-        _register_override(
-            overrides, "llm.openai_base_url", "OPENAI_BASE_URL", base_url
-        )
-
-    llm_model = os.environ.get("LLM_MODEL")
-    if llm_model:
-        _register_override(overrides, "llm.llm_model", "LLM_MODEL", llm_model)
+    for env_key, field_path in _SIMPLE_LLM_ENV_MAP.items():
+        val = os.environ.get(env_key)
+        if val:
+            _register_override(overrides, field_path, env_key, val)
 
 
 def _register_groq_shared_overrides(overrides: dict[str, Any]) -> None:
@@ -375,6 +458,112 @@ def _build_env_override_metadata(data: dict[str, Any]) -> dict[str, Any]:
     return overrides
 
 
+def _get_llm_overridden_fields() -> set[str]:
+    """Return set of LLM field paths overridden by environment variables.
+
+    Only considers env vars with non-empty values.
+    """
+    overridden: set[str] = set()
+
+    if (
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+    ):
+        overridden.add("llm.llm_api_key")
+
+    for env_key, field_path in _SIMPLE_LLM_ENV_MAP.items():
+        if os.environ.get(env_key):
+            overridden.add(field_path)
+
+    return overridden
+
+
+def _get_whisper_overridden_fields() -> set[str]:
+    """Return set of whisper field paths overridden by environment variables."""
+    overridden: set[str] = set()
+
+    if os.environ.get("WHISPER_TYPE"):
+        overridden.add("whisper.whisper_type")
+
+    # Remote whisper
+    if os.environ.get("WHISPER_REMOTE_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        overridden.add("whisper.api_key")
+    if os.environ.get("WHISPER_REMOTE_BASE_URL") or os.environ.get("OPENAI_BASE_URL"):
+        overridden.add("whisper.base_url")
+    if os.environ.get("WHISPER_REMOTE_MODEL"):
+        overridden.add("whisper.model")
+    if os.environ.get("WHISPER_REMOTE_TIMEOUT_SEC"):
+        overridden.add("whisper.timeout_sec")
+    if os.environ.get("WHISPER_REMOTE_CHUNKSIZE_MB"):
+        overridden.add("whisper.chunksize_mb")
+
+    # Groq whisper
+    if os.environ.get("GROQ_API_KEY"):
+        overridden.add("whisper.api_key")
+    if os.environ.get("GROQ_WHISPER_MODEL") or os.environ.get("WHISPER_GROQ_MODEL"):
+        overridden.add("whisper.model")
+    if os.environ.get("GROQ_MAX_RETRIES"):
+        overridden.add("whisper.max_retries")
+
+    # Local whisper
+    if os.environ.get("WHISPER_LOCAL_MODEL"):
+        overridden.add("whisper.model")
+
+    return overridden
+
+
+def _get_env_overridden_fields() -> set[str]:
+    """Return set of field paths that are overridden by environment variables.
+
+    These fields should not be modified via the API - env vars are authoritative.
+    """
+    return _get_llm_overridden_fields() | _get_whisper_overridden_fields()
+
+
+def _strip_env_overridden_fields(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Remove env-overridden fields from payload, return cleaned payload and list of stripped fields."""
+    overridden = _get_env_overridden_fields()
+    stripped: list[str] = []
+
+    cleaned = dict(payload)
+
+    llm = cleaned.get("llm")
+    if isinstance(llm, dict):
+        llm = dict(llm)
+        # llm_api_key has multi-env fallback, so it's not in _SIMPLE_LLM_ENV_MAP
+        llm_field_paths = ["llm.llm_api_key", *_SIMPLE_LLM_ENV_MAP.values()]
+        for field_path in llm_field_paths:
+            field_key = field_path.split(".", 1)[1]
+            if field_path in overridden and field_key in llm:
+                llm.pop(field_key)
+                stripped.append(field_path)
+        cleaned["llm"] = llm
+
+    whisper = cleaned.get("whisper")
+    if isinstance(whisper, dict):
+        whisper = dict(whisper)
+        whisper_field_paths = [
+            "whisper.whisper_type",
+            "whisper.api_key",
+            "whisper.base_url",
+            "whisper.model",
+            "whisper.timeout_sec",
+            "whisper.chunksize_mb",
+            "whisper.max_retries",
+        ]
+        for field_path in whisper_field_paths:
+            field_key = field_path.split(".", 1)[1]
+            if field_path in overridden and field_key in whisper:
+                whisper.pop(field_key)
+                stripped.append(field_path)
+        cleaned["whisper"] = whisper
+
+    return cleaned, stripped
+
+
 @config_bp.route("/api/config", methods=["PUT"])
 def api_put_config() -> flask.Response:
     _, error_response = require_admin()
@@ -386,10 +575,19 @@ def api_put_config() -> flask.Response:
     llm_payload = payload.get("llm")
     if isinstance(llm_payload, dict):
         llm_payload.pop("llm_api_key_preview", None)
+        llm_payload.pop("llm_fallback_api_key_preview", None)
 
     whisper_payload = payload.get("whisper")
     if isinstance(whisper_payload, dict):
         whisper_payload.pop("api_key_preview", None)
+
+    # Strip env-overridden fields - env vars are authoritative and cannot be overwritten via API
+    payload, stripped_fields = _strip_env_overridden_fields(payload)
+    if stripped_fields:
+        logger.info(
+            "Stripped env-overridden fields from config update: %s",
+            ", ".join(stripped_fields),
+        )
 
     try:
         result = writer_client.action(
@@ -432,9 +630,15 @@ def api_test_llm() -> flask.Response:
 
     payload: dict[str, Any] = request.get_json(silent=True) or {}
     llm: dict[str, Any] = dict(payload.get("llm", {}))
+    # When testing the fallback model, the frontend may send an empty api key
+    # because the stored fallback key is masked in the UI. This flag tells us
+    # to prefer the stored fallback key over the stored primary key.
+    use_fallback_api_key: bool = bool(payload.get("use_fallback_api_key", False))
 
-    api_key: str | None = llm.get("llm_api_key") or getattr(
-        runtime_config, "llm_api_key", None
+    api_key: str | None = (
+        llm.get("llm_api_key")
+        or (getattr(runtime_config, "llm_fallback_api_key", None) if use_fallback_api_key else None)
+        or getattr(runtime_config, "llm_api_key", None)
     )
     model_val = llm.get("llm_model")
     model: str = (

@@ -51,4 +51,12 @@ else:
         autoprocess_on_download=DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
         max_queue_size=DEFAULTS.APP_MAX_QUEUE_SIZE,
         max_queue_size_per_feed=DEFAULTS.APP_MAX_QUEUE_SIZE_PER_FEED,
+        feed_tag_label=DEFAULTS.APP_FEED_TAG_LABEL,
+        feed_tag_position=DEFAULTS.APP_FEED_TAG_POSITION,
+        feed_tag_override=DEFAULTS.APP_FEED_TAG_OVERRIDE,
+        episode_status_indicator_enabled=DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+        episode_status_processed_symbol=DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+        episode_status_error_symbol=DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
+        notification_apprise_url=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+        notification_apprise_key=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
     )

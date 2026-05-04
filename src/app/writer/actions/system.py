@@ -1,10 +1,11 @@
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
 from app.extensions import db
 from app.jobs_manager_run_service import get_or_create_singleton_run
-from app.models import DiscordSettings
+from app.models import DiscordSettings, OidcSettings
 
 logger = logging.getLogger("writer")
 
@@ -45,6 +46,30 @@ def update_discord_settings_action(params: dict[str, Any]) -> dict[str, Any]:
         "allow_registration",
     ):
         if field in params:
+            setattr(settings, field, params.get(field))
+
+    settings.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    db.session.flush()
+    return {"updated": True}
+
+
+_OIDC_ENV_LOCKS: dict[str, str] = {
+    "issuer": "OIDC_ISSUER",
+    "client_id": "OIDC_CLIENT_ID",
+    "client_secret": "OIDC_CLIENT_SECRET",
+    "redirect_uri": "OIDC_REDIRECT_URI",
+    "allow_registration": "OIDC_ALLOW_REGISTRATION",
+}
+
+
+def update_oidc_settings_action(params: dict[str, Any]) -> dict[str, Any]:
+    settings = db.session.get(OidcSettings, 1)
+    if settings is None:
+        settings = OidcSettings(id=1)
+        db.session.add(settings)
+
+    for field, env_var in _OIDC_ENV_LOCKS.items():
+        if field in params and not os.environ.get(env_var):
             setattr(settings, field, params.get(field))
 
     settings.updated_at = datetime.now(UTC).replace(tzinfo=None)

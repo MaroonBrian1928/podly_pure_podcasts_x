@@ -12,19 +12,37 @@ import LoginPage from './pages/LoginPage';
 import LandingPage from './pages/LandingPage';
 import BillingPage from './pages/BillingPage';
 import AudioPlayer from './components/AudioPlayer';
-import { billingApi } from './services/api';
+import { billingApi, jobsApi } from './services/api';
+import type { JobManagerStatus } from './types';
 import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsContext';
 import DiagnosticsModal from './components/DiagnosticsModal';
+import ThemeToggle from './components/ThemeToggle';
+import { ThemeProvider, useTheme } from './contexts/ThemeContext';
 import './App.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 0,
-      gcTime: 0,
+      // Keep inactive query cache alive for 5 s so in-flight fetches can
+      // settle before GC.  gcTime: 0 caused cancelled-query rejections to
+      // leak as unhandled promise rejections when a component unmounted
+      // while a background refetch was in progress.  30 s was overly long
+      // and caused stale data to flash on remount; 5 s is a safe middle
+      // ground.
+      gcTime: 5_000,
       refetchOnMount: 'always',
       refetchOnWindowFocus: 'always',
       refetchOnReconnect: 'always',
+      // Never throw errors into React error boundaries — keep them in the
+      // query's own `error` state so the UI can handle them gracefully.
+      throwOnError: false,
+      // Retry once on transient network failures; avoids hammering the
+      // server on persistent errors while still recovering from brief blips.
+      // retryDelay: 0 makes the retry immediate — no artificial 1 s pause
+      // before the UI shows an error or recovers.
+      retry: 1,
+      retryDelay: () => 0,
     },
   },
 });
@@ -32,6 +50,7 @@ const queryClient = new QueryClient({
 function AppShell() {
   const { status, requireAuth, isAuthenticated, user, logout, landingPageEnabled } = useAuth();
   const { open: openDiagnostics } = useDiagnostics();
+  const { isDark } = useTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
@@ -41,6 +60,20 @@ function AppShell() {
     enabled: !!user && requireAuth && isAuthenticated,
     retry: false,
   });
+
+  const { data: jobManagerStatus } = useQuery({
+    queryKey: ['job-manager', 'status', 'nav'],
+    queryFn: jobsApi.getJobManagerStatus,
+    enabled: !requireAuth || user?.role === 'admin',
+    refetchInterval: (query) => {
+      const run = (query.state.data as JobManagerStatus | undefined)?.run;
+      const active = (run?.running_jobs ?? 0) + (run?.queued_jobs ?? 0);
+      return active > 0 ? 15_000 : 60_000;
+    },
+    retry: false,
+  });
+  const activeJobsCount = (jobManagerStatus?.run?.running_jobs ?? 0) + (jobManagerStatus?.run?.queued_jobs ?? 0);
+  const activeJobsLabel = activeJobsCount > 99 ? '99+' : String(activeJobsCount);
 
   // Close mobile menu on route change
   useEffect(() => {
@@ -123,8 +156,13 @@ function AppShell() {
                 </Link>
               )}
               {showJobsLink && (
-                <Link to="/jobs" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <Link to="/jobs" className="flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-gray-900">
                   Jobs
+                  {activeJobsCount > 0 && (
+                    <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 dark:bg-red-600 text-white text-[10px] font-bold leading-none">
+                      {activeJobsLabel}
+                    </span>
+                  )}
                 </Link>
               )}
               {showConfigLink && (
@@ -139,6 +177,7 @@ function AppShell() {
               >
                 Report issue
               </button>
+              <ThemeToggle />
               {requireAuth && user && (
                 <div className="flex items-center gap-3 text-sm text-gray-600 flex-shrink-0">
                   {billingSummary && !isAdmin && (
@@ -187,6 +226,18 @@ function AppShell() {
                 </>
               )}
 
+              <ThemeToggle />
+
+              {showJobsLink && activeJobsCount > 0 && (
+                <Link
+                  to="/jobs"
+                  aria-label={`${activeJobsCount} active jobs`}
+                  className="flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 dark:bg-red-600 text-white text-[11px] font-bold leading-none"
+                >
+                  {activeJobsLabel}
+                </Link>
+              )}
+
               {/* Hamburger Button */}
               <div className="relative" ref={mobileMenuRef}>
                 <button
@@ -225,9 +276,14 @@ function AppShell() {
                     {showJobsLink && (
                       <Link
                         to="/jobs"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        className="flex items-center justify-between px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
                       >
                         Jobs
+                        {activeJobsCount > 0 && (
+                          <span className="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 dark:bg-red-600 text-white text-[10px] font-bold leading-none">
+                            {activeJobsLabel}
+                          </span>
+                        )}
                       </Link>
                     )}
                     {showConfigLink && (
@@ -286,7 +342,23 @@ function AppShell() {
 
       <AudioPlayer />
       <DiagnosticsModal />
-      <Toaster position="top-center" toastOptions={{ duration: 3000 }} />
+      <Toaster
+        position="top-center"
+        toastOptions={{
+          duration: 3000,
+          style: isDark
+            ? {
+                background: '#0f172a',
+                color: '#e2e8f0',
+                border: '1px solid #334155',
+              }
+            : {
+                background: '#ffffff',
+                color: '#111827',
+                border: '1px solid #e5e7eb',
+              },
+        }}
+      />
     </div>
   );
 }
@@ -294,15 +366,17 @@ function AppShell() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <AudioPlayerProvider>
-          <DiagnosticsProvider>
-            <Router>
-              <AppShell />
-            </Router>
-          </DiagnosticsProvider>
-        </AudioPlayerProvider>
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <AudioPlayerProvider>
+            <DiagnosticsProvider>
+              <Router>
+                <AppShell />
+              </Router>
+            </DiagnosticsProvider>
+          </AudioPlayerProvider>
+        </AuthProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }

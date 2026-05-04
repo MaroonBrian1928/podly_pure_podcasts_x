@@ -1,17 +1,19 @@
 import logging
-import os
 from typing import Any
 
 from app.extensions import db as _db
 from app.models import Post, ProcessingJob
 from app.runtime_config import config as runtime_config
+from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
+from shared.processing_paths import find_existing_processed_audio_path
 
 
 class JobManager:
     """Manage the lifecycle guarantees for a single `ProcessingJob` record."""
 
     ACTIVE_STATUSES = {"pending", "running"}
+    TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
     def __init__(
         self,
@@ -155,7 +157,28 @@ class JobManager:
                 },
             )
 
-        if post.processed_audio_path and os.path.exists(post.processed_audio_path):
+        existing_processed_path = find_existing_processed_audio_path(
+            processed_audio_path=post.processed_audio_path,
+            unprocessed_audio_path=post.unprocessed_audio_path,
+            feed_title=getattr(post.feed, "title", None),
+            post_title=post.title,
+        )
+        if existing_processed_path:
+            resolved_processed_path = str(existing_processed_path)
+            if post.processed_audio_path != resolved_processed_path:
+                result = writer_client.update(
+                    "Post",
+                    post.id,
+                    {"processed_audio_path": resolved_processed_path},
+                    wait=True,
+                )
+                if result and result.success:
+                    post.processed_audio_path = resolved_processed_path
+                else:
+                    self._logger.warning(
+                        "Failed to persist resolved processed path for post %s",
+                        post.guid,
+                    )
             try:
                 job = self.skip("Post already processed")
             except Exception as err:  # noqa: BLE001
@@ -179,7 +202,7 @@ class JobManager:
 
     def _mark_job_skipped(self, reason: str) -> ProcessingJob | None:
         job = self.get_active_job()
-        if job and job.status in {"pending", "running"}:
+        if job and job.status in self.ACTIVE_STATUSES:
             job.error_message = None
             total_steps = job.total_steps or job.current_step or 4
             self._status_manager.update_job_status(

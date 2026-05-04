@@ -1,22 +1,284 @@
 import datetime
+import html
+import json
 import logging
+import re
 import uuid
 from collections.abc import Iterable
 from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, cast
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote as _url_quote, urlencode, urlparse, urlunparse
 
 import feedparser
 import PyRSS2Gen
 from flask import current_app, g, request
 
+from sqlalchemy import func
+
 from app.extensions import db
-from app.models import Feed, Post, User, UserFeed
+from app.models import Feed, Post, ProcessingJob, User, UserFeed
+from app.process_token import make_process_token
 from app.runtime_config import config
 from app.writer.client import writer_client
+from podcast_processor.audio import get_audio_duration_ms
 from podcast_processor.podcast_downloader import find_audio_link
 
-logger = logging.getLogger("global_logger")
+logger = logging.getLogger(__name__)
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True only for http/https URLs to prevent javascript:/data: XSS."""
+    try:
+        return urlparse(url).scheme.lower() in ("http", "https")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _apply_feed_tag(title: str, feed: "Feed | None" = None) -> str:
+    """Apply the configurable feed tag to a feed channel title at render time.
+
+    Rules:
+    - If feed_tag_override is True on global config → always use global label/position.
+    - Otherwise, if the feed has its own label/position set → use them.
+    - Fall back to global label/position for any unset per-feed value.
+    - If the resolved label is empty → return the title unchanged (no brackets).
+    - position "prefix"  →  "[label] title"
+    - position "suffix"  →  "title [label]"
+    - Any other value falls back to prefix.
+    """
+    global_label = config.feed_tag_label
+    global_position = config.feed_tag_position
+    feed_tag_override = config.feed_tag_override
+
+    if feed is not None and not feed_tag_override:
+        per_label = feed.feed_tag_label
+        per_position = feed.feed_tag_position
+        label = per_label if per_label is not None else global_label
+        position = per_position if per_position is not None else global_position
+    else:
+        label = global_label
+        position = global_position
+
+    label = label.strip() if label else ""
+    if not label:
+        return title
+    tag = f"[{label}]"
+    if position == "suffix":
+        return f"{title} {tag}"
+    return f"{tag} {title}"
+
+
+def _episode_status_suffix(post: "Post", failed_guids: "set[str]") -> str:
+    """Return the status symbol suffix for an episode title, or empty string.
+
+    Only active when episode_status_indicator_enabled is True in config.
+    - processed_audio_path is not None  →  processed symbol (e.g. ' ✓')
+    - guid in failed_guids              →  error symbol    (e.g. ' ⚠')
+    - otherwise                         →  ''  (no change)
+    """
+    if not config.episode_status_indicator_enabled:
+        return ""
+    if post.processed_audio_path is not None:
+        symbol = config.episode_status_processed_symbol.strip()
+        return f" {symbol}" if symbol else ""
+    if post.guid in failed_guids:
+        symbol = config.episode_status_error_symbol.strip()
+        return f" {symbol}" if symbol else ""
+    return ""
+
+_FORWARDED_PROTO_RE = re.compile(
+    r"(?:^|[;,])\s*proto=(\"?)(https?|[A-Za-z]+)\1", re.IGNORECASE
+)
+_FEED_TEXT_NORMALIZE_TABLE = str.maketrans(
+    {
+        "\u00a0": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\u2060": "",
+        "\ufeff": "",
+    }
+)
+
+
+def _format_itunes_duration(duration_seconds: int) -> str:
+    total_seconds = max(0, int(duration_seconds))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _parse_duration_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value if value >= 0 else None
+
+    if isinstance(value, float):
+        return int(value) if value >= 0 else None
+
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = None
+
+    if parsed is not None:
+        return parsed if parsed >= 0 else None
+
+    parts = [part.strip() for part in raw_value.split(":")]
+    if len(parts) not in {2, 3} or any(not part for part in parts):
+        return None
+
+    try:
+        seconds = float(parts[-1])
+        minutes = int(parts[-2])
+        hours = int(parts[0]) if len(parts) == 3 else 0
+    except ValueError:
+        return None
+
+    if hours < 0 or minutes < 0 or seconds < 0:
+        return None
+
+    return int((hours * 3600) + (minutes * 60) + seconds)
+
+
+def _format_chapter_timestamp(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _chapters_for_description(post: Post) -> list[tuple[float, str]]:
+    raw_chapter_data = getattr(post, "chapter_data", None)
+    if not raw_chapter_data:
+        return []
+
+    try:
+        chapter_data = (
+            json.loads(raw_chapter_data)
+            if isinstance(raw_chapter_data, str)
+            else raw_chapter_data
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    if not isinstance(chapter_data, dict):
+        return []
+
+    chapters = chapter_data.get("chapters_for_output") or chapter_data.get(
+        "chapters_kept"
+    )
+    if not isinstance(chapters, list):
+        return []
+
+    out: list[tuple[float, str]] = []
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        title = str(chapter.get("title") or "").strip()
+        if not title:
+            continue
+        try:
+            start_time = float(chapter.get("start_time", 0.0))
+        except Exception:  # noqa: BLE001
+            continue
+        out.append((max(0.0, start_time), title))
+
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _render_podly_chapters_html(post: Post) -> str:
+    chapters = _chapters_for_description(post)
+    if not chapters:
+        return ""
+
+    items = "".join(
+        (f"<li>{_format_chapter_timestamp(start_time)} {html.escape(title)}</li>")
+        for start_time, title in chapters
+    )
+    return f"<p><strong>Podly Chapters</strong></p><ul>{items}</ul>"
+
+
+def _normalize_feed_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.translate(_FEED_TEXT_NORMALIZE_TABLE)
+
+
+def build_post_feed_description_html(post: Post) -> str:
+    """Build the description shown in Podly-generated RSS items for a post."""
+    description_parts: list[str] = []
+
+    # For episodes that have not yet been processed, prepend a one-tap link so
+    # the user can trigger processing directly from their podcast app without
+    # needing to open the Podly web UI.  The link is authenticated via a
+    # per-episode HMAC token — no login required.
+    if post.processed_audio_path is None:
+        try:
+            base_url = _get_base_url()
+            token = make_process_token(post.guid)
+            process_url = html.escape(
+                f"{base_url}/process/{post.guid}?token={token}", quote=True
+            )
+            description_parts.append(
+                f'<p>▶️ <a href="{process_url}">Process with Podly</a></p>'
+            )
+        except Exception:  # noqa: BLE001
+            # Never break RSS generation over a missing process link.
+            pass
+
+    if post.description:
+        description_parts.append(_normalize_feed_text(post.description))
+
+    chapters_html = _render_podly_chapters_html(post)
+    if chapters_html:
+        description_parts.append(chapters_html)
+
+    if post.processed_audio_path is not None:
+        source_url = post.link or post.download_url
+        if source_url and _is_safe_url(source_url):
+            escaped_url = html.escape(source_url, quote=True)
+            description_parts.append(
+                f'<p>🔗 <a href="{escaped_url}">Original episode source</a></p>'
+            )
+
+    return "\n".join(description_parts)
+
+
+def _write_cdata(handler: Any, value: str) -> None:
+    if not value:
+        return
+
+    escaped_value = value.replace("]]>", "]]]]><![CDATA[>")
+    writer = getattr(handler, "_write", None)
+    if callable(writer):
+        writer(f"<![CDATA[{escaped_value}]]>")
+        return
+
+    handler.characters(value)
+
+
+def _publish_cdata_opt_element(handler: Any, name: str, value: str | None) -> None:
+    if value is None:
+        return
+
+    handler.startElement(name, {})
+    _write_cdata(handler, value)
+    handler.endElement(name)
 
 
 def is_feed_active_for_user(feed_id: int, user: User) -> bool:
@@ -85,6 +347,13 @@ def _should_auto_whitelist_new_posts(feed: Feed, post: Post | None = None) -> bo
 
 def _get_base_url() -> str:
     try:
+
+        def _normalize_proto(value: Any) -> str | None:
+            if value is None:
+                return None
+            first = str(value).split(",")[0].strip().strip('"').lower()
+            return first if first in {"http", "https"} else None
+
         # Check various ways HTTP/2 pseudo-headers might be available
         http2_scheme = (
             request.headers.get(":scheme")
@@ -103,16 +372,45 @@ def _get_base_url() -> str:
 
         # Fall back to Host header with scheme detection
         if host:
+            forwarded_proto = None
+            for header_name in (
+                "X-Forwarded-Proto",
+                "X-Forwarded-Protocol",
+                "X-Forwarded-Scheme",
+                "X-Url-Scheme",
+            ):
+                forwarded_proto = _normalize_proto(request.headers.get(header_name))
+                if forwarded_proto:
+                    break
+
+            if not forwarded_proto:
+                forwarded = request.headers.get("Forwarded")
+                if forwarded:
+                    match = _FORWARDED_PROTO_RE.search(forwarded)
+                    if match:
+                        forwarded_proto = _normalize_proto(match.group(2))
+
+            if not forwarded_proto:
+                cf_visitor = request.headers.get("CF-Visitor")
+                if cf_visitor:
+                    try:
+                        forwarded_proto = _normalize_proto(
+                            json.loads(cf_visitor).get("scheme")
+                        )
+                    except Exception:  # noqa: BLE001
+                        forwarded_proto = None
+
             # Check multiple indicators for HTTPS
-            is_https = (
+            is_https = forwarded_proto == "https" or (
                 request.is_secure
-                or request.headers.get("X-Forwarded-Proto") == "https"
                 or request.headers.get("Strict-Transport-Security") is not None
                 or request.headers.get("X-Forwarded-Ssl") == "on"
+                or request.headers.get("Front-End-Https") == "on"
+                or request.headers.get("X-Forwarded-Port") == "443"
                 or request.environ.get("HTTPS") == "on"
                 or request.scheme == "https"
             )
-            scheme = "https" if is_https else "http"
+            scheme = forwarded_proto or ("https" if is_https else "http")
             return f"{scheme}://{host}"
     except RuntimeError:
         # Working outside of request context
@@ -141,7 +439,7 @@ def refresh_feed(feed: Feed) -> None:
         if feed.image_url != new_image_url:
             updates["image_url"] = new_image_url
 
-    existing_posts = {post.guid for post in feed.posts}  # type: ignore[attr-defined]
+    existing_posts = {post.guid: post for post in feed.posts}  # type: ignore[attr-defined]
     oldest_post = min(
         (post for post in feed.posts if post.release_date),  # type: ignore[attr-defined]
         key=lambda p: p.release_date,
@@ -149,8 +447,10 @@ def refresh_feed(feed: Feed) -> None:
     )
 
     new_posts = []
+    existing_post_updates = []
     for entry in feed_data.entries:
-        if entry.id not in existing_posts:
+        existing_post = existing_posts.get(entry.id)
+        if existing_post is None:
             logger.debug("found new podcast: %s", entry.title)
             p = make_post(feed, entry)
             # do not allow automatic download of any backcatalog added to the feed
@@ -180,13 +480,47 @@ number_of_episodes_to_whitelist_from_archive_of_new_feed setting: {entry.title}"
                 "feed_id": feed.id,
             }
             new_posts.append(post_data)
+            continue
 
-    if updates or new_posts:
+        post_update: dict[str, Any] = {"post_id": existing_post.id}
+
+        updated_title = str(getattr(entry, "title", "") or "").strip()
+        if updated_title and existing_post.title != updated_title:
+            post_update["title"] = updated_title
+
+        updated_description = _extract_post_description(entry)
+        if existing_post.description != updated_description:
+            post_update["description"] = updated_description
+
+        updated_image_url = _extract_episode_image_url(entry, feed)
+        if existing_post.image_url != updated_image_url:
+            post_update["image_url"] = updated_image_url
+
+        parsed_duration = get_duration(entry)
+        if (
+            existing_post.processed_audio_path is None
+            and parsed_duration is not None
+            and existing_post.duration != parsed_duration
+        ):
+            post_update["duration"] = parsed_duration
+
+        if len(post_update) > 1:
+            existing_post_updates.append(post_update)
+
+    if updates or new_posts or existing_post_updates:
         writer_client.action(
             "refresh_feed",
-            {"feed_id": feed.id, "updates": updates, "new_posts": new_posts},
+            {
+                "feed_id": feed.id,
+                "updates": updates,
+                "new_posts": new_posts,
+                "existing_post_updates": existing_post_updates,
+            },
             wait=True,
         )
+        # Refreshes are written through the separate writer service, so expire the
+        # current request session before serializing the feed response.
+        db.session.expire_all()
 
     logger.info(f"Feed with ID: {feed.id} refreshed")
 
@@ -278,9 +612,11 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
         guid: str,
         pubDate: str | None,
         image_url: str | None = None,
+        duration_seconds: int | None = None,
         **kwargs: Any,
     ) -> None:
         self.image_url = image_url
+        self.duration_seconds = duration_seconds
         super().__init__(
             title=title,
             enclosure=enclosure,
@@ -294,10 +630,67 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
         if self.image_url:
             handler.startElement("itunes:image", {"href": self.image_url})
             handler.endElement("itunes:image")
+        if self.duration_seconds:
+            handler.startElement("itunes:duration", {})
+            handler.characters(_format_itunes_duration(self.duration_seconds))
+            handler.endElement("itunes:duration")
+        _publish_cdata_opt_element(handler, "content:encoded", self.description)
         super().publish_extensions(handler)
 
+    def publish(self, handler: Any) -> None:
+        # PyRSS2Gen escapes item descriptions with handler.characters(), which
+        # flattens rich HTML from source feeds and the appended Podly chapters.
+        handler.startElement("item", self.element_attrs)
+        PyRSS2Gen._opt_element(handler, "title", self.title)
+        PyRSS2Gen._opt_element(handler, "link", self.link)
+        self.publish_extensions(handler)
+        _publish_cdata_opt_element(handler, "description", self.description)
+        PyRSS2Gen._opt_element(handler, "author", self.author)
 
-def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem:
+        for item_category in self.categories:
+            category = (
+                PyRSS2Gen.Category(item_category)
+                if isinstance(item_category, str)
+                else item_category
+            )
+            category.publish(handler)
+
+        PyRSS2Gen._opt_element(handler, "comments", self.comments)
+        if self.enclosure is not None:
+            self.enclosure.publish(handler)
+        PyRSS2Gen._opt_element(handler, "guid", self.guid)
+
+        pub_date = self.pubDate
+        if isinstance(pub_date, datetime.datetime):
+            pub_date = PyRSS2Gen.DateElement("pubDate", pub_date)
+        PyRSS2Gen._opt_element(handler, "pubDate", pub_date)
+
+        if self.source is not None:
+            self.source.publish(handler)
+
+        handler.endElement("item")
+
+
+def _feed_item_duration_seconds(post: Post) -> int | None:
+    processed_audio_path = getattr(post, "processed_audio_path", None)
+    if processed_audio_path:
+        duration_ms = get_audio_duration_ms(processed_audio_path)
+        if duration_ms is not None and duration_ms > 0:
+            return round(duration_ms / 1000.0)
+
+    raw_duration = getattr(post, "duration", None)
+    if raw_duration is None:
+        return None
+
+    duration_seconds = int(raw_duration)
+    return duration_seconds if duration_seconds > 0 else None
+
+
+def feed_item(
+    post: Post,
+    prepend_feed_title: bool = False,
+    failed_guids: "set[str] | None" = None,
+) -> PyRSS2Gen.RSSItem:
     """
     Given a post, return the corresponding RSS item. Reference:
     https://github.com/Podcast-Standards-Project/PSP-1-Podcast-RSS-Specification?tab=readme-ov-file#required-item-elements
@@ -305,17 +698,17 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
 
     base_url = _get_base_url()
 
-    # Generate URLs that will be proxied by the frontend to the backend
-    audio_url = _append_feed_token_params(f"{base_url}/api/posts/{post.guid}/download")
-    post_details_url = _append_feed_token_params(f"{base_url}/api/posts/{post.guid}")
-
-    description = (
-        f'{post.description}\n<p><a href="{post_details_url}">Podly Post Page</a></p>'
-    )
+    # Podcast clients stream enclosure URLs directly, so use the inline MP3 route
+    # rather than the attachment-style download endpoint.
+    audio_url = _append_feed_token_params(f"{base_url}/post/{post.guid}.mp3")
+    description = build_post_feed_description_html(post)
 
     title = post.title
     if prepend_feed_title and post.feed:
         title = f"[{post.feed.title}] {title}"
+    title += _episode_status_suffix(post, failed_guids or set())
+
+    duration_seconds = _feed_item_duration_seconds(post)
 
     item = ItunesRSSItem(
         title=title,
@@ -328,6 +721,7 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
         guid=post.guid,
         pubDate=_format_pub_date(post.release_date),
         image_url=post.image_url,
+        duration_seconds=duration_seconds,
     )
 
     return item
@@ -351,7 +745,33 @@ def generate_feed_xml(feed: Feed) -> Any:
             .all()
         )
 
-    items = [feed_item(post) for post in posts]
+    # Compute failed episode GUIDs in a single query (only when indicator is on).
+    # Use created_at (not id, which is a random UUID) to identify the latest job.
+    failed_guids: set[str] = set()
+    if config.episode_status_indicator_enabled and posts:
+        post_guids = [p.guid for p in posts]
+        latest_created_subq = (
+            db.session.query(
+                ProcessingJob.post_guid,
+                func.max(ProcessingJob.created_at).label("max_created_at"),
+            )
+            .filter(ProcessingJob.post_guid.in_(post_guids))
+            .group_by(ProcessingJob.post_guid)
+            .subquery()
+        )
+        failed_rows = (
+            db.session.query(ProcessingJob.post_guid)
+            .join(
+                latest_created_subq,
+                (ProcessingJob.post_guid == latest_created_subq.c.post_guid)
+                & (ProcessingJob.created_at == latest_created_subq.c.max_created_at),
+            )
+            .filter(ProcessingJob.status.in_(["failed", "cancelled"]))
+            .all()
+        )
+        failed_guids = {row.post_guid for row in failed_rows}
+
+    items = [feed_item(post, failed_guids=failed_guids) for post in posts]
 
     base_url = _get_base_url()
     link = _append_feed_token_params(f"{base_url}/feed/{feed.id}")
@@ -359,9 +779,9 @@ def generate_feed_xml(feed: Feed) -> Any:
     last_build_date = format_datetime(datetime.datetime.now(datetime.UTC))
 
     rss_feed = PyRSS2Gen.RSS2(
-        title="[podly] " + feed.title,
+        title=_apply_feed_tag(feed.title, feed),
         link=link,
-        description=feed.description,
+        description=_normalize_feed_text(feed.description),
         lastBuildDate=last_build_date,
         image=PyRSS2Gen.Image(url=feed.image_url, title=feed.title, link=link),
         items=items,
@@ -472,8 +892,11 @@ def _append_feed_token_params(url: str) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 
-def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
-    # Extract episode image URL, fallback to feed image
+def _extract_episode_image_url(
+    entry: feedparser.FeedParserDict,
+    feed: Feed,
+) -> str | None:
+    """Prefer episode-level artwork when the source feed exposes it."""
     episode_image_url = None
 
     # Try to get episode-specific image from various RSS fields
@@ -499,28 +922,48 @@ def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
     if not episode_image_url:
         episode_image_url = feed.image_url
 
-    # Try multiple description fields in order of preference
-    description = entry.get("description", "")
-    if not description:
-        description = entry.get("summary", "")
-    if not description and hasattr(entry, "content") and entry.content:
-        description = entry.content[0].get("value", "")
-    if not description:
-        description = entry.get("subtitle", "")
+    return episode_image_url
 
+
+def _extract_post_description(entry: feedparser.FeedParserDict) -> str:
+    """Prefer rich HTML payloads when a source feed exposes them."""
+    content_items = getattr(entry, "content", None) or []
+    for content in content_items:
+        value = str(content.get("value", "") or "").strip()
+        content_type = str(content.get("type", "") or "").strip().lower()
+        if value and content_type in {"text/html", "application/xhtml+xml"}:
+            return value
+
+    for field in ("description", "summary"):
+        value = str(entry.get(field, "") or "").strip()
+        if value:
+            return value
+
+    for content in content_items:
+        value = str(content.get("value", "") or "").strip()
+        if value:
+            return value
+
+    return str(entry.get("subtitle", "") or "").strip()
+
+
+def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
     return Post(
         feed_id=feed.id,
         guid=get_guid(entry),
         download_url=find_audio_link(entry),
+        link=str(entry.link).strip() if entry.get("link") else None,
         title=entry.title,
-        description=description,
+        description=_extract_post_description(entry),
         release_date=_parse_release_date(entry),
         duration=get_duration(entry),
-        image_url=episode_image_url,
+        image_url=_extract_episode_image_url(entry, feed),
     )
 
 
-def _get_entry_field(entry: feedparser.FeedParserDict, field: str) -> Any | None:
+def _get_entry_field(
+    entry: feedparser.FeedParserDict | dict[str, Any], field: str
+) -> Any | None:
     value = getattr(entry, field, None)
     return value if value is not None else entry.get(field)
 
@@ -598,9 +1041,9 @@ def get_guid(entry: feedparser.FeedParserDict) -> str:
 
 
 def get_duration(entry: feedparser.FeedParserDict | dict[str, Any]) -> int | None:
-    try:
-        return int(entry["itunes_duration"])
-    except Exception:  # noqa: BLE001
-        logger.error("Failed to get duration")
-        logger.error("Failed to get duration")
-        return None
+    for field in ("itunes_duration", "duration"):
+        parsed_duration = _parse_duration_seconds(_get_entry_field(entry, field))
+        if parsed_duration is not None:
+            return parsed_duration
+
+    return None

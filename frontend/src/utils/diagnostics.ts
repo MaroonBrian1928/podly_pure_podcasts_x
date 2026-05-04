@@ -189,6 +189,16 @@ export const initFrontendDiagnostics = () => {
   }
 
   window.addEventListener('error', (event) => {
+    // Cross-origin scripts (iOS content blockers, browser extensions, injected
+    // third-party code) are reported by the browser as "Script error." with an
+    // empty filename and zero line/column numbers — the browser intentionally
+    // hides all details for security.  These are never actionable, so we log
+    // them quietly and skip the modal.
+    if (event.message === 'Script error.' && !event.filename && event.lineno === 0) {
+      diagnostics.add('warn', 'Cross-origin script error suppressed (likely iOS extension/content-blocker)');
+      return;
+    }
+
     emitDiagnosticError({
       title: 'Unhandled error',
       message: event.message || 'Unknown error',
@@ -202,12 +212,105 @@ export const initFrontendDiagnostics = () => {
   });
 
   window.addEventListener('unhandledrejection', (event) => {
-    const reason = (event as PromiseRejectionEvent).reason;
-    emitDiagnosticError({
-      title: 'Unhandled promise rejection',
-      message: typeof reason === 'string' ? reason : 'Promise rejected',
-      kind: 'app',
-      details: reason,
-    });
+    // Wrap the entire handler in try/catch — if anything here throws (e.g.
+    // extractError itself fails) we must not create a new unhandled rejection,
+    // which would trigger this handler recursively.
+    try {
+      const reason = (event as PromiseRejectionEvent).reason;
+
+      // Error objects have non-enumerable message/stack so plain JSON.stringify
+      // loses them.  Explicitly extract safe, useful fields before passing to
+      // the sanitiser.  We allow-list rather than spreading all enumerable
+      // properties to avoid leaking sensitive AxiosError fields (auth headers,
+      // request config, full response bodies, etc.).
+      const extractError = (
+        err: unknown,
+        seen = new WeakSet<object>(),
+        depth = 0,
+      ): unknown => {
+        if (depth > 5) return '[MaxDepthExceeded]';
+        if (err instanceof Error) {
+          if (seen.has(err)) return '[CircularError]';
+          seen.add(err);
+
+          const axiosErr = err as Error & {
+            code?: string;
+            response?: { status?: number; statusText?: string };
+            config?: { method?: string; url?: string };
+          };
+
+          const causeVal =
+            'cause' in err && err.cause !== undefined
+              ? { cause: extractError((err as Error & { cause?: unknown }).cause, seen, depth + 1) }
+              : {};
+
+          return {
+            // Allow-listed safe fields — put explicit keys last so they
+            // always take precedence over anything in enumerable properties.
+            ...(axiosErr.code !== undefined ? { code: axiosErr.code } : {}),
+            ...(axiosErr.response?.status !== undefined ? { httpStatus: axiosErr.response.status } : {}),
+            ...(axiosErr.response?.statusText !== undefined ? { httpStatusText: axiosErr.response.statusText } : {}),
+            ...(axiosErr.config?.method !== undefined ? { requestMethod: axiosErr.config.method } : {}),
+            ...(axiosErr.config?.url !== undefined ? { requestUrl: axiosErr.config.url } : {}),
+            ...causeVal,
+            // Explicit fields last so they are never overwritten.
+            errorType: err.constructor?.name ?? 'Error',
+            message: err.message,
+            stack: err.stack,
+          };
+        }
+
+        // Plain-object rejections (e.g. `Promise.reject({ status: 401 })`) are
+        // treated with the same safe-field allow-list as Error instances so that
+        // arbitrary response bodies or user data can't slip into diagnostics.
+        if (err && typeof err === 'object') {
+          if (seen.has(err as object)) return '[CircularObject]';
+          seen.add(err as object);
+
+          const obj = err as {
+            code?: unknown;
+            message?: unknown;
+            name?: unknown;
+            status?: unknown;
+            statusText?: unknown;
+            response?: { status?: unknown; statusText?: unknown };
+            config?: { method?: unknown; url?: unknown };
+            cause?: unknown;
+          };
+
+          return {
+            errorType: typeof obj.name === 'string' ? obj.name : 'Object',
+            ...(typeof obj.message === 'string' ? { message: obj.message } : {}),
+            ...(typeof obj.code === 'string' ? { code: obj.code } : {}),
+            ...(typeof obj.status === 'number' ? { httpStatus: obj.status } : {}),
+            ...(typeof obj.statusText === 'string' ? { httpStatusText: obj.statusText } : {}),
+            ...(typeof obj.response?.status === 'number' ? { httpStatus: obj.response.status } : {}),
+            ...(typeof obj.response?.statusText === 'string' ? { httpStatusText: obj.response.statusText } : {}),
+            ...(typeof obj.config?.method === 'string' ? { requestMethod: obj.config.method } : {}),
+            ...(typeof obj.config?.url === 'string' ? { requestUrl: obj.config.url } : {}),
+            ...(obj.cause !== undefined ? { cause: extractError(obj.cause, seen, depth + 1) } : {}),
+          };
+        }
+
+        return err;
+      };
+
+      const details = extractError(reason);
+      const message =
+        reason instanceof Error
+          ? reason.message || reason.constructor?.name || 'Promise rejected'
+          : typeof reason === 'string'
+            ? reason
+            : 'Promise rejected';
+
+      emitDiagnosticError({
+        title: 'Unhandled promise rejection',
+        message,
+        kind: 'app',
+        details,
+      });
+    } catch {
+      // ignore — do not create a new unhandled rejection
+    }
   });
 };

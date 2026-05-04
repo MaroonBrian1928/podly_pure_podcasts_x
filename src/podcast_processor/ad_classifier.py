@@ -585,9 +585,24 @@ class AdClassifier:
         return is_valid
 
     def _prepare_api_call(
-        self, model_call_obj: ModelCall, system_prompt: str
+        self,
+        model_call_obj: ModelCall,
+        system_prompt: str,
+        *,
+        model_name: str | None = None,
     ) -> dict[str, Any] | None:
-        """Prepare API call arguments and validate token limits."""
+        """Prepare API call arguments and validate token limits.
+
+        Args:
+            model_call_obj: The ModelCall record being processed.
+            system_prompt: The system prompt for the LLM.
+            model_name: Override the model to call. When provided (e.g. for the
+                fallback model), this value is used for rate-limiting, token-param
+                selection, and the ``model`` field in the returned args instead of
+                ``model_call_obj.model_name``.
+        """
+        effective_model = model_name or model_call_obj.model_name
+
         # Prepare messages for the API call
         messages = [
             {"role": "system", "content": system_prompt},
@@ -596,7 +611,7 @@ class AdClassifier:
 
         # Use rate limiter to wait if necessary and track token usage
         if self.rate_limiter:
-            self.rate_limiter.wait_if_needed(messages, model_call_obj.model_name)
+            self.rate_limiter.wait_if_needed(messages, effective_model)
 
             # Get usage stats for logging
             usage_stats = self.rate_limiter.get_usage_stats()
@@ -630,24 +645,21 @@ class AdClassifier:
                     model_call_obj.error_message = error_msg
                 return None
 
-        # Prepare completion arguments
+        # Prepare completion arguments using the effective (possibly overridden) model
         completion_args = {
-            "model": model_call_obj.model_name,
+            "model": effective_model,
             "messages": messages,
             "timeout": self.config.openai_timeout,
         }
 
         # Use max_completion_tokens for newer OpenAI models (o1, gpt-5, gpt-4o variants)
         # OpenAI deprecated max_tokens for these models in favor of max_completion_tokens
-        # Check if this is a model that requires max_completion_tokens
         # This includes: gpt-5, gpt-4o variants, o1 series, and latest chatgpt models
-        uses_max_completion_tokens = model_uses_max_completion_tokens(
-            model_call_obj.model_name
-        )
+        uses_max_completion_tokens = model_uses_max_completion_tokens(effective_model)
 
         # Debug logging to help diagnose model parameter issues
         self.logger.info(
-            f"Model: '{model_call_obj.model_name}', using max_completion_tokens: {uses_max_completion_tokens}"
+            f"Model: '{effective_model}', using max_completion_tokens: {uses_max_completion_tokens}"
         )
 
         if uses_max_completion_tokens:
@@ -1098,7 +1110,71 @@ class AdClassifier:
                     model_call_obj.error_message = str(e)
                     raise  # Re-raise non-retryable exceptions immediately
 
-        # If we get here, all retries were exhausted
+        # If we get here, all retries were exhausted.
+        # Before giving up, try the fallback model if one is configured and the
+        # errors were retryable (rate limit / service unavailable).
+        fallback_model = getattr(self.config, "llm_fallback_model", None)
+        if fallback_model and last_error and self._is_retryable_error(last_error):
+            self.logger.warning(
+                f"Primary model '{model_call_obj.model_name}' exhausted all retries "
+                f"for ModelCall {model_call_obj.id}. Trying fallback model '{fallback_model}'."
+            )
+            fallback_api_key = getattr(self.config, "llm_fallback_api_key", None)
+            # Preserve the original error so it is stored if the fallback also fails
+            original_last_error = last_error
+            try:
+                # Pass fallback_model as the model_name override so that rate
+                # limiting, token-param selection, and the completion call all
+                # use the correct model — not the primary model's settings.
+                completion_args = self._prepare_api_call(
+                    model_call_obj, system_prompt, model_name=fallback_model
+                )
+                if completion_args is not None:
+                    if fallback_api_key:
+                        completion_args["api_key"] = fallback_api_key
+                    if self.concurrency_limiter:
+                        with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
+                            response = litellm.completion(**completion_args)
+                    else:
+                        response = litellm.completion(**completion_args)
+                    response_first_choice = response.choices[0]
+                    assert isinstance(response_first_choice, Choices)
+                    content = response_first_choice.message.content
+                    assert content is not None
+                    success_res = writer_client.update(
+                        "ModelCall",
+                        model_call_obj.id,
+                        {
+                            "response": content,
+                            "status": "success",
+                            "error_message": None,
+                            "actual_model_name": fallback_model,
+                            "retry_attempts": model_call_obj.retry_attempts,
+                        },
+                        wait=True,
+                    )
+                    if not success_res or not success_res.success:
+                        raise RuntimeError(
+                            getattr(success_res, "error", "Failed to update ModelCall")
+                        )
+                    model_call_obj.status = "success"
+                    model_call_obj.response = content
+                    model_call_obj.error_message = None
+                    model_call_obj.actual_model_name = fallback_model
+                    self.logger.info(
+                        f"Fallback model '{fallback_model}' succeeded for ModelCall {model_call_obj.id}."
+                    )
+                    return content
+            except Exception as fallback_err:
+                self.logger.error(
+                    f"Fallback model '{fallback_model}' also failed for ModelCall "
+                    f"{model_call_obj.id}: {fallback_err}"
+                )
+                # Keep original_last_error for _handle_retry_exhausted so the
+                # stored error message reflects the primary failure, not the
+                # fallback failure. The fallback error is already logged above.
+                last_error = original_last_error
+
         self._handle_retry_exhausted(model_call_obj, retry_count, last_error)
 
         if last_error:

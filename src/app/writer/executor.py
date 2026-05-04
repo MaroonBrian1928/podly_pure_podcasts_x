@@ -30,10 +30,16 @@ class CommandExecutor:
         )
         self.register_action("clear_all_jobs", writer_actions.clear_all_jobs_action)
         self.register_action(
+            "clear_active_jobs", writer_actions.clear_active_jobs_action
+        )
+        self.register_action(
             "cleanup_missing_audio_paths",
             writer_actions.cleanup_missing_audio_paths_action,
         )
         self.register_action("create_job", writer_actions.create_job_action)
+        self.register_action(
+            "create_job_if_missing", writer_actions.create_job_if_missing_action
+        )
         self.register_action(
             "cancel_existing_jobs", writer_actions.cancel_existing_jobs_action
         )
@@ -43,6 +49,10 @@ class CommandExecutor:
         self.register_action("mark_cancelled", writer_actions.mark_cancelled_action)
         self.register_action(
             "mark_cancelled_bulk", writer_actions.mark_cancelled_bulk_action
+        )
+        self.register_action(
+            "cancel_pending_jobs_for_feed",
+            writer_actions.cancel_pending_jobs_for_feed_action,
         )
         self.register_action(
             "reassign_pending_jobs", writer_actions.reassign_pending_jobs_action
@@ -55,6 +65,10 @@ class CommandExecutor:
         self.register_action(
             "clear_post_processing_data",
             writer_actions.clear_post_processing_data_action,
+        )
+        self.register_action(
+            "clear_post_processing_data_keep_transcript",
+            writer_actions.clear_post_processing_data_keep_transcript_action,
         )
         self.register_action(
             "cleanup_processed_post", writer_actions.cleanup_processed_post_action
@@ -123,6 +137,12 @@ class CommandExecutor:
         self.register_action(
             "upsert_discord_user", writer_actions.upsert_discord_user_action
         )
+        self.register_action(
+            "upsert_oidc_user", writer_actions.upsert_oidc_user_action
+        )
+        self.register_action(
+            "update_oidc_settings", writer_actions.update_oidc_settings_action
+        )
 
         self.register_action(
             "upsert_model_call", writer_actions.upsert_model_call_action
@@ -178,6 +198,7 @@ class CommandExecutor:
                             "[WRITER] Rolling back TRANSACTION command id=%s", cmd.id
                         )
                         db.session.rollback()
+                    db.session.expunge_all()
                     return result
 
                 # Single operation
@@ -196,6 +217,7 @@ class CommandExecutor:
                 else:
                     logger.info("[WRITER] Rolling back single command id=%s", cmd.id)
                     db.session.rollback()
+                db.session.expunge_all()
                 return result
 
             except Exception as e:
@@ -206,6 +228,7 @@ class CommandExecutor:
                     exc_info=True,
                 )
                 db.session.rollback()
+                db.session.expunge_all()
                 return WriteResult(cmd.id, False, error=str(e))
 
     def _execute_single_command(self, cmd: WriteCommand) -> WriteResult:

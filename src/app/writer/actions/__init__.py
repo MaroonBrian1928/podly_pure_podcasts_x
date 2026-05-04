@@ -10,6 +10,9 @@ from .cleanup import (
 from .cleanup import (
     clear_post_processing_data_action as clear_post_processing_data_action,
 )
+from .cleanup import (
+    clear_post_processing_data_keep_transcript_action as clear_post_processing_data_keep_transcript_action,
+)
 from .feeds import add_feed_action as add_feed_action
 from .feeds import create_dev_test_feed_action as create_dev_test_feed_action
 from .feeds import create_feed_access_token_action as create_feed_access_token_action
@@ -33,10 +36,13 @@ from .feeds import (
 from .feeds import whitelist_post_action as whitelist_post_action
 from .jobs import cancel_existing_jobs_action as cancel_existing_jobs_action
 from .jobs import cleanup_stale_jobs_action as cleanup_stale_jobs_action
+from .jobs import clear_active_jobs_action as clear_active_jobs_action
 from .jobs import clear_all_jobs_action as clear_all_jobs_action
 from .jobs import create_job_action as create_job_action
+from .jobs import create_job_if_missing_action as create_job_if_missing_action
 from .jobs import dequeue_job_action as dequeue_job_action
 from .jobs import mark_cancelled_action as mark_cancelled_action
+from .jobs import cancel_pending_jobs_for_feed_action as cancel_pending_jobs_for_feed_action
 from .jobs import mark_cancelled_bulk_action as mark_cancelled_bulk_action
 from .jobs import reassign_pending_jobs_action as reassign_pending_jobs_action
 from .jobs import update_job_status_action as update_job_status_action
@@ -51,6 +57,7 @@ from .processor import (
 from .system import ensure_active_run_action as ensure_active_run_action
 from .system import update_combined_config_action as update_combined_config_action
 from .system import update_discord_settings_action as update_discord_settings_action
+from .system import update_oidc_settings_action as update_oidc_settings_action
 from .users import create_user_action as create_user_action
 from .users import delete_user_action as delete_user_action
 from .users import set_manual_feed_allowance_action as set_manual_feed_allowance_action
@@ -62,3 +69,4 @@ from .users import set_user_role_action as set_user_role_action
 from .users import update_user_last_active_action as update_user_last_active_action
 from .users import update_user_password_action as update_user_password_action
 from .users import upsert_discord_user_action as upsert_discord_user_action
+from .users import upsert_oidc_user_action as upsert_oidc_user_action

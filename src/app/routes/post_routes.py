@@ -9,18 +9,26 @@ import flask
 from flask import Blueprint, g, jsonify, request, send_file
 from flask.typing import ResponseReturnValue
 
-from app.auth.guards import require_admin
+from app.auth.guards import is_auth_enabled, require_admin
 from app.auth.service import update_user_last_active
 from app.extensions import db
-from app.jobs_manager import get_jobs_manager
+from app.feeds import build_post_feed_description_html
+from app.jobs_manager import _processing_time_seconds, get_jobs_manager
+from app.process_token import verify_process_token
+from app.model_call_utils import whisper_model_call_filter
 from app.models import (
     Feed,
     Identification,
     ModelCall,
     Post,
+    ProcessingJob,
     TranscriptSegment,
+    UserFeed,
 )
-from app.posts import clear_post_processing_data
+from app.posts import (
+    clear_post_processing_data,
+    clear_post_processing_data_keep_transcript,
+)
 from app.routes.post_stats_utils import (
     count_model_calls,
     count_primary_labels,
@@ -34,14 +42,72 @@ from app.routes.post_utils import (
     increment_download_count,
     missing_processed_audio_response,
 )
+from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.chapter_filter import parse_filter_strings
+from podcast_processor.transcription_manager import TranscriptionManager
 from shared import defaults as DEFAULTS
+from shared.processing_paths import (
+    get_in_root,
+    get_processed_audio_path_candidates,
+    get_srv_root,
+)
 
 logger = logging.getLogger("global_logger")
 
 
 post_bp = Blueprint("post", __name__)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_file_debug(path_value: str | None) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "path": path_value,
+        "absolute_path": None,
+        "exists": False,
+        "is_file": False,
+        "size_bytes": None,
+    }
+    if not path_value:
+        return info
+
+    path_obj = Path(path_value)
+    try:
+        info["absolute_path"] = str(path_obj.resolve())
+        exists = path_obj.exists()
+        is_file = path_obj.is_file()
+        info["exists"] = exists
+        info["is_file"] = is_file
+        if exists and is_file:
+            info["size_bytes"] = path_obj.stat().st_size
+    except OSError as exc:
+        info["error"] = str(exc)
+    return info
+
+
+def _build_candidate_file_debug(candidates: list[Path]) -> list[dict[str, Any]]:
+    candidate_details: list[dict[str, Any]] = []
+    for candidate in candidates:
+        detail = {
+            "path": str(candidate),
+            "exists": False,
+            "size_bytes": None,
+        }
+        try:
+            exists = candidate.exists() and candidate.is_file()
+            detail["exists"] = exists
+            if exists:
+                detail["size_bytes"] = candidate.stat().st_size
+        except OSError as exc:
+            detail["error"] = str(exc)
+        candidate_details.append(detail)
+    return candidate_details
 
 
 @post_bp.route("/api/feeds/<int:feed_id>/posts", methods=["GET"])
@@ -93,6 +159,7 @@ def api_feed_posts(feed_id: int) -> flask.Response:
             "guid": post.guid,
             "title": post.title,
             "description": post.description,
+            "podly_description_html": build_post_feed_description_html(post),
             "release_date": (
                 post.release_date.isoformat() if post.release_date else None
             ),
@@ -175,9 +242,7 @@ def get_post_json(p_guid: str) -> flask.Response:
             )
 
     whisper_model_calls = []
-    for model_call in post.model_calls.filter(
-        ModelCall.model_name.like("%whisper%")
-    ).all():
+    for model_call in post.model_calls.filter(whisper_model_call_filter()).all():
         whisper_model_calls.append(
             {
                 "id": model_call.id,
@@ -283,6 +348,12 @@ def _get_chapter_stats(post: Post, feed: Feed) -> dict[str, Any]:
             chapters_removed = [
                 {**ch, "label": "ad"} for ch in data.get("chapters_removed", [])
             ]
+            if not chapters_kept and not chapters_removed:
+                chapters_for_output = data.get("chapters_for_output", [])
+                if isinstance(chapters_for_output, list):
+                    chapters_kept = [
+                        {**ch, "label": "content"} for ch in chapters_for_output
+                    ]
             # Sort by original start time to maintain order from the file
             all_chapters = sorted(
                 chapters_kept + chapters_removed, key=lambda c: c["start_time"]
@@ -456,7 +527,11 @@ def api_post_stats(p_guid: str) -> flask.Response:
 
     # Build chapter data for chapter-based processing
     chapters_data = None
-    if ad_detection_strategy == "chapter" and post.processed_audio_path and feed:
+    if (
+        ad_detection_strategy in ("chapter", "chapter_insert")
+        and post.processed_audio_path
+        and feed
+    ):
         chapters_data = _get_chapter_stats(post, feed)
 
     # Calculate ad blocks and statistics for LLM-based processing
@@ -472,6 +547,26 @@ def api_post_stats(p_guid: str) -> flask.Response:
         (ad_time_seconds / duration_seconds) * 100 if duration_seconds > 0 else 0.0
     )
 
+    # Processing time: for completed episodes prefer the most recent *completed* job
+    # so that a failed re-attempt doesn't mask the earlier successful run.  For
+    # episodes that are still in progress, fall back to any job to show elapsed time.
+    if post.processed_audio_path is not None:
+        # Include "skipped" — a legitimate terminal status when audio was
+        # recovered from disk rather than re-processed from scratch.
+        latest_job = (
+            ProcessingJob.query.filter_by(post_guid=post.guid)
+            .filter(ProcessingJob.status.in_(("completed", "skipped")))
+            .order_by(ProcessingJob.completed_at.desc().nullslast())
+            .first()
+        )
+    else:
+        latest_job = (
+            ProcessingJob.query.filter_by(post_guid=post.guid)
+            .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
+    processing_time_seconds = _processing_time_seconds(latest_job) if latest_job else None
+
     stats_data = {
         "post": {
             "guid": post.guid,
@@ -483,6 +578,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             "whitelisted": post.whitelisted,
             "has_processed_audio": post.processed_audio_path is not None,
             "download_count": post.download_count,
+            "processing_time_seconds": processing_time_seconds,
         },
         "ad_detection_strategy": ad_detection_strategy,
         "processing_stats": {
@@ -508,6 +604,35 @@ def api_post_stats(p_guid: str) -> flask.Response:
         "identifications": identifications_data,
         "chapters": chapters_data,
     }
+
+    if _env_bool("PODLY_STATS_DEBUG", default=False):
+        candidates = get_processed_audio_path_candidates(
+            processed_audio_path=post.processed_audio_path,
+            unprocessed_audio_path=post.unprocessed_audio_path,
+            feed_title=feed.title if feed else None,
+            post_title=post.title,
+        )
+        stats_data["debug_info"] = {
+            "post_id": post.id,
+            "feed_id": post.feed_id,
+            "guid": post.guid,
+            "download_url": post.download_url,
+            "download_count": post.download_count,
+            "has_processed_audio": post.processed_audio_path is not None,
+            "has_unprocessed_audio": post.unprocessed_audio_path is not None,
+            "processed_audio": _build_file_debug(post.processed_audio_path),
+            "unprocessed_audio": _build_file_debug(post.unprocessed_audio_path),
+            "processed_audio_path_candidates": _build_candidate_file_debug(candidates),
+            "processing_roots": {
+                "in_root": str(get_in_root()),
+                "srv_root": str(get_srv_root()),
+            },
+            "record_counts": {
+                "transcript_segments": len(transcript_segments),
+                "model_calls": len(model_calls),
+                "identifications": len(identifications),
+            },
+        }
 
     return flask.jsonify(stats_data)
 
@@ -844,6 +969,169 @@ def api_reprocess_post(p_guid: str) -> ResponseReturnValue:
         )
 
 
+@post_bp.route(
+    "/api/posts/<string:p_guid>/reprocess/keep-transcript",
+    methods=["POST"],
+)
+def api_reprocess_post_keep_transcript(p_guid: str) -> ResponseReturnValue:
+    """Clear processing outputs but preserve transcript, then reprocess."""
+    logger.info(
+        "[API] Reprocess (keep transcript) requested for post_guid=%s",
+        p_guid,
+    )
+
+    post = Post.query.filter_by(guid=p_guid).first()
+    if not post:
+        logger.warning(
+            "[API] Reprocess (keep transcript): post not found for guid=%s", p_guid
+        )
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "NOT_FOUND",
+                    "message": "Post not found",
+                }
+            ),
+            404,
+        )
+
+    feed = db.session.get(Feed, post.feed_id)
+    if feed is None:
+        logger.warning(
+            "[API] Reprocess (keep transcript): feed not found for guid=%s feed_id=%s",
+            p_guid,
+            getattr(post, "feed_id", None),
+        )
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "FEED_NOT_FOUND",
+                    "message": "Feed not found",
+                }
+            ),
+            404,
+        )
+
+    user, error = require_admin("reprocess this episode (keep transcript)")
+    if error:
+        logger.warning(
+            "[API] Reprocess (keep transcript): auth error for guid=%s",
+            p_guid,
+        )
+        return error
+    if user and user.role != "admin":
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "REPROCESS_FORBIDDEN",
+                    "message": "Only admins can reprocess episodes.",
+                }
+            ),
+            403,
+        )
+
+    if not post.whitelisted:
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "NOT_WHITELISTED",
+                    "message": "Post not whitelisted",
+                }
+            ),
+            400,
+        )
+
+    transcription_manager = TranscriptionManager(
+        logger=logger,
+        config=runtime_config,
+        db_session=db.session,
+    )
+    reusable_transcript_segments = transcription_manager.get_reusable_transcription(
+        post
+    )
+    if reusable_transcript_segments is None:
+        transcript_count = (
+            db.session.query(TranscriptSegment.id).filter_by(post_id=post.id).count()
+        )
+        logger.warning(
+            "[API] Reprocess (keep transcript): no reusable transcript for guid=%s "
+            "post_id=%s transcript_count=%s active_whisper_model=%s",
+            p_guid,
+            post.id,
+            transcript_count,
+            transcription_manager.transcriber.model_name,
+        )
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "NO_REUSABLE_TRANSCRIPT",
+                    "message": (
+                        "No reusable transcript found for the currently configured "
+                        "transcription model. Use full reprocess instead."
+                    ),
+                }
+            ),
+            400,
+        )
+
+    billing_user_id = getattr(user, "id", None)
+
+    try:
+        logger.info(
+            "[API] Reprocess (keep transcript): cancelling jobs and clearing outputs "
+            "guid=%s post_id=%s",
+            p_guid,
+            post.id,
+        )
+        get_jobs_manager().cancel_post_jobs(p_guid)
+        clear_post_processing_data_keep_transcript(post)
+
+        logger.info(
+            "[API] Reprocess (keep transcript): starting post processing "
+            "guid=%s post_id=%s",
+            p_guid,
+            post.id,
+        )
+        result = get_jobs_manager().start_post_processing(
+            p_guid,
+            priority="interactive",
+            requested_by_user_id=billing_user_id,
+            billing_user_id=billing_user_id,
+        )
+        status_code = 200 if result.get("status") in ("started", "completed") else 400
+        if result.get("status") == "started":
+            result["message"] = "Post reprocessing started (keeping transcript)"
+        logger.info(
+            "[API] Reprocess (keep transcript): completed guid=%s status=%s code=%s",
+            p_guid,
+            result.get("status"),
+            status_code,
+        )
+        return flask.jsonify(result), status_code
+    except Exception as e:
+        logger.error(
+            "Failed to reprocess post (keep transcript) %s: %s",
+            p_guid,
+            e,
+            exc_info=True,
+        )
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "REPROCESS_FAILED",
+                    "message": f"Failed to reprocess post (keep transcript): {e!s}",
+                }
+            ),
+            500,
+        )
+
+
 @post_bp.route("/api/posts/<string:p_guid>/status", methods=["GET"])
 def api_post_status(p_guid: str) -> ResponseReturnValue:
     """Get the current processing status of a post via JobsManager."""
@@ -859,6 +1147,10 @@ def api_post_status(p_guid: str) -> ResponseReturnValue:
 @post_bp.route("/api/posts/<string:p_guid>/audio", methods=["GET"])
 def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
     """API endpoint to serve processed audio files with proper CORS headers."""
+    current_user = getattr(g, "current_user", None)
+    if current_user:
+        update_user_last_active(current_user.id)
+
     logger.info(f"API request for audio file with GUID: {p_guid}")
 
     post = Post.query.filter_by(guid=p_guid).first()
@@ -868,31 +1160,19 @@ def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
             jsonify({"error": "Post not found", "error_code": "NOT_FOUND"}), 404
         )
 
-    if not post.whitelisted:
-        logger.warning(f"Post: {post.title} is not whitelisted")
-        return flask.make_response(
-            jsonify({"error": "Post not whitelisted", "error_code": "NOT_WHITELISTED"}),
-            403,
-        )
+    whitelist_response = ensure_whitelisted_for_download(post, p_guid)
+    if whitelist_response:
+        return whitelist_response
 
     if not post.processed_audio_path or not Path(post.processed_audio_path).exists():
-        logger.warning(f"Processed audio not found for post: {post.id}")
-        return flask.make_response(
-            jsonify(
-                {
-                    "error": "Processed audio not available",
-                    "error_code": "AUDIO_NOT_READY",
-                    "message": "Post needs to be processed first",
-                }
-            ),
-            404,
-        )
+        return missing_processed_audio_response(post, p_guid)
 
     try:
         response = send_file(
             path_or_file=Path(post.processed_audio_path).resolve(),
             mimetype="audio/mpeg",
             as_attachment=False,
+            conditional=True,
         )
         response.headers["Accept-Ranges"] = "bytes"
         return response
@@ -932,7 +1212,9 @@ def api_download_post(p_guid: str) -> flask.Response:
             mimetype="audio/mpeg",
             as_attachment=True,
             download_name=f"{post.title}.mp3",
+            conditional=True,
         )
+        response.headers["Accept-Ranges"] = "bytes"
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error serving file for {p_guid}: {e}")
         return flask.make_response(("Error serving file", 500))
@@ -978,10 +1260,125 @@ def api_download_original_post(p_guid: str) -> flask.Response:
 
 # Legacy endpoints for backward compatibility
 @post_bp.route("/post/<string:p_guid>.mp3", methods=["GET"])
-def download_post_legacy(p_guid: str) -> flask.Response:
-    return api_download_post(p_guid)
+def download_post_legacy(p_guid: str) -> ResponseReturnValue:
+    return api_get_post_audio(p_guid)
 
 
 @post_bp.route("/post/<string:p_guid>/original.mp3", methods=["GET"])
 def download_original_post_legacy(p_guid: str) -> flask.Response:
     return api_download_original_post(p_guid)
+
+
+# ---------------------------------------------------------------------------
+# Process-request link — called from the episode description in RSS feeds
+# ---------------------------------------------------------------------------
+
+
+def _process_page(icon: str, heading: str, body: str, title: str | None = None) -> str:
+    """Render process_page.html via Jinja2.
+
+    All user-supplied strings (icon, heading, body, title) are auto-escaped
+    by Flask's template engine, so no manual escaping is needed here.
+    """
+    return flask.render_template(
+        "process_page.html",
+        icon=icon,
+        heading=heading,
+        body=body,
+        title=title,
+    )
+
+
+@post_bp.route("/process/<string:p_guid>", methods=["GET"])
+def request_process_episode(p_guid: str) -> ResponseReturnValue:
+    """Handle a process-request tap from the episode description link.
+
+    Authenticated via a per-episode HMAC token embedded in the RSS
+    description — no user login required.  Returns a minimal HTML page
+    that confirms processing has started; users return to their podcast
+    app using the in-app browser's native controls.
+    """
+    token = request.args.get("token", "")
+    if not verify_process_token(p_guid, token):
+        page = _process_page(
+            "🔒", "Invalid link",
+            "This link is not valid. Please refresh your podcast feed and try again.",
+        )
+        return flask.make_response(page, 403)
+
+    post = Post.query.filter_by(guid=p_guid).first()
+    if not post:
+        page = _process_page(
+            "❓", "Episode not found",
+            "Could not find this episode. It may have been removed.",
+        )
+        return flask.make_response(page, 404)
+
+    post_title = post.title or p_guid
+
+    # When auth is enabled, verify the feed still has at least one active
+    # subscriber before allowing processing.  This guards against tokens
+    # embedded in feeds that were shared with users whose subscriptions have
+    # since been revoked.  We also use the first subscriber for billing
+    # attribution since the link itself carries no user identity.
+    billing_user_id: int | None = None
+    if is_auth_enabled():
+        feed = db.session.get(Feed, post.feed_id)
+        earliest_subscriber = (
+            UserFeed.query.filter_by(feed_id=post.feed_id)
+            .order_by(UserFeed.created_at)
+            .first()
+        )
+        if feed is None or earliest_subscriber is None:
+            logger.warning(
+                "Process-request denied for %s: feed has no active subscribers", p_guid
+            )
+            page = _process_page(
+                "🔒", "Feed not available",
+                "This feed no longer has active subscribers.",
+            )
+            return flask.make_response(page, 403)
+        # Attribute processing cost to the earliest (primary) subscriber.
+        billing_user_id = earliest_subscriber.user_id
+
+    # Already fully processed — nothing to do.
+    if post.processed_audio_path is not None:
+        page = _process_page(
+            "✅", "Already processed",
+            "This episode has already been processed and is ready to play.",
+            title=post_title,
+        )
+        return flask.make_response(page, 200)
+
+    # Whitelist the post if needed, then queue processing.
+    try:
+        if not post.whitelisted:
+            writer_client.action(
+                "whitelist_post", {"post_id": post.id}, wait=True
+            )
+            post.whitelisted = True
+            logger.info("Whitelisted post %s via process-request link", p_guid)
+
+        get_jobs_manager().start_post_processing(
+            p_guid,
+            priority="interactive",
+            requested_by_user_id=billing_user_id,
+            billing_user_id=billing_user_id,
+        )
+        logger.info("Queued processing for %s via process-request link", p_guid)
+
+        page = _process_page(
+            "▶️", "Processing started!",
+            "Your episode is being processed. Come back in a few minutes to listen.",
+            title=post_title,
+        )
+        return flask.make_response(page, 202)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to queue processing for %s via link: %s", p_guid, exc)
+        page = _process_page(
+            "⚠️", "Something went wrong",
+            "Could not start processing. Please try again or use the Podly web app.",
+            title=post_title,
+        )
+        return flask.make_response(page, 500)

@@ -88,6 +88,14 @@ class Config(BaseModel):
         default=DEFAULTS.LLM_MAX_INPUT_TOKENS_PER_CALL,
         description="Maximum input tokens per LLM call to stay under API limits",
     )
+    llm_fallback_model: str | None = Field(
+        default=DEFAULTS.LLM_FALLBACK_MODEL,
+        description="Fallback LLM model to use when all retries on the primary model fail with retryable errors (rate limit / service unavailable)",
+    )
+    llm_fallback_api_key: str | None = Field(
+        default=DEFAULTS.LLM_FALLBACK_API_KEY,
+        description="API key for the fallback model (leave empty to reuse the primary key)",
+    )
     # Token-based rate limiting
     llm_enable_token_rate_limiting: bool = Field(
         default=DEFAULTS.LLM_ENABLE_TOKEN_RATE_LIMITING,
@@ -104,6 +112,13 @@ class Config(BaseModel):
     enable_word_level_boundary_refinder: bool = Field(
         default=DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
         description="Enable word-level (heuristic-timed) ad boundary refinement",
+    )
+    enable_llm_chapter_fallback_tagging: bool = Field(
+        default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
+        description=(
+            "When enabled, LLM processing will preserve embedded chapters or "
+            "generate fallback chapter tags from description/transcript."
+        ),
     )
     developer_mode: bool = Field(
         default=False,
@@ -162,6 +177,42 @@ class Config(BaseModel):
         default=DEFAULTS.APP_MAX_QUEUE_SIZE_PER_FEED,
         gt=0,
         description="Maximum pending/running jobs per podcast feed. None = unlimited.",
+    )
+    cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
+    feed_tag_label: str = Field(
+        default=DEFAULTS.APP_FEED_TAG_LABEL,
+        max_length=50,
+        description="Text inside the brackets added to feed titles (e.g. 'podly'). Empty string omits the tag entirely.",
+    )
+    feed_tag_position: Literal["prefix", "suffix"] = Field(
+        default=DEFAULTS.APP_FEED_TAG_POSITION,
+        description="Where to place the tag relative to the feed title: 'prefix' or 'suffix'.",
+    )
+    feed_tag_override: bool = Field(
+        default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
+        description="When True, the global tag label/position always overrides any per-feed tag settings.",
+    )
+    episode_status_indicator_enabled: bool = Field(
+        default=DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+        description="When True, appends a status symbol to episode titles in the RSS feed.",
+    )
+    episode_status_processed_symbol: str = Field(
+        default=DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+        max_length=10,
+        description="Symbol appended to episode titles when processing succeeded.",
+    )
+    episode_status_error_symbol: str = Field(
+        default=DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
+        max_length=10,
+        description="Symbol appended to episode titles when processing failed.",
+    )
+    notification_apprise_url: str = Field(
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+        description="Apprise API server base URL (e.g. http://apprise:8000). Leave empty to disable notifications.",
+    )
+    notification_apprise_key: str = Field(
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
+        description="Apprise API config key/tag to notify (e.g. podly). Leave empty to disable notifications.",
     )
 
     def redacted(self) -> Config:

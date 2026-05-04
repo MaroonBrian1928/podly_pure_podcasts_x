@@ -24,6 +24,7 @@ def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
     feed_id = params.get("feed_id")
     updates = params.get("updates", {})
     new_posts_data = params.get("new_posts", [])
+    existing_post_updates = params.get("existing_post_updates", [])
 
     feed = db.session.get(Feed, feed_id)
     if not feed:
@@ -59,9 +60,32 @@ def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
             )
             db.session.add(job)
 
+    updated_posts_count = 0
+    for post_update in existing_post_updates:
+        post_id = post_update.get("post_id")
+        if not post_id:
+            continue
+        post = db.session.get(Post, int(post_id))
+        if not post or post.feed_id != feed.id:
+            continue
+
+        updated = False
+        for field_name in ("title", "description", "image_url", "duration"):
+            if field_name not in post_update:
+                continue
+            setattr(post, field_name, post_update[field_name])
+            updated = True
+
+        if updated:
+            updated_posts_count += 1
+
     recalculate_run_counts(db.session)
 
-    return {"feed_id": feed.id, "new_posts_count": len(created_posts)}
+    return {
+        "feed_id": feed.id,
+        "new_posts_count": len(created_posts),
+        "updated_posts_count": updated_posts_count,
+    }
 
 
 def add_feed_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -115,10 +139,23 @@ def update_feed_settings_action(params: dict[str, Any]) -> dict[str, Any]:
     if not feed:
         raise ValueError(f"Feed {feed_id} not found")
 
+    # Explicit allowlist — only these columns may be updated through this action.
     if "auto_whitelist_new_episodes_override" in params:
         feed.auto_whitelist_new_episodes_override = params.get(
             "auto_whitelist_new_episodes_override"
         )
+    if "ad_detection_strategy" in params:
+        feed.ad_detection_strategy = params["ad_detection_strategy"]
+    if "chapter_filter_strings" in params:
+        feed.chapter_filter_strings = params["chapter_filter_strings"]
+    if "enable_llm_chapter_fallback_tagging" in params:
+        feed.enable_llm_chapter_fallback_tagging = params["enable_llm_chapter_fallback_tagging"]
+    if "feed_tag_label" in params:
+        # None means "inherit global default"; validated + stripped by feed_routes
+        feed.feed_tag_label = params["feed_tag_label"]
+    if "feed_tag_position" in params:
+        # None means "inherit global default"; validated by feed_routes
+        feed.feed_tag_position = params["feed_tag_position"]
 
     db.session.flush()
     return {"feed_id": feed.id}

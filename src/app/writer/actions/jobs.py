@@ -3,7 +3,7 @@ from typing import Any
 
 from app.extensions import db
 from app.jobs_manager_run_service import recalculate_run_counts
-from app.models import ProcessingJob
+from app.models import Post, ProcessingJob
 
 
 def dequeue_job_action(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -58,6 +58,26 @@ def clear_all_jobs_action(params: dict[str, Any]) -> int:
     return count
 
 
+def clear_active_jobs_action(params: dict[str, Any]) -> int:
+    """Reset interrupted running jobs back to pending on startup.
+
+    Only affects jobs with status="running" — those were mid-execution when the
+    process was killed and must be retried. Pending jobs are left untouched so
+    their existing queue position is preserved and _ensure_jobs_for_all_posts
+    does not re-create duplicates for every whitelisted episode.
+    """
+    running_jobs = ProcessingJob.query.filter(
+        ProcessingJob.status == "running"
+    ).all()
+    count = len(running_jobs)
+    for job in running_jobs:
+        job.status = "pending"
+        job.started_at = None
+    if count > 0:
+        recalculate_run_counts(db.session)
+    return count
+
+
 def create_job_action(params: dict[str, Any]) -> dict[str, Any]:
     job_data = params.get("job_data")
     if not isinstance(job_data, dict):
@@ -75,6 +95,23 @@ def create_job_action(params: dict[str, Any]) -> dict[str, Any]:
 
     db.session.flush()
     return {"job_id": job.id}
+
+
+def create_job_if_missing_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a new pending job only if no completed/skipped job already exists for the post."""
+    job_data = params.get("job_data")
+    if not isinstance(job_data, dict):
+        raise ValueError("job_data must be a dictionary")
+
+    post_guid = job_data.get("post_guid")
+    if not post_guid:
+        raise ValueError("job_data must contain post_guid")
+
+    existing = ProcessingJob.query.filter_by(post_guid=post_guid).first()
+    if existing:
+        return {"job_id": None, "skipped": True}
+
+    return create_job_action({"job_data": job_data})
 
 
 def cancel_existing_jobs_action(params: dict[str, Any]) -> int:
@@ -171,6 +208,43 @@ def mark_cancelled_bulk_action(params: dict[str, Any]) -> dict[str, Any]:
         recalculate_run_counts(db.session)
 
     return {"job_ids": job_ids, "cancelled_count": len(job_ids)}
+
+
+def cancel_pending_jobs_for_feed_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Bulk-cancel all pending jobs for a feed in two SQL statements.
+
+    Selects matching job IDs via a JOIN (SQLAlchemy can't JOIN in a bulk UPDATE
+    portably), then issues a single UPDATE ... WHERE id IN (...).
+    """
+    feed_id = params.get("feed_id")
+    if feed_id is None:
+        raise ValueError("feed_id is required")
+
+    job_ids: list[str] = [
+        row.id
+        for row in (
+            db.session.query(ProcessingJob.id)
+            .join(Post, ProcessingJob.post_guid == Post.guid)
+            .filter(ProcessingJob.status == "pending", Post.feed_id == feed_id)
+            .all()
+        )
+    ]
+
+    if not job_ids:
+        return {"cancelled_count": 0, "cancelled_ids": []}
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    ProcessingJob.query.filter(ProcessingJob.id.in_(job_ids)).update(
+        {
+            ProcessingJob.status: "cancelled",
+            ProcessingJob.error_message: "Cancelled by user request",
+            ProcessingJob.completed_at: now,
+        },
+        synchronize_session=False,
+    )
+    recalculate_run_counts(db.session)
+
+    return {"cancelled_count": len(job_ids), "cancelled_ids": job_ids}
 
 
 def reassign_pending_jobs_action(params: dict[str, Any]) -> int:

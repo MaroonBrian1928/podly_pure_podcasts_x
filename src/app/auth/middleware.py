@@ -25,6 +25,9 @@ _PUBLIC_PATHS: set[str] = {
     "/api/auth/discord/status",
     "/api/auth/discord/login",
     "/api/auth/discord/callback",
+    "/api/auth/oidc/status",
+    "/api/auth/oidc/login",
+    "/api/auth/oidc/callback",
     "/api/landing/status",
     # Stripe webhooks must bypass auth to allow Stripe to deliver events
     "/api/billing/stripe-webhook",
@@ -36,6 +39,10 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/images/",
     "/fonts/",
     "/.well-known/",
+    # Process-request links are embedded in RSS feeds and tapped by podcast
+    # app users who have no session cookie.  Security is handled by the
+    # per-episode HMAC token in the query string, not by session auth.
+    "/process/",
 )
 
 _PUBLIC_EXTENSIONS: tuple[str, ...] = (
@@ -57,7 +64,7 @@ _TOKEN_PROTECTED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/feed/[^/]+$"),
     re.compile(r"^/feed/user/[^/]+$"),
     re.compile(r"^/api/posts/[^/]+/(audio|download(?:/original)?)$"),
-    re.compile(r"^/post/[^/]+(?:\\.mp3|/original\\.mp3)$"),
+    re.compile(r"^/post/[^/]+(?:\.mp3|/original\.mp3)$"),
 )
 
 

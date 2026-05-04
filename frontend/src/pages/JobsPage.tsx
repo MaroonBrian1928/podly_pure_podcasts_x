@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jobsApi } from '../services/api';
 import type { CleanupPreview, Job, JobManagerRun, JobManagerStatus } from '../types';
+import { buildProcessingProgressModel } from '../utils/processingProgress';
+import { formatProcessingTime } from '../utils/formatters';
 
 function getStatusColor(status: string) {
   switch (status) {
@@ -30,12 +32,12 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function ProgressBar({ value }: { value: number }) {
+function ProgressBar({ value, colorClass = 'bg-indigo-600' }: { value: number; colorClass?: string }) {
   const clamped = Math.max(0, Math.min(100, Math.round(value)));
   return (
     <div className="w-full bg-gray-200 rounded h-2">
       <div
-        className="bg-indigo-600 h-2 rounded"
+        className={`${colorClass} h-2 rounded`}
         style={{ width: `${clamped}%` }}
       />
     </div>
@@ -56,12 +58,14 @@ function formatDateTime(value: string | null): string {
     return '—';
   }
   try {
-    return new Date(value).toLocaleString();
+    const utc = value.includes('Z') ? value : value.replace(' ', 'T') + 'Z';
+    return new Date(utc).toLocaleString();
   } catch (err) {
     console.error('Failed to format date', err);
     return value;
   }
 }
+
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -73,6 +77,8 @@ export default function JobsPage() {
   const [cancellingJobs, setCancellingJobs] = useState<Set<string>>(new Set());
   const [cancellingAll, setCancellingAll] = useState(false);
   const [togglingPause, setTogglingPause] = useState(false);
+  const [cancellingQueued, setCancellingQueued] = useState(false);
+  const [confirmCancelQueued, setConfirmCancelQueued] = useState(false);
   const previousHasActiveWork = useRef<boolean>(false);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreview | null>(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
@@ -191,6 +197,45 @@ export default function JobsPage() {
     }
   }, [managerStatus?.paused, refresh]);
 
+  const cancelAllQueuedJobs = useCallback(async () => {
+    if (!confirmCancelQueued) {
+      setConfirmCancelQueued(true);
+      return;
+    }
+
+    setConfirmCancelQueued(false);
+
+    const queuedVisibleJobIds = jobs
+      .filter(job => job.status === 'pending')
+      .map(job => job.job_id);
+
+    setCancellingQueued(true);
+    setCancellingJobs(prev => {
+      const next = new Set(prev);
+      queuedVisibleJobIds.forEach(id => next.add(id));
+      return next;
+    });
+
+    try {
+      await jobsApi.cancelQueuedJobs();
+      setError(null);
+      await refresh();
+    } catch (e) {
+      setError(
+        `Failed to cancel queued jobs: ${
+          e instanceof Error ? e.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setCancellingQueued(false);
+      setCancellingJobs(prev => {
+        const next = new Set(prev);
+        queuedVisibleJobIds.forEach(id => next.delete(id));
+        return next;
+      });
+    }
+  }, [confirmCancelQueued, jobs, refresh]);
+
   const runCleanupNow = useCallback(async () => {
     setCleanupRunning(true);
     setCleanupError(null);
@@ -257,6 +302,8 @@ export default function JobsPage() {
   const run: JobManagerRun | null = managerStatus?.run ?? null;
   const isPaused = managerStatus?.paused ?? false;
   const hasActiveWork = run ? run.queued_jobs + run.running_jobs > 0 : false;
+  const localQueuedCount = jobs.filter(job => job.status === 'pending').length;
+  const queuedJobsCount = Math.max(localQueuedCount, run?.queued_jobs ?? 0);
   const retentionDays = cleanupPreview?.retention_days ?? null;
   const cleanupDisabled = retentionDays === null || retentionDays <= 0;
   const cleanupEligibleCount = cleanupPreview?.count ?? 0;
@@ -414,6 +461,33 @@ export default function JobsPage() {
               {cancellingAll ? 'Stopping…' : 'Stop All'}
             </button>
           )}
+          {confirmCancelQueued ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-red-700 font-medium">Cancel {queuedJobsCount} queued jobs?</span>
+              <button
+                onClick={() => { void cancelAllQueuedJobs(); }}
+                className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => setConfirmCancelQueued(false)}
+                className="inline-flex items-center rounded-md bg-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400"
+              >
+                No
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { void cancelAllQueuedJobs(); }}
+              className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-400 disabled:cursor-not-allowed"
+              disabled={loading || cancellingQueued || queuedJobsCount <= 0}
+            >
+              {cancellingQueued
+                ? 'Cancelling queued…'
+                : `Cancel queued${queuedJobsCount > 0 ? ` (${queuedJobsCount})` : ''}`}
+            </button>
+          )}
           <button
             onClick={() => { void refresh(); }}
             className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -450,72 +524,127 @@ export default function JobsPage() {
       ) : null}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {jobs.map((job) => (
-          <div key={job.job_id} className="bg-white border rounded shadow-sm p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium text-gray-900 truncate">
-                {job.post_title || 'Untitled episode'}
-              </div>
-              <StatusBadge status={job.status} />
-            </div>
-            <div className="text-xs text-gray-600 truncate">{job.feed_title || 'Unknown feed'}</div>
+        {jobs.map((job) => {
+          const progressModel = buildProcessingProgressModel({
+            status: job.status,
+            step: job.step,
+            totalSteps: job.total_steps,
+            stepName: job.step_name,
+            progressPercentage: job.progress_percentage,
+          });
+          const progressColorClass =
+            job.status === 'failed' || job.status === 'cancelled'
+              ? 'bg-red-600'
+              : job.status === 'completed' || job.status === 'skipped'
+                ? 'bg-green-600'
+                : 'bg-indigo-600';
 
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs text-gray-700">
-                <span>Priority</span>
-                <span className="font-medium">{job.priority}</span>
+          return (
+            <div key={job.job_id} className="bg-white border rounded shadow-sm p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium text-gray-900 truncate">
+                  {job.post_title || 'Untitled episode'}
+                </div>
+                <StatusBadge status={job.status} />
               </div>
-              <div className="flex items-center justify-between text-xs text-gray-700">
-                <span>Step</span>
-                <span className="font-medium">{job.step}/{job.total_steps} {job.step_name ? `· ${job.step_name}` : ''}</span>
-              </div>
-              <div className="space-y-1">
+              <div className="text-xs text-gray-600 truncate">{job.feed_title || 'Unknown feed'}</div>
+
+              <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs text-gray-700">
-                  <span>Progress</span>
-                  <span className="font-medium">{Math.round(job.progress_percentage)}%</span>
+                  <span>Priority</span>
+                  <span className="font-medium">{job.priority}</span>
                 </div>
-                <ProgressBar value={job.progress_percentage} />
+                <div className="flex items-center justify-between text-xs text-gray-700">
+                  <span>Stage</span>
+                  <span className="font-medium">
+                    {progressModel.currentStep}/4 · {progressModel.currentStageLabel}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-gray-700">
+                    <span>Progress</span>
+                    <span className="font-medium">{Math.round(progressModel.progress)}%</span>
+                  </div>
+                  <ProgressBar value={progressModel.progress} colorClass={progressColorClass} />
+                </div>
+                <div className="grid grid-cols-5 gap-1 text-[10px]">
+                  {progressModel.stages.map((stage) => (
+                    <div
+                      key={`${job.job_id}-stage-${stage.index}`}
+                      title={stage.label}
+                      className={`flex flex-col items-center leading-tight ${
+                        stage.state === 'active'
+                          ? 'text-blue-600 font-medium'
+                          : stage.state === 'completed'
+                            ? 'text-green-600'
+                            : stage.state === 'failed'
+                              ? 'text-red-600 font-medium'
+                              : 'text-gray-400'
+                      }`}
+                    >
+                      <span>
+                        {stage.state === 'completed'
+                          ? '✓'
+                          : stage.state === 'active'
+                            ? '●'
+                            : stage.state === 'failed'
+                              ? '!'
+                              : '○'}
+                      </span>
+                      <span>{stage.shortLabel}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
-              <div>
-                <div className="text-gray-500">Job ID</div>
-                <div className="truncate" title={job.job_id}>{job.job_id}</div>
-              </div>
-              <div>
-                <div className="text-gray-500">Post GUID</div>
-                <div className="truncate" title={job.post_guid}>{job.post_guid}</div>
-              </div>
-              <div>
-                <div className="text-gray-500">Created</div>
-                <div>{job.created_at ? formatDateTime(job.created_at) : '—'}</div>
-              </div>
-              <div>
-                <div className="text-gray-500">Started</div>
-                <div>{job.started_at ? formatDateTime(job.started_at) : '—'}</div>
-              </div>
-              {job.error_message ? (
+              <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
+                <div>
+                  <div className="text-gray-500">Job ID</div>
+                  <div className="truncate" title={job.job_id}>{job.job_id}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Post GUID</div>
+                  <div className="truncate" title={job.post_guid}>{job.post_guid}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Created</div>
+                  <div>{job.created_at ? formatDateTime(job.created_at) : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Started</div>
+                  <div>{job.started_at ? formatDateTime(job.started_at) : '—'}</div>
+                </div>
                 <div className="col-span-2">
-                  <div className="text-gray-500">Message</div>
-                  <div className="text-red-700 truncate" title={job.error_message}>{job.error_message}</div>
+                  <div className="text-gray-500">
+                    Processing time
+                    {job.status === 'running' && (
+                      <span className="ml-1 text-blue-500">(in progress)</span>
+                    )}
+                  </div>
+                  <div className="font-medium">{formatProcessingTime(job.processing_time_seconds)}</div>
                 </div>
-              ) : null}
-            </div>
-
-            {(job.status === 'pending' || job.status === 'running') && (
-              <div className="mt-3 pt-3 border-t border-gray-200">
-                <button
-                  onClick={() => { void cancelJob(job.job_id); }}
-                  disabled={cancellingJobs.has(job.job_id)}
-                  className="w-full inline-flex items-center justify-center rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                  {cancellingJobs.has(job.job_id) ? 'Cancelling...' : 'Cancel Job'}
-                </button>
+                {job.error_message ? (
+                  <div className="col-span-2">
+                    <div className="text-gray-500">Message</div>
+                    <div className="text-red-700 truncate" title={job.error_message}>{job.error_message}</div>
+                  </div>
+                ) : null}
               </div>
-            )}
-          </div>
-        ))}
+
+              {(job.status === 'pending' || job.status === 'running') && (
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <button
+                    onClick={() => { void cancelJob(job.job_id); }}
+                    disabled={cancellingJobs.has(job.job_id)}
+                    className="w-full inline-flex items-center justify-center rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                  >
+                    {cancellingJobs.has(job.job_id) ? 'Cancelling...' : 'Cancel Job'}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

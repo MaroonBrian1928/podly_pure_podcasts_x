@@ -34,7 +34,10 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     author = db.Column(db.Text)
     rss_url = db.Column(db.Text, unique=True, nullable=False)
     image_url = db.Column(db.Text)
-    # Ad detection strategy: "llm" (default) or "chapter".
+    # Ad detection strategy:
+    # - "llm" (default): LLM ad detection + ad removal
+    # - "chapter": chapter-title filter ad detection + ad removal
+    # - "chapter_insert": chapter insertion only (no ad removal)
     # Note: "chapter" strategy requires CBR audio encoding for accurate chapter marker
     # seeking. "llm" uses VBR for smaller files.
     ad_detection_strategy = db.Column(
@@ -42,7 +45,12 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     )
     # Per-feed filter strings override (comma-separated), null = use global defaults
     chapter_filter_strings = db.Column(db.Text, nullable=True)
+    # Per-feed override for LLM chapter fallback tagging, null = use global config
+    enable_llm_chapter_fallback_tagging = db.Column(db.Boolean, nullable=True)
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
+    # Per-feed tag label/position overrides, null = use global config
+    feed_tag_label = db.Column(db.Text, nullable=True)
+    feed_tag_position = db.Column(db.Text, nullable=True)
 
     posts = db.relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
@@ -89,6 +97,7 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     download_url = db.Column(
         db.Text, unique=True, nullable=False
     )  # remote download URL, not podly url
+    link = db.Column(db.Text, nullable=True)  # episode page URL (from entry.link)
     title = db.Column(db.Text, nullable=False)
     unprocessed_audio_path = db.Column(db.Text)
     processed_audio_path = db.Column(db.Text)
@@ -166,10 +175,17 @@ class User(db.Model):  # type: ignore[name-defined, misc]
     updated_at = db.Column(
         db.DateTime, default=_utc_now_naive, onupdate=_utc_now_naive, nullable=False
     )
+    # SSO provider — "local", "discord", or "oidc"
+    auth_provider = db.Column(db.String(32), nullable=False, default="local")
+
     # Discord SSO fields
     discord_id = db.Column(db.String(32), unique=True, nullable=True, index=True)
     discord_username = db.Column(db.String(100), nullable=True)
     last_active = db.Column(db.DateTime, nullable=True)
+
+    # OIDC SSO fields
+    oidc_sub = db.Column(db.String(255), unique=True, nullable=True, index=True)
+    oidc_email = db.Column(db.String(255), nullable=True)
 
     # Admin override for feed allowance (if set, overrides plan-based allowance)
     manual_feed_allowance = db.Column(db.Integer, nullable=True)
@@ -204,6 +220,9 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     last_segment_sequence_num = db.Column(db.Integer, nullable=False)
 
     model_name = db.Column(db.String, nullable=False)
+    # When the fallback model handled the call, actual_model_name records which
+    # model answered. NULL means the primary model (model_name) was used.
+    actual_model_name = db.Column(db.String, nullable=True)
     prompt = db.Column(db.Text, nullable=False)
     response = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
@@ -228,7 +247,8 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     )
 
     def __repr__(self) -> str:
-        return f"<ModelCall {self.id} P:{self.post_id} Segs:{self.first_segment_sequence_num}-{self.last_segment_sequence_num} M:{self.model_name} S:{self.status}>"
+        effective = self.actual_model_name or self.model_name
+        return f"<ModelCall {self.id} P:{self.post_id} Segs:{self.first_segment_sequence_num}-{self.last_segment_sequence_num} M:{effective} S:{self.status}>"
 
 
 class Identification(db.Model):  # type: ignore[name-defined, misc]
@@ -379,6 +399,8 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Integer, nullable=False, default=DEFAULTS.LLM_DEFAULT_MAX_RETRY_ATTEMPTS
     )
     llm_max_input_tokens_per_call = db.Column(db.Integer, nullable=True)
+    llm_fallback_model = db.Column(db.Text, nullable=True)
+    llm_fallback_api_key = db.Column(db.Text, nullable=True)
     llm_enable_token_rate_limiting = db.Column(
         db.Boolean, nullable=False, default=DEFAULTS.LLM_ENABLE_TOKEN_RATE_LIMITING
     )
@@ -390,6 +412,11 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Boolean,
         nullable=False,
         default=DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
+    )
+    enable_llm_chapter_fallback_tagging = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
     )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
@@ -518,6 +545,51 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
     )
+    cost_rate_per_hour = db.Column(
+        db.Float,
+        nullable=False,
+        default=DEFAULTS.APP_COST_RATE_PER_HOUR,
+    )
+    feed_tag_label = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_FEED_TAG_LABEL,
+    )
+    feed_tag_position = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_FEED_TAG_POSITION,
+    )
+    feed_tag_override = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.APP_FEED_TAG_OVERRIDE,
+    )
+    episode_status_indicator_enabled = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.APP_EPISODE_STATUS_INDICATOR_ENABLED,
+    )
+    episode_status_processed_symbol = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_EPISODE_STATUS_PROCESSED_SYMBOL,
+    )
+    episode_status_error_symbol = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_EPISODE_STATUS_ERROR_SYMBOL,
+    )
+    notification_apprise_url = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_URL,
+    )
+    notification_apprise_key = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
+    )
 
     # Hash of the environment variables used to seed configuration.
     # Used to detect changes in environment variables between restarts.
@@ -535,6 +607,20 @@ class DiscordSettings(db.Model):  # type: ignore[name-defined, misc]
     client_secret = db.Column(db.Text, nullable=True)
     redirect_uri = db.Column(db.Text, nullable=True)
     guild_ids = db.Column(db.Text, nullable=True)  # Comma-separated list
+    allow_registration = db.Column(db.Boolean, nullable=False, default=True)
+
+    created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+    updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+
+
+class OidcSettings(db.Model):  # type: ignore[name-defined, misc]
+    __tablename__ = "oidc_settings"
+
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    issuer = db.Column(db.Text, nullable=True)
+    client_id = db.Column(db.Text, nullable=True)
+    client_secret = db.Column(db.Text, nullable=True)
+    redirect_uri = db.Column(db.Text, nullable=True)
     allow_registration = db.Column(db.Boolean, nullable=False, default=True)
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

@@ -1,8 +1,18 @@
+import { useState } from 'react';
 import { useConfigContext } from '../ConfigContext';
 import { Section, Field, SaveButton } from '../shared';
+import { EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY } from '../../../constants/localStorage';
+
+function loadGlobalDescView(): 'source' | 'podly' {
+  if (typeof window === 'undefined') return 'source';
+  return window.localStorage.getItem(EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY) === 'podly'
+    ? 'podly'
+    : 'source';
+}
 
 export default function AppSection() {
   const { pending, setField, handleSave, isSaving } = useConfigContext();
+  const [globalDescView, setGlobalDescView] = useState<'source' | 'podly'>(loadGlobalDescView);
 
   if (!pending) return null;
 
@@ -68,6 +78,21 @@ export default function AppSection() {
               }
             />
           </Field>
+          <Field label="Cost Rate Per Hour ($)">
+            <input
+              className="input"
+              type="number"
+              step="0.01"
+              min="0"
+              value={pending?.app?.cost_rate_per_hour ?? 0.04}
+              onChange={(e) =>
+                setField(
+                  ['app', 'cost_rate_per_hour'],
+                  Number(e.target.value)
+                )
+              }
+            />
+          </Field>
           <div className="col-span-1 md:col-span-2 flex items-center gap-3">
             <label className="flex items-center gap-2 text-sm text-gray-700 font-medium">
               <input
@@ -78,6 +103,111 @@ export default function AppSection() {
               Enable the public landing page
             </label>
           </div>
+          <Field label="Apprise API Server URL">
+            <input
+              className="input"
+              type="text"
+              placeholder="http://apprise:8000"
+              value={pending?.app?.notification_apprise_url ?? ''}
+              onChange={(e) => setField(['app', 'notification_apprise_url'], e.target.value)}
+            />
+          </Field>
+          <Field label="Apprise Config Key">
+            <input
+              className="input"
+              type="text"
+              placeholder="podly"
+              value={pending?.app?.notification_apprise_key ?? ''}
+              onChange={(e) => setField(['app', 'notification_apprise_key'], e.target.value)}
+            />
+          </Field>
+          <Field label="Feed Tag Label">
+            <input
+              className="input"
+              type="text"
+              maxLength={50}
+              placeholder="podly"
+              value={pending?.app?.feed_tag_label ?? ''}
+              onChange={(e) => setField(['app', 'feed_tag_label'], e.target.value)}
+            />
+            <p className="text-xs text-gray-500 mt-1">Text shown inside brackets on feed titles. Leave empty to omit the tag entirely.</p>
+          </Field>
+          <Field label="Feed Tag Position">
+            <select
+              className="input"
+              value={pending?.app?.feed_tag_position ?? 'suffix'}
+              onChange={(e) => setField(['app', 'feed_tag_position'], e.target.value)}
+            >
+              <option value="prefix">[tag] Feed Title</option>
+              <option value="suffix">Feed Title [tag]</option>
+            </select>
+          </Field>
+          <div className="col-span-1 md:col-span-2 flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-gray-700 font-medium">
+              <input
+                type="checkbox"
+                checked={!!pending?.app?.feed_tag_override}
+                onChange={(e) => setField(['app', 'feed_tag_override'], e.target.checked)}
+              />
+              Override per-feed tag settings with global defaults
+            </label>
+            <p className="text-xs text-gray-500">When enabled, the global tag label and position above apply to all feeds, ignoring any per-feed tag customizations.</p>
+          </div>
+          <Field label="Default episode description view">
+            <select
+              className="input"
+              value={globalDescView}
+              onChange={(e) => {
+                const v = e.target.value as 'source' | 'podly';
+                setGlobalDescView(v);
+                window.localStorage.setItem(EPISODE_DESCRIPTION_VIEW_GLOBAL_KEY, v);
+              }}
+            >
+              <option value="source">Source description</option>
+              <option value="podly">Podly description preview</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Saved immediately in your browser — no Save button needed. Default for all feeds; can be overridden per feed in Feed Settings.
+            </p>
+          </Field>
+          <div className="col-span-1 md:col-span-2 border-t border-gray-200 pt-4">
+            <p className="text-sm font-medium text-gray-700 mb-1">Episode status indicator</p>
+            <p className="text-xs text-gray-500 mb-3">
+              When enabled, a symbol is appended to each episode title in your podcast app so you can see at a glance whether ads were removed, processing failed, or the episode hasn't been processed yet.
+            </p>
+            <label className="flex items-center gap-2 text-sm text-gray-700 font-medium">
+              <input
+                type="checkbox"
+                checked={!!pending?.app?.episode_status_indicator_enabled}
+                onChange={(e) => setField(['app', 'episode_status_indicator_enabled'], e.target.checked)}
+              />
+              Enable episode status indicator
+            </label>
+          </div>
+          {!!pending?.app?.episode_status_indicator_enabled && (
+            <>
+              <Field label="Processed symbol" hint={`e.g. "My Episode ${pending?.app?.episode_status_processed_symbol || '✓'}"`}>
+                <input
+                  className="input"
+                  type="text"
+                  maxLength={10}
+                  placeholder="✓"
+                  value={pending?.app?.episode_status_processed_symbol ?? ''}
+                  onChange={(e) => setField(['app', 'episode_status_processed_symbol'], e.target.value)}
+                />
+              </Field>
+              <Field label="Error symbol" hint={`e.g. "My Episode ${pending?.app?.episode_status_error_symbol || '⚠'}"`}>
+                <input
+                  className="input"
+                  type="text"
+                  maxLength={10}
+                  placeholder="⚠"
+                  value={pending?.app?.episode_status_error_symbol ?? ''}
+                  onChange={(e) => setField(['app', 'episode_status_error_symbol'], e.target.value)}
+                />
+              </Field>
+            </>
+          )}
         </div>
       </Section>
 

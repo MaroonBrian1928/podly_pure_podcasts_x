@@ -12,8 +12,11 @@ LLM_DEFAULT_MAX_RETRY_ATTEMPTS = 5
 LLM_ENABLE_TOKEN_RATE_LIMITING = False
 LLM_MAX_INPUT_TOKENS_PER_CALL: int | None = None
 LLM_MAX_INPUT_TOKENS_PER_MINUTE: int | None = None
+LLM_FALLBACK_MODEL: str | None = None
+LLM_FALLBACK_API_KEY: str | None = None
 ENABLE_BOUNDARY_REFINEMENT = True
 ENABLE_WORD_LEVEL_BOUNDARY_REFINDER = False
+ENABLE_LLM_CHAPTER_FALLBACK_TAGGING = False
 
 # Whisper defaults
 WHISPER_DEFAULT_TYPE = "groq"
@@ -26,7 +29,7 @@ WHISPER_REMOTE_CHUNKSIZE_MB = 24
 
 WHISPER_GROQ_MODEL = "whisper-large-v3-turbo"
 WHISPER_GROQ_LANGUAGE = "en"
-WHISPER_GROQ_MAX_RETRIES = 3
+WHISPER_GROQ_MAX_RETRIES = 0
 
 # Processing defaults
 PROCESSING_NUM_SEGMENTS_TO_INPUT_TO_PROMPT = 60
@@ -48,6 +51,25 @@ APP_USER_LIMIT_TOTAL: int | None = None
 APP_AUTOPROCESS_ON_DOWNLOAD = False
 APP_MAX_QUEUE_SIZE: int | None = None
 APP_MAX_QUEUE_SIZE_PER_FEED: int | None = None
+APP_COST_RATE_PER_HOUR = 0.04
+
+# Feed tag defaults
+# Empty string means no tag is applied by default — users must opt-in.
+# This prevents existing feeds from suddenly showing "[podly]" after an upgrade.
+APP_FEED_TAG_LABEL = ""
+APP_FEED_TAG_POSITION = "suffix"  # "prefix" or "suffix"
+APP_FEED_TAG_OVERRIDE = False  # When True, global tag always wins over per-feed tag
+
+# Episode status indicator defaults
+# When enabled, a symbol is appended to episode titles in the RSS feed so users
+# can see processing status directly in their podcast app.
+APP_EPISODE_STATUS_INDICATOR_ENABLED = False
+APP_EPISODE_STATUS_PROCESSED_SYMBOL = "✓"
+APP_EPISODE_STATUS_ERROR_SYMBOL = "⚠"
+
+# Notification defaults (Apprise API integration)
+APP_NOTIFICATION_APPRISE_URL = ""
+APP_NOTIFICATION_APPRISE_KEY = ""
 
 # Credits defaults
 MINUTES_PER_CREDIT = 60

@@ -8,6 +8,7 @@ from app.auth.guards import require_admin
 from app.extensions import db
 from app.jobs_manager import get_jobs_manager
 from app.jobs_manager_run_service import build_run_status_snapshot
+from app.models import Feed
 from app.post_cleanup import cleanup_processed_posts, count_cleanup_candidates
 from app.runtime_config import config as runtime_config
 
@@ -112,6 +113,54 @@ def api_cancel_all_jobs() -> ResponseReturnValue:
                     "status": "error",
                     "error_code": "CANCEL_FAILED",
                     "message": f"Failed to cancel all jobs: {e!s}",
+                }
+            ),
+            500,
+        )
+
+
+@jobs_bp.route("/api/jobs/cancel-queued", methods=["POST"])
+def api_cancel_queued_jobs() -> ResponseReturnValue:
+    _, error_response = require_admin("cancel all queued jobs")
+    if error_response:
+        return error_response
+    try:
+        result = get_jobs_manager().cancel_queued_jobs()
+        db.session.expire_all()
+        return flask.jsonify(result), 200
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to cancel queued jobs: %s", e)
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "CANCEL_QUEUED_FAILED",
+                    "message": f"Failed to cancel queued jobs: {e!s}",
+                }
+            ),
+            500,
+        )
+
+
+@jobs_bp.route("/api/feeds/<int:feed_id>/jobs/cancel-queued", methods=["POST"])
+def api_cancel_feed_queued_jobs(feed_id: int) -> ResponseReturnValue:
+    _, error_response = require_admin("cancel feed queued jobs")
+    if error_response:
+        return error_response
+    if db.session.get(Feed, feed_id) is None:
+        return flask.jsonify({"status": "error", "error_code": "FEED_NOT_FOUND", "message": f"Feed {feed_id} not found"}), 404
+    try:
+        result = get_jobs_manager().cancel_feed_queued_jobs(feed_id)
+        db.session.expire_all()
+        return flask.jsonify(result), 200
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to cancel queued jobs for feed %s: %s", feed_id, e)
+        return (
+            flask.jsonify(
+                {
+                    "status": "error",
+                    "error_code": "CANCEL_FEED_QUEUED_FAILED",
+                    "message": f"Failed to cancel queued jobs: {e!s}",
                 }
             ),
             500,

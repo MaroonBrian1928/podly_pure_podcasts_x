@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { configApi } from '../../../services/api';
 import { useConfigContext } from '../ConfigContext';
-import { Section, Field, SaveButton, TestButton } from '../shared';
+import { Section, Field, SaveButton, TestButton, EnvVarHint } from '../shared';
 import type { LLMConfig } from '../../../types';
 
 const LLM_MODEL_ALIASES: string[] = [
@@ -18,10 +18,52 @@ const LLM_MODEL_ALIASES: string[] = [
 ];
 
 export default function LLMSection() {
-  const { pending, setField, getEnvHint, handleSave, isSaving } = useConfigContext();
+  const { pending, setField, getEnvHint, isFieldReadOnly, handleSave, isSaving } = useConfigContext();
   const [showBaseUrlInfo, setShowBaseUrlInfo] = useState(false);
+  const [testingFallback, setTestingFallback] = useState(false);
+
+  const handleTestFallbackLLM = () => {
+    if (!pending?.llm?.llm_fallback_model) return;
+    setTestingFallback(true);
+    const testPayload: LLMConfig = {
+      ...(pending.llm as LLMConfig),
+      llm_model: pending.llm.llm_fallback_model as string,
+      llm_api_key: (pending.llm.llm_fallback_api_key as string) || (pending.llm.llm_api_key as string) || '',
+    };
+    // If the API key fields are empty (keys are stored/masked in DB), signal the
+    // backend to use the stored fallback key rather than the stored primary key.
+    const hasFallbackKeyInUI = !!(pending.llm.llm_fallback_api_key || pending.llm.llm_fallback_api_key_preview);
+    const payload = hasFallbackKeyInUI
+      ? { llm: testPayload, use_fallback_api_key: true }
+      : { llm: testPayload };
+    toast.promise(
+      configApi.testLLM(payload).finally(() => setTestingFallback(false)),
+      {
+        loading: 'Testing fallback LLM connection...',
+        success: (res: { ok: boolean; message?: string }) => res?.message || 'Fallback LLM connection OK',
+        error: (err: unknown) => {
+          const e = err as { response?: { data?: { error?: string; message?: string } }; message?: string };
+          return e?.response?.data?.error || e?.response?.data?.message || e?.message || 'Fallback LLM connection failed';
+        },
+      }
+    );
+  };
 
   if (!pending) return null;
+
+  const apiKeyReadOnly = isFieldReadOnly('llm.llm_api_key');
+  const baseUrlReadOnly = isFieldReadOnly('llm.openai_base_url');
+  const modelReadOnly = isFieldReadOnly('llm.llm_model');
+  const timeoutReadOnly = isFieldReadOnly('llm.openai_timeout');
+  const maxTokensReadOnly = isFieldReadOnly('llm.openai_max_tokens');
+  const maxConcurrentReadOnly = isFieldReadOnly('llm.llm_max_concurrent_calls');
+  const maxRetriesReadOnly = isFieldReadOnly('llm.llm_max_retry_attempts');
+  const tokenRateLimitReadOnly = isFieldReadOnly('llm.llm_enable_token_rate_limiting');
+  const maxInputPerCallReadOnly = isFieldReadOnly('llm.llm_max_input_tokens_per_call');
+  const maxInputPerMinReadOnly = isFieldReadOnly('llm.llm_max_input_tokens_per_minute');
+
+  const inputClass = (readOnly: boolean) =>
+    readOnly ? 'input bg-gray-100 cursor-not-allowed' : 'input';
 
   const handleTestLLM = () => {
     toast.promise(configApi.testLLM({ llm: pending.llm as LLMConfig }), {
@@ -47,11 +89,12 @@ export default function LLMSection() {
       <Section title="LLM">
         <Field label="API Key" envMeta={getEnvHint('llm.llm_api_key')}>
           <input
-            className="input"
+            className={inputClass(apiKeyReadOnly)}
             type="text"
             placeholder={pending?.llm?.llm_api_key_preview || ''}
             value={pending?.llm?.llm_api_key || ''}
             onChange={(e) => setField(['llm', 'llm_api_key'], e.target.value)}
+            disabled={apiKeyReadOnly}
           />
         </Field>
 
@@ -68,19 +111,16 @@ export default function LLMSection() {
                 ⓘ
               </button>
             </div>
-            {getEnvHint('llm.openai_base_url')?.env_var && (
-              <code className="mt-1 block text-xs text-gray-500 font-mono">
-                {getEnvHint('llm.openai_base_url')?.env_var}
-              </code>
-            )}
+            <EnvVarHint meta={getEnvHint('llm.openai_base_url')} />
           </div>
           <div className="flex-1 space-y-2">
             <input
-              className="input"
+              className={inputClass(baseUrlReadOnly)}
               type="text"
               placeholder="https://api.openai.com/v1"
               value={pending?.llm?.openai_base_url || ''}
               onChange={(e) => setField(['llm', 'openai_base_url'], e.target.value)}
+              disabled={baseUrlReadOnly}
             />
             {showBaseUrlInfo && <BaseUrlInfoBox />}
           </div>
@@ -91,51 +131,57 @@ export default function LLMSection() {
             <div className="relative">
               <input
                 list="llm-model-datalist"
-                className="input"
+                className={inputClass(modelReadOnly)}
                 type="text"
                 value={pending?.llm?.llm_model ?? ''}
                 onChange={(e) => setField(['llm', 'llm_model'], e.target.value)}
                 placeholder="e.g. groq/openai/gpt-oss-120b"
+                disabled={modelReadOnly}
               />
             </div>
           </Field>
-          <Field label="OpenAI Timeout (sec)">
+          <Field label="OpenAI Timeout (sec)" envMeta={getEnvHint('llm.openai_timeout')}>
             <input
-              className="input"
+              className={inputClass(timeoutReadOnly)}
               type="number"
               value={pending?.llm?.openai_timeout ?? 300}
               onChange={(e) => setField(['llm', 'openai_timeout'], Number(e.target.value))}
+              disabled={timeoutReadOnly}
             />
           </Field>
-          <Field label="OpenAI Max Tokens">
+          <Field label="OpenAI Max Tokens" envMeta={getEnvHint('llm.openai_max_tokens')}>
             <input
-              className="input"
+              className={inputClass(maxTokensReadOnly)}
               type="number"
               value={pending?.llm?.openai_max_tokens ?? 4096}
               onChange={(e) => setField(['llm', 'openai_max_tokens'], Number(e.target.value))}
+              disabled={maxTokensReadOnly}
             />
           </Field>
-          <Field label="Max Concurrent LLM Calls">
+          <Field label="Max Concurrent LLM Calls" envMeta={getEnvHint('llm.llm_max_concurrent_calls')}>
             <input
-              className="input"
+              className={inputClass(maxConcurrentReadOnly)}
               type="number"
               value={pending?.llm?.llm_max_concurrent_calls ?? 3}
               onChange={(e) => setField(['llm', 'llm_max_concurrent_calls'], Number(e.target.value))}
+              disabled={maxConcurrentReadOnly}
             />
           </Field>
-          <Field label="Max Retry Attempts">
+          <Field label="Max Retry Attempts" envMeta={getEnvHint('llm.llm_max_retry_attempts')}>
             <input
-              className="input"
+              className={inputClass(maxRetriesReadOnly)}
               type="number"
               value={pending?.llm?.llm_max_retry_attempts ?? 5}
               onChange={(e) => setField(['llm', 'llm_max_retry_attempts'], Number(e.target.value))}
+              disabled={maxRetriesReadOnly}
             />
           </Field>
-          <Field label="Enable Token Rate Limiting">
+          <Field label="Enable Token Rate Limiting" envMeta={getEnvHint('llm.llm_enable_token_rate_limiting')}>
             <input
               type="checkbox"
               checked={!!pending?.llm?.llm_enable_token_rate_limiting}
               onChange={(e) => setField(['llm', 'llm_enable_token_rate_limiting'], e.target.checked)}
+              disabled={tokenRateLimitReadOnly}
             />
           </Field>
           <Field label="Enable Boundary Refinement" hint="LLM-based ad boundary refinement for improved precision">
@@ -157,9 +203,24 @@ export default function LLMSection() {
               }
             />
           </Field>
-          <Field label="Max Input Tokens Per Call (optional)">
+          <Field
+            label="Enable LLM-Based Chapter Tagging"
+            hint="Preserve embedded chapters when available, otherwise fall back to description or transcript-derived chapters for LLM processing."
+          >
             <input
-              className="input"
+              type="checkbox"
+              checked={!!pending?.llm?.enable_llm_chapter_fallback_tagging}
+              onChange={(e) =>
+                setField(
+                  ['llm', 'enable_llm_chapter_fallback_tagging'],
+                  e.target.checked
+                )
+              }
+            />
+          </Field>
+          <Field label="Max Input Tokens Per Call (optional)" envMeta={getEnvHint('llm.llm_max_input_tokens_per_call')}>
+            <input
+              className={inputClass(maxInputPerCallReadOnly)}
               type="number"
               value={pending?.llm?.llm_max_input_tokens_per_call ?? ''}
               onChange={(e) =>
@@ -168,11 +229,12 @@ export default function LLMSection() {
                   e.target.value === '' ? null : Number(e.target.value)
                 )
               }
+              disabled={maxInputPerCallReadOnly}
             />
           </Field>
-          <Field label="Max Input Tokens Per Minute (optional)">
+          <Field label="Max Input Tokens Per Minute (optional)" envMeta={getEnvHint('llm.llm_max_input_tokens_per_minute')}>
             <input
-              className="input"
+              className={inputClass(maxInputPerMinReadOnly)}
               type="number"
               value={pending?.llm?.llm_max_input_tokens_per_minute ?? ''}
               onChange={(e) =>
@@ -181,11 +243,46 @@ export default function LLMSection() {
                   e.target.value === '' ? null : Number(e.target.value)
                 )
               }
+              disabled={maxInputPerMinReadOnly}
             />
           </Field>
         </div>
 
         <TestButton onClick={handleTestLLM} label="Test LLM" />
+      </Section>
+
+      <Section title="Fallback LLM">
+        <p className="text-xs text-gray-500 -mt-2 mb-2">
+          When the primary model exhausts all retries due to rate limiting or service unavailability,
+          podly will automatically retry with this model instead of failing the job.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Fallback Model">
+            <input
+              list="llm-model-datalist"
+              className="input"
+              type="text"
+              value={pending?.llm?.llm_fallback_model ?? ''}
+              onChange={(e) => setField(['llm', 'llm_fallback_model'], e.target.value || null)}
+              placeholder="e.g. gemini/gemini-2.0-flash (leave empty to disable)"
+            />
+          </Field>
+          <Field label="Fallback API Key" hint="Leave empty to reuse the primary API key">
+            <input
+              className="input"
+              type="text"
+              placeholder={pending?.llm?.llm_fallback_api_key_preview || 'Same as primary key'}
+              value={pending?.llm?.llm_fallback_api_key ?? ''}
+              onChange={(e) => setField(['llm', 'llm_fallback_api_key'], e.target.value)}
+            />
+          </Field>
+        </div>
+        {pending?.llm?.llm_fallback_model && (
+          <TestButton
+            onClick={handleTestFallbackLLM}
+            label={testingFallback ? 'Testing…' : 'Test Fallback LLM'}
+          />
+        )}
       </Section>
 
       <SaveButton onSave={handleSave} isPending={isSaving} />
