@@ -48,6 +48,10 @@ class CommandExecutor:
         )
         self.register_action("mark_cancelled", writer_actions.mark_cancelled_action)
         self.register_action(
+            "cancel_pending_jobs_for_feed",
+            writer_actions.cancel_pending_jobs_for_feed_action,
+        )
+        self.register_action(
             "reassign_pending_jobs", writer_actions.reassign_pending_jobs_action
         )
         self.register_action("refresh_feed", writer_actions.refresh_feed_action)

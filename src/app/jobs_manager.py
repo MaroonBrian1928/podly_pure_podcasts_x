@@ -487,6 +487,23 @@ class JobsManager:
                 "message": f"Cancelled {len(cancelled_job_ids)} queued jobs",
             }
 
+    def cancel_feed_queued_jobs(self, feed_id: int) -> dict[str, Any]:
+        """Cancel all queued (pending) jobs for posts belonging to a specific feed."""
+        with _scheduler_app_context():
+            result = writer_client.action(
+                "cancel_pending_jobs_for_feed", {"feed_id": feed_id}, wait=True
+            )
+            if not result or not result.success:
+                error_msg = getattr(result, "error", "writer action failed") if result else "no response from writer"
+                raise RuntimeError(f"cancel_pending_jobs_for_feed failed: {error_msg}")
+
+            cancelled_count = result.data.get("cancelled_count", 0) if result.data else 0
+            return {
+                "status": "cancelled",
+                "cancelled_count": cancelled_count,
+                "message": f"Cancelled {cancelled_count} queued jobs for feed {feed_id}",
+            }
+
     def cleanup_stale_jobs(self, older_than: timedelta) -> int:
         try:
             result = writer_client.action(

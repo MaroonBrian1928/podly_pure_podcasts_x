@@ -3,7 +3,7 @@ from typing import Any
 
 from app.extensions import db
 from app.jobs_manager_run_service import recalculate_run_counts
-from app.models import ProcessingJob
+from app.models import Post, ProcessingJob
 
 
 def dequeue_job_action(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -59,13 +59,20 @@ def clear_all_jobs_action(params: dict[str, Any]) -> int:
 
 
 def clear_active_jobs_action(params: dict[str, Any]) -> int:
-    """Clear only pending and running jobs. Preserves completed/failed/skipped/cancelled."""
-    active_jobs = ProcessingJob.query.filter(
-        ProcessingJob.status.in_(["pending", "running"])
+    """Reset interrupted running jobs back to pending on startup.
+
+    Only affects jobs with status="running" — those were mid-execution when the
+    process was killed and must be retried. Pending jobs are left untouched so
+    their existing queue position is preserved and _ensure_jobs_for_all_posts
+    does not re-create duplicates for every whitelisted episode.
+    """
+    running_jobs = ProcessingJob.query.filter(
+        ProcessingJob.status == "running"
     ).all()
-    count = len(active_jobs)
-    for job in active_jobs:
-        db.session.delete(job)
+    count = len(running_jobs)
+    for job in running_jobs:
+        job.status = "pending"
+        job.started_at = None
     if count > 0:
         recalculate_run_counts(db.session)
     return count
@@ -181,6 +188,43 @@ def mark_cancelled_action(params: dict[str, Any]) -> dict[str, Any]:
         recalculate_run_counts(db.session)
 
     return {"job_id": job.id, "status": "cancelled"}
+
+
+def cancel_pending_jobs_for_feed_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Bulk-cancel all pending jobs for a feed in two SQL statements.
+
+    Selects matching job IDs via a JOIN (SQLAlchemy can't JOIN in a bulk UPDATE
+    portably), then issues a single UPDATE ... WHERE id IN (...).
+    """
+    feed_id = params.get("feed_id")
+    if feed_id is None:
+        raise ValueError("feed_id is required")
+
+    job_ids: list[str] = [
+        row.id
+        for row in (
+            db.session.query(ProcessingJob.id)
+            .join(Post, ProcessingJob.post_guid == Post.guid)
+            .filter(ProcessingJob.status == "pending", Post.feed_id == feed_id)
+            .all()
+        )
+    ]
+
+    if not job_ids:
+        return {"cancelled_count": 0, "cancelled_ids": []}
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    ProcessingJob.query.filter(ProcessingJob.id.in_(job_ids)).update(
+        {
+            ProcessingJob.status: "cancelled",
+            ProcessingJob.error_message: "Cancelled by user request",
+            ProcessingJob.completed_at: now,
+        },
+        synchronize_session=False,
+    )
+    recalculate_run_counts(db.session)
+
+    return {"cancelled_count": len(job_ids), "cancelled_ids": job_ids}
 
 
 def reassign_pending_jobs_action(params: dict[str, Any]) -> int:

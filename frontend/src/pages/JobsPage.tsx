@@ -76,6 +76,7 @@ export default function JobsPage() {
   const [mode, setMode] = useState<'active' | 'all'>('active');
   const [cancellingJobs, setCancellingJobs] = useState<Set<string>>(new Set());
   const [cancellingQueued, setCancellingQueued] = useState(false);
+  const [confirmCancelQueued, setConfirmCancelQueued] = useState(false);
   const previousHasActiveWork = useRef<boolean>(false);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreview | null>(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
@@ -166,17 +167,12 @@ export default function JobsPage() {
   );
 
   const cancelAllQueuedJobs = useCallback(async () => {
-    const queuedCount =
-      managerStatus?.run?.queued_jobs ??
-      jobs.filter(job => job.status === 'pending').length;
-    if (queuedCount <= 0) {
+    if (!confirmCancelQueued) {
+      setConfirmCancelQueued(true);
       return;
     }
 
-    const confirmMessage = `Cancel all ${queuedCount} queued job${queuedCount === 1 ? '' : 's'}?`;
-    if (!window.confirm(confirmMessage)) {
-      return;
-    }
+    setConfirmCancelQueued(false);
 
     const queuedVisibleJobIds = jobs
       .filter(job => job.status === 'pending')
@@ -207,7 +203,7 @@ export default function JobsPage() {
         return next;
       });
     }
-  }, [jobs, managerStatus?.run?.queued_jobs, refresh]);
+  }, [confirmCancelQueued, jobs, refresh]);
 
   const runCleanupNow = useCallback(async () => {
     setCleanupRunning(true);
@@ -404,15 +400,33 @@ export default function JobsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => { void cancelAllQueuedJobs(); }}
-            className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-400 disabled:cursor-not-allowed"
-            disabled={loading || cancellingQueued || queuedJobsCount <= 0}
-          >
-            {cancellingQueued
-              ? 'Cancelling queued…'
-              : `Cancel queued${queuedJobsCount > 0 ? ` (${queuedJobsCount})` : ''}`}
-          </button>
+          {confirmCancelQueued ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-red-700 font-medium">Cancel {queuedJobsCount} queued jobs?</span>
+              <button
+                onClick={() => { void cancelAllQueuedJobs(); }}
+                className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => setConfirmCancelQueued(false)}
+                className="inline-flex items-center rounded-md bg-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400"
+              >
+                No
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { void cancelAllQueuedJobs(); }}
+              className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-400 disabled:cursor-not-allowed"
+              disabled={loading || cancellingQueued || queuedJobsCount <= 0}
+            >
+              {cancellingQueued
+                ? 'Cancelling queued…'
+                : `Cancel queued${queuedJobsCount > 0 ? ` (${queuedJobsCount})` : ''}`}
+            </button>
+          )}
           <button
             onClick={() => { void refresh(); }}
             className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
