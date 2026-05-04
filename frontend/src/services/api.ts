@@ -636,6 +636,14 @@ export const jobsApi = {
     const response = await api.post('/api/jobs/cancel-all');
     return response.data;
   },
+  pauseProcessing: async (): Promise<{ status: string; message: string }> => {
+    const response = await api.post('/api/jobs/pause');
+    return response.data;
+  },
+  resumeProcessing: async (): Promise<{ status: string; message: string }> => {
+    const response = await api.post('/api/jobs/resume');
+    return response.data;
+  },
   getJobManagerStatus: async (): Promise<JobManagerStatus> => {
     const response = await api.get('/api/job-manager/status');
     return response.data;

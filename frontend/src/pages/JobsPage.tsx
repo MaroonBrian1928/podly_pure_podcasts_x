@@ -72,6 +72,7 @@ export default function JobsPage() {
   const [mode, setMode] = useState<'active' | 'all'>('active');
   const [cancellingJobs, setCancellingJobs] = useState<Set<string>>(new Set());
   const [cancellingAll, setCancellingAll] = useState(false);
+  const [togglingPause, setTogglingPause] = useState(false);
   const previousHasActiveWork = useRef<boolean>(false);
   const [cleanupPreview, setCleanupPreview] = useState<CleanupPreview | null>(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
@@ -173,6 +174,23 @@ export default function JobsPage() {
     }
   }, [refresh]);
 
+  const togglePause = useCallback(async () => {
+    setTogglingPause(true);
+    try {
+      const isPaused = managerStatus?.paused ?? false;
+      if (isPaused) {
+        await jobsApi.resumeProcessing();
+      } else {
+        await jobsApi.pauseProcessing();
+      }
+      await loadStatus();
+    } catch (e) {
+      setError(`Failed to toggle pause: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    } finally {
+      setTogglingPause(false);
+    }
+  }, [managerStatus?.paused, loadStatus]);
+
   const runCleanupNow = useCallback(async () => {
     setCleanupRunning(true);
     setCleanupError(null);
@@ -237,6 +255,7 @@ export default function JobsPage() {
   }, [managerStatus?.run?.queued_jobs, managerStatus?.run?.running_jobs, refresh]);
 
   const run: JobManagerRun | null = managerStatus?.run ?? null;
+  const isPaused = managerStatus?.paused ?? false;
   const hasActiveWork = run ? run.queued_jobs + run.running_jobs > 0 : false;
   const retentionDays = cleanupPreview?.retention_days ?? null;
   const cleanupDisabled = retentionDays === null || retentionDays <= 0;
@@ -250,19 +269,39 @@ export default function JobsPage() {
             <h2 className="text-base font-semibold text-gray-900">Jobs Manager</h2>
             <p className="text-xs text-gray-600">
               {run
-                ? hasActiveWork
-                  ? `Processing · Last update ${formatDateTime(run.updated_at)}`
-                  : `Idle · Last activity ${formatDateTime(run.updated_at)}`
+                ? isPaused
+                  ? `Paused · ${hasActiveWork ? 'jobs still queued' : 'no queued jobs'} · Last update ${formatDateTime(run.updated_at)}`
+                  : hasActiveWork
+                    ? `Processing · Last update ${formatDateTime(run.updated_at)}`
+                    : `Idle · Last activity ${formatDateTime(run.updated_at)}`
                 : 'Jobs Manager has not started yet.'}
             </p>
           </div>
-          {run ? (
-            <StatusBadge status={run.status} />
-          ) : (
-            <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-800">
-              idle
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {isPaused && (
+              <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800">
+                paused
+              </span>
+            )}
+            {run ? (
+              <StatusBadge status={run.status} />
+            ) : (
+              <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-800">
+                idle
+              </span>
+            )}
+            <button
+              onClick={() => { void togglePause(); }}
+              disabled={togglingPause}
+              className={`inline-flex items-center rounded-md px-3 py-1.5 text-sm font-medium focus:outline-none focus:ring-2 disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed ${
+                isPaused
+                  ? 'bg-green-600 text-white hover:bg-green-700 focus:ring-green-500'
+                  : 'bg-amber-500 text-white hover:bg-amber-600 focus:ring-amber-400'
+              }`}
+            >
+              {togglingPause ? '…' : isPaused ? 'Resume' : 'Pause'}
+            </button>
+          </div>
         </div>
 
         {statusError && (

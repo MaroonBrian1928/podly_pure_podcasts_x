@@ -40,7 +40,23 @@ def api_list_all_jobs() -> ResponseReturnValue:
 @jobs_bp.route("/api/job-manager/status", methods=["GET"])
 def api_job_manager_status() -> ResponseReturnValue:
     run_snapshot = build_run_status_snapshot(db.session)
-    return flask.jsonify({"run": run_snapshot})
+    return flask.jsonify({"run": run_snapshot, "paused": get_jobs_manager().is_paused()})
+
+
+@jobs_bp.route("/api/jobs/pause", methods=["POST"])
+def api_pause_processing() -> ResponseReturnValue:
+    _, error_response = require_admin("pause processing")
+    if error_response:
+        return error_response
+    return flask.jsonify(get_jobs_manager().pause_processing())
+
+
+@jobs_bp.route("/api/jobs/resume", methods=["POST"])
+def api_resume_processing() -> ResponseReturnValue:
+    _, error_response = require_admin("resume processing")
+    if error_response:
+        return error_response
+    return flask.jsonify(get_jobs_manager().resume_processing())
 
 
 @jobs_bp.route("/api/jobs/<string:job_id>/cancel", methods=["POST"])
