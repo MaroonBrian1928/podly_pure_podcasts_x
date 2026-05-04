@@ -173,6 +173,8 @@ export interface AppConfigUI {
   enable_public_landing_page: boolean;
   user_limit_total: number | null;
   autoprocess_on_download: boolean;
+  max_queue_size: number | null;
+  max_queue_size_per_feed: number | null;
   cost_rate_per_hour: number;
   feed_tag_label: string;
   feed_tag_position: string;
