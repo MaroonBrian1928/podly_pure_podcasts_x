@@ -677,8 +677,15 @@ class PodcastProcessor:
                     "a WhisperX-compatible endpoint"
                 )
 
+            output_config = getattr(self.config, "output", None)
             windows_ms, saw_word_timestamps = extract_profanity_windows(
-                rich_transcript_segments or []
+                rich_transcript_segments or [],
+                pad_start_ms=int(
+                    getattr(output_config, "bleep_padding_start_ms", 150) or 0
+                ),
+                pad_end_ms=int(
+                    getattr(output_config, "bleep_padding_end_ms", 150) or 0
+                ),
             )
             if not saw_word_timestamps:
                 raise ProcessorException(

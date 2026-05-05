@@ -1,10 +1,13 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.models import Post, ProcessingJob
+from app.runtime_config import config as runtime_config
 from podcast_processor.chapter_reader import Chapter
 from podcast_processor.podcast_processor import PodcastProcessor, ProfanityBleepResult
+from shared.config import RemoteWhisperConfig
 from shared.test_utils import create_standard_test_config
 
 
@@ -392,6 +395,48 @@ def test_llm_processing_persists_bleep_windows_when_enabled() -> None:
         {"start_time": 0.12, "end_time": 0.24},
         {"start_time": 1.0, "end_time": 1.3},
     ]
+
+
+def test_prepare_profanity_bleeped_audio_uses_configured_bleep_padding(
+    tmp_path: Path,
+) -> None:
+    config = create_standard_test_config()
+    config.output.bleep_padding_start_ms = 25
+    config.output.bleep_padding_end_ms = 75
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+
+    original_whisper = runtime_config.whisper
+    runtime_config.whisper = RemoteWhisperConfig(api_key="test-key", model="whisper-1")
+
+    source_path = tmp_path / "source.mp3"
+    output_path = tmp_path / "output.mp3"
+    transcript_segments = [object()]
+
+    try:
+        with (
+            patch(
+                "podcast_processor.podcast_processor.extract_profanity_windows",
+                return_value=([(475, 775)], True),
+            ) as extract_windows,
+            patch("podcast_processor.podcast_processor.overlay_beeps_with_ducking"),
+        ):
+            result = processor._prepare_profanity_bleeped_audio(
+                source_audio_path=str(source_path),
+                processed_audio_path=str(output_path),
+                rich_transcript_segments=transcript_segments,
+                enable_profanity_bleeping=True,
+            )
+    finally:
+        runtime_config.whisper = original_whisper
+
+    extract_windows.assert_called_once_with(
+        transcript_segments,
+        pad_start_ms=25,
+        pad_end_ms=75,
+    )
+    assert result.windows_ms == [(475, 775)]
 
 
 def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> None:

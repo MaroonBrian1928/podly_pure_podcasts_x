@@ -25,6 +25,16 @@ class ProcessingConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     fade_ms: int
+    bleep_padding_start_ms: int = Field(
+        default=DEFAULTS.OUTPUT_BLEEP_PADDING_START_MS,
+        ge=0,
+        description="Milliseconds to include before each detected profanity word.",
+    )
+    bleep_padding_end_ms: int = Field(
+        default=DEFAULTS.OUTPUT_BLEEP_PADDING_END_MS,
+        ge=0,
+        description="Milliseconds to include after each detected profanity word.",
+    )
     min_ad_segement_separation_seconds: int
     min_ad_segment_length_seconds: int
     min_confidence: float

@@ -2,7 +2,8 @@ import math
 import re
 from typing import Any
 
-PROFANITY_PAD_MS = 40
+PROFANITY_PAD_START_MS = 150
+PROFANITY_PAD_END_MS = 150
 PROFANITY_MERGE_GAP_MS = 80
 
 # Keep the default list intentionally conservative to avoid surprising false
@@ -119,8 +120,6 @@ DEFAULT_PROFANITY_TERMS = frozenset(
         "slut",
         "sluts",
         "sonofabitch",
-        "sucked",
-        "sucker",
         "tit",
         "tits",
         "titties",
@@ -144,7 +143,8 @@ def extract_profanity_windows(
     segments: list[Any],
     *,
     profanity_terms: frozenset[str] = DEFAULT_PROFANITY_TERMS,
-    pad_ms: int = PROFANITY_PAD_MS,
+    pad_start_ms: int = PROFANITY_PAD_START_MS,
+    pad_end_ms: int = PROFANITY_PAD_END_MS,
     merge_gap_ms: int = PROFANITY_MERGE_GAP_MS,
 ) -> tuple[list[tuple[int, int]], bool]:
     raw_windows: list[tuple[int, int]] = []
@@ -166,8 +166,8 @@ def extract_profanity_windows(
             if not normalized or normalized not in profanity_terms:
                 continue
 
-            start_ms = max(0, math.floor(float(start) * 1000.0) - pad_ms)
-            end_ms = max(start_ms + 1, math.ceil(float(end) * 1000.0) + pad_ms)
+            start_ms = max(0, math.floor(float(start) * 1000.0) - pad_start_ms)
+            end_ms = max(start_ms + 1, math.ceil(float(end) * 1000.0) + pad_end_ms)
             raw_windows.append((start_ms, end_ms))
 
     return _merge_windows(raw_windows, gap_ms=merge_gap_ms), saw_word_timestamps

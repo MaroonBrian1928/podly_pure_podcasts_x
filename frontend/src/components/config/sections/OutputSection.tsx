@@ -18,6 +18,28 @@ export default function OutputSection() {
               onChange={(e) => setField(['output', 'fade_ms'], Number(e.target.value))}
             />
           </Field>
+          <Field label="Bleep Padding Start (ms)">
+            <input
+              className="input"
+              type="number"
+              min="0"
+              value={pending?.output?.bleep_padding_start_ms ?? 150}
+              onChange={(e) =>
+                setField(['output', 'bleep_padding_start_ms'], Number(e.target.value))
+              }
+            />
+          </Field>
+          <Field label="Bleep Padding End (ms)">
+            <input
+              className="input"
+              type="number"
+              min="0"
+              value={pending?.output?.bleep_padding_end_ms ?? 150}
+              onChange={(e) =>
+                setField(['output', 'bleep_padding_end_ms'], Number(e.target.value))
+              }
+            />
+          </Field>
           <Field label="Min Segment Separation (sec)">
             <input
               className="input"

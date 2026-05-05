@@ -516,6 +516,16 @@ class OutputSettings(db.Model):  # type: ignore[name-defined, misc]
 
     id = db.Column(db.Integer, primary_key=True, default=1)
     fade_ms = db.Column(db.Integer, nullable=False, default=DEFAULTS.OUTPUT_FADE_MS)
+    bleep_padding_start_ms = db.Column(
+        db.Integer,
+        nullable=False,
+        default=DEFAULTS.OUTPUT_BLEEP_PADDING_START_MS,
+    )
+    bleep_padding_end_ms = db.Column(
+        db.Integer,
+        nullable=False,
+        default=DEFAULTS.OUTPUT_BLEEP_PADDING_END_MS,
+    )
     min_ad_segement_separation_seconds = db.Column(
         db.Integer,
         nullable=False,

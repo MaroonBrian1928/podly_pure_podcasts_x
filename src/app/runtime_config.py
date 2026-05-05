@@ -27,6 +27,8 @@ else:
         openai_timeout=DEFAULTS.OPENAI_DEFAULT_TIMEOUT_SEC,
         output=OutputConfig(
             fade_ms=DEFAULTS.OUTPUT_FADE_MS,
+            bleep_padding_start_ms=DEFAULTS.OUTPUT_BLEEP_PADDING_START_MS,
+            bleep_padding_end_ms=DEFAULTS.OUTPUT_BLEEP_PADDING_END_MS,
             min_ad_segement_separation_seconds=DEFAULTS.OUTPUT_MIN_AD_SEGMENT_SEPARATION_SECONDS,
             min_ad_segment_length_seconds=DEFAULTS.OUTPUT_MIN_AD_SEGMENT_LENGTH_SECONDS,
             min_confidence=DEFAULTS.OUTPUT_MIN_CONFIDENCE,

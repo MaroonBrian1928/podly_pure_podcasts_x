@@ -154,6 +154,8 @@ export interface ProcessingConfigUI {
 
 export interface OutputConfigUI {
   fade_ms: number;
+  bleep_padding_start_ms: number;
+  bleep_padding_end_ms: number;
   // Note the intentional spelling to match backend
   min_ad_segement_separation_seconds: number;
   min_ad_segment_length_seconds: number;
