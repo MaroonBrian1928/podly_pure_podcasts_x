@@ -153,6 +153,8 @@ def ensure_defaults() -> None:
             "enable_public_landing_page": DEFAULTS.APP_ENABLE_PUBLIC_LANDING_PAGE,
             "user_limit_total": DEFAULTS.APP_USER_LIMIT_TOTAL,
             "autoprocess_on_download": DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
+            "max_queue_size": DEFAULTS.APP_MAX_QUEUE_SIZE,
+            "max_queue_size_per_feed": DEFAULTS.APP_MAX_QUEUE_SIZE_PER_FEED,
             "cost_rate_per_hour": DEFAULTS.APP_COST_RATE_PER_HOUR,
             "feed_tag_label": DEFAULTS.APP_FEED_TAG_LABEL,
             "feed_tag_position": DEFAULTS.APP_FEED_TAG_POSITION,
@@ -239,6 +241,8 @@ def read_combined() -> dict[str, Any]:
             "enable_public_landing_page": app_s.enable_public_landing_page,
             "user_limit_total": app_s.user_limit_total,
             "autoprocess_on_download": app_s.autoprocess_on_download,
+            "max_queue_size": app_s.max_queue_size,
+            "max_queue_size_per_feed": app_s.max_queue_size_per_feed,
             "cost_rate_per_hour": app_s.cost_rate_per_hour,
             "feed_tag_label": app_s.feed_tag_label,
             "feed_tag_position": app_s.feed_tag_position,
@@ -385,6 +389,8 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
         "enable_public_landing_page",
         "user_limit_total",
         "autoprocess_on_download",
+        "max_queue_size",
+        "max_queue_size_per_feed",
         "cost_rate_per_hour",
     ]:
         if key in data:
@@ -673,6 +679,10 @@ def to_pydantic_config() -> PydanticConfig:
                 DEFAULTS.APP_NOTIFICATION_APPRISE_KEY,
             )
             or ""
+        ),
+        max_queue_size=data["app"].get("max_queue_size", DEFAULTS.APP_MAX_QUEUE_SIZE),
+        max_queue_size_per_feed=data["app"].get(
+            "max_queue_size_per_feed", DEFAULTS.APP_MAX_QUEUE_SIZE_PER_FEED
         ),
     )
 
