@@ -1,7 +1,7 @@
 """add queue size limit settings
 
-Revision ID: a1b2c3d4e5f6
-Revises: f4e5f6a7b8c9
+Revision ID: 1a2b3c4d5e6f
+Revises: 6f67a7db0fbb
 Create Date: 2026-05-04 00:00:00.000000
 
 """
@@ -9,8 +9,8 @@ Create Date: 2026-05-04 00:00:00.000000
 import sqlalchemy as sa
 from alembic import op
 
-revision = "a1b2c3d4e5f6"
-down_revision = "f4e5f6a7b8c9"
+revision = "1a2b3c4d5e6f"
+down_revision = "6f67a7db0fbb"
 branch_labels = None
 depends_on = None
 
