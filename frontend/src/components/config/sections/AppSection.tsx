@@ -52,13 +52,12 @@ export default function AppSection() {
               className="input"
               type="number"
               min={1}
+              step={1}
               value={pending?.app?.max_queue_size ?? ''}
-              onChange={(e) =>
-                setField(
-                  ['app', 'max_queue_size'],
-                  e.target.value === '' ? null : Number(e.target.value)
-                )
-              }
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10);
+                setField(['app', 'max_queue_size'], e.target.value === '' ? null : (parsed >= 1 ? parsed : 1));
+              }}
             />
           </Field>
           <Field label="Max queue size per feed" hint="Maximum pending + running jobs per podcast feed. Leave empty for unlimited.">
@@ -66,13 +65,12 @@ export default function AppSection() {
               className="input"
               type="number"
               min={1}
+              step={1}
               value={pending?.app?.max_queue_size_per_feed ?? ''}
-              onChange={(e) =>
-                setField(
-                  ['app', 'max_queue_size_per_feed'],
-                  e.target.value === '' ? null : Number(e.target.value)
-                )
-              }
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10);
+                setField(['app', 'max_queue_size_per_feed'], e.target.value === '' ? null : (parsed >= 1 ? parsed : 1));
+              }}
             />
           </Field>
           <Field label="Auto-whitelist new episodes">

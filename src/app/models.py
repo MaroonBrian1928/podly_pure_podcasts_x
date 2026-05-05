@@ -545,6 +545,8 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
     )
+    max_queue_size = db.Column(db.Integer, nullable=True)
+    max_queue_size_per_feed = db.Column(db.Integer, nullable=True)
     cost_rate_per_hour = db.Column(
         db.Float,
         nullable=False,
