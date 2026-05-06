@@ -1259,34 +1259,38 @@ def test_make_post_prefers_html_content_over_plain_description(
     assert mock_post_class.call_args.kwargs["description"] == "<p>Rich description</p>"
 
 
+def _guid_entry(**values) -> feedparser.FeedParserDict:
+    return feedparser.FeedParserDict(values)
+
+
 def test_get_guid_returns_url_id_verbatim():
     """A URL-form upstream <guid> must be returned unchanged.
 
     This is the dominant case in real feeds; hashing the enclosure URL
     instead breaks subscriber libraries the moment a CDN path rotates.
     """
-    entry = SimpleNamespace(id="https://show.example.com/episodes/123", guid=None)
+    entry = _guid_entry(id="https://show.example.com/episodes/123", guid=None)
 
     assert get_guid(entry) == "https://show.example.com/episodes/123"
 
 
 def test_get_guid_returns_tag_uri_verbatim():
     """A `tag:` URI upstream <guid> must be returned unchanged."""
-    entry = SimpleNamespace(id="tag:libsyn.com,2024:42", guid=None)
+    entry = _guid_entry(id="tag:libsyn.com,2024:42", guid=None)
 
     assert get_guid(entry) == "tag:libsyn.com,2024:42"
 
 
 def test_get_guid_returns_uuid_verbatim():
     """A UUID upstream <guid> stays unchanged (regression check)."""
-    entry = SimpleNamespace(id="550e8400-e29b-41d4-a716-446655440000", guid=None)
+    entry = _guid_entry(id="550e8400-e29b-41d4-a716-446655440000", guid=None)
 
     assert get_guid(entry) == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_get_guid_strips_whitespace_around_id():
     """Surrounding whitespace on the upstream id is stripped."""
-    entry = SimpleNamespace(id="  https://show.example.com/ep/1  ", guid=None)
+    entry = _guid_entry(id="  https://show.example.com/ep/1  ", guid=None)
 
     assert get_guid(entry) == "https://show.example.com/ep/1"
 
@@ -1295,11 +1299,9 @@ def test_get_guid_strips_whitespace_around_id():
 def test_get_guid_falls_back_to_url_hash_when_id_missing(mock_find_audio_link):
     """No upstream id at all -> hash the enclosure URL."""
     mock_find_audio_link.return_value = "https://cdn.example.com/audio.mp3"
-    entry = SimpleNamespace()  # no id, no guid
+    entry = _guid_entry()  # no id, no guid
 
-    expected = str(
-        uuid.uuid5(uuid.NAMESPACE_URL, "https://cdn.example.com/audio.mp3")
-    )
+    expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://cdn.example.com/audio.mp3"))
     assert get_guid(entry) == expected
 
 
@@ -1307,11 +1309,9 @@ def test_get_guid_falls_back_to_url_hash_when_id_missing(mock_find_audio_link):
 def test_get_guid_falls_back_to_url_hash_when_id_empty(mock_find_audio_link):
     """Empty-string upstream id -> hash the enclosure URL."""
     mock_find_audio_link.return_value = "https://cdn.example.com/audio.mp3"
-    entry = SimpleNamespace(id="", guid=None)
+    entry = _guid_entry(id="", guid=None)
 
-    expected = str(
-        uuid.uuid5(uuid.NAMESPACE_URL, "https://cdn.example.com/audio.mp3")
-    )
+    expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://cdn.example.com/audio.mp3"))
     assert get_guid(entry) == expected
 
 
@@ -1319,17 +1319,15 @@ def test_get_guid_falls_back_to_url_hash_when_id_empty(mock_find_audio_link):
 def test_get_guid_falls_back_to_url_hash_when_id_whitespace_only(mock_find_audio_link):
     """Whitespace-only upstream id -> hash the enclosure URL."""
     mock_find_audio_link.return_value = "https://cdn.example.com/audio.mp3"
-    entry = SimpleNamespace(id="   \n  ", guid=None)
+    entry = _guid_entry(id="   \n  ", guid=None)
 
-    expected = str(
-        uuid.uuid5(uuid.NAMESPACE_URL, "https://cdn.example.com/audio.mp3")
-    )
+    expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://cdn.example.com/audio.mp3"))
     assert get_guid(entry) == expected
 
 
 def test_get_guid_uses_guid_attribute_when_id_missing():
     """If `entry.id` is missing but `entry.guid` is set, prefer `entry.guid`."""
-    entry = SimpleNamespace(id=None, guid="https://show.example.com/episodes/7")
+    entry = _guid_entry(guid="https://show.example.com/episodes/7")
 
     assert get_guid(entry) == "https://show.example.com/episodes/7"
 
