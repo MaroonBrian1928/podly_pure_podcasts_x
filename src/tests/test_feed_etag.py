@@ -129,6 +129,7 @@ def test_generate_feed_xml_uses_feed_last_changed_at(app):
     with app.app_context():
         feed_id = _make_feed_with_post()
         feed = db.session.get(Feed, feed_id)
+        assert feed is not None
         fixed = dt.datetime(2025, 6, 15, 10, 30, 0)
         feed.last_changed_at = fixed
         db.session.commit()
@@ -173,8 +174,14 @@ def test_get_feed_returns_304_when_etag_matches(app):
 
     client = app.test_client()
     with (
-        mock.patch("app.routes.feed_routes.refresh_feed") as mock_refresh,
-        mock.patch("app.routes.feed_routes.generate_feed_xml", return_value=b"<rss/>"),
+        mock.patch(
+            "app.routes.feed_routes._should_kickoff_async_refresh",
+            return_value=True,
+        ),
+        mock.patch("app.routes.feed_routes._spawn_async_refresh") as mock_spawn,
+        mock.patch(
+            "app.routes.feed_routes.generate_feed_xml", return_value=b"<rss/>"
+        ) as mock_gen,
     ):
         first = client.get(f"/feed/{feed_id}")
         etag = first.headers["ETag"]
@@ -186,8 +193,9 @@ def test_get_feed_returns_304_when_etag_matches(app):
     assert second.get_data(as_text=True) == ""
     # ETag header is required on a 304 per RFC 9110
     assert second.headers.get("ETag") == etag
-    # the second call must NOT have triggered a refresh — that's the entire point.
-    assert mock_refresh.call_count == 1  # only the first call refreshed
+    # The second call must not schedule refresh work or regenerate XML.
+    mock_spawn.assert_called_once()
+    mock_gen.assert_called_once()
 
 
 def test_get_feed_skips_refresh_and_xml_when_etag_matches(app):
@@ -198,6 +206,7 @@ def test_get_feed_skips_refresh_and_xml_when_etag_matches(app):
     with app.app_context():
         feed_id = _make_feed_with_post()
         feed = db.session.get(Feed, feed_id)
+        assert feed is not None
         # We need a stable ETag value to check on the FIRST request,
         # so seed last_changed_at to a known value.
         feed.last_changed_at = dt.datetime(2026, 1, 1, 0, 0, 0)
@@ -252,6 +261,7 @@ def test_get_feed_returns_304_when_if_modified_since_recent(app):
     with app.app_context():
         feed_id = _make_feed_with_post()
         feed = db.session.get(Feed, feed_id)
+        assert feed is not None
         feed.last_changed_at = dt.datetime(2026, 1, 1, 0, 0, 0)
         db.session.commit()
 
@@ -278,6 +288,7 @@ def test_get_feed_etag_changes_when_last_changed_at_changes(app):
     with app.app_context():
         feed_id = _make_feed_with_post()
         feed = db.session.get(Feed, feed_id)
+        assert feed is not None
         feed.last_changed_at = dt.datetime(2026, 1, 1, 0, 0, 0)
         db.session.commit()
     # In real deployments the writer runs in a separate process so the request
@@ -296,6 +307,7 @@ def test_get_feed_etag_changes_when_last_changed_at_changes(app):
 
     with app.app_context():
         feed = db.session.get(Feed, feed_id)
+        assert feed is not None
         feed.last_changed_at = dt.datetime(2026, 1, 2, 0, 0, 0)
         db.session.commit()
     db.session.expire_all()

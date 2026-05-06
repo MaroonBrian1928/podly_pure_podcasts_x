@@ -1,7 +1,7 @@
 """feed last_changed_at
 
 Revision ID: 8a4d0c2f3e91
-Revises: 3e5eebc6b3b1
+Revises: 0cd8f1e2d228
 Create Date: 2026-04-28 00:45:00.000000
 
 """
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "8a4d0c2f3e91"
-down_revision = "3e5eebc6b3b1"
+down_revision = "0cd8f1e2d228"
 branch_labels = None
 depends_on = None
 

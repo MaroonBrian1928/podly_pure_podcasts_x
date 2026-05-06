@@ -2,8 +2,9 @@ import datetime
 import hashlib
 import logging
 import secrets
+import time
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, cast
 from urllib.parse import urlencode
 
@@ -64,6 +65,16 @@ logger = logging.getLogger("global_logger")
 
 feed_bp = Blueprint("feed", __name__)
 _MISSING = object()
+
+# Per-feed debounce so that bursty reader polls don't fan out into N background
+# refresh threads. The scheduled `refresh_all_feeds` job
+# (`src/app/background.py`) is the primary freshness mechanism; this just
+# opportunistically nudges a single-feed refresh on read traffic without ever
+# blocking the response. In-memory state is fine: a process restart simply
+# resets the cooldown and the next poll triggers a fresh kickoff.
+_BACKGROUND_REFRESH_LOCK = Lock()
+_BACKGROUND_REFRESH_LAST_KICKOFF: dict[int, float] = {}
+_AUTO_REFRESH_COOLDOWN_SECONDS = 60.0
 
 
 def _parse_optional_feed_bool(
@@ -536,6 +547,26 @@ def _make_feed_304(etag: str, last_modified_aware: datetime.datetime) -> Respons
     return response
 
 
+def _should_kickoff_async_refresh(feed_id: int) -> bool:
+    """True iff the per-feed cooldown has elapsed; reserves the next slot."""
+    now = time.monotonic()
+    with _BACKGROUND_REFRESH_LOCK:
+        last = _BACKGROUND_REFRESH_LAST_KICKOFF.get(feed_id)
+        if last is not None and now - last < _AUTO_REFRESH_COOLDOWN_SECONDS:
+            return False
+        _BACKGROUND_REFRESH_LAST_KICKOFF[feed_id] = now
+        return True
+
+
+def _spawn_async_refresh(app: Flask, feed_id: int) -> None:
+    Thread(
+        target=_refresh_feed_background,
+        args=(app, feed_id),
+        daemon=True,
+        name=f"feed-auto-refresh-{feed_id}",
+    ).start()
+
+
 @feed_bp.route("/feed/<int:f_id>", methods=["GET"])
 def get_feed(f_id: int) -> Response:
     if hasattr(g, "current_user") and g.current_user:
@@ -555,18 +586,20 @@ def get_feed(f_id: int) -> Response:
     ):
         return _make_feed_304(cached_etag, cached_last_modified)
 
-    refresh_feed(feed)
+    # Don't block the response on an upstream RSS fetch. The scheduled
+    # `refresh_all_feeds` job is the primary freshness source; we additionally
+    # nudge a per-feed refresh on read traffic, debounced so bursty pollers
+    # don't fan out into N threads.
+    if _should_kickoff_async_refresh(f_id):
+        app = cast(Any, current_app)._get_current_object()
+        _spawn_async_refresh(app, f_id)
 
-    fresh_etag = _compute_feed_etag(feed)
-    fresh_last_modified = _aware_utc(feed.last_changed_at) or datetime.datetime.now(
-        datetime.UTC
-    )
-
+    response_last_modified = cached_last_modified or datetime.datetime.now(datetime.UTC)
     xml_content = generate_feed_xml(feed)
 
     response = make_response(xml_content)
     response.headers["Content-Type"] = "application/rss+xml"
-    _apply_feed_response_headers(response, fresh_etag, fresh_last_modified)
+    _apply_feed_response_headers(response, cached_etag, response_last_modified)
     return response
 
 
