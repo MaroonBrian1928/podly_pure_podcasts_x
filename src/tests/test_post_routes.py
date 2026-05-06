@@ -1028,12 +1028,20 @@ def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
             "edited_end_time": 5.0,
             "original_start_time": 4.0,
             "original_end_time": 5.0,
+            "display_edited_start_time": 4.15,
+            "display_edited_end_time": 4.85,
+            "display_original_start_time": 4.15,
+            "display_original_end_time": 4.85,
         },
         {
             "edited_start_time": 34.0,
             "edited_end_time": 35.0,
             "original_start_time": 44.0,
             "original_end_time": 45.0,
+            "display_edited_start_time": 34.15,
+            "display_edited_end_time": 34.85,
+            "display_original_start_time": 44.15,
+            "display_original_end_time": 44.85,
         },
     ]
 

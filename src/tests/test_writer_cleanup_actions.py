@@ -169,7 +169,7 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
         assert post.processed_audio_path is None
         assert post.duration is None
         assert post.chapter_data is None
-        assert post.bleep_windows == [{"start_time": 1.25, "end_time": 1.75}]
+        assert post.bleep_windows is None
         assert post.transcript_word_timestamps == [
             {
                 "sequence_num": 0,

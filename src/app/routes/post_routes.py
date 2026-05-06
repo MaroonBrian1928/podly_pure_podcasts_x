@@ -771,9 +771,20 @@ def api_post_stats(p_guid: str) -> flask.Response:
     )
     edited_duration_seconds = max(0.0, original_duration_seconds - ad_time_seconds)
     edited_ad_markers = build_edited_timeline_ad_markers(ad_blocks)
+    output_config = getattr(runtime_config, "output", None)
     edited_bleep_windows = build_edited_timeline_bleep_windows(
         bleep_windows,
         ad_blocks,
+        display_pad_start_seconds=(
+            max(0, int(getattr(output_config, "bleep_padding_start_ms", 0))) / 1000.0
+            if output_config is not None
+            else 0.0
+        ),
+        display_pad_end_seconds=(
+            max(0, int(getattr(output_config, "bleep_padding_end_ms", 0))) / 1000.0
+            if output_config is not None
+            else 0.0
+        ),
     )
 
     stats_data = {

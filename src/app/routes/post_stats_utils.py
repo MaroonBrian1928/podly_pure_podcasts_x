@@ -274,6 +274,9 @@ def build_edited_timeline_ad_markers(
 def build_edited_timeline_bleep_windows(
     bleep_windows: list[tuple[float, float]],
     removed_windows: list[tuple[float, float]],
+    *,
+    display_pad_start_seconds: float = 0.0,
+    display_pad_end_seconds: float = 0.0,
 ) -> list[dict[str, float]]:
     sorted_removed_windows = sorted(removed_windows, key=lambda item: item[0])
     edited_windows: list[dict[str, float]] = []
@@ -286,12 +289,28 @@ def build_edited_timeline_bleep_windows(
             sorted_removed_windows,
         )
         for retained_start_time, retained_end_time in retained_windows:
+            display_original_start_time = min(
+                retained_end_time,
+                retained_start_time + max(0.0, display_pad_start_seconds),
+            )
+            display_original_end_time = max(
+                display_original_start_time,
+                retained_end_time - max(0.0, display_pad_end_seconds),
+            )
             edited_start_time = _map_time_to_edited_timeline(
                 retained_start_time,
                 sorted_removed_windows,
             )
             edited_end_time = _map_time_to_edited_timeline(
                 retained_end_time,
+                sorted_removed_windows,
+            )
+            display_edited_start_time = _map_time_to_edited_timeline(
+                display_original_start_time,
+                sorted_removed_windows,
+            )
+            display_edited_end_time = _map_time_to_edited_timeline(
+                display_original_end_time,
                 sorted_removed_windows,
             )
             if edited_end_time <= edited_start_time:
@@ -303,6 +322,12 @@ def build_edited_timeline_bleep_windows(
                     "edited_end_time": round(edited_end_time, 3),
                     "original_start_time": round(retained_start_time, 3),
                     "original_end_time": round(retained_end_time, 3),
+                    "display_edited_start_time": round(display_edited_start_time, 3),
+                    "display_edited_end_time": round(display_edited_end_time, 3),
+                    "display_original_start_time": round(
+                        display_original_start_time, 3
+                    ),
+                    "display_original_end_time": round(display_original_end_time, 3),
                 }
             )
 

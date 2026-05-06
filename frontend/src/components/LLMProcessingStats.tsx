@@ -211,17 +211,29 @@ export default function LLMProcessingStats({
     tooltipRows: [
       {
         label: 'Edited',
-        value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
+        value: formatTimelineRange(
+          window.display_edited_start_time ?? window.edited_start_time,
+          window.display_edited_end_time ?? window.edited_end_time,
+        ),
       },
       {
         label: 'Source',
-        value: formatTimelineRange(window.original_start_time, window.original_end_time),
+        value: formatTimelineRange(
+          window.display_original_start_time ?? window.original_start_time,
+          window.display_original_end_time ?? window.original_end_time,
+        ),
       },
     ],
     ariaLabel: [
       'Bleeped section.',
-      `Edited audio range ${formatTimelineRange(window.edited_start_time, window.edited_end_time)}.`,
-      `Source audio range ${formatTimelineRange(window.original_start_time, window.original_end_time)}.`,
+      `Edited audio range ${formatTimelineRange(
+        window.display_edited_start_time ?? window.edited_start_time,
+        window.display_edited_end_time ?? window.edited_end_time,
+      )}.`,
+      `Source audio range ${formatTimelineRange(
+        window.display_original_start_time ?? window.original_start_time,
+        window.display_original_end_time ?? window.original_end_time,
+      )}.`,
     ].join(' '),
   }));
   const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null

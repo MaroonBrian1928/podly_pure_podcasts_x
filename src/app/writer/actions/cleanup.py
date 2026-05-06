@@ -197,6 +197,7 @@ def clear_post_processing_data_keep_transcript_action(
     post.processed_audio_path = None
     post.duration = None
     post.chapter_data = None
+    post.bleep_windows = None
     post.refined_ad_boundaries = None
     post.refined_ad_boundaries_updated_at = None
 
