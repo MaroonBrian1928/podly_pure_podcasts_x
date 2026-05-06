@@ -49,6 +49,7 @@ from app.routes.post_utils import (
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.chapter_filter import parse_filter_strings
+from podcast_processor.chapter_reader import read_chapters
 from shared import defaults as DEFAULTS
 from shared.processing_paths import (
     get_in_root,
@@ -771,20 +772,9 @@ def api_post_stats(p_guid: str) -> flask.Response:
     )
     edited_duration_seconds = max(0.0, original_duration_seconds - ad_time_seconds)
     edited_ad_markers = build_edited_timeline_ad_markers(ad_blocks)
-    output_config = getattr(runtime_config, "output", None)
     edited_bleep_windows = build_edited_timeline_bleep_windows(
         bleep_windows,
         ad_blocks,
-        display_pad_start_seconds=(
-            max(0, int(getattr(output_config, "bleep_padding_start_ms", 0))) / 1000.0
-            if output_config is not None
-            else 0.0
-        ),
-        display_pad_end_seconds=(
-            max(0, int(getattr(output_config, "bleep_padding_end_ms", 0))) / 1000.0
-            if output_config is not None
-            else 0.0
-        ),
     )
 
     stats_data = {
@@ -1426,6 +1416,37 @@ def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
             ),
             500,
         )
+
+
+@post_bp.route("/api/posts/<string:p_guid>/chapters", methods=["GET"])
+def api_get_post_chapters(p_guid: str) -> flask.Response:
+    """Return chapter metadata embedded in the processed MP3, if present."""
+    post = Post.query.filter_by(guid=p_guid).first()
+    if post is None:
+        return flask.make_response(
+            jsonify({"error": "Post not found", "error_code": "NOT_FOUND"}), 404
+        )
+
+    whitelist_response = ensure_whitelisted_for_download(post, p_guid)
+    if whitelist_response:
+        return whitelist_response
+
+    if not post.processed_audio_path or not Path(post.processed_audio_path).exists():
+        return missing_processed_audio_response(post, p_guid)
+
+    chapters = read_chapters(str(Path(post.processed_audio_path).resolve()))
+    return flask.jsonify(
+        {
+            "chapters": [
+                {
+                    "title": chapter.title,
+                    "start_time": round(chapter.start_time_ms / 1000.0, 3),
+                    "end_time": round(chapter.end_time_ms / 1000.0, 3),
+                }
+                for chapter in chapters
+            ]
+        }
+    )
 
 
 @post_bp.route("/api/posts/<string:p_guid>/download", methods=["GET"])

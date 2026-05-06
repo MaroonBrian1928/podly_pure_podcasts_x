@@ -213,6 +213,17 @@ export const feedsApi = {
     return buildAbsoluteUrl(`/api/posts/${guid}/audio`);
   },
 
+  getPostChapters: async (guid: string): Promise<{
+    chapters: Array<{
+      title: string;
+      start_time: number;
+      end_time: number;
+    }>;
+  }> => {
+    const response = await api.get(`/api/posts/${guid}/chapters`);
+    return response.data;
+  },
+
   // Get download URL for processed post
   getPostDownloadUrl: (guid: string): string => {
     return buildAbsoluteUrl(`/api/posts/${guid}/download`);
@@ -309,10 +320,6 @@ export const feedsApi = {
         edited_end_time: number;
         original_start_time: number;
         original_end_time: number;
-        display_edited_start_time?: number;
-        display_edited_end_time?: number;
-        display_original_start_time?: number;
-        display_original_end_time?: number;
       }>;
       speaker_breakdown?: Array<{
         speaker_label: string | null;
@@ -521,10 +528,6 @@ export const feedsApi = {
         edited_end_time: number;
         original_start_time: number;
         original_end_time: number;
-        display_edited_start_time?: number;
-        display_edited_end_time?: number;
-        display_original_start_time?: number;
-        display_original_end_time?: number;
       }>;
       speaker_breakdown?: Array<{
         speaker_label: string | null;

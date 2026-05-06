@@ -915,6 +915,56 @@ def test_post_stats_include_bleep_windows(app):
     assert payload["processing_stats"]["bleeped_percentage"] == 1.0
 
 
+def test_post_chapters_reads_processed_mp3_chapters(app, tmp_path, monkeypatch):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    processed_path = tmp_path / "processed.mp3"
+    processed_path.write_bytes(b"fake mp3")
+
+    monkeypatch.setattr(
+        "app.routes.post_routes.read_chapters",
+        lambda _path: [
+            SimpleNamespace(
+                title="Intro",
+                start_time_ms=0,
+                end_time_ms=120_000,
+            ),
+            SimpleNamespace(
+                title="Main Topic",
+                start_time_ms=120_000,
+                end_time_ms=360_500,
+            ),
+        ],
+    )
+
+    with app.app_context():
+        feed = Feed(title="Chapter Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="chapter-player-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Chapter Player Episode",
+            processed_audio_path=str(processed_path),
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+    response = app.test_client().get("/api/posts/chapter-player-guid/chapters")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "chapters": [
+            {"title": "Intro", "start_time": 0.0, "end_time": 120.0},
+            {"title": "Main Topic", "start_time": 120.0, "end_time": 360.5},
+        ]
+    }
+
+
 def test_post_stats_report_no_bleep_windows_when_absent(app):
     app.testing = True
     app.register_blueprint(post_bp)
@@ -1028,20 +1078,12 @@ def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
             "edited_end_time": 5.0,
             "original_start_time": 4.0,
             "original_end_time": 5.0,
-            "display_edited_start_time": 4.15,
-            "display_edited_end_time": 4.85,
-            "display_original_start_time": 4.15,
-            "display_original_end_time": 4.85,
         },
         {
             "edited_start_time": 34.0,
             "edited_end_time": 35.0,
             "original_start_time": 44.0,
             "original_end_time": 45.0,
-            "display_edited_start_time": 34.15,
-            "display_edited_end_time": 34.85,
-            "display_original_start_time": 44.15,
-            "display_original_end_time": 44.85,
         },
     ]
 

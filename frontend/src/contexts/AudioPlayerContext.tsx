@@ -62,6 +62,11 @@ function audioPlayerReducer(state: AudioPlayerState, action: AudioPlayerAction):
 
 const AudioPlayerContext = createContext<AudioPlayerContextType | undefined>(undefined);
 
+const getEpisodeDuration = (episode: Episode | null) => {
+  const duration = Number(episode?.duration ?? 0);
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+};
+
 export function AudioPlayerProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(audioPlayerReducer, initialState);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -82,6 +87,7 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
 
     console.log('Setting episode and loading state');
     dispatch({ type: 'SET_EPISODE', payload: episode });
+    dispatch({ type: 'SET_DURATION', payload: getEpisodeDuration(episode) });
     dispatch({ type: 'SET_LOADING', payload: true });
     
     if (audioRef.current) {
@@ -117,10 +123,11 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
 
   const seekTo = useCallback((time: number) => {
     if (audioRef.current) {
-      audioRef.current.currentTime = time;
-      dispatch({ type: 'SET_CURRENT_TIME', payload: time });
+      const targetTime = Math.max(0, Math.min(time, state.duration || time));
+      audioRef.current.currentTime = targetTime;
+      dispatch({ type: 'SET_CURRENT_TIME', payload: targetTime });
     }
-  }, []);
+  }, [state.duration]);
 
   const setVolume = useCallback((volume: number) => {
     if (audioRef.current) {
@@ -134,8 +141,12 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     const audio = audioRef.current;
     if (!audio) return;
 
-    const handleLoadedData = () => {
-      dispatch({ type: 'SET_DURATION', payload: audio.duration });
+    const handleLoadedMetadata = () => {
+      const serverDuration = getEpisodeDuration(state.currentEpisode);
+      const mediaDuration = Number.isFinite(audio.duration) && audio.duration > 0
+        ? audio.duration
+        : 0;
+      dispatch({ type: 'SET_DURATION', payload: serverDuration || mediaDuration });
       dispatch({ type: 'SET_LOADING', payload: false });
     };
 
@@ -205,7 +216,7 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
       dispatch({ type: 'SET_LOADING', payload: false });
     };
 
-    audio.addEventListener('loadeddata', handleLoadedData);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
@@ -214,7 +225,7 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     audio.addEventListener('canplay', handleCanPlay);
 
     return () => {
-      audio.removeEventListener('loadeddata', handleLoadedData);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('play', handlePlay);
       audio.removeEventListener('pause', handlePause);
@@ -222,7 +233,7 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
       audio.removeEventListener('error', handleError);
       audio.removeEventListener('canplay', handleCanPlay);
     };
-  }, []);
+  }, [state.currentEpisode, state.duration]);
 
   // Keyboard shortcuts
   useEffect(() => {
