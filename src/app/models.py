@@ -50,6 +50,11 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
     enable_profanity_bleeping = db.Column(db.Boolean, nullable=False, default=False)
     confirm_whisperx_endpoint = db.Column(db.Boolean, nullable=False, default=False)
+    # Bumped by `refresh_feed_action` whenever something actually changes
+    # (new posts, post field updates, channel-level updates). Used as the
+    # `lastBuildDate` and as the input to the response ETag, so unchanged
+    # feeds can short-circuit reader polls with a 304.
+    last_changed_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
 
     posts = db.relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
