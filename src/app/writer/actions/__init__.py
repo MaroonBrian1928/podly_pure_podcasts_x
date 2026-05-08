@@ -47,6 +47,9 @@ from .jobs import update_job_status_action as update_job_status_action
 from .processor import (
     finish_transcription_replace_action as finish_transcription_replace_action,
 )
+from .processor import (
+    finish_transcription_replace_from_artifact_action as finish_transcription_replace_from_artifact_action,
+)
 from .processor import insert_identifications_action as insert_identifications_action
 from .processor import (
     insert_transcript_segments_action as insert_transcript_segments_action,

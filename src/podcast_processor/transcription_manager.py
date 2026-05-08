@@ -1,4 +1,6 @@
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.extensions import db
@@ -16,6 +18,7 @@ from shared.config import (
     RemoteWhisperConfig,
     TestWhisperConfig,
 )
+from shared.processing_paths import get_base_podcast_data_dir
 
 from .transcribe import (
     GroqWhisperTranscriber,
@@ -233,20 +236,59 @@ class TranscriptionManager:
                 self.logger,
             )
 
-        finish_res = writer_client.action(
-            "finish_transcription_replace",
-            {
+        finish_action = "finish_transcription_replace"
+        finish_payload: dict[str, Any] = {
+            "post_id": post.id,
+            "model_call_id": model_call_id,
+            "segment_count": inserted_count,
+            "transcript_word_timestamps": transcript_word_timestamps,
+        }
+        if transcript_word_timestamps is not None:
+            artifact_path = self._write_transcript_word_timestamps_artifact(
+                post_id=post.id,
+                model_call_id=model_call_id,
+                transcript_word_timestamps=transcript_word_timestamps,
+            )
+            finish_action = "finish_transcription_replace_from_artifact"
+            finish_payload = {
                 "post_id": post.id,
                 "model_call_id": model_call_id,
                 "segment_count": inserted_count,
-                "transcript_word_timestamps": transcript_word_timestamps,
-            },
+                "artifact_path": str(artifact_path),
+            }
+
+        finish_res = writer_client.action(
+            finish_action,
+            finish_payload,
             wait=True,
         )
         if not finish_res or not finish_res.success:
             raise RuntimeError(
                 getattr(finish_res, "error", "Failed to finish transcription replace")
             )
+
+    def _write_transcript_word_timestamps_artifact(
+        self,
+        *,
+        post_id: int,
+        model_call_id: int,
+        transcript_word_timestamps: list[dict[str, Any]],
+    ) -> Path:
+        artifact_dir = (
+            get_base_podcast_data_dir()
+            / "transcript_artifacts"
+            / f"post_{post_id}"
+            / f"model_call_{model_call_id}"
+        )
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / "word_timestamps.json"
+        temp_path = artifact_path.with_suffix(".json.tmp")
+        temp_path.write_text(
+            json.dumps(transcript_word_timestamps, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temp_path.replace(artifact_path)
+        return artifact_path
 
     def transcribe(self, post: Post) -> list[TranscriptSegment]:
         db_segments, _ = self.transcribe_for_processing(

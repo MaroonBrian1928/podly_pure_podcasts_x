@@ -1,5 +1,8 @@
 from podcast_processor.chapter_reader import Chapter
-from podcast_processor.chapter_writer import recalculate_chapter_times
+from podcast_processor.chapter_writer import (
+    recalculate_chapter_times,
+    write_adjusted_chapters,
+)
 
 
 def test_recalculate_chapter_times_shrinks_chapter_when_cut_occurs_inside() -> None:
@@ -50,3 +53,25 @@ def test_recalculate_chapter_times_merges_overlapping_removed_windows() -> None:
     # Unique removed duration is 120 seconds, not 150 seconds.
     assert [c.start_time_ms for c in adjusted] == [0, 280_000]
     assert [c.end_time_ms for c in adjusted] == [280_000, 680_000]
+
+
+def test_write_adjusted_chapters_uses_rust_when_enabled(monkeypatch) -> None:
+    calls = []
+
+    def fake_write_chapters(**kwargs) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "podcast_processor.chapter_writer.try_write_chapters", fake_write_chapters
+    )
+
+    write_adjusted_chapters(
+        "/tmp/audio.mp3",
+        [Chapter("c1", "Intro", 0, 120_000)],
+        [(10.0, 20.0)],
+    )
+
+    assert calls[0]["chapters"] == [
+        {"title": "Intro", "start_time_ms": 0, "end_time_ms": 110_000}
+    ]

@@ -1,0 +1,122 @@
+# Rust Sidecar Memory Reduction Plan
+
+## Summary
+
+Implement a phased Rust CLI sidecar, `podly_tools`, to move bounded, file-heavy, and serialization-heavy work out of long-lived Python processes. The first rollout keeps Python behavior as the source of truth, adds parity tests, and enables Rust per subsystem through temporary env flags.
+
+Use Rust to orchestrate ffmpeg, not replace codecs. Use direct read-only SQLite access for feed XML rendering and transcript export paths. Keep all database writes inside the existing writer service.
+
+## Key Changes
+
+- Add a Rust package under `rust/` producing one binary: `podly_tools`.
+- Add Docker build support for the release binary and copy it to `/app/bin/podly_tools`.
+- Add `rust` to `mise.toml` and extend `./scripts/ci.sh` to run `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`.
+- Add Python wrapper functions that invoke `podly_tools`, validate JSON responses, log failures, and fall back to existing Python behavior while rollout flags are disabled.
+- Add temporary flags:
+  - `PODLY_RUST_TOOLS_BIN=/app/bin/podly_tools`
+  - `PODLY_RUST_AUDIO_ENABLED=false`
+  - `PODLY_RUST_FEED_XML_ENABLED=false`
+  - `PODLY_RUST_TRANSCRIPT_ENABLED=false`
+
+## Progress
+
+- [x] Added initial Rust package under `rust/` producing the `podly_tools` binary.
+- [x] Added the initial CLI surface for planned `audio`, `chapters`, `feed`, and `transcript` commands.
+- [x] Implemented `audio probe --input <path>` using `ffprobe` and returning `{ "duration_ms": number }`.
+- [x] Added Docker build support for the release binary and copy to `/app/bin/podly_tools`.
+- [x] Added Rust to `mise.toml` and extended `./scripts/ci.sh` with `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`.
+- [x] Added Python sidecar helpers for `PODLY_RUST_TOOLS_BIN`, rollout flags, subprocess execution, JSON validation, and audio-probe fallback behavior.
+- [x] Added Python test coverage for rollout flag parsing, configured binary invocation, CLI failure handling, and audio-probe fallback behavior.
+- [x] Added Rust build/profile artifacts to `.gitignore` and `.dockerignore`.
+- [x] Implemented Rust `audio cut`, `audio bleep`, and `audio split` commands using ffmpeg.
+- [x] Moved audio window merging, keep-segment planning, ffmpeg argument construction, temp-file handling, and output writing into Rust for the implemented audio commands.
+- [x] Wired Python audio paths through sidecar wrappers with fallback while `PODLY_RUST_AUDIO_ENABLED=false`.
+- [x] Added focused Python wrapper tests for Rust audio probe, cut, bleep, and split fallback hooks.
+- [x] Implemented Rust `transcript normalize-word-timestamps --input <path> --output <path>`.
+- [x] Implemented Rust `transcript export-word-timestamps --db <sqlite> --post-id <id>` with read-only SQLite access.
+- [x] Added writer action `finish_transcription_replace_from_artifact`.
+- [x] Changed new transcription writes to store word timestamp payloads in an instance-data artifact and send only the artifact path through writer IPC.
+- [x] Added transcript artifact validation and writer-action JSON equivalence coverage.
+- [x] Implemented Rust `feed render` and `feed render-aggregate` commands with read-only SQLite access.
+- [x] Wired feed XML generation through sidecar wrappers with Python fallback while `PODLY_RUST_FEED_XML_ENABLED=false`.
+- [x] Implemented Rust `chapters write` using ID3 CHAP/CTOC frames.
+- [x] Wired adjusted chapter writing through a sidecar wrapper with Python fallback while `PODLY_RUST_AUDIO_ENABLED=false`.
+- [x] Added Rust unit/parity tests for window merging, keep-segment planning, duration formatting, token URLs, chapter HTML, transcript normalization, SQLite feed rendering, and CHAP/CTOC writing.
+- [x] Added Rust sidecar env defaults to `.env.local.example`, `.env.local`, `compose.yml`, and `compose.local.yml`.
+- [x] Validated Compose config rendering for both `compose.yml` and `compose.local.yml`.
+
+## Next Steps
+
+- [x] Implement Rust audio commands: `audio cut`, `audio bleep`, and `audio split`.
+- [x] Move audio window planning, ffmpeg argument construction, temp-file handling, and output writing into Rust.
+- [x] Wire Python audio paths through sidecar wrappers with fallback while `PODLY_RUST_AUDIO_ENABLED=false`.
+- [x] Implement Rust `chapters write`.
+- [x] Wire chapter writing through a sidecar wrapper with fallback while `PODLY_RUST_AUDIO_ENABLED=false`.
+- [x] Add Rust unit tests and deeper parity tests for audio and chapter behavior.
+- [x] Implement Rust feed XML commands: `feed render` and `feed render-aggregate`.
+- [x] Wire feed XML generation through sidecar wrappers with fallback while preserving Python auth, token updates, ETag, Last-Modified, 304 handling, and headers.
+- [x] Add feed XML parity tests covering seeded feeds, posts, chapter data, token URLs, ordering, and aggregate limits.
+- [x] Add writer action `finish_transcription_replace_from_artifact`.
+- [x] Write transcription word timestamp payloads to instance-data artifacts instead of writer IPC nested lists for new transcription writes.
+- [x] Implement Rust transcript command: `transcript normalize-word-timestamps`.
+- [x] Implement Rust transcript command: `transcript export-word-timestamps`.
+- [x] Add transcript artifact validation and JSON equivalence tests.
+- [x] Run `./scripts/ci.sh` after each backend chunk and review working tree changes because CI may auto-format.
+- [ ] Enable Rust subsystems one at a time only after parity tests pass and live memory measurements show stable improvement.
+
+## Implementation Details
+
+### Audio And Chapters
+
+- Implement Rust commands:
+  - `audio probe --input <path>` returns `{ "duration_ms": number }`.
+  - `audio cut --input <path> --output <path> --windows-json <path> --mode fade|exact --fade-ms <n> --encoding vbr|cbr`.
+  - `audio bleep --input <path> --output <path> --windows-json <path> --beep-frequency-hz <n> --beep-volume <f> --duck-volume <f> --encoding vbr|cbr`.
+  - `audio split --input <path> --out-dir <path> --chunk-size-bytes <n>` returns chunk paths and offsets.
+  - `chapters write --audio <path> --chapters-json <path> --removed-windows-json <path>`.
+- Keep ffmpeg as the execution engine for probe, split, bleep, cut, and concat. Rust owns window merging, keep-segment planning, ffmpeg argument construction, temp-file handling, and atomic output replacement.
+- Preserve current encoding behavior: LLM ad removal uses VBR/fade, chapter strategy uses exact CBR cuts, profanity bleeping keeps existing beep/duck semantics.
+- Replace Python calls in `podcast_processor/audio.py` and chapter writing only through wrapper functions, with Python fallback on Rust CLI error.
+
+### Feed XML
+
+- Implement Rust commands:
+  - `feed render --db <sqlite> --feed-id <id> --base-url <url> --include-unprocessed true|false --feed-token <id> --feed-secret <secret>`.
+  - `feed render-aggregate --db <sqlite> --user-id <id> --base-url <url> --require-auth true|false --limit-per-feed 3 --feed-token <id> --feed-secret <secret>`.
+- Rust opens SQLite read-only with `PRAGMA query_only=ON` and the same busy timeout policy as Python.
+- Python routes keep auth, feed token validation, writer-side `last_used_at` updates, ETag, Last-Modified, 304 handling, and response headers.
+- Rust renders only the XML body and must match current behavior for:
+  - feed title, link, image, lastBuildDate, namespaces;
+  - post ordering and aggregate limit-per-feed behavior;
+  - enclosure URL `/post/<guid>.mp3` plus feed token query params;
+  - enclosure length from `processed_audio_path` file size or `0`;
+  - CDATA descriptions, `content:encoded`, `itunes:image`, `itunes:duration`;
+  - Podly chapter HTML derived from `post.chapter_data`.
+- Python falls back to existing PyRSS2Gen rendering if Rust fails.
+
+### Transcript And Word Timestamp Serialization
+
+- Add a writer action `finish_transcription_replace_from_artifact`.
+- During transcription, write large word timestamp payloads to a job-scoped artifact file instead of sending the nested list through writer IPC.
+- The writer receives only `{ post_id, model_call_id, segment_count, artifact_path }`, validates the artifact path is under the job/instance data root, and invokes:
+  - `transcript normalize-word-timestamps --input <path> --output <path>`.
+- Rust streams the artifact and writes compact JSON text. The writer stores that JSON text in `post.transcript_word_timestamps` using the writer service, without materializing the nested Python object graph.
+- Add `transcript export-word-timestamps --db <sqlite> --post-id <id>` for read-heavy paths that can consume word timestamps from a short-lived Rust process instead of loading large JSON through ORM state.
+- Keep the existing `Post.transcript_word_timestamps` column and external behavior unchanged for this phase. No Alembic migration is required.
+
+## Test Plan
+
+- Add Rust unit tests for window merging, keep-segment planning, duration formatting, CDATA escaping, chapter timestamp recalculation, feed token URL appending, and transcript JSON streaming.
+- Add Python tests that monkeypatch `podly_tools` success/failure and verify fallback behavior for audio, feed XML, and transcript artifact writes.
+- Add feed XML parity tests: seed feeds/posts/chapter data, render with Python and Rust, normalize XML, and assert semantic equivalence.
+- Add transcript tests proving large word timestamp payloads go through artifact-path writer action and store the same JSON value currently produced.
+- Add audio/chapter parity tests using small fixture audio where practical; otherwise assert generated ffmpeg command plans and wrapper behavior.
+- Run only `./scripts/ci.sh` for backend verification after implementation, per project rules.
+
+## Assumptions And Defaults
+
+- Rust sidecar rollout is phased and opt-in at first.
+- Rust orchestrates ffmpeg instead of replacing audio codecs.
+- Rust may read SQLite directly for feed XML and transcript export, but all writes remain inside the writer service.
+- The first phase avoids schema migrations and preserves existing API, RSS, audio, and DB behavior.
+- Temporary Rust feature flags should be removed or defaulted on only after parity tests and live memory measurements show stable improvement.

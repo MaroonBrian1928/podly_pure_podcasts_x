@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.extensions import db
 from app.models import (
     AudioSegment,
@@ -11,6 +13,7 @@ from app.models import (
 )
 from app.writer.actions.processor import (
     finish_transcription_replace_action,
+    finish_transcription_replace_from_artifact_action,
     insert_transcript_segments_action,
     replace_audio_segments_action,
     start_transcription_replace_action,
@@ -151,6 +154,57 @@ def test_retry_start_clears_partial_transcript_rows(app) -> None:
     db.session.commit()
 
     assert TranscriptSegment.query.filter_by(post_id=post.id).count() == 0
+
+
+def test_finish_transcription_replace_from_artifact_normalizes_and_finishes(
+    app, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PODLY_INSTANCE_DIR", str(tmp_path / "instance"))
+    monkeypatch.setattr(
+        "app.writer.actions.processor.normalize_word_timestamps_artifact",
+        lambda input_path, output_path: False,
+    )
+    artifact_dir = tmp_path / "instance" / "data" / "transcript_artifacts"
+    artifact_dir.mkdir(parents=True)
+    artifact_path = artifact_dir / "words.json"
+    artifact_path.write_text(
+        json.dumps(
+            [
+                {
+                    "sequence_num": "0",
+                    "words": [
+                        {"word": "hello", "start": "0.1", "end": "0.4"},
+                        {"word": "bad", "start": 1.0, "end": 0.5},
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    post = _create_post()
+    model_call = _create_model_call(post, status="pending")
+
+    result = finish_transcription_replace_from_artifact_action(
+        {
+            "post_id": post.id,
+            "model_call_id": model_call.id,
+            "segment_count": 1,
+            "artifact_path": str(artifact_path),
+        }
+    )
+    db.session.commit()
+    db.session.refresh(post)
+    db.session.refresh(model_call)
+
+    assert result == {"post_id": post.id, "segment_count": 1}
+    assert model_call.status == "success"
+    assert post.transcript_word_timestamps == [
+        {
+            "sequence_num": 0,
+            "words": [{"word": "hello", "start": 0.1, "end": 0.4, "score": None}],
+        }
+    ]
 
 
 def test_replace_audio_segments_batches_and_returns_count(app, monkeypatch) -> None:

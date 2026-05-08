@@ -15,6 +15,10 @@ services:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - SERVER_THREADS=${SERVER_THREADS:-1}
+      - PODLY_RUST_TOOLS_BIN=${PODLY_RUST_TOOLS_BIN:-/app/bin/podly_tools}
+      - PODLY_RUST_AUDIO_ENABLED=${PODLY_RUST_AUDIO_ENABLED:-false}
+      - PODLY_RUST_FEED_XML_ENABLED=${PODLY_RUST_FEED_XML_ENABLED:-false}
+      - PODLY_RUST_TRANSCRIPT_ENABLED=${PODLY_RUST_TRANSCRIPT_ENABLED:-false}
     restart: unless-stopped
     healthcheck:
       test:
@@ -31,7 +35,8 @@ services:
   parakeetx-cuda:
     image: ghcr.io/maroonbrian1928/parakeetx:cuda
     env_file:
-      - .parakeetx.env
+      - path: .parakeetx.env
+        required: false
     environment:
       PARAKEET__DEVICE: ${PARAKEET__DEVICE_CUDA:-cuda}
       DIARIZATION__DEVICE: ${DIARIZATION__DEVICE_CUDA:-cpu}
@@ -55,3 +60,6 @@ services:
 networks:
   default:
     name: podly-pure-podcasts-network
+
+volumes:
+  model-cache:

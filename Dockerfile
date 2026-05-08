@@ -12,6 +12,13 @@ RUN set -e && \
     test -d dist && \
     echo "Frontend build successful - dist directory created"
 
+FROM rust:1-slim AS rust-tools
+WORKDIR /app/rust
+
+COPY rust/Cargo.toml rust/Cargo.lock* ./
+COPY rust/src/ ./src/
+RUN cargo build --release --locked
+
 FROM python:3.14-slim AS backend
 COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /uvx /bin/
 
@@ -43,6 +50,9 @@ COPY src/ ./src/
 RUN rm -rf ./src/instance
 COPY scripts/ ./scripts/
 RUN chmod +x scripts/start_services.sh
+
+RUN mkdir -p /app/bin
+COPY --from=rust-tools /app/rust/target/release/podly_tools /app/bin/podly_tools
 
 COPY --from=frontend-build /app/dist ./src/app/static
 

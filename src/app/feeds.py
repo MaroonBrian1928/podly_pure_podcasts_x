@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Iterable
 from email.utils import format_datetime, parsedate_to_datetime
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -19,6 +20,7 @@ from app.models import Feed, Post, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
 from podcast_processor.podcast_downloader import find_audio_link
+from shared.rust_sidecar import try_render_aggregate_feed_xml, try_render_feed_xml
 
 logger = logging.getLogger("global_logger")
 
@@ -725,6 +727,9 @@ def generate_feed_xml(feed: Feed) -> Any:
     logger.info(f"Generating XML for feed with ID: {feed.id}")
 
     include_unprocessed = getattr(config, "autoprocess_on_download", True)
+    rust_xml = _try_generate_feed_xml_with_rust(feed, include_unprocessed)
+    if rust_xml is not None:
+        return rust_xml
 
     if include_unprocessed:
         posts = list(cast(Iterable[Post], feed.posts))
@@ -772,6 +777,9 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     username = user.username if user else "Public"
     user_id = user.id if user else 0
     logger.info(f"Generating aggregate feed XML for: {username}")
+    rust_xml = _try_generate_aggregate_feed_xml_with_rust(user)
+    if rust_xml is not None:
+        return rust_xml
 
     posts = get_user_aggregate_posts(user_id)
     items = [feed_item(post, prepend_feed_title=True) for post in posts]
@@ -812,6 +820,74 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     request_memory_trim_after_context(f"aggregate feed XML user_id={user_id}")
 
     logger.info(f"Aggregate XML generated for: {username}")
+    return xml_content
+
+
+def _sqlite_db_path_from_app_config() -> Path | None:
+    uri = str(current_app.config.get("SQLALCHEMY_DATABASE_URI") or "")
+    prefix = "sqlite:///"
+    if not uri.startswith(prefix) or uri == "sqlite:///:memory:":
+        return None
+    path = uri.removeprefix(prefix)
+    if not path:
+        return None
+    return Path(path)
+
+
+def _feed_token_request_values() -> tuple[str | None, str | None]:
+    try:
+        token_result = getattr(g, "feed_token", None)
+        token_id = request.args.get("feed_token")
+        secret = request.args.get("feed_secret")
+    except RuntimeError:
+        return None, None
+
+    if token_result is not None:
+        token_id = token_id or token_result.token.token_id
+        secret = secret or token_result.token.token_secret
+    return token_id, secret
+
+
+def _try_generate_feed_xml_with_rust(
+    feed: Feed,
+    include_unprocessed: bool,
+) -> bytes | None:
+    db_path = _sqlite_db_path_from_app_config()
+    if db_path is None:
+        return None
+    token_id, secret = _feed_token_request_values()
+    xml_content = try_render_feed_xml(
+        db_path=db_path,
+        feed_id=int(feed.id),
+        base_url=_get_base_url(),
+        include_unprocessed=bool(include_unprocessed),
+        feed_token=token_id,
+        feed_secret=secret,
+    )
+    if xml_content is not None:
+        release_memory_to_os(f"rust feed XML feed_id={feed.id}", logger)
+        request_memory_trim_after_context(f"rust feed XML feed_id={feed.id}")
+    return xml_content
+
+
+def _try_generate_aggregate_feed_xml_with_rust(user: User | None) -> bytes | None:
+    db_path = _sqlite_db_path_from_app_config()
+    if db_path is None:
+        return None
+    user_id = int(user.id) if user else 0
+    token_id, secret = _feed_token_request_values()
+    xml_content = try_render_aggregate_feed_xml(
+        db_path=db_path,
+        user_id=user_id,
+        base_url=_get_base_url(),
+        require_auth=bool(current_app.config.get("REQUIRE_AUTH")),
+        limit_per_feed=3,
+        feed_token=token_id,
+        feed_secret=secret,
+    )
+    if xml_content is not None:
+        release_memory_to_os(f"rust aggregate feed XML user_id={user_id}", logger)
+        request_memory_trim_after_context(f"rust aggregate feed XML user_id={user_id}")
     return xml_content
 
 

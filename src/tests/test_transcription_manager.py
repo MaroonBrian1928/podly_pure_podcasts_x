@@ -406,7 +406,10 @@ def test_transcribe_for_processing_returns_rich_segments_when_requested(
     test_config: Config,
     test_logger: logging.Logger,
     app: Flask,
+    tmp_path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("PODLY_INSTANCE_DIR", str(tmp_path / "instance"))
     with app.app_context():
         feed = Feed(title="Test Feed", rss_url="http://example.com/rss-rich.xml")
         post = Post(

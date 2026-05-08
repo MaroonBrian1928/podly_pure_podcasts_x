@@ -166,6 +166,10 @@ class CommandExecutor:
             writer_actions.finish_transcription_replace_action,
         )
         self.register_action(
+            "finish_transcription_replace_from_artifact",
+            writer_actions.finish_transcription_replace_from_artifact_action,
+        )
+        self.register_action(
             "mark_model_call_failed", writer_actions.mark_model_call_failed_action
         )
         self.register_action(

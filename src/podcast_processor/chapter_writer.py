@@ -1,12 +1,14 @@
 """Write chapter metadata to processed MP3 files with adjusted timestamps."""
 
 import logging
+from pathlib import Path
 from typing import cast
 
 from mutagen.id3 import CHAP, CTOC, ID3, TIT2
 from mutagen.mp3 import MP3
 
 from podcast_processor.chapter_reader import Chapter
+from shared.rust_sidecar import try_write_chapters
 
 logger = logging.getLogger("global_logger")
 
@@ -208,4 +210,18 @@ def write_adjusted_chapters(
         removed_segments: List of (start_sec, end_sec) tuples that were removed
     """
     adjusted_chapters = recalculate_chapter_times(chapters_to_keep, removed_segments)
+    chapter_payload = [
+        {
+            "title": chapter.title,
+            "start_time_ms": chapter.start_time_ms,
+            "end_time_ms": chapter.end_time_ms,
+        }
+        for chapter in adjusted_chapters
+    ]
+    if try_write_chapters(
+        audio_path=Path(audio_path),
+        chapters=chapter_payload,
+        removed_windows=removed_segments,
+    ):
+        return
     write_chapters(audio_path, adjusted_chapters)

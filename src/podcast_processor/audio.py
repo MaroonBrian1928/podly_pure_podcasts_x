@@ -8,10 +8,21 @@ from typing import Any
 
 import ffmpeg
 
+from shared.rust_sidecar import (
+    try_bleep_audio,
+    try_cut_audio,
+    try_probe_audio_duration_ms,
+    try_split_audio,
+)
+
 logger = logging.getLogger("global_logger")
 
 
 def get_audio_duration_ms(file_path: str) -> int | None:
+    rust_duration_ms = try_probe_audio_duration_ms(Path(file_path))
+    if rust_duration_ms is not None:
+        return rust_duration_ms
+
     try:
         logger.debug("[FFMPEG_PROBE] Probing audio file: %s", file_path)
         probe = ffmpeg.probe(file_path)
@@ -47,6 +58,15 @@ def clip_segments_with_fade(
     vbr_quality: int = 2,
     cbr_bitrate: str = "192k",
 ) -> None:
+    if try_cut_audio(
+        windows_ms=ad_segments_ms,
+        input_path=Path(in_path),
+        output_path=Path(out_path),
+        mode="fade",
+        fade_ms=fade_ms,
+        encoding="vbr" if use_vbr else "cbr",
+    ):
+        return
 
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
@@ -142,6 +162,16 @@ def clip_segments_exact(
     Used by chapter-based ad detection. Always uses CBR encoding because VBR
     causes seeking inaccuracy with chapter markers.
     """
+    if try_cut_audio(
+        windows_ms=ad_segments_ms,
+        input_path=Path(in_path),
+        output_path=Path(out_path),
+        mode="exact",
+        fade_ms=0,
+        encoding="cbr",
+    ):
+        return
+
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
     # Chapter strategy always uses CBR for accurate chapter marker seeking
@@ -163,6 +193,17 @@ def overlay_beeps_with_ducking(
     vbr_quality: int = 2,
     cbr_bitrate: str = "192k",
 ) -> None:
+    if try_bleep_audio(
+        windows_ms=censor_windows_ms,
+        input_path=Path(in_path),
+        output_path=Path(out_path),
+        beep_frequency_hz=beep_frequency_hz,
+        beep_volume=beep_volume,
+        duck_volume=duck_volume,
+        encoding="vbr" if use_vbr else "cbr",
+    ):
+        return
+
     if not censor_windows_ms:
         shutil.copyfile(in_path, out_path)
         return
@@ -362,6 +403,14 @@ def split_audio(
 ) -> list[tuple[Path, int]]:
 
     audio_chunk_path.mkdir(parents=True, exist_ok=True)
+
+    rust_chunks = try_split_audio(
+        input_path=audio_file_path,
+        output_dir=audio_chunk_path,
+        chunk_size_bytes=chunk_size_bytes,
+    )
+    if rust_chunks is not None:
+        return rust_chunks
 
     logger.info(
         "[FFMPEG_SPLIT] Splitting audio file: %s into chunks of %d bytes",

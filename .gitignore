@@ -71,6 +71,23 @@ scripts/railway_command.sh
 # Linter / type checker caches
 .ruff_cache/
 
+# Rust build output and local package artifacts
+rust/target/
+target/
+*.rs.bk
+*.rlib
+*.rmeta
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.gcov
+rust/*.profraw
+rust/*.profdata
+rust/flamegraph.svg
+rust/perf.data
+rust/perf.data.old
+
 # Claude local files
 .claude/
 CLAUDE.md

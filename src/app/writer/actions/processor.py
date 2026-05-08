@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -15,6 +18,8 @@ from app.writer.batching import (
     get_writer_batch_size,
     iter_writer_batches,
 )
+from shared.processing_paths import get_base_podcast_data_dir, get_instance_dir
+from shared.rust_sidecar import normalize_word_timestamps_artifact
 
 
 def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -378,6 +383,62 @@ def finish_transcription_replace_action(params: dict[str, Any]) -> dict[str, Any
 
     db.session.flush()
     return {"post_id": post_id_i, "segment_count": segment_count}
+
+
+def finish_transcription_replace_from_artifact_action(
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    post_id = params.get("post_id")
+    model_call_id = params.get("model_call_id")
+    segment_count = int(params.get("segment_count") or 0)
+    artifact_path = params.get("artifact_path")
+
+    if post_id is None:
+        raise ValueError("post_id is required")
+    if not isinstance(artifact_path, str):
+        raise ValueError("artifact_path is required")
+
+    artifact = _validate_transcript_artifact_path(Path(artifact_path))
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".normalized.json",
+        delete=False,
+    ) as temp_file:
+        normalized_path = Path(temp_file.name)
+
+    try:
+        transcript_word_timestamps: Any
+        if normalize_word_timestamps_artifact(artifact, normalized_path):
+            transcript_word_timestamps = json.loads(normalized_path.read_text())
+        else:
+            transcript_word_timestamps = _normalize_transcript_word_timestamps_payload(
+                json.loads(artifact.read_text())
+            )
+    finally:
+        normalized_path.unlink(missing_ok=True)
+
+    return finish_transcription_replace_action(
+        {
+            "post_id": post_id,
+            "model_call_id": model_call_id,
+            "segment_count": segment_count,
+            "transcript_word_timestamps": transcript_word_timestamps,
+        }
+    )
+
+
+def _validate_transcript_artifact_path(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    allowed_roots = [
+        get_instance_dir().expanduser().resolve(),
+        get_base_podcast_data_dir().expanduser().resolve(),
+    ]
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise ValueError("artifact_path must be under the Podly instance data root")
+    if not resolved.is_file():
+        raise ValueError("artifact_path must point to an existing file")
+    return resolved
 
 
 def mark_model_call_failed_action(params: dict[str, Any]) -> dict[str, Any]:

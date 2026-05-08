@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 
 from podcast_processor.audio import (
+    clip_segments_exact,
     clip_segments_with_fade,
     get_audio_duration_ms,
     overlay_beeps_with_ducking,
@@ -14,6 +15,52 @@ TEST_FILE_PATH = "src/tests/data/count_0_99.mp3"
 
 def test_get_duration_ms() -> None:
     assert get_audio_duration_ms(TEST_FILE_PATH) == TEST_FILE_DURATION
+
+
+def test_get_duration_ms_uses_rust_probe_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "podcast_processor.audio.try_probe_audio_duration_ms", lambda path: 1234
+    )
+
+    assert get_audio_duration_ms(TEST_FILE_PATH) == 1234
+
+
+def test_clip_segment_with_fade_uses_rust_when_enabled(monkeypatch) -> None:
+    calls = []
+
+    def fake_cut_audio(**kwargs) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr("podcast_processor.audio.try_cut_audio", fake_cut_audio)
+
+    clip_segments_with_fade(
+        [(3_000, 21_000)],
+        5_000,
+        TEST_FILE_PATH,
+        "/tmp/out.mp3",
+        use_vbr=True,
+    )
+
+    assert calls[0]["mode"] == "fade"
+    assert calls[0]["fade_ms"] == 5_000
+    assert calls[0]["encoding"] == "vbr"
+
+
+def test_clip_segment_exact_uses_rust_when_enabled(monkeypatch) -> None:
+    calls = []
+
+    def fake_cut_audio(**kwargs) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr("podcast_processor.audio.try_cut_audio", fake_cut_audio)
+
+    clip_segments_exact([(3_000, 21_000)], TEST_FILE_PATH, "/tmp/out.mp3")
+
+    assert calls[0]["mode"] == "exact"
+    assert calls[0]["fade_ms"] == 0
+    assert calls[0]["encoding"] == "cbr"
 
 
 def test_clip_segment_with_fade() -> None:
@@ -129,6 +176,26 @@ def test_overlay_beeps_with_ducking_handles_equal_length_windows() -> None:
         )
 
 
+def test_overlay_beeps_with_ducking_uses_rust_when_enabled(monkeypatch) -> None:
+    calls = []
+
+    def fake_bleep_audio(**kwargs) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr("podcast_processor.audio.try_bleep_audio", fake_bleep_audio)
+
+    overlay_beeps_with_ducking(
+        [(3_000, 3_600)],
+        TEST_FILE_PATH,
+        "/tmp/out.mp3",
+        use_vbr=True,
+    )
+
+    assert calls[0]["windows_ms"] == [(3_000, 3_600)]
+    assert calls[0]["encoding"] == "vbr"
+
+
 def test_split_audio() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
@@ -162,3 +229,14 @@ def test_split_audio() -> None:
             assert abs(filesize - split.stat().st_size) <= 500, (
                 f"filesize <> 500 bytes for {split}. found {split.stat().st_size}, expected {filesize}"
             )
+
+
+def test_split_audio_uses_rust_when_enabled(monkeypatch) -> None:
+    expected = [(Path("/tmp/chunks/0.mp3"), 0), (Path("/tmp/chunks/1.mp3"), 1000)]
+
+    monkeypatch.setattr(
+        "podcast_processor.audio.try_split_audio",
+        lambda **kwargs: expected,
+    )
+
+    assert split_audio(Path(TEST_FILE_PATH), Path("/tmp/chunks"), 38_000) == expected

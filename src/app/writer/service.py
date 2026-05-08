@@ -15,6 +15,7 @@ MEMORY_TRIM_ACTIONS = {
     "insert_identifications",
     "insert_transcript_segments",
     "finish_transcription_replace",
+    "finish_transcription_replace_from_artifact",
     "refresh_feed",
     "replace_audio_segments",
     "replace_identifications",
