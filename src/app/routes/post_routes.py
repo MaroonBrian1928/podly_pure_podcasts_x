@@ -341,7 +341,7 @@ def api_feed_posts(feed_id: int) -> flask.Response:
     )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/processing-estimate", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/processing-estimate", methods=["GET"])
 def api_post_processing_estimate(p_guid: str) -> ResponseReturnValue:
     post = Post.query.filter_by(guid=p_guid).first()
     if post is None:
@@ -576,7 +576,7 @@ def _resolve_original_duration_seconds(
     )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/stats", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/stats", methods=["GET"])
 def api_post_stats(p_guid: str) -> flask.Response:
     """Get processing statistics for a post in JSON format."""
     post = Post.query.filter_by(guid=p_guid).first()
@@ -865,7 +865,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
     return flask.jsonify(stats_data)
 
 
-@post_bp.route("/api/posts/<string:p_guid>/whitelist", methods=["POST"])
+@post_bp.route("/api/posts/<path:p_guid>/whitelist", methods=["POST"])
 def api_toggle_whitelist(p_guid: str) -> ResponseReturnValue:
     """Toggle whitelist status for a post via API (admins only)."""
     post = Post.query.filter_by(guid=p_guid).first()
@@ -991,7 +991,7 @@ def api_toggle_whitelist_all(feed_id: int) -> ResponseReturnValue:
     )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/process", methods=["POST"])
+@post_bp.route("/api/posts/<path:p_guid>/process", methods=["POST"])
 def api_process_post(p_guid: str) -> ResponseReturnValue:
     """Start processing a post and return immediately.
 
@@ -1073,7 +1073,7 @@ def api_process_post(p_guid: str) -> ResponseReturnValue:
         )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/reprocess", methods=["POST"])
+@post_bp.route("/api/posts/<path:p_guid>/reprocess", methods=["POST"])
 def api_reprocess_post(p_guid: str) -> ResponseReturnValue:
     """Clear all processing data for a post and start processing from scratch.
 
@@ -1198,7 +1198,7 @@ def api_reprocess_post(p_guid: str) -> ResponseReturnValue:
 
 
 @post_bp.route(
-    "/api/posts/<string:p_guid>/reprocess/keep-transcript",
+    "/api/posts/<path:p_guid>/reprocess/keep-transcript",
     methods=["POST"],
 )
 def api_reprocess_post_keep_transcript(p_guid: str) -> ResponseReturnValue:
@@ -1362,7 +1362,7 @@ def api_reprocess_post_keep_transcript(p_guid: str) -> ResponseReturnValue:
         )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/status", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/status", methods=["GET"])
 def api_post_status(p_guid: str) -> ResponseReturnValue:
     """Get the current processing status of a post via JobsManager."""
     result = get_jobs_manager().get_post_status(p_guid)
@@ -1374,7 +1374,7 @@ def api_post_status(p_guid: str) -> ResponseReturnValue:
     return flask.jsonify(result), status_code
 
 
-@post_bp.route("/api/posts/<string:p_guid>/audio", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/audio", methods=["GET"])
 def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
     """API endpoint to serve processed audio files with proper CORS headers."""
     current_user = getattr(g, "current_user", None)
@@ -1418,7 +1418,7 @@ def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
         )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/chapters", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/chapters", methods=["GET"])
 def api_get_post_chapters(p_guid: str) -> flask.Response:
     """Return chapter metadata embedded in the processed MP3, if present."""
     post = Post.query.filter_by(guid=p_guid).first()
@@ -1449,7 +1449,7 @@ def api_get_post_chapters(p_guid: str) -> flask.Response:
     )
 
 
-@post_bp.route("/api/posts/<string:p_guid>/download", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/download", methods=["GET"])
 def api_download_post(p_guid: str) -> flask.Response:
     """API endpoint to download processed audio files."""
     current_user = getattr(g, "current_user", None)
@@ -1487,7 +1487,7 @@ def api_download_post(p_guid: str) -> flask.Response:
     return response
 
 
-@post_bp.route("/api/posts/<string:p_guid>/download/original", methods=["GET"])
+@post_bp.route("/api/posts/<path:p_guid>/download/original", methods=["GET"])
 def api_download_original_post(p_guid: str) -> flask.Response:
     """API endpoint to download original (unprocessed) audio files."""
     logger.info(f"Request to download original post with GUID: {p_guid}")

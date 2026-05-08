@@ -44,6 +44,8 @@ Use Rust to orchestrate ffmpeg, not replace codecs. Use direct read-only SQLite 
 - [x] Added Rust unit/parity tests for window merging, keep-segment planning, duration formatting, token URLs, chapter HTML, transcript normalization, SQLite feed rendering, and CHAP/CTOC writing.
 - [x] Added Rust sidecar env defaults to `.env.local.example`, `.env.local`, `compose.yml`, and `compose.local.yml`.
 - [x] Validated Compose config rendering for both `compose.yml` and `compose.local.yml`.
+- [x] Fixed slash-containing post GUID API routing/encoding discovered during live Rust sidecar processing checks.
+- [x] Captured first live Rust-enabled memory/speed comparison against same-day Python-disabled jobs.
 
 ## Next Steps
 
@@ -62,6 +64,8 @@ Use Rust to orchestrate ffmpeg, not replace codecs. Use direct read-only SQLite 
 - [x] Implement Rust transcript command: `transcript export-word-timestamps`.
 - [x] Add transcript artifact validation and JSON equivalence tests.
 - [x] Run `./scripts/ci.sh` after each backend chunk and review working tree changes because CI may auto-format.
+- [x] Fix GUID-safe API route handling for processing controls before comparing live Rust/Python runs.
+- [x] Compare first live Rust-enabled processing runs to same-day Python-disabled runs.
 - [ ] Enable Rust subsystems one at a time only after parity tests pass and live memory measurements show stable improvement.
 
 ## Implementation Details
