@@ -10,6 +10,8 @@ from app.jobs_manager import get_jobs_manager
 from app.jobs_manager_run_service import build_run_status_snapshot
 from app.post_cleanup import cleanup_processed_posts, count_cleanup_candidates
 from app.runtime_config import config as runtime_config
+from shared.processing_paths import get_instance_dir
+from shared.rust_sidecar import try_list_active_jobs, try_list_all_jobs
 
 logger = logging.getLogger("global_logger")
 
@@ -23,6 +25,12 @@ def api_list_active_jobs() -> ResponseReturnValue:
         limit = int(request.args.get("limit", "100"))
     except ValueError:
         limit = 100
+    rust_result = try_list_active_jobs(
+        db_path=get_instance_dir() / "sqlite3.db",
+        limit=limit,
+    )
+    if rust_result is not None:
+        return flask.jsonify(rust_result)
     result = get_jobs_manager().list_active_jobs(limit=limit)
     return flask.jsonify(result)
 
@@ -33,6 +41,12 @@ def api_list_all_jobs() -> ResponseReturnValue:
         limit = int(request.args.get("limit", "100"))
     except ValueError:
         limit = 100
+    rust_result = try_list_all_jobs(
+        db_path=get_instance_dir() / "sqlite3.db",
+        limit=limit,
+    )
+    if rust_result is not None:
+        return flask.jsonify(rust_result)
     result = get_jobs_manager().list_all_jobs_detailed(limit=limit)
     return flask.jsonify(result)
 

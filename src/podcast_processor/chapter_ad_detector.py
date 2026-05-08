@@ -1,12 +1,14 @@
 """Detect ad segments using chapter metadata filtering."""
 
 import logging
+from pathlib import Path
 
 from podcast_processor.chapter_filter import (
     filter_chapters_by_strings,
     parse_filter_strings,
 )
 from podcast_processor.chapter_reader import Chapter, read_chapters
+from shared.rust_sidecar import try_detect_chapter_ads
 
 
 class ChapterDetectionError(Exception):
@@ -69,6 +71,39 @@ class ChapterAdDetector:
         Raises:
             ChapterDetectionError: If no chapters are found in the audio file
         """
+        rust_detection = try_detect_chapter_ads(
+            Path(audio_path),
+            ",".join(self.filter_strings),
+        )
+        if rust_detection is not None:
+            chapters_to_keep = [
+                Chapter(
+                    element_id=chapter["element_id"],
+                    title=chapter["title"],
+                    start_time_ms=chapter["start_time_ms"],
+                    end_time_ms=chapter["end_time_ms"],
+                )
+                for chapter in rust_detection["chapters_to_keep"]
+            ]
+            chapters_to_remove = [
+                Chapter(
+                    element_id=chapter["element_id"],
+                    title=chapter["title"],
+                    start_time_ms=chapter["start_time_ms"],
+                    end_time_ms=chapter["end_time_ms"],
+                )
+                for chapter in rust_detection["chapters_to_remove"]
+            ]
+            if not chapters_to_keep and not chapters_to_remove:
+                raise ChapterDetectionError(
+                    f"No chapters found in audio file: {audio_path}"
+                )
+            ad_segments = [
+                (float(segment[0]), float(segment[1]))
+                for segment in rust_detection["ad_segments"]
+            ]
+            return ad_segments, chapters_to_keep, chapters_to_remove
+
         chapters = read_chapters(audio_path)
 
         if not chapters:

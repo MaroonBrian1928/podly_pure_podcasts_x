@@ -6,7 +6,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 LOGGER = logging.getLogger(__name__)
 
@@ -15,6 +15,10 @@ DEFAULT_RUST_TOOLS_BIN = "/app/bin/podly_tools"
 RUST_TOOLS_BIN_ENV = "PODLY_RUST_TOOLS_BIN"
 RUST_AUDIO_ENABLED_ENV = "PODLY_RUST_AUDIO_ENABLED"
 RUST_FEED_XML_ENABLED_ENV = "PODLY_RUST_FEED_XML_ENABLED"
+RUST_CHAPTERS_ENABLED_ENV = "PODLY_RUST_CHAPTERS_ENABLED"
+RUST_FEED_REFRESH_ENABLED_ENV = "PODLY_RUST_FEED_REFRESH_ENABLED"
+RUST_JOBS_ENABLED_ENV = "PODLY_RUST_JOBS_ENABLED"
+RUST_STATS_ENABLED_ENV = "PODLY_RUST_STATS_ENABLED"
 RUST_TRANSCRIPT_ENABLED_ENV = "PODLY_RUST_TRANSCRIPT_ENABLED"
 
 
@@ -36,6 +40,22 @@ def rust_audio_enabled() -> bool:
 
 def rust_feed_xml_enabled() -> bool:
     return env_flag_enabled(RUST_FEED_XML_ENABLED_ENV)
+
+
+def rust_feed_refresh_enabled() -> bool:
+    return env_flag_enabled(RUST_FEED_REFRESH_ENABLED_ENV)
+
+
+def rust_chapters_enabled() -> bool:
+    return env_flag_enabled(RUST_CHAPTERS_ENABLED_ENV)
+
+
+def rust_jobs_enabled() -> bool:
+    return env_flag_enabled(RUST_JOBS_ENABLED_ENV)
+
+
+def rust_stats_enabled() -> bool:
+    return env_flag_enabled(RUST_STATS_ENABLED_ENV)
 
 
 def rust_transcript_enabled() -> bool:
@@ -297,6 +317,96 @@ def try_render_aggregate_feed_xml(
     return _try_feed_xml_command(args, "feed render-aggregate")
 
 
+def try_render_post_stats(
+    *,
+    db_path: Path,
+    post_guid: str,
+    min_confidence: float,
+    min_ad_segment_separation_seconds: float,
+    enable_boundary_refinement: bool,
+    stats_debug: bool,
+    log_path: Path,
+    in_root: Path,
+    srv_root: Path,
+) -> dict[str, Any] | None:
+    if not rust_stats_enabled():
+        return None
+
+    try:
+        payload = run_podly_tools(
+            [
+                "stats",
+                "render",
+                "--db",
+                str(db_path),
+                "--post-guid",
+                post_guid,
+                "--min-confidence",
+                str(min_confidence),
+                "--min-ad-segment-separation-seconds",
+                str(min_ad_segment_separation_seconds),
+                "--enable-boundary-refinement",
+                "true" if enable_boundary_refinement else "false",
+                "--stats-debug",
+                "true" if stats_debug else "false",
+                "--log-path",
+                str(log_path),
+                "--in-root",
+                str(in_root),
+                "--srv-root",
+                str(srv_root),
+            ]
+        )
+    except RustSidecarError:
+        LOGGER.exception("Rust stats render failed; falling back to Python behavior")
+        return None
+
+    stats = payload.get("stats")
+    if not isinstance(stats, dict):
+        LOGGER.error("Rust stats render returned invalid stats payload: %r", payload)
+        return None
+    return stats
+
+
+def try_list_active_jobs(*, db_path: Path, limit: int) -> list[dict[str, Any]] | None:
+    return _try_list_jobs(db_path=db_path, active_only=True, limit=limit)
+
+
+def try_list_all_jobs(*, db_path: Path, limit: int) -> list[dict[str, Any]] | None:
+    return _try_list_jobs(db_path=db_path, active_only=False, limit=limit)
+
+
+def _try_list_jobs(
+    *,
+    db_path: Path,
+    active_only: bool,
+    limit: int,
+) -> list[dict[str, Any]] | None:
+    if not rust_jobs_enabled():
+        return None
+
+    try:
+        payload = run_podly_tools(
+            [
+                "jobs",
+                "active" if active_only else "all",
+                "--db",
+                str(db_path),
+                "--limit",
+                str(limit),
+            ]
+        )
+    except RustSidecarError:
+        LOGGER.exception("Rust jobs list failed; falling back to Python behavior")
+        return None
+
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
+        LOGGER.error("Rust jobs list returned invalid payload: %r", payload)
+        return None
+    return cast(list[dict[str, Any]], jobs)
+
+
 def try_write_chapters(
     *,
     audio_path: Path,
@@ -321,6 +431,91 @@ def try_write_chapters(
                 ],
                 "chapters write",
             )
+
+
+def try_read_chapters(audio_path: Path) -> list[dict[str, Any]] | None:
+    if not rust_chapters_enabled():
+        return None
+
+    try:
+        payload = run_podly_tools(["chapters", "read", "--audio", str(audio_path)])
+    except RustSidecarError:
+        LOGGER.exception("Rust chapters read failed; falling back to Python behavior")
+        return None
+
+    chapters = payload.get("chapters")
+    if not isinstance(chapters, list):
+        LOGGER.error("Rust chapters read returned invalid payload: %r", payload)
+        return None
+
+    parsed: list[dict[str, Any]] = []
+    for chapter in chapters:
+        if not _is_valid_chapter_payload(chapter):
+            LOGGER.error("Rust chapters read returned invalid chapter: %r", chapter)
+            return None
+        parsed.append(chapter)
+    return parsed
+
+
+def try_detect_chapter_ads(
+    audio_path: Path,
+    filter_strings_csv: str,
+) -> dict[str, Any] | None:
+    if not rust_chapters_enabled():
+        return None
+
+    try:
+        payload = run_podly_tools(
+            [
+                "chapters",
+                "detect",
+                "--audio",
+                str(audio_path),
+                "--filter-strings-csv",
+                filter_strings_csv,
+            ]
+        )
+    except RustSidecarError:
+        LOGGER.exception("Rust chapters detect failed; falling back to Python behavior")
+        return None
+
+    if not _is_valid_chapter_detection_payload(payload):
+        LOGGER.error("Rust chapters detect returned invalid payload: %r", payload)
+        return None
+    return payload
+
+
+def _is_valid_chapter_detection_payload(payload: dict[str, Any]) -> bool:
+    ad_segments = payload.get("ad_segments")
+    if not isinstance(ad_segments, list):
+        return False
+    for segment in ad_segments:
+        if (
+            not isinstance(segment, list)
+            or len(segment) != 2
+            or not all(isinstance(value, int | float) for value in segment)
+        ):
+            return False
+
+    for key in ("chapters_to_keep", "chapters_to_remove"):
+        chapters = payload.get(key)
+        if not isinstance(chapters, list):
+            return False
+        if not all(_is_valid_chapter_payload(chapter) for chapter in chapters):
+            return False
+    return True
+
+
+def _is_valid_chapter_payload(chapter: object) -> bool:
+    if not isinstance(chapter, dict):
+        return False
+    chapter_dict = cast(dict[str, Any], chapter)
+    return (
+        isinstance(chapter_dict.get("element_id"), str)
+        and isinstance(chapter_dict.get("title"), str)
+        and isinstance(chapter_dict.get("start_time_ms"), int)
+        and isinstance(chapter_dict.get("end_time_ms"), int)
+    )
 
 
 def _try_audio_command(args: list[str], label: str) -> bool:

@@ -849,6 +849,107 @@ def test_post_stats_omits_debug_info_when_disabled(app):
     assert "debug_info" not in payload
 
 
+def test_post_stats_returns_rust_payload_when_available(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Rust Stats Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-rust-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Rust Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+        guid = post.guid
+
+    rust_payload = {
+        "post": {"guid": guid, "title": "from rust"},
+        "processing_stats": {"total_segments": 0},
+    }
+    with mock.patch(
+        "app.routes.post_routes.try_render_post_stats", return_value=rust_payload
+    ) as render_mock:
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    assert response.get_json() == rust_payload
+    render_mock.assert_called_once()
+
+
+def test_post_stats_falls_back_when_rust_payload_unavailable(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(
+            title="Rust Stats Fallback Feed", rss_url="https://example.com/feed.xml"
+        )
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-rust-fallback-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Rust Fallback Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+        guid = post.guid
+
+    with mock.patch(
+        "app.routes.post_routes.try_render_post_stats", return_value=None
+    ) as render_mock:
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["post"]["guid"] == guid
+    render_mock.assert_called_once()
+
+
+def test_post_stats_rust_path_accepts_guid_with_slashes(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(
+            title="Rust Slash Stats Feed", rss_url="https://example.com/feed.xml"
+        )
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="tag:example.com,2026:/posts/123",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Slash Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+        guid = post.guid
+
+    rust_payload = {"post": {"guid": guid}, "processing_stats": {}}
+    with mock.patch(
+        "app.routes.post_routes.try_render_post_stats", return_value=rust_payload
+    ) as render_mock:
+        response = app.test_client().get(f"/api/posts/{_encoded_guid(guid)}/stats")
+
+    assert response.status_code == 200
+    assert response.get_json() == rust_payload
+    assert render_mock.call_args.kwargs["post_guid"] == guid
+
+
 def test_post_stats_include_chapters_for_chapter_insert_strategy(app):
     app.testing = True
     app.register_blueprint(post_bp)

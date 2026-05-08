@@ -17,7 +17,11 @@ services:
       - SERVER_THREADS=${SERVER_THREADS:-1}
       - PODLY_RUST_TOOLS_BIN=${PODLY_RUST_TOOLS_BIN:-/app/bin/podly_tools}
       - PODLY_RUST_AUDIO_ENABLED=${PODLY_RUST_AUDIO_ENABLED:-false}
+      - PODLY_RUST_CHAPTERS_ENABLED=${PODLY_RUST_CHAPTERS_ENABLED:-false}
+      - PODLY_RUST_FEED_REFRESH_ENABLED=${PODLY_RUST_FEED_REFRESH_ENABLED:-false}
       - PODLY_RUST_FEED_XML_ENABLED=${PODLY_RUST_FEED_XML_ENABLED:-false}
+      - PODLY_RUST_JOBS_ENABLED=${PODLY_RUST_JOBS_ENABLED:-false}
+      - PODLY_RUST_STATS_ENABLED=${PODLY_RUST_STATS_ENABLED:-false}
       - PODLY_RUST_TRANSCRIPT_ENABLED=${PODLY_RUST_TRANSCRIPT_ENABLED:-false}
     restart: unless-stopped
     healthcheck:
@@ -32,23 +36,23 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-  parakeetx-cuda:
-    image: ghcr.io/maroonbrian1928/parakeetx:cuda
-    env_file:
-      - path: .parakeetx.env
-        required: false
-    environment:
-      PARAKEET__DEVICE: ${PARAKEET__DEVICE_CUDA:-cuda}
-      DIARIZATION__DEVICE: ${DIARIZATION__DEVICE_CUDA:-cpu}
-      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-    ports:
-      - "${HOST_PORT_CUDA:-7373}:${UVICORN_PORT:-7317}"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: ["gpu"]
-  ina-segmenter:
+  # parakeetx-cuda:
+  #   image: ghcr.io/maroonbrian1928/parakeetx:cuda
+  #   env_file:
+  #     - path: .parakeetx.env
+  #       required: false
+  #   environment:
+  #     PARAKEET__DEVICE: ${PARAKEET__DEVICE_CUDA:-cuda}
+  #     DIARIZATION__DEVICE: ${DIARIZATION__DEVICE_CUDA:-cpu}
+  #     PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+  #   ports:
+  #     - "${HOST_PORT_CUDA:-7373}:${UVICORN_PORT:-7317}"
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - capabilities: ["gpu"]
+  # ina-segmenter:
     image: ghcr.io/maroonbrian1928/InaFastAPI:latest
     ports:
       - "8002:8000"

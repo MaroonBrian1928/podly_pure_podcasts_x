@@ -12,11 +12,19 @@ from shared.rust_sidecar import RustSidecarError
 
 def test_rust_feature_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PODLY_RUST_AUDIO_ENABLED", raising=False)
+    monkeypatch.delenv("PODLY_RUST_CHAPTERS_ENABLED", raising=False)
+    monkeypatch.delenv("PODLY_RUST_FEED_REFRESH_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_FEED_XML_ENABLED", raising=False)
+    monkeypatch.delenv("PODLY_RUST_JOBS_ENABLED", raising=False)
+    monkeypatch.delenv("PODLY_RUST_STATS_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_TRANSCRIPT_ENABLED", raising=False)
 
     assert rust_sidecar.rust_audio_enabled() is False
+    assert rust_sidecar.rust_chapters_enabled() is False
+    assert rust_sidecar.rust_feed_refresh_enabled() is False
     assert rust_sidecar.rust_feed_xml_enabled() is False
+    assert rust_sidecar.rust_jobs_enabled() is False
+    assert rust_sidecar.rust_stats_enabled() is False
     assert rust_sidecar.rust_transcript_enabled() is False
 
 
@@ -129,3 +137,253 @@ def test_try_render_feed_xml_uses_rust_when_enabled(
             "secret",
         ]
     ]
+
+
+def test_try_render_post_stats_returns_none_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PODLY_RUST_STATS_ENABLED", raising=False)
+
+    assert (
+        rust_sidecar.try_render_post_stats(
+            db_path=Path("/tmp/db.sqlite"),
+            post_guid="post-guid",
+            min_confidence=0.8,
+            min_ad_segment_separation_seconds=30.0,
+            enable_boundary_refinement=True,
+            stats_debug=False,
+            log_path=Path("/tmp/app.log"),
+            in_root=Path("/tmp/in"),
+            srv_root=Path("/tmp/srv"),
+        )
+        is None
+    )
+
+
+def test_try_render_post_stats_returns_valid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_run(args: list[str]) -> dict[str, object]:
+        calls.append(args)
+        return {"stats": {"post": {"guid": "post-guid"}}}
+
+    monkeypatch.setenv("PODLY_RUST_STATS_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    result = rust_sidecar.try_render_post_stats(
+        db_path=Path("/tmp/db.sqlite"),
+        post_guid="post-guid/with/slash",
+        min_confidence=0.8,
+        min_ad_segment_separation_seconds=30.0,
+        enable_boundary_refinement=True,
+        stats_debug=False,
+        log_path=Path("/tmp/app.log"),
+        in_root=Path("/tmp/in"),
+        srv_root=Path("/tmp/srv"),
+    )
+
+    assert result == {"post": {"guid": "post-guid"}}
+    assert calls == [
+        [
+            "stats",
+            "render",
+            "--db",
+            "/tmp/db.sqlite",
+            "--post-guid",
+            "post-guid/with/slash",
+            "--min-confidence",
+            "0.8",
+            "--min-ad-segment-separation-seconds",
+            "30.0",
+            "--enable-boundary-refinement",
+            "true",
+            "--stats-debug",
+            "false",
+            "--log-path",
+            "/tmp/app.log",
+            "--in-root",
+            "/tmp/in",
+            "--srv-root",
+            "/tmp/srv",
+        ]
+    ]
+
+
+def test_try_render_post_stats_falls_back_on_bad_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_STATS_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", lambda args: {"stats": []})
+
+    assert (
+        rust_sidecar.try_render_post_stats(
+            db_path=Path("/tmp/db.sqlite"),
+            post_guid="post-guid",
+            min_confidence=0.8,
+            min_ad_segment_separation_seconds=30.0,
+            enable_boundary_refinement=True,
+            stats_debug=False,
+            log_path=Path("/tmp/app.log"),
+            in_root=Path("/tmp/in"),
+            srv_root=Path("/tmp/srv"),
+        )
+        is None
+    )
+
+
+def test_try_render_post_stats_falls_back_on_process_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(args: list[str]) -> dict[str, object]:
+        raise RustSidecarError("boom")
+
+    monkeypatch.setenv("PODLY_RUST_STATS_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    assert (
+        rust_sidecar.try_render_post_stats(
+            db_path=Path("/tmp/db.sqlite"),
+            post_guid="post-guid",
+            min_confidence=0.8,
+            min_ad_segment_separation_seconds=30.0,
+            enable_boundary_refinement=True,
+            stats_debug=False,
+            log_path=Path("/tmp/app.log"),
+            in_root=Path("/tmp/in"),
+            srv_root=Path("/tmp/srv"),
+        )
+        is None
+    )
+
+
+def test_try_list_active_jobs_returns_valid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_run(args: list[str]) -> dict[str, object]:
+        calls.append(args)
+        return {"jobs": [{"job_id": "job-1"}]}
+
+    monkeypatch.setenv("PODLY_RUST_JOBS_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    assert rust_sidecar.try_list_active_jobs(
+        db_path=Path("/tmp/db.sqlite"),
+        limit=12,
+    ) == [{"job_id": "job-1"}]
+    assert calls == [
+        [
+            "jobs",
+            "active",
+            "--db",
+            "/tmp/db.sqlite",
+            "--limit",
+            "12",
+        ]
+    ]
+
+
+def test_try_list_all_jobs_falls_back_on_bad_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_JOBS_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", lambda args: {"jobs": {}})
+
+    assert (
+        rust_sidecar.try_list_all_jobs(
+            db_path=Path("/tmp/db.sqlite"),
+            limit=12,
+        )
+        is None
+    )
+
+
+def test_try_read_chapters_returns_valid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_CHAPTERS_ENABLED", "true")
+    monkeypatch.setattr(
+        rust_sidecar,
+        "run_podly_tools",
+        lambda args: {
+            "chapters": [
+                {
+                    "element_id": "chp0",
+                    "title": "Intro",
+                    "start_time_ms": 0,
+                    "end_time_ms": 1000,
+                }
+            ]
+        },
+    )
+
+    assert rust_sidecar.try_read_chapters(Path("/tmp/audio.mp3")) == [
+        {
+            "element_id": "chp0",
+            "title": "Intro",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+        }
+    ]
+
+
+def test_try_read_chapters_falls_back_on_bad_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_CHAPTERS_ENABLED", "true")
+    monkeypatch.setattr(
+        rust_sidecar,
+        "run_podly_tools",
+        lambda args: {"chapters": [{"element_id": "chp0"}]},
+    )
+
+    assert rust_sidecar.try_read_chapters(Path("/tmp/audio.mp3")) is None
+
+
+def test_try_detect_chapter_ads_returns_valid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "ad_segments": [[1.0, 2.0]],
+        "chapters_to_keep": [
+            {
+                "element_id": "chp0",
+                "title": "Intro",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+            }
+        ],
+        "chapters_to_remove": [
+            {
+                "element_id": "chp1",
+                "title": "Sponsor",
+                "start_time_ms": 1000,
+                "end_time_ms": 2000,
+            }
+        ],
+    }
+    monkeypatch.setenv("PODLY_RUST_CHAPTERS_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", lambda args: payload)
+
+    assert (
+        rust_sidecar.try_detect_chapter_ads(Path("/tmp/audio.mp3"), "sponsor")
+        == payload
+    )
+
+
+def test_try_detect_chapter_ads_falls_back_on_bad_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_CHAPTERS_ENABLED", "true")
+    monkeypatch.setattr(
+        rust_sidecar,
+        "run_podly_tools",
+        lambda args: {"ad_segments": ["not-a-window"]},
+    )
+
+    assert (
+        rust_sidecar.try_detect_chapter_ads(Path("/tmp/audio.mp3"), "sponsor") is None
+    )

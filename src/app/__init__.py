@@ -7,7 +7,6 @@ from typing import Any
 
 from flask import Flask, current_app, g, has_app_context, request
 from flask_cors import CORS
-from flask_migrate import upgrade
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
@@ -493,6 +492,8 @@ def _register_memory_cleanup(app: Flask) -> None:
 
 
 def _run_app_startup(auth_settings: AuthSettings) -> None:
+    from flask_migrate import upgrade
+
     upgrade()
     bootstrap_admin_user(auth_settings)
     try:

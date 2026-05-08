@@ -54,6 +54,7 @@ config/config.yml
 **/*.sqlite-*
 .DS_Store
 src/instance/data/*
+src/instance/*
 
 # Frontend build logs
 frontend-build.log

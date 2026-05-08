@@ -57,6 +57,7 @@ from shared.processing_paths import (
     get_processed_audio_path_candidates,
     get_srv_root,
 )
+from shared.rust_sidecar import try_render_post_stats
 
 logger = logging.getLogger("global_logger")
 
@@ -74,6 +75,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sqlite_db_path_for_sidecar() -> Path:
+    return get_instance_dir() / "sqlite3.db"
 
 
 def _build_file_debug(path_value: str | None) -> dict[str, Any]:
@@ -585,6 +590,22 @@ def api_post_stats(p_guid: str) -> flask.Response:
 
     feed = db.session.get(Feed, post.feed_id)
     ad_detection_strategy = feed.ad_detection_strategy if feed else "llm"
+
+    rust_stats = try_render_post_stats(
+        db_path=_sqlite_db_path_for_sidecar(),
+        post_guid=p_guid,
+        min_confidence=float(runtime_config.output.min_confidence),
+        min_ad_segment_separation_seconds=float(
+            runtime_config.output.min_ad_segment_separation_seconds
+        ),
+        enable_boundary_refinement=bool(runtime_config.enable_boundary_refinement),
+        stats_debug=_env_bool("PODLY_STATS_DEBUG", default=False),
+        log_path=get_instance_dir() / "logs" / "app.log",
+        in_root=get_in_root(),
+        srv_root=get_srv_root(),
+    )
+    if rust_stats is not None:
+        return flask.jsonify(rust_stats)
 
     model_calls = (
         ModelCall.query.filter_by(post_id=post.id)

@@ -1,15 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use id3::frame::{Chapter as Id3Chapter, Content, Frame, TableOfContents};
 use id3::{Tag, TagLike, Version};
+use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[derive(Parser)]
 #[command(name = "podly_tools")]
@@ -23,6 +26,8 @@ struct Cli {
 enum Commands {
     Audio(AudioCommand),
     Feed(FeedCommand),
+    Jobs(JobsCommand),
+    Stats(StatsCommand),
     Transcript(TranscriptCommand),
     Chapters(ChaptersCommand),
 }
@@ -116,6 +121,59 @@ enum FeedSubcommand {
 }
 
 #[derive(Args)]
+struct JobsCommand {
+    #[command(subcommand)]
+    command: JobsSubcommand,
+}
+
+#[derive(Subcommand)]
+enum JobsSubcommand {
+    Active(JobsListArgs),
+    All(JobsListArgs),
+}
+
+#[derive(Args)]
+struct JobsListArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long, default_value_t = 100)]
+    limit: i64,
+}
+
+#[derive(Args)]
+struct StatsCommand {
+    #[command(subcommand)]
+    command: StatsSubcommand,
+}
+
+#[derive(Subcommand)]
+enum StatsSubcommand {
+    Render(StatsRenderArgs),
+}
+
+#[derive(Args)]
+struct StatsRenderArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "min-confidence")]
+    min_confidence: f64,
+    #[arg(long = "min-ad-segment-separation-seconds")]
+    min_ad_segment_separation_seconds: f64,
+    #[arg(long = "enable-boundary-refinement", action = ArgAction::Set)]
+    enable_boundary_refinement: bool,
+    #[arg(long = "stats-debug", action = ArgAction::Set)]
+    stats_debug: bool,
+    #[arg(long = "log-path")]
+    log_path: PathBuf,
+    #[arg(long = "in-root")]
+    in_root: PathBuf,
+    #[arg(long = "srv-root")]
+    srv_root: PathBuf,
+}
+
+#[derive(Args)]
 struct FeedRenderArgs {
     #[arg(long)]
     db: PathBuf,
@@ -185,7 +243,23 @@ struct ChaptersCommand {
 
 #[derive(Subcommand)]
 enum ChaptersSubcommand {
+    Read(ChaptersReadArgs),
+    Detect(ChaptersDetectArgs),
     Write(ChaptersWriteArgs),
+}
+
+#[derive(Args)]
+struct ChaptersReadArgs {
+    #[arg(long)]
+    audio: PathBuf,
+}
+
+#[derive(Args)]
+struct ChaptersDetectArgs {
+    #[arg(long)]
+    audio: PathBuf,
+    #[arg(long = "filter-strings-csv")]
+    filter_strings_csv: String,
 }
 
 #[derive(Args)]
@@ -287,6 +361,117 @@ struct ChapterPayload {
     end_time_ms: u32,
 }
 
+#[derive(Clone, Serialize)]
+struct ChapterResponseItem {
+    element_id: String,
+    title: String,
+    start_time_ms: u32,
+    end_time_ms: u32,
+}
+
+#[derive(Serialize)]
+struct ChaptersReadResponse {
+    chapters: Vec<ChapterResponseItem>,
+}
+
+#[derive(Serialize)]
+struct ChaptersDetectResponse {
+    ad_segments: Vec<(f64, f64)>,
+    chapters_to_keep: Vec<ChapterResponseItem>,
+    chapters_to_remove: Vec<ChapterResponseItem>,
+}
+
+#[derive(Clone)]
+struct StatsPostRow {
+    id: i64,
+    feed_id: i64,
+    guid: String,
+    title: String,
+    download_url: String,
+    unprocessed_audio_path: Option<String>,
+    processed_audio_path: Option<String>,
+    release_date: Option<String>,
+    duration: Option<f64>,
+    whitelisted: bool,
+    download_count: Option<i64>,
+    chapter_data: Option<String>,
+    bleep_windows: Option<String>,
+    refined_ad_boundaries: Option<String>,
+}
+
+struct StatsFeedRow {
+    ad_detection_strategy: String,
+    chapter_filter_strings: Option<String>,
+}
+
+#[derive(Clone)]
+struct StatsTranscriptSegmentRow {
+    id: i64,
+    sequence_num: i64,
+    start_time: f64,
+    end_time: f64,
+    text: String,
+    speaker_label: Option<String>,
+}
+
+#[derive(Clone)]
+struct StatsIdentificationRow {
+    id: i64,
+    transcript_segment_id: i64,
+    label: String,
+    confidence: Option<f64>,
+    model_call_id: i64,
+    model_call_status: String,
+    segment_sequence_num: i64,
+    segment_start_time: f64,
+    segment_end_time: f64,
+    segment_text: String,
+}
+
+#[derive(Clone)]
+struct StatsAudioSegmentRow {
+    id: i64,
+    start_time: f64,
+    end_time: f64,
+    label: String,
+    model_call_id: Option<i64>,
+}
+
+struct StatsModelCallRow {
+    id: i64,
+    model_name: String,
+    status: String,
+    first_segment_sequence_num: i64,
+    last_segment_sequence_num: i64,
+    timestamp: Option<String>,
+    retry_attempts: i64,
+    error_message: Option<String>,
+    prompt: String,
+    response: Option<String>,
+}
+
+struct StatsProcessingJobRow {
+    id: String,
+}
+
+#[derive(Clone)]
+struct StatsAdGroup {
+    segments: Vec<StatsTranscriptSegmentRow>,
+    identifications: Vec<StatsIdentificationRow>,
+    start_time: f64,
+    end_time: f64,
+    confidence_avg: f64,
+    keywords: Vec<String>,
+}
+
+#[derive(Clone)]
+struct RefinedBoundaryRow {
+    orig_start: f64,
+    orig_end: f64,
+    refined_start: f64,
+    refined_end: f64,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error:#}");
@@ -308,6 +493,13 @@ fn run() -> Result<()> {
             FeedSubcommand::Render(args) => print_json(&render_feed(args)?),
             FeedSubcommand::RenderAggregate(args) => print_json(&render_aggregate_feed(args)?),
         },
+        Commands::Jobs(jobs) => match jobs.command {
+            JobsSubcommand::Active(args) => print_json(&render_jobs(args, true)?),
+            JobsSubcommand::All(args) => print_json(&render_jobs(args, false)?),
+        },
+        Commands::Stats(stats) => match stats.command {
+            StatsSubcommand::Render(args) => print_json(&render_stats(args)?),
+        },
         Commands::Transcript(transcript) => match transcript.command {
             TranscriptSubcommand::NormalizeWordTimestamps(args) => {
                 print_json(&normalize_word_timestamps(args)?)
@@ -317,8 +509,1328 @@ fn run() -> Result<()> {
             }
         },
         Commands::Chapters(chapters) => match chapters.command {
+            ChaptersSubcommand::Read(args) => print_json(&read_chapters(args)?),
+            ChaptersSubcommand::Detect(args) => print_json(&detect_chapter_ads(args)?),
             ChaptersSubcommand::Write(args) => print_json(&write_chapters(args)?),
         },
+    }
+}
+
+fn render_stats(args: StatsRenderArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let feed = query_stats_feed(&conn, post.feed_id)?;
+    let model_calls = query_stats_model_calls(&conn, post.id)?;
+    let recent_jobs = query_stats_processing_jobs(&conn, &post.guid)?;
+    let transcript_segments = query_stats_transcript_segments(&conn, post.id)?;
+    let audio_segments = query_stats_audio_segments(&conn, post.id)?;
+    let identifications = query_stats_identifications(&conn, post.id)?;
+
+    let ad_detection_strategy = feed
+        .as_ref()
+        .map(|feed| feed.ad_detection_strategy.as_str())
+        .unwrap_or("llm");
+    let (model_call_statuses, model_types) = count_stats_model_calls(&model_calls);
+    let identifications_by_segment = group_stats_identifications_by_segment(&identifications);
+    let (content_segments, ad_segments_count) =
+        count_stats_primary_labels(&transcript_segments, &identifications_by_segment);
+    let refined_windows = parse_refined_windows_json(post.refined_ad_boundaries.as_deref());
+    let bleep_windows =
+        parse_time_windows_json(post.bleep_windows.as_deref(), "start_time", "end_time");
+
+    let mut segment_mixed_by_id: HashMap<i64, bool> = HashMap::new();
+    let transcript_segments_data: Vec<Value> = transcript_segments
+        .iter()
+        .map(|segment| {
+            let segment_identifications = identifications_by_segment
+                .get(&segment.id)
+                .cloned()
+                .unwrap_or_default();
+            let has_ad_label = segment_identifications
+                .iter()
+                .any(|ident| ident.label == "ad");
+            let mixed = has_ad_label
+                && is_mixed_segment(segment.start_time, segment.end_time, &refined_windows);
+            segment_mixed_by_id.insert(segment.id, mixed);
+            json!({
+                "id": segment.id,
+                "sequence_num": segment.sequence_num,
+                "start_time": round_to(segment.start_time, 1),
+                "end_time": round_to(segment.end_time, 1),
+                "speaker_label": segment.speaker_label,
+                "text": segment.text,
+                "primary_label": if has_ad_label { "ad" } else { "content" },
+                "mixed": mixed,
+                "identifications": segment_identifications.iter().map(|ident| json!({
+                    "id": ident.id,
+                    "label": ident.label,
+                    "confidence": ident.confidence.map(|value| round_to(value, 2)),
+                    "model_call_id": ident.model_call_id,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    let ad_blocks = build_stats_ad_blocks(
+        &post,
+        &transcript_segments,
+        &audio_segments,
+        &identifications,
+        args.min_confidence,
+        args.min_ad_segment_separation_seconds,
+        args.enable_boundary_refinement,
+    );
+    let ad_time_seconds: f64 = ad_blocks
+        .iter()
+        .filter(|(start, end)| end > start)
+        .map(|(start, end)| end - start)
+        .sum();
+    let original_duration_seconds = resolve_original_duration_seconds(
+        post.duration,
+        &transcript_segments,
+        &bleep_windows,
+        ad_time_seconds,
+    );
+    let ad_percentage = if original_duration_seconds > 0.0 {
+        ad_time_seconds / original_duration_seconds * 100.0
+    } else {
+        0.0
+    };
+    let bleep_time_seconds: f64 = bleep_windows
+        .iter()
+        .filter(|(start, end)| end > start)
+        .map(|(start, end)| end - start)
+        .sum();
+    let bleep_percentage = if original_duration_seconds > 0.0 {
+        bleep_time_seconds / original_duration_seconds * 100.0
+    } else {
+        0.0
+    };
+    let edited_duration_seconds = (original_duration_seconds - ad_time_seconds).max(0.0);
+
+    let chapters = build_stats_chapters(&post, feed.as_ref(), ad_detection_strategy)?;
+    let related_logs = build_related_logs_for_stats(&args.log_path, &post, &recent_jobs);
+
+    let mut stats = json!({
+        "post": {
+            "guid": post.guid,
+            "title": post.title,
+            "duration": post.duration,
+            "release_date": post.release_date,
+            "whitelisted": post.whitelisted,
+            "has_processed_audio": post.processed_audio_path.is_some(),
+            "download_count": post.download_count,
+        },
+        "ad_detection_strategy": ad_detection_strategy,
+        "processing_stats": {
+            "total_segments": transcript_segments.len(),
+            "total_model_calls": model_calls.len(),
+            "total_identifications": identifications.len(),
+            "audio_segments_count": audio_segments.len(),
+            "content_segments": content_segments,
+            "ad_segments_count": ad_segments_count,
+            "ad_percentage": round_to(ad_percentage, 1),
+            "estimated_ad_time_seconds": round_to(ad_time_seconds, 1),
+            "original_duration_seconds": round_to(original_duration_seconds, 1),
+            "edited_duration_seconds": round_to(edited_duration_seconds, 1),
+            "ad_blocks": ad_blocks.iter().map(|(start, end)| json!({
+                "start_time": round_to(*start, 1),
+                "end_time": round_to(*end, 1),
+            })).collect::<Vec<_>>(),
+            "edited_ad_markers": build_edited_timeline_ad_markers(&ad_blocks),
+            "has_bleep_windows": !bleep_windows.is_empty(),
+            "bleeped_time_seconds": round_to(bleep_time_seconds, 1),
+            "bleeped_percentage": round_to(bleep_percentage, 1),
+            "bleep_windows": bleep_windows.iter().map(|(start, end)| json!({
+                "start_time": round_to(*start, 3),
+                "end_time": round_to(*end, 3),
+            })).collect::<Vec<_>>(),
+            "edited_bleep_windows": build_edited_timeline_bleep_windows(&bleep_windows, &ad_blocks),
+            "speaker_breakdown": build_stats_speaker_breakdown(&transcript_segments),
+            "model_call_statuses": model_call_statuses,
+            "model_types": model_types,
+        },
+        "model_calls": model_calls.iter().map(|call| {
+            let recorded_attempts = call.retry_attempts.max(0);
+            json!({
+                "id": call.id,
+                "model_name": call.model_name,
+                "status": call.status,
+                "segment_range": format!("{}-{}", call.first_segment_sequence_num, call.last_segment_sequence_num),
+                "first_segment_sequence_num": call.first_segment_sequence_num,
+                "last_segment_sequence_num": call.last_segment_sequence_num,
+                "timestamp": call.timestamp,
+                "retry_attempts": recorded_attempts,
+                "retry_count": (recorded_attempts - 1).max(0),
+                "error_message": call.error_message,
+                "prompt": call.prompt,
+                "response": call.response,
+            })
+        }).collect::<Vec<_>>(),
+        "transcript_segments": transcript_segments_data,
+        "audio_segments": audio_segments.iter().map(|segment| json!({
+            "id": segment.id,
+            "start_time": round_to(segment.start_time, 1),
+            "end_time": round_to(segment.end_time, 1),
+            "label": segment.label,
+            "model_call_id": segment.model_call_id,
+        })).collect::<Vec<_>>(),
+        "identifications": identifications.iter().map(|ident| json!({
+            "id": ident.id,
+            "transcript_segment_id": ident.transcript_segment_id,
+            "label": ident.label,
+            "confidence": ident.confidence.map(|value| round_to(value, 2)),
+            "model_call_id": ident.model_call_id,
+            "segment_sequence_num": ident.segment_sequence_num,
+            "segment_start_time": round_to(ident.segment_start_time, 1),
+            "segment_end_time": round_to(ident.segment_end_time, 1),
+            "segment_text": ident.segment_text,
+            "mixed": *segment_mixed_by_id.get(&ident.transcript_segment_id).unwrap_or(&false),
+        })).collect::<Vec<_>>(),
+        "related_logs": related_logs,
+        "chapters": chapters,
+    });
+
+    if args.stats_debug {
+        stats["debug_info"] = json!({
+            "post_id": post.id,
+            "feed_id": post.feed_id,
+            "guid": post.guid,
+            "download_url": post.download_url,
+            "download_count": post.download_count,
+            "has_processed_audio": post.processed_audio_path.is_some(),
+            "has_unprocessed_audio": post.unprocessed_audio_path.is_some(),
+            "processed_audio": build_file_debug(post.processed_audio_path.as_deref()),
+            "unprocessed_audio": build_file_debug(post.unprocessed_audio_path.as_deref()),
+            "processed_audio_path_candidates": [],
+            "processing_roots": {
+                "in_root": args.in_root.to_string_lossy().to_string(),
+                "srv_root": args.srv_root.to_string_lossy().to_string(),
+            },
+            "record_counts": {
+                "transcript_segments": transcript_segments.len(),
+                "audio_segments": audio_segments.len(),
+                "model_calls": model_calls.len(),
+                "identifications": identifications.len(),
+            },
+        });
+    }
+
+    Ok(json!({ "stats": stats }))
+}
+
+fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let limit = args.limit.clamp(1, 1000);
+    let status_filter = if active_only {
+        "WHERE processing_job.status IN ('pending', 'running')"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT
+            processing_job.id,
+            processing_job.post_guid,
+            post.title,
+            feed.title,
+            processing_job.status,
+            CASE
+                WHEN processing_job.status = 'running' THEN 2
+                WHEN processing_job.status = 'pending' THEN 1
+                ELSE 0
+            END AS priority,
+            processing_job.current_step,
+            processing_job.step_name,
+            processing_job.total_steps,
+            processing_job.progress_percentage,
+            processing_job.created_at,
+            processing_job.started_at,
+            processing_job.completed_at,
+            processing_job.error_message
+         FROM processing_job
+         LEFT JOIN post ON processing_job.post_guid = post.guid
+         LEFT JOIN feed ON post.feed_id = feed.id
+         {status_filter}
+         ORDER BY priority DESC, processing_job.created_at DESC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit], |row| {
+        Ok(json!({
+            "job_id": row.get::<_, String>(0)?,
+            "post_guid": row.get::<_, String>(1)?,
+            "post_title": row.get::<_, Option<String>>(2)?,
+            "feed_title": row.get::<_, Option<String>>(3)?,
+            "status": row.get::<_, String>(4)?,
+            "priority": row.get::<_, i64>(5)?,
+            "step": row.get::<_, Option<i64>>(6)?,
+            "step_name": row.get::<_, Option<String>>(7)?,
+            "total_steps": row.get::<_, Option<i64>>(8)?,
+            "progress_percentage": row.get::<_, Option<f64>>(9)?,
+            "created_at": row.get::<_, Option<String>>(10)?.map(|value| sqlite_datetime_to_iso(&value)),
+            "started_at": row.get::<_, Option<String>>(11)?.map(|value| sqlite_datetime_to_iso(&value)),
+            "completed_at": row.get::<_, Option<String>>(12)?.map(|value| sqlite_datetime_to_iso(&value)),
+            "error_message": row.get::<_, Option<String>>(13)?,
+        }))
+    })?;
+    let jobs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(json!({ "jobs": jobs }))
+}
+
+fn query_stats_post(conn: &Connection, guid: &str) -> Result<Option<StatsPostRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, feed_id, guid, title, download_url, unprocessed_audio_path, processed_audio_path,
+                release_date, duration, whitelisted, download_count, chapter_data,
+                bleep_windows, refined_ad_boundaries
+         FROM post WHERE guid = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query([guid])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(StatsPostRow {
+            id: row.get(0)?,
+            feed_id: row.get(1)?,
+            guid: row.get(2)?,
+            title: row.get(3)?,
+            download_url: row.get(4)?,
+            unprocessed_audio_path: row.get(5)?,
+            processed_audio_path: row.get(6)?,
+            release_date: row
+                .get::<_, Option<String>>(7)?
+                .map(|value| sqlite_datetime_to_iso(&value)),
+            duration: row.get(8)?,
+            whitelisted: row.get(9)?,
+            download_count: row.get(10)?,
+            chapter_data: row.get(11)?,
+            bleep_windows: row.get(12)?,
+            refined_ad_boundaries: row.get(13)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn query_stats_feed(conn: &Connection, feed_id: i64) -> Result<Option<StatsFeedRow>> {
+    let mut stmt = conn
+        .prepare("SELECT ad_detection_strategy, chapter_filter_strings FROM feed WHERE id = ?1")?;
+    let mut rows = stmt.query([feed_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(StatsFeedRow {
+            ad_detection_strategy: row
+                .get::<_, Option<String>>(0)?
+                .unwrap_or_else(|| "llm".to_string()),
+            chapter_filter_strings: row.get(1)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn query_stats_model_calls(conn: &Connection, post_id: i64) -> Result<Vec<StatsModelCallRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, model_name, status, first_segment_sequence_num, last_segment_sequence_num,
+                timestamp, retry_attempts, error_message, prompt, response
+         FROM model_call WHERE post_id = ?1
+         ORDER BY model_name, first_segment_sequence_num",
+    )?;
+    let rows = stmt.query_map([post_id], |row| {
+        Ok(StatsModelCallRow {
+            id: row.get(0)?,
+            model_name: row.get(1)?,
+            status: row.get(2)?,
+            first_segment_sequence_num: row.get(3)?,
+            last_segment_sequence_num: row.get(4)?,
+            timestamp: row
+                .get::<_, Option<String>>(5)?
+                .map(|value| sqlite_datetime_to_iso(&value)),
+            retry_attempts: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+            error_message: row.get(7)?,
+            prompt: row.get(8)?,
+            response: row.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn query_stats_processing_jobs(
+    conn: &Connection,
+    guid: &str,
+) -> Result<Vec<StatsProcessingJobRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM processing_job WHERE post_guid = ?1 ORDER BY created_at DESC LIMIT 3",
+    )?;
+    let rows = stmt.query_map([guid], |row| Ok(StatsProcessingJobRow { id: row.get(0)? }))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn query_stats_transcript_segments(
+    conn: &Connection,
+    post_id: i64,
+) -> Result<Vec<StatsTranscriptSegmentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, sequence_num, start_time, end_time, text, speaker_label
+         FROM transcript_segment WHERE post_id = ?1 ORDER BY sequence_num",
+    )?;
+    let rows = stmt.query_map([post_id], |row| {
+        Ok(StatsTranscriptSegmentRow {
+            id: row.get(0)?,
+            sequence_num: row.get(1)?,
+            start_time: row.get(2)?,
+            end_time: row.get(3)?,
+            text: row.get(4)?,
+            speaker_label: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn query_stats_audio_segments(
+    conn: &Connection,
+    post_id: i64,
+) -> Result<Vec<StatsAudioSegmentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, start_time, end_time, label, model_call_id
+         FROM audio_segment WHERE post_id = ?1 ORDER BY start_time",
+    )?;
+    let rows = stmt.query_map([post_id], |row| {
+        Ok(StatsAudioSegmentRow {
+            id: row.get(0)?,
+            start_time: row.get(1)?,
+            end_time: row.get(2)?,
+            label: row.get(3)?,
+            model_call_id: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn query_stats_identifications(
+    conn: &Connection,
+    post_id: i64,
+) -> Result<Vec<StatsIdentificationRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT identification.id, identification.transcript_segment_id, identification.label,
+                identification.confidence, identification.model_call_id, model_call.status,
+                transcript_segment.sequence_num, transcript_segment.start_time,
+                transcript_segment.end_time, transcript_segment.text
+         FROM identification
+         JOIN transcript_segment ON identification.transcript_segment_id = transcript_segment.id
+         JOIN model_call ON identification.model_call_id = model_call.id
+         WHERE transcript_segment.post_id = ?1
+         ORDER BY transcript_segment.sequence_num",
+    )?;
+    let rows = stmt.query_map([post_id], |row| {
+        Ok(StatsIdentificationRow {
+            id: row.get(0)?,
+            transcript_segment_id: row.get(1)?,
+            label: row.get(2)?,
+            confidence: row.get(3)?,
+            model_call_id: row.get(4)?,
+            model_call_status: row.get(5)?,
+            segment_sequence_num: row.get(6)?,
+            segment_start_time: row.get(7)?,
+            segment_end_time: row.get(8)?,
+            segment_text: row.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn round_to(value: f64, places: i32) -> f64 {
+    let factor = 10_f64.powi(places);
+    (value * factor).round() / factor
+}
+
+fn sqlite_datetime_to_iso(value: &str) -> String {
+    let iso = if value.contains('T') {
+        value.to_string()
+    } else {
+        value.replace(' ', "T")
+    };
+    iso.strip_suffix(".000000").unwrap_or(&iso).to_string()
+}
+
+fn count_stats_model_calls(
+    model_calls: &[StatsModelCallRow],
+) -> (HashMap<String, i64>, HashMap<String, i64>) {
+    let mut statuses = HashMap::new();
+    let mut types = HashMap::new();
+    for call in model_calls {
+        *statuses.entry(call.status.clone()).or_insert(0) += 1;
+        *types.entry(call.model_name.clone()).or_insert(0) += 1;
+    }
+    (statuses, types)
+}
+
+fn group_stats_identifications_by_segment(
+    identifications: &[StatsIdentificationRow],
+) -> HashMap<i64, Vec<StatsIdentificationRow>> {
+    let mut grouped: HashMap<i64, Vec<StatsIdentificationRow>> = HashMap::new();
+    for ident in identifications {
+        grouped
+            .entry(ident.transcript_segment_id)
+            .or_default()
+            .push(ident.clone());
+    }
+    grouped
+}
+
+fn count_stats_primary_labels(
+    segments: &[StatsTranscriptSegmentRow],
+    grouped: &HashMap<i64, Vec<StatsIdentificationRow>>,
+) -> (usize, usize) {
+    let mut content = 0;
+    let mut ads = 0;
+    for segment in segments {
+        if grouped
+            .get(&segment.id)
+            .map(|items| items.iter().any(|ident| ident.label == "ad"))
+            .unwrap_or(false)
+        {
+            ads += 1;
+        } else {
+            content += 1;
+        }
+    }
+    (content, ads)
+}
+
+fn parse_refined_windows_json(raw: Option<&str>) -> Vec<(f64, f64)> {
+    parse_time_windows_json(raw, "refined_start", "refined_end")
+}
+
+fn parse_time_windows_json(raw: Option<&str>, start_key: &str, end_key: &str) -> Vec<(f64, f64)> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let start = value_to_f64(object.get(start_key)?)?;
+            let end = value_to_f64(object.get(end_key)?)?;
+            (end > start).then_some((start, end))
+        })
+        .collect()
+}
+
+fn is_mixed_segment(seg_start: f64, seg_end: f64, refined_windows: &[(f64, f64)]) -> bool {
+    refined_windows.iter().any(|(win_start, win_end)| {
+        let overlaps = seg_start <= *win_end && seg_end >= *win_start;
+        let fully_contained = seg_start >= *win_start && seg_end <= *win_end;
+        overlaps && !fully_contained
+    })
+}
+
+fn build_stats_speaker_breakdown(segments: &[StatsTranscriptSegmentRow]) -> Vec<Value> {
+    let mut totals: HashMap<Option<String>, (f64, i64)> = HashMap::new();
+    let mut total_time = 0.0;
+    for segment in segments {
+        let duration = segment.end_time - segment.start_time;
+        if duration <= 0.0 {
+            continue;
+        }
+        let label = segment.speaker_label.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        let entry = totals.entry(label).or_insert((0.0, 0));
+        entry.0 += duration;
+        entry.1 += 1;
+        total_time += duration;
+    }
+    let mut entries: Vec<_> = totals.into_iter().collect();
+    entries.sort_by(|(label_a, (time_a, _)), (label_b, (time_b, _))| {
+        time_b
+            .partial_cmp(time_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| label_a.is_none().cmp(&label_b.is_none()))
+            .then_with(|| label_a.cmp(label_b))
+    });
+    entries
+        .into_iter()
+        .map(|(label, (time, count))| {
+            json!({
+                "speaker_label": label,
+                "speaking_time_seconds": round_to(time, 1),
+                "speaking_percentage": round_to(if total_time > 0.0 { time / total_time * 100.0 } else { 0.0 }, 1),
+                "segment_count": count,
+            })
+        })
+        .collect()
+}
+
+fn build_stats_ad_blocks(
+    post: &StatsPostRow,
+    transcript_segments: &[StatsTranscriptSegmentRow],
+    audio_segments: &[StatsAudioSegmentRow],
+    identifications: &[StatsIdentificationRow],
+    min_confidence: f64,
+    max_gap: f64,
+    enable_boundary_refinement: bool,
+) -> Vec<(f64, f64)> {
+    let segment_by_id: HashMap<i64, StatsTranscriptSegmentRow> = transcript_segments
+        .iter()
+        .map(|segment| (segment.id, segment.clone()))
+        .collect();
+    let ad_identifications: Vec<StatsIdentificationRow> = identifications
+        .iter()
+        .filter(|ident| ident.label == "ad")
+        .filter(|ident| ident.confidence.unwrap_or(0.0) >= min_confidence)
+        .filter(|ident| ident.model_call_status == "success")
+        .cloned()
+        .collect();
+    let mut ad_segments: Vec<StatsTranscriptSegmentRow> = ad_identifications
+        .iter()
+        .filter_map(|ident| segment_by_id.get(&ident.transcript_segment_id).cloned())
+        .collect();
+    ad_segments.sort_by(|a, b| {
+        a.start_time
+            .partial_cmp(&b.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if ad_segments.is_empty() {
+        return Vec::new();
+    }
+
+    let groups = merge_stats_ad_segments(&ad_segments, &ad_identifications, max_gap);
+    let refined_boundaries = if enable_boundary_refinement {
+        parse_refined_boundaries_full(post.refined_ad_boundaries.as_deref())
+    } else {
+        Vec::new()
+    };
+    let mut ad_windows: Vec<(f64, f64)> = groups
+        .iter()
+        .map(|group| cut_window_for_stats_ad_group(group, &refined_boundaries))
+        .collect();
+    let bridgeable_audio = extract_audio_windows(audio_segments, false);
+    if !bridgeable_audio.is_empty() {
+        ad_windows = bridge_ad_windows_with_audio(&ad_windows, &bridgeable_audio);
+    }
+    let edge_audio = extract_audio_windows(audio_segments, true);
+    if !edge_audio.is_empty()
+        && !has_transcript_content_before_first_ad(
+            transcript_segments,
+            &ad_windows,
+            &ad_identifications,
+        )
+    {
+        ad_windows = expand_episode_edge_ad_windows_with_audio(&ad_windows, &edge_audio);
+    }
+    ad_windows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    ad_windows
+}
+
+fn merge_stats_ad_segments(
+    segments: &[StatsTranscriptSegmentRow],
+    identifications: &[StatsIdentificationRow],
+    max_gap: f64,
+) -> Vec<StatsAdGroup> {
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    for segment in segments {
+        if current
+            .last()
+            .map(|last: &StatsTranscriptSegmentRow| segment.start_time - last.end_time <= max_gap)
+            .unwrap_or(true)
+        {
+            current.push(segment.clone());
+        } else {
+            groups.push(create_stats_ad_group(&current, identifications));
+            current = vec![segment.clone()];
+        }
+    }
+    if !current.is_empty() {
+        groups.push(create_stats_ad_group(&current, identifications));
+    }
+
+    let refined = refine_stats_ad_groups(groups);
+    refined
+        .into_iter()
+        .filter(is_valid_stats_ad_group)
+        .collect()
+}
+
+fn create_stats_ad_group(
+    segments: &[StatsTranscriptSegmentRow],
+    identifications: &[StatsIdentificationRow],
+) -> StatsAdGroup {
+    let segment_ids: HashSet<i64> = segments.iter().map(|segment| segment.id).collect();
+    let ids: Vec<_> = identifications
+        .iter()
+        .filter(|ident| segment_ids.contains(&ident.transcript_segment_id))
+        .cloned()
+        .collect();
+    let confidence_avg = if ids.is_empty() {
+        0.0
+    } else {
+        ids.iter()
+            .map(|ident| ident.confidence.unwrap_or(0.0))
+            .sum::<f64>()
+            / ids.len() as f64
+    };
+    StatsAdGroup {
+        segments: segments.to_vec(),
+        identifications: ids,
+        start_time: segments
+            .first()
+            .map(|segment| segment.start_time)
+            .unwrap_or(0.0),
+        end_time: segments
+            .last()
+            .map(|segment| segment.end_time)
+            .unwrap_or(0.0),
+        confidence_avg,
+        keywords: extract_stats_keywords(segments),
+    }
+}
+
+fn extract_stats_keywords(segments: &[StatsTranscriptSegmentRow]) -> Vec<String> {
+    static URL_RE: OnceLock<Regex> = OnceLock::new();
+    static PROMO_RE: OnceLock<Regex> = OnceLock::new();
+    static PHONE_RE: OnceLock<Regex> = OnceLock::new();
+    static BRAND_RE: OnceLock<Regex> = OnceLock::new();
+
+    let text = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lower = text.to_lowercase();
+    let mut keywords = HashSet::new();
+    let url_re =
+        URL_RE.get_or_init(|| Regex::new(r"\b([a-z0-9\-\.]+\.(?:com|net|org|io))\b").unwrap());
+    for capture in url_re.captures_iter(&lower) {
+        keywords.insert(capture[1].to_string());
+    }
+    let promo_re = PROMO_RE.get_or_init(|| Regex::new(r"\b(code|promo|save)\s+\w+\b").unwrap());
+    for capture in promo_re.captures_iter(&lower) {
+        keywords.insert(capture[1].to_string());
+    }
+    let phone_re = PHONE_RE.get_or_init(|| Regex::new(r"\b\d{3}[ -]?\d{3}[ -]?\d{4}\b").unwrap());
+    if phone_re.is_match(&lower) {
+        keywords.insert("phone".to_string());
+    }
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let brand_re = BRAND_RE.get_or_init(|| Regex::new(r"\b[A-Z][a-z]+\b").unwrap());
+    for capture in brand_re.captures_iter(&text) {
+        let word = capture[0].to_string();
+        if word.len() > 3 {
+            *counts.entry(word).or_insert(0) += 1;
+        }
+    }
+    for (word, count) in counts {
+        if count >= 2 {
+            keywords.insert(word.to_lowercase());
+        }
+    }
+    keywords.into_iter().collect()
+}
+
+fn refine_stats_ad_groups(groups: Vec<StatsAdGroup>) -> Vec<StatsAdGroup> {
+    if groups.len() <= 1 {
+        return groups;
+    }
+    let mut refined = Vec::new();
+    let mut i = 0;
+    while i < groups.len() {
+        let current = &groups[i];
+        if i + 1 < groups.len() {
+            let next = &groups[i + 1];
+            let gap = next.start_time - current.end_time;
+            if gap <= 12.0 && should_merge_stats_ad_groups(current, next) {
+                let mut segments = current.segments.clone();
+                segments.extend(next.segments.clone());
+                let mut ids = current.identifications.clone();
+                ids.extend(next.identifications.clone());
+                let mut keywords: HashSet<String> = current.keywords.iter().cloned().collect();
+                keywords.extend(next.keywords.iter().cloned());
+                refined.push(StatsAdGroup {
+                    segments,
+                    identifications: ids,
+                    start_time: current.start_time,
+                    end_time: next.end_time,
+                    confidence_avg: (current.confidence_avg + next.confidence_avg) / 2.0,
+                    keywords: keywords.into_iter().collect(),
+                });
+                i += 2;
+            } else {
+                refined.push(current.clone());
+                i += 1;
+            }
+        } else {
+            refined.push(current.clone());
+            i += 1;
+        }
+    }
+    refined
+}
+
+fn should_merge_stats_ad_groups(a: &StatsAdGroup, b: &StatsAdGroup) -> bool {
+    if a.confidence_avg >= 0.9 && b.confidence_avg >= 0.9 {
+        return true;
+    }
+    let a_keywords: HashSet<_> = a.keywords.iter().collect();
+    if b.keywords
+        .iter()
+        .any(|keyword| a_keywords.contains(keyword))
+    {
+        return true;
+    }
+    let gap = b.start_time - a.end_time;
+    gap <= 10.0 && a.confidence_avg >= 0.8 && b.confidence_avg >= 0.8
+}
+
+fn is_valid_stats_ad_group(group: &StatsAdGroup) -> bool {
+    let duration = group.end_time - group.start_time;
+    if duration > 180.0 && group.keywords.is_empty() && group.confidence_avg < 0.9 {
+        return false;
+    }
+    if group.segments.len() < 2 || duration <= 10.0 {
+        return !group.keywords.is_empty() || group.confidence_avg >= 0.9;
+    }
+    true
+}
+
+fn cut_window_for_stats_ad_group(
+    group: &StatsAdGroup,
+    refined: &[RefinedBoundaryRow],
+) -> (f64, f64) {
+    let blocks = atomic_ad_blocks_for_group(group);
+    if blocks.is_empty() {
+        return (group.start_time, group.end_time);
+    }
+    let projected: Vec<(f64, f64)> = blocks
+        .into_iter()
+        .map(|block| project_atomic_block(block, refined))
+        .collect();
+    (
+        projected
+            .iter()
+            .map(|item| item.0)
+            .fold(f64::INFINITY, f64::min),
+        projected
+            .iter()
+            .map(|item| item.1)
+            .fold(f64::NEG_INFINITY, f64::max),
+    )
+}
+
+fn atomic_ad_blocks_for_group(group: &StatsAdGroup) -> Vec<(f64, f64)> {
+    let mut segments = group.segments.clone();
+    segments.sort_by(|a, b| {
+        a.start_time
+            .partial_cmp(&b.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let mut blocks = Vec::new();
+    let mut current_start = segments[0].start_time;
+    let mut current_end = segments[0].end_time;
+    for segment in segments.iter().skip(1) {
+        if segment.start_time - current_end <= 10.0 {
+            current_end = current_end.max(segment.end_time);
+        } else {
+            blocks.push((current_start, current_end));
+            current_start = segment.start_time;
+            current_end = segment.end_time;
+        }
+    }
+    blocks.push((current_start, current_end));
+    blocks
+}
+
+fn project_atomic_block(block: (f64, f64), refined: &[RefinedBoundaryRow]) -> (f64, f64) {
+    let mut best: Option<&RefinedBoundaryRow> = None;
+    let mut best_overlap = 0.0;
+    for boundary in refined {
+        let overlap = (block.1 + 1.5).min(boundary.orig_end + 1.5)
+            - (block.0 - 1.5).max(boundary.orig_start - 1.5);
+        if overlap > best_overlap {
+            best_overlap = overlap;
+            best = Some(boundary);
+        }
+    }
+    best.filter(|_| best_overlap > 0.0)
+        .map(|boundary| (boundary.refined_start, boundary.refined_end))
+        .unwrap_or(block)
+}
+
+fn parse_refined_boundaries_full(raw: Option<&str>) -> Vec<RefinedBoundaryRow> {
+    let Some(raw) = raw else { return Vec::new() };
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let orig_start = value_to_f64(object.get("orig_start")?)?;
+            let orig_end = value_to_f64(object.get("orig_end")?)?;
+            let refined_start = value_to_f64(object.get("refined_start")?)?;
+            let refined_end = value_to_f64(object.get("refined_end")?)?;
+            (orig_end > orig_start && refined_end > refined_start).then_some(RefinedBoundaryRow {
+                orig_start,
+                orig_end,
+                refined_start,
+                refined_end,
+            })
+        })
+        .collect()
+}
+
+fn normalize_audio_label(label: &str) -> String {
+    label.trim().replace('_', "").to_lowercase()
+}
+
+fn extract_audio_windows(
+    segments: &[StatsAudioSegmentRow],
+    include_speech: bool,
+) -> Vec<(f64, f64)> {
+    let allowed: HashSet<&str> = if include_speech {
+        ["music", "silence", "noenergy", "speech"]
+            .into_iter()
+            .collect()
+    } else {
+        ["music", "silence", "noenergy"].into_iter().collect()
+    };
+    let windows = segments
+        .iter()
+        .filter(|segment| allowed.contains(normalize_audio_label(&segment.label).as_str()))
+        .filter(|segment| segment.end_time > segment.start_time)
+        .map(|segment| (segment.start_time, segment.end_time))
+        .collect();
+    merge_float_windows(windows, 0.75)
+}
+
+fn bridge_ad_windows_with_audio(
+    ad_windows: &[(f64, f64)],
+    audio_windows: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    let merged_ads = merge_float_windows(ad_windows.to_vec(), 0.0);
+    if merged_ads.is_empty() || merged_ads.len() == 1 {
+        return merged_ads;
+    }
+    let merged_audio = merge_float_windows(audio_windows.to_vec(), 0.75);
+    if merged_audio.is_empty() {
+        return merged_ads;
+    }
+    let mut bridged = vec![merged_ads[0]];
+    for (next_start, next_end) in merged_ads.into_iter().skip(1) {
+        let (current_start, current_end) = *bridged.last().unwrap();
+        if gap_is_covered_by_audio(current_end, next_start, &merged_audio, 0.75) {
+            *bridged.last_mut().unwrap() = (current_start, next_end);
+        } else {
+            bridged.push((next_start, next_end));
+        }
+    }
+    bridged
+}
+
+fn expand_episode_edge_ad_windows_with_audio(
+    ad_windows: &[(f64, f64)],
+    edge_audio_windows: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    let mut expanded = ad_windows.to_vec();
+    expanded.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    if expanded.is_empty() {
+        return expanded;
+    }
+    let merged_audio = merge_float_windows(edge_audio_windows.to_vec(), 0.75);
+    if merged_audio.is_empty() {
+        return expanded;
+    }
+    let (first_start, first_end) = expanded[0];
+    if first_start <= 30.0 {
+        let mut coverage_start = first_start;
+        let mut changed = false;
+        for (audio_start, audio_end) in merged_audio.iter().rev() {
+            if *audio_end < coverage_start - 0.75 {
+                break;
+            }
+            if *audio_start > coverage_start + 0.75 {
+                continue;
+            }
+            coverage_start = coverage_start.min(*audio_start);
+            changed = true;
+        }
+        if changed && coverage_start <= 30.0 {
+            expanded[0] = (coverage_start.max(0.0), first_end);
+        }
+    }
+    expanded
+}
+
+fn gap_is_covered_by_audio(
+    gap_start: f64,
+    gap_end: f64,
+    audio_windows: &[(f64, f64)],
+    tolerance: f64,
+) -> bool {
+    if gap_end <= gap_start {
+        return true;
+    }
+    let mut coverage = gap_start;
+    for (audio_start, audio_end) in audio_windows {
+        if *audio_end < coverage - tolerance {
+            continue;
+        }
+        if *audio_start > coverage + tolerance {
+            return false;
+        }
+        coverage = coverage.max(*audio_end);
+        if coverage >= gap_end - tolerance {
+            return true;
+        }
+    }
+    false
+}
+
+fn merge_float_windows(mut windows: Vec<(f64, f64)>, gap_seconds: f64) -> Vec<(f64, f64)> {
+    windows.retain(|(start, end)| end > start);
+    windows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in windows {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 + gap_seconds {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn has_transcript_content_before_first_ad(
+    transcript_segments: &[StatsTranscriptSegmentRow],
+    ad_windows: &[(f64, f64)],
+    ad_identifications: &[StatsIdentificationRow],
+) -> bool {
+    if ad_windows.is_empty() {
+        return false;
+    }
+    let first_start = ad_windows
+        .iter()
+        .map(|(start, _)| *start)
+        .fold(f64::INFINITY, f64::min);
+    if first_start > 30.0 {
+        return false;
+    }
+    let ad_segment_ids: HashSet<i64> = ad_identifications
+        .iter()
+        .map(|ident| ident.transcript_segment_id)
+        .collect();
+    transcript_segments
+        .iter()
+        .any(|segment| segment.start_time < first_start && !ad_segment_ids.contains(&segment.id))
+}
+
+fn resolve_original_duration_seconds(
+    post_duration: Option<f64>,
+    transcript_segments: &[StatsTranscriptSegmentRow],
+    bleep_windows: &[(f64, f64)],
+    ad_time_seconds: f64,
+) -> f64 {
+    let mut cut_duration = post_duration.unwrap_or(0.0);
+    if let Some(max_bleep_end) = bleep_windows.iter().map(|(_, end)| *end).reduce(f64::max) {
+        if max_bleep_end > cut_duration {
+            cut_duration = max_bleep_end;
+        }
+    }
+    let transcript_duration = transcript_segments
+        .iter()
+        .map(|segment| segment.end_time)
+        .reduce(f64::max)
+        .unwrap_or(0.0);
+    if post_duration.is_some() {
+        cut_duration + ad_time_seconds
+    } else {
+        transcript_duration.max(cut_duration)
+    }
+}
+
+fn build_edited_timeline_ad_markers(ad_windows: &[(f64, f64)]) -> Vec<Value> {
+    let mut sorted = ad_windows.to_vec();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut removed_before = 0.0;
+    let mut markers = Vec::new();
+    for (start, end) in sorted {
+        let removed = end - start;
+        if removed <= 0.0 {
+            continue;
+        }
+        let edited_time = (start - removed_before).max(0.0);
+        markers.push(json!({
+            "edited_start_time": round_to(edited_time, 3),
+            "edited_end_time": round_to(edited_time, 3),
+            "original_start_time": round_to(start, 3),
+            "original_end_time": round_to(end, 3),
+            "removed_duration_seconds": round_to(removed, 3),
+        }));
+        removed_before += removed;
+    }
+    markers
+}
+
+fn build_edited_timeline_bleep_windows(
+    bleep_windows: &[(f64, f64)],
+    removed_windows: &[(f64, f64)],
+) -> Vec<Value> {
+    let mut edited = Vec::new();
+    let mut sorted_bleeps = bleep_windows.to_vec();
+    sorted_bleeps.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted_removed = removed_windows.to_vec();
+    sorted_removed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for window in sorted_bleeps {
+        for (retained_start, retained_end) in subtract_removed_windows(window, &sorted_removed) {
+            let edited_start = map_time_to_edited_timeline(retained_start, &sorted_removed);
+            let edited_end = map_time_to_edited_timeline(retained_end, &sorted_removed);
+            if edited_end > edited_start {
+                edited.push(json!({
+                    "edited_start_time": round_to(edited_start, 3),
+                    "edited_end_time": round_to(edited_end, 3),
+                    "original_start_time": round_to(retained_start, 3),
+                    "original_end_time": round_to(retained_end, 3),
+                }));
+            }
+        }
+    }
+    edited
+}
+
+fn map_time_to_edited_timeline(time: f64, removed_windows: &[(f64, f64)]) -> f64 {
+    let mut removed_before = 0.0;
+    for (start, end) in removed_windows {
+        if time >= *end {
+            removed_before += end - start;
+        } else if time > *start {
+            removed_before += time - start;
+            break;
+        } else {
+            break;
+        }
+    }
+    (time - removed_before).max(0.0)
+}
+
+fn subtract_removed_windows(window: (f64, f64), removed_windows: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut remaining = vec![window];
+    for (removed_start, removed_end) in removed_windows {
+        let mut updated = Vec::new();
+        for (segment_start, segment_end) in remaining {
+            if *removed_end <= segment_start || *removed_start >= segment_end {
+                updated.push((segment_start, segment_end));
+            } else {
+                if *removed_start > segment_start {
+                    updated.push((segment_start, *removed_start));
+                }
+                if *removed_end < segment_end {
+                    updated.push((*removed_end, segment_end));
+                }
+            }
+        }
+        remaining = updated
+            .into_iter()
+            .filter(|(start, end)| end > start)
+            .collect();
+    }
+    remaining
+}
+
+fn build_stats_chapters(
+    post: &StatsPostRow,
+    feed: Option<&StatsFeedRow>,
+    strategy: &str,
+) -> Result<Value> {
+    if strategy != "chapter" && strategy != "chapter_insert" {
+        return Ok(Value::Null);
+    }
+    let Some(raw) = post.chapter_data.as_deref() else {
+        if post.processed_audio_path.is_some() && feed.is_some() {
+            return Err(anyhow!(
+                "stats chapters require audio chapter read; falling back to Python"
+            ));
+        }
+        return Ok(Value::Null);
+    };
+    let data: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let kept = data
+        .get("chapters_kept")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let removed = data
+        .get("chapters_removed")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if kept.is_empty() && removed.is_empty() {
+        return Ok(Value::Null);
+    }
+    Ok(json!({
+        "chapters_kept": kept,
+        "chapters_removed": removed,
+        "chapters_kept_count": kept.len(),
+        "chapters_removed_count": removed.len(),
+        "filter_strings": feed.and_then(|feed| feed.chapter_filter_strings.clone()),
+    }))
+}
+
+fn build_related_logs_for_stats(
+    log_path: &Path,
+    post: &StatsPostRow,
+    recent_jobs: &[StatsProcessingJobRow],
+) -> Value {
+    let latest_job_id = recent_jobs.first().map(|job| job.id.clone());
+    let Ok(lines) = tail_log_lines(log_path, 1_000_000) else {
+        return json!({ "latest_job_id": latest_job_id, "entries": [] });
+    };
+    if lines.is_empty() {
+        return json!({ "latest_job_id": latest_job_id, "entries": [] });
+    }
+    let recent_job_ids: HashSet<String> = recent_jobs.iter().map(|job| job.id.clone()).collect();
+    let post_id_text = post.id.to_string();
+    let mut entries = Vec::new();
+    let line_re = Regex::new(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (?P<level>[A-Z]+)\s+(?P<message>.*)$").unwrap();
+    for line in lines {
+        let Some(caps) = line_re.captures(&line) else {
+            continue;
+        };
+        let message = caps.name("message").map(|m| m.as_str()).unwrap_or("");
+        let job_id = extract_log_field(message, "job_id");
+        let post_guid = extract_log_field(message, "post_guid");
+        let matches_job = job_id
+            .as_ref()
+            .map(|value| recent_job_ids.contains(value))
+            .unwrap_or(false);
+        let matches_guid = post_guid.as_deref() == Some(post.guid.as_str());
+        let matches_post_id = message.contains(&format!("post_id={post_id_text}"))
+            || message.contains(&format!("post {post_id_text}"));
+        if !(matches_job || matches_guid || matches_post_id) {
+            continue;
+        }
+        let step_name = extract_step_name(message);
+        entries.push(json!({
+            "timestamp": caps.name("timestamp").map(|m| m.as_str()).unwrap_or(""),
+            "level": caps.name("level").map(|m| m.as_str()).unwrap_or(""),
+            "stage": infer_log_stage(message, step_name.as_deref()),
+            "message": message,
+            "job_id": job_id,
+            "step_name": step_name,
+        }));
+    }
+    let keep_from = entries.len().saturating_sub(120);
+    json!({
+        "latest_job_id": latest_job_id,
+        "entries": entries.into_iter().skip(keep_from).collect::<Vec<_>>(),
+    })
+}
+
+fn tail_log_lines(path: &Path, max_bytes: u64) -> Result<Vec<String>> {
+    if !path.exists() || !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let mut file = fs::File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let read_size = file_size.min(max_bytes);
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(file_size.saturating_sub(read_size)))?;
+    let mut payload = Vec::new();
+    file.read_to_end(&mut payload)?;
+    let text = String::from_utf8_lossy(&payload);
+    let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect();
+    if read_size < file_size && !lines.is_empty() {
+        lines.remove(0);
+    }
+    Ok(lines)
+}
+
+fn extract_log_field(message: &str, field_name: &str) -> Option<String> {
+    let pattern = format!(r"\b{}=([^\s]+)", regex::escape(field_name));
+    Regex::new(&pattern)
+        .ok()?
+        .captures(message)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+}
+
+fn extract_step_name(message: &str) -> Option<String> {
+    Regex::new(r"\bstep_name=(.*?)(?:\s+\w+=|$)")
+        .ok()?
+        .captures(message)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().trim().to_string()))
+        .filter(|value| !value.is_empty())
+}
+
+fn infer_log_stage(message: &str, step_name: Option<&str>) -> &'static str {
+    let searchable = format!("{} {}", step_name.unwrap_or(""), message).to_lowercase();
+    if searchable.contains("download") {
+        "download"
+    } else if searchable.contains("transcrib") || searchable.contains("whisper") {
+        "transcription"
+    } else if searchable.contains("chapter") {
+        "chapters"
+    } else if searchable.contains("identifying ads")
+        || searchable.contains("classif")
+        || searchable.contains("identification")
+        || searchable.contains("boundary")
+        || searchable.contains("modelcall")
+        || searchable.contains("model call")
+        || searchable.contains("llm")
+    {
+        "classification"
+    } else if searchable.contains("processing audio")
+        || searchable.contains("audio processor")
+        || searchable.contains("ffmpeg")
+        || searchable.contains("removed segment")
+        || searchable.contains("processed audio")
+    {
+        "audio"
+    } else if searchable.contains("[job_status")
+        || searchable.contains("starting processing")
+        || searchable.contains("processing complete")
+        || searchable.contains("cancel")
+        || searchable.contains("unexpected error")
+        || searchable.contains("failed")
+    {
+        "job"
+    } else {
+        "general"
+    }
+}
+
+fn build_file_debug(path_value: Option<&str>) -> Value {
+    let Some(path_value) = path_value else {
+        return json!({
+            "path": Value::Null,
+            "absolute_path": Value::Null,
+            "exists": false,
+            "is_file": false,
+            "size_bytes": Value::Null,
+        });
+    };
+    let path = Path::new(path_value);
+    match fs::metadata(path) {
+        Ok(metadata) => json!({
+            "path": path_value,
+            "absolute_path": path.canonicalize().ok().map(|path| path.to_string_lossy().to_string()),
+            "exists": true,
+            "is_file": metadata.is_file(),
+            "size_bytes": if metadata.is_file() { Some(metadata.len()) } else { None },
+        }),
+        Err(error) => json!({
+            "path": path_value,
+            "absolute_path": path.canonicalize().ok().map(|path| path.to_string_lossy().to_string()),
+            "exists": false,
+            "is_file": false,
+            "size_bytes": Value::Null,
+            "error": error.to_string(),
+        }),
     }
 }
 
@@ -908,6 +2420,87 @@ fn write_chapters(args: ChaptersWriteArgs) -> Result<OkResponse> {
     Ok(OkResponse { ok: true })
 }
 
+fn read_chapters(args: ChaptersReadArgs) -> Result<ChaptersReadResponse> {
+    Ok(ChaptersReadResponse {
+        chapters: read_chapters_from_audio(&args.audio)?,
+    })
+}
+
+fn detect_chapter_ads(args: ChaptersDetectArgs) -> Result<ChaptersDetectResponse> {
+    let chapters = read_chapters_from_audio(&args.audio)?;
+    let filters = parse_filter_strings_csv(&args.filter_strings_csv);
+    let (chapters_to_keep, chapters_to_remove) = filter_chapters_by_strings(chapters, &filters);
+    let ad_segments = chapters_to_remove
+        .iter()
+        .map(|chapter| {
+            (
+                f64::from(chapter.start_time_ms) / 1000.0,
+                f64::from(chapter.end_time_ms) / 1000.0,
+            )
+        })
+        .collect();
+
+    Ok(ChaptersDetectResponse {
+        ad_segments,
+        chapters_to_keep,
+        chapters_to_remove,
+    })
+}
+
+fn read_chapters_from_audio(audio: &Path) -> Result<Vec<ChapterResponseItem>> {
+    let Ok(tag) = Tag::read_from_path(audio) else {
+        return Ok(Vec::new());
+    };
+
+    let mut chapters: Vec<ChapterResponseItem> = tag
+        .chapters()
+        .map(|chapter| {
+            let title = chapter
+                .frames
+                .iter()
+                .find(|frame| frame.id() == "TIT2")
+                .and_then(|frame| match frame.content() {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| chapter.element_id.clone());
+
+            ChapterResponseItem {
+                element_id: chapter.element_id.clone(),
+                title,
+                start_time_ms: chapter.start_time,
+                end_time_ms: chapter.end_time,
+            }
+        })
+        .collect();
+    chapters.sort_by_key(|chapter| chapter.start_time_ms);
+    Ok(chapters)
+}
+
+fn parse_filter_strings_csv(filter_strings_csv: &str) -> Vec<String> {
+    filter_strings_csv
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn filter_chapters_by_strings(
+    chapters: Vec<ChapterResponseItem>,
+    filters: &[String],
+) -> (Vec<ChapterResponseItem>, Vec<ChapterResponseItem>) {
+    if filters.is_empty() {
+        return (chapters, Vec::new());
+    }
+
+    chapters.into_iter().partition(|chapter| {
+        let title = chapter.title.to_lowercase();
+        !filters.iter().any(|filter| title.contains(filter))
+    })
+}
+
 fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
     let conn = open_readonly_sqlite(&args.db)?;
     let feed_ids: Vec<i64> = if args.require_auth {
@@ -1473,5 +3066,243 @@ mod tests {
         let tag = Tag::read_from_path(audio).unwrap();
         assert_eq!(tag.chapters().count(), 2);
         assert_eq!(tag.tables_of_contents().count(), 1);
+    }
+
+    #[test]
+    fn chapters_read_returns_empty_without_chap_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio.mp3");
+        fs::write(&audio, b"not-real-audio").unwrap();
+
+        let response = read_chapters(ChaptersReadArgs { audio }).unwrap();
+
+        assert!(response.chapters.is_empty());
+    }
+
+    #[test]
+    fn chapters_read_reads_file_written_by_chapters_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio.mp3");
+        let chapters_json = dir.path().join("chapters.json");
+        let removed_json = dir.path().join("removed.json");
+        fs::write(&audio, b"not-real-audio-but-id3-can-write-tags").unwrap();
+        fs::write(
+            &chapters_json,
+            r#"[
+                {"title":"Sponsor","start_time_ms":1000,"end_time_ms":2000},
+                {"title":"Intro","start_time_ms":0,"end_time_ms":1000}
+            ]"#,
+        )
+        .unwrap();
+        fs::write(&removed_json, "[]").unwrap();
+
+        write_chapters(ChaptersWriteArgs {
+            audio: audio.clone(),
+            chapters_json,
+            removed_windows_json: removed_json,
+        })
+        .unwrap();
+
+        let response = read_chapters(ChaptersReadArgs { audio }).unwrap();
+
+        assert_eq!(response.chapters.len(), 2);
+        assert_eq!(response.chapters[0].element_id, "chp0");
+        assert_eq!(response.chapters[0].title, "Intro");
+        assert_eq!(response.chapters[0].start_time_ms, 0);
+        assert_eq!(response.chapters[1].title, "Sponsor");
+    }
+
+    #[test]
+    fn chapters_detect_filters_titles_case_insensitively() {
+        let chapters = vec![
+            ChapterResponseItem {
+                element_id: "chp0".to_string(),
+                title: "Intro".to_string(),
+                start_time_ms: 0,
+                end_time_ms: 1000,
+            },
+            ChapterResponseItem {
+                element_id: "chp1".to_string(),
+                title: "Sponsored Break".to_string(),
+                start_time_ms: 1000,
+                end_time_ms: 2500,
+            },
+        ];
+
+        let filters = parse_filter_strings_csv(" sponsor, advertisement ,,");
+        let (keep, remove) = filter_chapters_by_strings(chapters, &filters);
+
+        assert_eq!(keep.len(), 1);
+        assert_eq!(keep[0].title, "Intro");
+        assert_eq!(remove.len(), 1);
+        assert_eq!(remove[0].title, "Sponsored Break");
+    }
+
+    #[test]
+    fn stats_render_reads_seeded_sqlite_and_shapes_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let log_path = dir.path().join("app.log");
+        fs::write(
+            &log_path,
+            "2026-05-08 12:00:00,000 INFO [job_status] post_guid=slash/guid job_id=job-1 step_name=Processing audio\n",
+        )
+        .unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (
+                id INTEGER PRIMARY KEY, title TEXT NOT NULL, ad_detection_strategy TEXT NOT NULL,
+                chapter_filter_strings TEXT
+            );
+            CREATE TABLE post (
+                id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL, guid TEXT NOT NULL,
+                title TEXT NOT NULL, download_url TEXT NOT NULL, unprocessed_audio_path TEXT,
+                processed_audio_path TEXT, release_date TEXT, duration REAL, whitelisted INTEGER NOT NULL,
+                download_count INTEGER, chapter_data TEXT, bleep_windows TEXT, refined_ad_boundaries TEXT
+            );
+            CREATE TABLE model_call (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, first_segment_sequence_num INTEGER NOT NULL,
+                last_segment_sequence_num INTEGER NOT NULL, model_name TEXT NOT NULL, prompt TEXT NOT NULL,
+                response TEXT, timestamp TEXT, status TEXT NOT NULL, error_message TEXT, retry_attempts INTEGER
+            );
+            CREATE TABLE transcript_segment (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, sequence_num INTEGER NOT NULL,
+                start_time REAL NOT NULL, end_time REAL NOT NULL, text TEXT NOT NULL, speaker_label TEXT
+            );
+            CREATE TABLE audio_segment (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, model_call_id INTEGER,
+                label TEXT NOT NULL, start_time REAL NOT NULL, end_time REAL NOT NULL
+            );
+            CREATE TABLE identification (
+                id INTEGER PRIMARY KEY, transcript_segment_id INTEGER NOT NULL, model_call_id INTEGER NOT NULL,
+                confidence REAL, label TEXT NOT NULL
+            );
+            CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY, post_guid TEXT NOT NULL, created_at TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO feed VALUES (1, 'Feed', 'llm', NULL)", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO post VALUES (
+                1, 1, 'slash/guid', 'Episode', 'https://example.com/audio.mp3',
+                '/tmp/in.mp3', '/tmp/out.mp3', '2026-05-08 12:00:00.000000',
+                90.0, 1, 2, NULL,
+                '[{\"start_time\":5.0,\"end_time\":6.0}]',
+                '[{\"orig_start\":10.0,\"orig_end\":20.0,\"refined_start\":9.5,\"refined_end\":20.5}]'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transcript_segment VALUES
+                (1, 1, 0, 0.0, 8.0, 'content', 'A'),
+                (2, 1, 1, 10.0, 20.0, 'visit example.com code SAVE now', 'B')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audio_segment VALUES (1, 1, NULL, 'music', 20.0, 21.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identification VALUES (1, 2, 1, 0.95, 'ad')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_job VALUES ('job-1', 'slash/guid', '2026-05-08 12:00:02')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let payload = render_stats(StatsRenderArgs {
+            db: db_path,
+            post_guid: "slash/guid".to_string(),
+            min_confidence: 0.8,
+            min_ad_segment_separation_seconds: 60.0,
+            enable_boundary_refinement: true,
+            stats_debug: false,
+            log_path,
+            in_root: dir.path().join("in"),
+            srv_root: dir.path().join("srv"),
+        })
+        .unwrap();
+        let stats = payload.get("stats").unwrap();
+
+        assert_eq!(stats["post"]["guid"], "slash/guid");
+        assert_eq!(stats["post"]["release_date"], "2026-05-08T12:00:00");
+        assert_eq!(stats["processing_stats"]["total_segments"], 2);
+        assert_eq!(stats["processing_stats"]["ad_segments_count"], 1);
+        assert_eq!(stats["model_calls"][0]["retry_count"], 1);
+        assert_eq!(stats["related_logs"]["latest_job_id"], "job-1");
+        assert_eq!(
+            stats["related_logs"]["entries"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn jobs_render_matches_python_route_shape_and_ordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE post (
+                id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL, guid TEXT NOT NULL, title TEXT NOT NULL
+            );
+            CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY, post_guid TEXT NOT NULL, status TEXT NOT NULL,
+                current_step INTEGER, step_name TEXT, total_steps INTEGER,
+                progress_percentage REAL, started_at TEXT, completed_at TEXT,
+                error_message TEXT, created_at TEXT
+            );
+            INSERT INTO feed VALUES (1, 'Feed');
+            INSERT INTO post VALUES (1, 1, 'guid-1', 'Episode 1');
+            INSERT INTO processing_job VALUES
+                ('job-complete', 'guid-1', 'completed', 4, 'Done', 4, 100.0, NULL, '2026-05-08 12:02:00', NULL, '2026-05-08 12:02:00'),
+                ('job-pending', 'guid-1', 'pending', 0, 'Queued', 4, 0.0, NULL, NULL, NULL, '2026-05-08 12:01:00'),
+                ('job-running', 'missing-guid', 'running', 2, 'Work', 4, 50.0, '2026-05-08 12:00:00', NULL, NULL, '2026-05-08 12:00:00');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let active = render_jobs(
+            JobsListArgs {
+                db: db_path.clone(),
+                limit: 10,
+            },
+            true,
+        )
+        .unwrap();
+        let active_jobs = active["jobs"].as_array().unwrap();
+        assert_eq!(active_jobs.len(), 2);
+        assert_eq!(active_jobs[0]["job_id"], "job-running");
+        assert_eq!(active_jobs[0]["priority"], 2);
+        assert_eq!(active_jobs[0]["post_title"], Value::Null);
+        assert_eq!(active_jobs[1]["job_id"], "job-pending");
+        assert_eq!(active_jobs[1]["feed_title"], "Feed");
+
+        let all = render_jobs(
+            JobsListArgs {
+                db: db_path,
+                limit: 10,
+            },
+            false,
+        )
+        .unwrap();
+        let all_jobs = all["jobs"].as_array().unwrap();
+        assert_eq!(all_jobs.len(), 3);
+        assert_eq!(all_jobs[2]["job_id"], "job-complete");
+        assert_eq!(all_jobs[2]["completed_at"], "2026-05-08T12:02:00");
     }
 }
