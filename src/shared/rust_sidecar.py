@@ -376,6 +376,60 @@ def try_list_all_jobs(*, db_path: Path, limit: int) -> list[dict[str, Any]] | No
     return _try_list_jobs(db_path=db_path, active_only=False, limit=limit)
 
 
+def try_plan_feed_refresh(
+    *,
+    db_path: Path,
+    feed_id: int,
+    feed_xml: str | bytes,
+    auto_whitelist_new_posts: bool,
+) -> dict[str, Any] | None:
+    if not rust_feed_refresh_enabled():
+        return None
+
+    raw_xml = feed_xml.encode("utf-8") if isinstance(feed_xml, str) else feed_xml
+    with tempfile.NamedTemporaryFile(suffix=".xml") as feed_file:
+        feed_file.write(raw_xml)
+        feed_file.flush()
+        try:
+            payload = run_podly_tools(
+                [
+                    "feed",
+                    "refresh-plan",
+                    "--db",
+                    str(db_path),
+                    "--feed-id",
+                    str(feed_id),
+                    "--feed-xml",
+                    feed_file.name,
+                    "--auto-whitelist-new-posts",
+                    "true" if auto_whitelist_new_posts else "false",
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust feed refresh planning failed; falling back to Python behavior"
+            )
+            return None
+
+    if not _is_valid_feed_refresh_plan(payload):
+        LOGGER.error("Rust feed refresh planning returned invalid payload: %r", payload)
+        return None
+    return payload
+
+
+def _is_valid_feed_refresh_plan(payload: dict[str, Any]) -> bool:
+    updates = payload.get("updates")
+    new_posts = payload.get("new_posts")
+    existing_post_updates = payload.get("existing_post_updates")
+    return (
+        isinstance(updates, dict)
+        and isinstance(new_posts, list)
+        and all(isinstance(post, dict) for post in new_posts)
+        and isinstance(existing_post_updates, list)
+        and all(isinstance(post, dict) for post in existing_post_updates)
+    )
+
+
 def _try_list_jobs(
     *,
     db_path: Path,

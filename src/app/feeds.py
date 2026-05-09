@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import feedparser
 import PyRSS2Gen
+import requests
 from flask import current_app, g, request
 
 from app.extensions import db
@@ -20,7 +21,11 @@ from app.models import Feed, Post, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
 from podcast_processor.podcast_downloader import find_audio_link
-from shared.rust_sidecar import try_render_aggregate_feed_xml, try_render_feed_xml
+from shared.rust_sidecar import (
+    try_plan_feed_refresh,
+    try_render_aggregate_feed_xml,
+    try_render_feed_xml,
+)
 
 logger = logging.getLogger("global_logger")
 
@@ -331,9 +336,29 @@ def _get_base_url() -> str:
     return "http://localhost:5001"
 
 
+def _fetch_raw_feed_bytes(url: str) -> tuple[bytes | None, str | None]:
+    try:
+        resp = requests.get(url, timeout=30, headers={"User-Agent": "podly/1.0"})
+        resp.raise_for_status()
+        return resp.content, resp.url
+    except requests.RequestException as exc:
+        logger.warning(f"requests fetch failed: {exc}")
+        return None, None
+
+
 def fetch_feed(url: str) -> feedparser.FeedParserDict:
     logger.info(f"Fetching feed from URL: {url}")
-    feed_data = feedparser.parse(url)
+    raw_xml, final_url = _fetch_raw_feed_bytes(url)
+    if raw_xml is None:
+        # Network failure via requests; fall back to feedparser's own fetch.
+        feed_data = feedparser.parse(url)
+        for entry in feed_data.entries:
+            entry.id = get_guid(entry)
+        return feed_data
+
+    feed_data = feedparser.parse(raw_xml)
+    feed_data["href"] = final_url
+    feed_data["podly_raw_xml"] = raw_xml
     for entry in feed_data.entries:
         entry.id = get_guid(entry)
     return feed_data
@@ -462,17 +487,48 @@ def _existing_post_refresh_payload(
 
 
 def refresh_feed(feed: Feed) -> None:
+    from shared.rust_sidecar import rust_feed_refresh_enabled
+
     logger.info(f"Refreshing feed with ID: {feed.id}")
     feed_id = feed.id
-    feed_data = fetch_feed(feed.rss_url)
     new_posts: list[dict[str, Any]] = []
     existing_post_updates: list[dict[str, Any]] = []
     updates: dict[str, Any] = {}
+    feed_data: feedparser.FeedParserDict | None = None
+    raw_xml: bytes | None = None
+
+    # When Rust planning is enabled, try the Rust path with just raw XML and
+    # skip the expensive feedparser.parse on the happy path. feedparser parsing
+    # of a 3MB+ feed can dominate refresh latency (1+ second).
+    if rust_feed_refresh_enabled():
+        logger.info(f"Fetching feed from URL: {feed.rss_url}")
+        raw_xml, _ = _fetch_raw_feed_bytes(feed.rss_url)
 
     try:
-        updates, new_posts, existing_post_updates = _build_refresh_feed_payload(
-            feed, feed_data
-        )
+        rust_plan: dict[str, Any] | None = None
+        if raw_xml is not None:
+            rust_plan = _try_build_rust_refresh_feed_payload_from_xml(feed, raw_xml)
+
+        if rust_plan is not None:
+            updates = cast(dict[str, Any], rust_plan["updates"])
+            new_posts = cast(list[dict[str, Any]], rust_plan["new_posts"])
+            existing_post_updates = cast(
+                list[dict[str, Any]], rust_plan["existing_post_updates"]
+            )
+        else:
+            # Either Rust disabled, raw fetch failed, or Rust planner returned None.
+            # Run the standard feedparser-based path (parses raw_xml if we have it,
+            # otherwise fetches the URL again through feedparser).
+            if feed_data is None:
+                if raw_xml is not None:
+                    feed_data = feedparser.parse(raw_xml)
+                    for entry in feed_data.entries:
+                        entry.id = get_guid(entry)
+                else:
+                    feed_data = fetch_feed(feed.rss_url)
+            updates, new_posts, existing_post_updates = _build_refresh_feed_payload(
+                feed, feed_data
+            )
         if updates or new_posts or existing_post_updates:
             writer_client.action(
                 "refresh_feed",
@@ -488,11 +544,54 @@ def refresh_feed(feed: Feed) -> None:
             # current request session before serializing the feed response.
             db.session.expire_all()
     finally:
-        del feed_data, updates, new_posts, existing_post_updates
+        del feed_data, raw_xml, updates, new_posts, existing_post_updates
         release_memory_to_os(f"feed refresh feed_id={feed_id}", logger)
         request_memory_trim_after_context(f"feed refresh feed_id={feed_id}")
 
     logger.info(f"Feed with ID: {feed_id} refreshed")
+
+
+def _try_build_rust_refresh_feed_payload(
+    feed: Feed,
+    feed_data: feedparser.FeedParserDict,
+) -> dict[str, Any] | None:
+    raw_xml = _raw_feed_xml_from_feedparser_result(feed_data)
+    if raw_xml is None:
+        logger.info(
+            "Rust feed refresh planning skipped because feedparser result has no raw XML"
+        )
+        return None
+    return _try_build_rust_refresh_feed_payload_from_xml(feed, raw_xml)
+
+
+def _try_build_rust_refresh_feed_payload_from_xml(
+    feed: Feed,
+    raw_xml: str | bytes,
+) -> dict[str, Any] | None:
+    from shared.processing_paths import get_instance_dir
+
+    db_path = get_instance_dir() / "sqlite3.db"
+
+    return try_plan_feed_refresh(
+        db_path=db_path,
+        feed_id=int(feed.id),
+        feed_xml=raw_xml,
+        auto_whitelist_new_posts=_should_auto_whitelist_new_posts(feed),
+    )
+
+
+def _raw_feed_xml_from_feedparser_result(
+    feed_data: feedparser.FeedParserDict,
+) -> str | bytes | None:
+    for field in ("content", "rawdata", "data", "podly_raw_xml", "_podly_raw_xml"):
+        value = getattr(feed_data, field, None)
+        if isinstance(value, str | bytes) and value:
+            return value
+        if isinstance(feed_data, dict):
+            value = feed_data.get(field)
+            if isinstance(value, str | bytes) and value:
+                return value
+    return None
 
 
 def add_or_refresh_feed(url: str) -> Feed:

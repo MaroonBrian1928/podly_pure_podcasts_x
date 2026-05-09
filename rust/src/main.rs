@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Parser)]
 #[command(name = "podly_tools")]
@@ -118,6 +118,7 @@ struct FeedCommand {
 enum FeedSubcommand {
     Render(FeedRenderArgs),
     RenderAggregate(FeedRenderAggregateArgs),
+    RefreshPlan(FeedRefreshPlanArgs),
 }
 
 #[derive(Args)]
@@ -205,6 +206,18 @@ struct FeedRenderAggregateArgs {
     feed_token: Option<String>,
     #[arg(long = "feed-secret")]
     feed_secret: Option<String>,
+}
+
+#[derive(Args)]
+struct FeedRefreshPlanArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "feed-id")]
+    feed_id: i64,
+    #[arg(long = "feed-xml")]
+    feed_xml: PathBuf,
+    #[arg(long = "auto-whitelist-new-posts", action = ArgAction::Set)]
+    auto_whitelist_new_posts: bool,
 }
 
 #[derive(Args)]
@@ -326,6 +339,34 @@ struct FeedRow {
     description: Option<String>,
     image_url: Option<String>,
     last_changed_at: Option<String>,
+}
+
+struct FeedRefreshFeedRow {
+    id: i64,
+    image_url: Option<String>,
+}
+
+struct FeedRefreshPostRow {
+    id: i64,
+    guid: String,
+    download_url: String,
+    title: String,
+    description: Option<String>,
+    processed_audio_path: Option<String>,
+    release_date: Option<String>,
+    duration: Option<i64>,
+    image_url: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedFeedEntry {
+    guid: String,
+    title: String,
+    description: String,
+    download_url: String,
+    release_date: Option<String>,
+    duration: Option<i64>,
+    image_url: Option<String>,
 }
 
 struct PostRow {
@@ -492,6 +533,7 @@ fn run() -> Result<()> {
         Commands::Feed(feed) => match feed.command {
             FeedSubcommand::Render(args) => print_json(&render_feed(args)?),
             FeedSubcommand::RenderAggregate(args) => print_json(&render_aggregate_feed(args)?),
+            FeedSubcommand::RefreshPlan(args) => print_json(&plan_feed_refresh(args)?),
         },
         Commands::Jobs(jobs) => match jobs.command {
             JobsSubcommand::Active(args) => print_json(&render_jobs(args, true)?),
@@ -798,7 +840,7 @@ fn query_stats_post(conn: &Connection, guid: &str) -> Result<Option<StatsPostRow
             release_date: row
                 .get::<_, Option<String>>(7)?
                 .map(|value| sqlite_datetime_to_iso(&value)),
-            duration: row.get(8)?,
+            duration: get_duration_f64(row, 8)?,
             whitelisted: row.get(9)?,
             download_count: row.get(10)?,
             chapter_data: row.get(11)?,
@@ -934,6 +976,16 @@ fn query_stats_identifications(
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+// SQLite INTEGER columns can hold real values due to dynamic typing. Read as f64
+// to avoid rusqlite type mismatch errors.
+fn get_duration_f64(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<f64>> {
+    row.get::<_, Option<f64>>(idx)
+}
+
+fn get_duration_seconds(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<i64>> {
+    Ok(get_duration_f64(row, idx)?.map(|v| v as i64))
 }
 
 fn round_to(value: f64, places: i32) -> f64 {
@@ -1697,7 +1749,10 @@ fn build_related_logs_for_stats(
     let recent_job_ids: HashSet<String> = recent_jobs.iter().map(|job| job.id.clone()).collect();
     let post_id_text = post.id.to_string();
     let mut entries = Vec::new();
-    let line_re = Regex::new(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (?P<level>[A-Z]+)\s+(?P<message>.*)$").unwrap();
+    static LINE_RE: OnceLock<Regex> = OnceLock::new();
+    let line_re = LINE_RE.get_or_init(|| {
+        Regex::new(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (?P<level>[A-Z]+)\s+(?P<message>.*)$").unwrap()
+    });
     for line in lines {
         let Some(caps) = line_re.captures(&line) else {
             continue;
@@ -1751,18 +1806,30 @@ fn tail_log_lines(path: &Path, max_bytes: u64) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn extract_log_field(message: &str, field_name: &str) -> Option<String> {
+fn log_field_regex(field_name: &str) -> &'static Regex {
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static Regex>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(re) = guard.get(field_name) {
+        return re;
+    }
     let pattern = format!(r"\b{}=([^\s]+)", regex::escape(field_name));
-    Regex::new(&pattern)
-        .ok()?
+    let leaked: &'static Regex = Box::leak(Box::new(Regex::new(&pattern).unwrap()));
+    guard.insert(field_name.to_string(), leaked);
+    leaked
+}
+
+fn extract_log_field(message: &str, field_name: &str) -> Option<String> {
+    log_field_regex(field_name)
         .captures(message)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
 fn extract_step_name(message: &str) -> Option<String> {
-    Regex::new(r"\bstep_name=(.*?)(?:\s+\w+=|$)")
-        .ok()?
-        .captures(message)
+    static STEP_NAME_RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        STEP_NAME_RE.get_or_init(|| Regex::new(r"\bstep_name=(.*?)(?:\s+\w+=|$)").unwrap());
+    re.captures(message)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().trim().to_string()))
         .filter(|value| !value.is_empty())
 }
@@ -2571,6 +2638,403 @@ fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
     Ok(XmlResponse { xml })
 }
 
+#[derive(Serialize)]
+struct FeedRefreshPlanResponse {
+    updates: Value,
+    new_posts: Vec<Value>,
+    existing_post_updates: Vec<Value>,
+}
+
+fn plan_feed_refresh(args: FeedRefreshPlanArgs) -> Result<FeedRefreshPlanResponse> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let feed = query_refresh_feed(&conn, args.feed_id)?;
+    let xml = fs::read_to_string(&args.feed_xml)
+        .with_context(|| format!("failed to read feed XML {}", args.feed_xml.display()))?;
+    let channel_image_url = parse_channel_image_url(&xml);
+    let entries = parse_feed_entries(&xml, feed.image_url.as_deref())?;
+
+    let mut updates = serde_json::Map::new();
+    if let Some(new_image_url) = channel_image_url {
+        if feed.image_url.as_deref() != Some(new_image_url.as_str()) {
+            updates.insert("image_url".to_string(), json!(new_image_url));
+        }
+    }
+
+    let posts = query_refresh_posts(&conn, feed.id)?;
+    let oldest_release_date = posts
+        .iter()
+        .filter_map(|post| post.release_date.as_deref())
+        .min()
+        .map(str::to_string);
+    let posts_by_guid: HashMap<&str, &FeedRefreshPostRow> = posts
+        .iter()
+        .map(|post| (post.guid.as_str(), post))
+        .collect();
+    let posts_by_url: HashMap<&str, &FeedRefreshPostRow> = posts
+        .iter()
+        .map(|post| (post.download_url.as_str(), post))
+        .collect();
+
+    let mut new_posts = Vec::new();
+    let mut existing_post_updates = Vec::new();
+    for entry in entries {
+        let mut existing = posts_by_guid.get(entry.guid.as_str()).copied();
+        let mut repaired_guid: Option<&str> = None;
+        if existing.is_none() {
+            existing = posts_by_url.get(entry.download_url.as_str()).copied();
+            if let Some(post) = existing {
+                if post.guid != entry.guid {
+                    repaired_guid = Some(entry.guid.as_str());
+                }
+            }
+        }
+
+        if let Some(post) = existing {
+            let update = existing_post_refresh_update(post, &entry, repaired_guid);
+            if let Some(update) = update {
+                existing_post_updates.push(update);
+            }
+        } else {
+            let is_archive = match (
+                oldest_release_date.as_deref(),
+                entry.release_date.as_deref(),
+            ) {
+                (Some(oldest), Some(release)) => {
+                    release_date_prefix(release) < release_date_prefix(oldest)
+                }
+                _ => false,
+            };
+            let whitelisted = args.auto_whitelist_new_posts && !is_archive;
+            new_posts.push(json!({
+                "guid": entry.guid,
+                "title": entry.title,
+                "description": entry.description,
+                "download_url": entry.download_url,
+                "release_date": entry.release_date,
+                "duration": entry.duration,
+                "image_url": entry.image_url,
+                "whitelisted": whitelisted,
+                "feed_id": feed.id,
+            }));
+        }
+    }
+
+    Ok(FeedRefreshPlanResponse {
+        updates: Value::Object(updates),
+        new_posts,
+        existing_post_updates,
+    })
+}
+
+fn query_refresh_feed(conn: &Connection, feed_id: i64) -> Result<FeedRefreshFeedRow> {
+    conn.query_row(
+        "SELECT id, image_url FROM feed WHERE id = ?1",
+        [feed_id],
+        |row| {
+            Ok(FeedRefreshFeedRow {
+                id: row.get(0)?,
+                image_url: row.get(1)?,
+            })
+        },
+    )
+    .with_context(|| format!("feed {feed_id} not found"))
+}
+
+fn query_refresh_posts(conn: &Connection, feed_id: i64) -> Result<Vec<FeedRefreshPostRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, guid, download_url, title, description, processed_audio_path,
+                release_date, duration, image_url
+           FROM post
+          WHERE feed_id = ?1",
+    )?;
+    let rows = stmt.query_map([feed_id], |row| {
+        Ok(FeedRefreshPostRow {
+            id: row.get(0)?,
+            guid: row.get(1)?,
+            download_url: row.get(2)?,
+            title: row.get(3)?,
+            description: row.get(4)?,
+            processed_audio_path: row.get(5)?,
+            release_date: row.get(6)?,
+            duration: get_duration_seconds(row, 7)?,
+            image_url: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn existing_post_refresh_update(
+    post: &FeedRefreshPostRow,
+    entry: &ParsedFeedEntry,
+    repaired_guid: Option<&str>,
+) -> Option<Value> {
+    let mut update = serde_json::Map::new();
+    update.insert("post_id".to_string(), json!(post.id));
+    if let Some(guid) = repaired_guid {
+        update.insert("guid".to_string(), json!(guid));
+    }
+    if !entry.title.is_empty() && post.title != entry.title {
+        update.insert("title".to_string(), json!(entry.title));
+    }
+    if post.description.as_deref().unwrap_or("") != entry.description {
+        update.insert("description".to_string(), json!(entry.description));
+    }
+    if post.image_url != entry.image_url {
+        update.insert("image_url".to_string(), json!(entry.image_url));
+    }
+    if post.processed_audio_path.is_none()
+        && entry.duration.is_some()
+        && post.duration != entry.duration
+    {
+        update.insert("duration".to_string(), json!(entry.duration));
+    }
+    if update.len() > 1 {
+        Some(Value::Object(update))
+    } else {
+        None
+    }
+}
+
+fn parse_feed_entries(xml: &str, feed_image_url: Option<&str>) -> Result<Vec<ParsedFeedEntry>> {
+    let mut entries = Vec::new();
+    for item in extract_xml_blocks(xml, "item") {
+        let title = xml_text(&item, "title").unwrap_or_default();
+        let download_url = find_feed_entry_audio_url(&item)
+            .or_else(|| xml_text(&item, "guid"))
+            .unwrap_or_default();
+        let raw_guid = xml_text(&item, "guid").unwrap_or_default();
+        let guid = if raw_guid.trim().is_empty() {
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, download_url.as_bytes()).to_string()
+        } else {
+            raw_guid.trim().to_string()
+        };
+        entries.push(ParsedFeedEntry {
+            guid,
+            title: title.trim().to_string(),
+            description: parse_entry_description(&item),
+            download_url,
+            release_date: xml_text(&item, "pubDate").and_then(|value| parse_rfc2822_to_utc(&value)),
+            duration: xml_text(&item, "duration")
+                .or_else(|| xml_text(&item, "itunes:duration"))
+                .and_then(|value| parse_duration_seconds_string(&value)),
+            image_url: parse_entry_image_url(&item).or_else(|| feed_image_url.map(str::to_string)),
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_channel_image_url(xml: &str) -> Option<String> {
+    let channel = extract_xml_blocks(xml, "channel").into_iter().next()?;
+    if let Some(image_block) = extract_xml_blocks(&channel, "image").into_iter().next() {
+        if let Some(url) = xml_text(&image_block, "url") {
+            return Some(url);
+        }
+    }
+    parse_itunes_image_href(&channel)
+}
+
+fn parse_entry_image_url(item: &str) -> Option<String> {
+    parse_itunes_image_href(item)
+        .or_else(|| parse_media_thumbnail_url(item))
+        .or_else(|| {
+            extract_xml_blocks(item, "image")
+                .into_iter()
+                .next()
+                .and_then(|image| {
+                    xml_text(&image, "url").or_else(|| Some(image.trim().to_string()))
+                })
+        })
+}
+
+fn parse_entry_description(item: &str) -> String {
+    xml_text(item, "content:encoded")
+        .or_else(|| xml_text(item, "description"))
+        .or_else(|| xml_text(item, "summary"))
+        .or_else(|| xml_text(item, "itunes:subtitle"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn find_feed_entry_audio_url(item: &str) -> Option<String> {
+    static ENCLOSURE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ENCLOSURE_RE.get_or_init(|| Regex::new(r#"(?is)<enclosure\b([^>]*)>"#).unwrap());
+    for caps in re.captures_iter(item) {
+        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let mime = xml_attr(attrs, "type").unwrap_or_default().to_lowercase();
+        if is_audio_mime_type(&mime) {
+            if let Some(url) = xml_attr(attrs, "url") {
+                return Some(url);
+            }
+        }
+    }
+    static LINK_RE: OnceLock<Regex> = OnceLock::new();
+    let link_re = LINK_RE.get_or_init(|| Regex::new(r#"(?is)<link\b([^>]*)>"#).unwrap());
+    for caps in link_re.captures_iter(item) {
+        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let mime = xml_attr(attrs, "type").unwrap_or_default().to_lowercase();
+        if is_audio_mime_type(&mime) {
+            if let Some(url) = xml_attr(attrs, "href") {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+fn is_audio_mime_type(mime: &str) -> bool {
+    matches!(
+        mime,
+        "audio/mpeg"
+            | "audio/mp3"
+            | "audio/x-mp3"
+            | "audio/mpeg3"
+            | "audio/mp4"
+            | "audio/m4a"
+            | "audio/x-m4a"
+            | "audio/aac"
+            | "audio/wav"
+            | "audio/x-wav"
+            | "audio/ogg"
+            | "audio/opus"
+            | "audio/flac"
+    )
+}
+
+// Cache compiled regexes keyed by tag/attr name. Without this, every call to
+// xml_text / extract_xml_blocks / xml_attr recompiles a regex; for a feed with
+// hundreds of items that means thousands of compilations and dominates wall
+// time of the refresh planner.
+fn block_regex(tag: &str) -> &'static Regex {
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static Regex>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(re) = guard.get(tag) {
+        return re;
+    }
+    let pattern = format!(
+        r"(?is)<{tag}\b[^>]*>(.*?)</{tag}>",
+        tag = regex::escape(tag)
+    );
+    let leaked: &'static Regex = Box::leak(Box::new(Regex::new(&pattern).unwrap()));
+    guard.insert(tag.to_string(), leaked);
+    leaked
+}
+
+fn attr_regex(name: &str) -> &'static Regex {
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static Regex>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(re) = guard.get(name) {
+        return re;
+    }
+    let pattern = format!(
+        r#"(?is)\b{}\s*=\s*("([^"]*)"|'([^']*)')"#,
+        regex::escape(name)
+    );
+    let leaked: &'static Regex = Box::leak(Box::new(Regex::new(&pattern).unwrap()));
+    guard.insert(name.to_string(), leaked);
+    leaked
+}
+
+fn extract_xml_blocks(xml: &str, tag: &str) -> Vec<String> {
+    block_regex(tag)
+        .captures_iter(xml)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+fn xml_text(xml: &str, tag: &str) -> Option<String> {
+    let raw = block_regex(tag)
+        .captures(xml)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .to_string();
+    Some(decode_xml_text(&strip_cdata(&raw)))
+}
+
+fn parse_itunes_image_href(xml: &str) -> Option<String> {
+    static IMAGE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = IMAGE_RE.get_or_init(|| Regex::new(r#"(?is)<itunes:image\b([^>]*)>"#).unwrap());
+    let attrs = re.captures(xml)?.get(1)?.as_str();
+    xml_attr(attrs, "href")
+}
+
+fn parse_media_thumbnail_url(xml: &str) -> Option<String> {
+    static THUMB_RE: OnceLock<Regex> = OnceLock::new();
+    let re = THUMB_RE.get_or_init(|| Regex::new(r#"(?is)<media:thumbnail\b([^>]*)>"#).unwrap());
+    let attrs = re.captures(xml)?.get(1)?.as_str();
+    xml_attr(attrs, "url")
+}
+
+fn xml_attr(attrs: &str, name: &str) -> Option<String> {
+    let caps = attr_regex(name).captures(attrs)?;
+    let value = caps
+        .get(2)
+        .or_else(|| caps.get(3))
+        .map(|m| m.as_str())
+        .unwrap_or("");
+    Some(decode_xml_text(value))
+}
+
+fn strip_cdata(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with("<![CDATA[") && trimmed.ends_with("]]>") {
+        trimmed
+            .trim_start_matches("<![CDATA[")
+            .trim_end_matches("]]>")
+            .to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn decode_xml_text(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+fn parse_rfc2822_to_utc(value: &str) -> Option<String> {
+    DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
+}
+
+fn parse_duration_seconds_string(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = trimmed.parse::<i64>() {
+        return (seconds >= 0).then_some(seconds);
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.trim().is_empty()) {
+        return None;
+    }
+    let nums: Vec<i64> = parts
+        .iter()
+        .map(|part| part.trim().parse::<i64>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+    match nums.as_slice() {
+        [minutes, seconds] if *minutes >= 0 && *seconds >= 0 => Some(minutes * 60 + seconds),
+        [hours, minutes, seconds] if *hours >= 0 && *minutes >= 0 && *seconds >= 0 => {
+            Some(hours * 3600 + minutes * 60 + seconds)
+        }
+        _ => None,
+    }
+}
+
+fn release_date_prefix(value: &str) -> &str {
+    value.split('T').next().unwrap_or(value)
+}
+
 fn open_readonly_sqlite(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| "failed to open sqlite database read-only")?;
@@ -2604,7 +3068,7 @@ fn post_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PostRow> {
         processed_audio_path: row.get(3)?,
         description: row.get(4)?,
         release_date: row.get(5)?,
-        duration: row.get(6)?,
+        duration: get_duration_seconds(row, 6)?,
         image_url: row.get(7)?,
         chapter_data: row.get(8)?,
     })
@@ -3248,6 +3712,110 @@ mod tests {
             stats["related_logs"]["entries"].as_array().unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn feed_refresh_plan_shapes_new_existing_archive_and_guid_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let xml_path = dir.path().join("feed.xml");
+        fs::write(
+            &xml_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+            <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+              <channel>
+                <title>Feed</title>
+                <image><url>https://img.test/new-feed.png</url></image>
+                <item>
+                  <title>New Episode</title>
+                  <guid>new-guid</guid>
+                  <pubDate>Fri, 08 May 2026 12:00:00 +0000</pubDate>
+                  <content:encoded><![CDATA[<p>New desc</p>]]></content:encoded>
+                  <itunes:duration>01:02:03</itunes:duration>
+                  <itunes:image href="https://img.test/new-ep.png" />
+                  <enclosure url="https://cdn.test/new.mp3" type="audio/mpeg" />
+                </item>
+                <item>
+                  <title>Existing Updated</title>
+                  <guid>existing-guid</guid>
+                  <description>Changed desc</description>
+                  <itunes:duration>321</itunes:duration>
+                  <enclosure url="https://cdn.test/existing.mp3" type="audio/mpeg" />
+                </item>
+                <item>
+                  <title>Repaired Guid</title>
+                  <guid>corrected-guid</guid>
+                  <description>Legacy desc</description>
+                  <enclosure url="https://cdn.test/legacy.mp3" type="audio/mpeg" />
+                </item>
+                <item>
+                  <title>Archive Episode</title>
+                  <guid>archive-guid</guid>
+                  <pubDate>Fri, 01 May 2020 12:00:00 +0000</pubDate>
+                  <description>Old desc</description>
+                  <enclosure url="https://cdn.test/archive.mp3" type="audio/mpeg" />
+                </item>
+              </channel>
+            </rss>"#,
+        )
+        .unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (
+                id INTEGER PRIMARY KEY,
+                image_url TEXT
+            );
+            CREATE TABLE post (
+                id INTEGER PRIMARY KEY,
+                feed_id INTEGER NOT NULL,
+                guid TEXT NOT NULL,
+                download_url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                processed_audio_path TEXT,
+                release_date TEXT,
+                duration INTEGER,
+                image_url TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feed VALUES (1, 'https://img.test/old-feed.png')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO post VALUES
+                (1, 1, 'existing-guid', 'https://cdn.test/existing.mp3', 'Existing', 'Old desc', NULL, '2026-05-01T12:00:00+00:00', NULL, NULL),
+                (2, 1, 'legacy-guid', 'https://cdn.test/legacy.mp3', 'Repaired Guid', 'Legacy desc', NULL, '2026-05-02T12:00:00+00:00', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let plan = plan_feed_refresh(FeedRefreshPlanArgs {
+            db: db_path,
+            feed_id: 1,
+            feed_xml: xml_path,
+            auto_whitelist_new_posts: true,
+        })
+        .unwrap();
+
+        assert_eq!(plan.updates["image_url"], "https://img.test/new-feed.png");
+        assert_eq!(plan.new_posts.len(), 2);
+        assert_eq!(plan.new_posts[0]["guid"], "new-guid");
+        assert_eq!(plan.new_posts[0]["duration"], 3723);
+        assert_eq!(plan.new_posts[0]["whitelisted"], true);
+        assert_eq!(plan.new_posts[1]["guid"], "archive-guid");
+        assert_eq!(plan.new_posts[1]["whitelisted"], false);
+
+        assert_eq!(plan.existing_post_updates.len(), 2);
+        assert_eq!(plan.existing_post_updates[0]["post_id"], 1);
+        assert_eq!(plan.existing_post_updates[0]["title"], "Existing Updated");
+        assert_eq!(plan.existing_post_updates[0]["description"], "Changed desc");
+        assert_eq!(plan.existing_post_updates[0]["duration"], 321);
+        assert_eq!(plan.existing_post_updates[1]["post_id"], 2);
+        assert_eq!(plan.existing_post_updates[1]["guid"], "corrected-guid");
     }
 
     #[test]

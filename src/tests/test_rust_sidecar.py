@@ -301,6 +301,63 @@ def test_try_list_all_jobs_falls_back_on_bad_payload(
     )
 
 
+def test_try_plan_feed_refresh_returns_valid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str]) -> dict[str, object]:
+        calls.append(args)
+        feed_xml_path = Path(args[args.index("--feed-xml") + 1])
+        assert feed_xml_path.read_text() == "<rss />"
+        return {
+            "updates": {"image_url": "https://example.com/feed.png"},
+            "new_posts": [{"guid": "new-guid"}],
+            "existing_post_updates": [{"post_id": 1, "title": "Updated"}],
+        }
+
+    monkeypatch.setenv("PODLY_RUST_FEED_REFRESH_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    assert rust_sidecar.try_plan_feed_refresh(
+        db_path=Path("/tmp/db.sqlite"),
+        feed_id=12,
+        feed_xml="<rss />",
+        auto_whitelist_new_posts=True,
+    ) == {
+        "updates": {"image_url": "https://example.com/feed.png"},
+        "new_posts": [{"guid": "new-guid"}],
+        "existing_post_updates": [{"post_id": 1, "title": "Updated"}],
+    }
+    assert calls
+    assert calls[0][:6] == [
+        "feed",
+        "refresh-plan",
+        "--db",
+        "/tmp/db.sqlite",
+        "--feed-id",
+        "12",
+    ]
+    assert calls[0][-2:] == ["--auto-whitelist-new-posts", "true"]
+
+
+def test_try_plan_feed_refresh_falls_back_on_bad_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_REFRESH_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", lambda args: {"updates": []})
+
+    assert (
+        rust_sidecar.try_plan_feed_refresh(
+            db_path=Path("/tmp/db.sqlite"),
+            feed_id=12,
+            feed_xml=b"<rss />",
+            auto_whitelist_new_posts=False,
+        )
+        is None
+    )
+
+
 def test_try_read_chapters_returns_valid_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

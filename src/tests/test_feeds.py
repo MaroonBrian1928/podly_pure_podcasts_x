@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -166,13 +167,36 @@ def mock_feed():
 
 
 @mock.patch("app.feeds.feedparser.parse")
-def test_fetch_feed(mock_parse, mock_feed_data):
+@mock.patch("app.feeds.requests.get")
+def test_fetch_feed(mock_get, mock_parse, mock_feed_data):
+    mock_resp = mock.MagicMock()
+    mock_resp.content = b"<rss/>"
+    mock_resp.url = "https://example.com/feed.xml"
+    mock_get.return_value = mock_resp
     mock_parse.return_value = mock_feed_data
 
     result = fetch_feed("https://example.com/feed.xml")
 
-    assert result == mock_feed_data
+    mock_get.assert_called_once_with(
+        "https://example.com/feed.xml",
+        timeout=30,
+        headers={"User-Agent": "podly/1.0"},
+    )
+    mock_parse.assert_called_once_with(b"<rss/>")
+
+
+@mock.patch("app.feeds.feedparser.parse")
+@mock.patch("app.feeds.requests.get")
+def test_fetch_feed_requests_failure_falls_back(mock_get, mock_parse, mock_feed_data):
+    import requests as req_lib
+
+    mock_get.side_effect = req_lib.RequestException("timeout")
+    mock_parse.return_value = mock_feed_data
+
+    result = fetch_feed("https://example.com/feed.xml")
+
     mock_parse.assert_called_once_with("https://example.com/feed.xml")
+    assert result == mock_feed_data
 
 
 def test_refresh_feed(mock_db_session):
@@ -311,6 +335,83 @@ def test_refresh_feed_unwhitelists_without_members(
     assert mock_make_post.call_count == len(mock_feed_data.entries)
     assert mock_should_auto_whitelist.call_count == len(mock_feed_data.entries)
     mock_should_auto_whitelist.assert_any_call(mock_feed, mock.ANY)
+    mock_writer_client.action.assert_called_once()
+
+
+@mock.patch("app.feeds.writer_client")
+@mock.patch("shared.processing_paths.get_instance_dir")
+@mock.patch("app.feeds.try_plan_feed_refresh")
+@mock.patch("app.feeds._should_auto_whitelist_new_posts")
+@mock.patch("app.feeds._fetch_raw_feed_bytes")
+@mock.patch("shared.rust_sidecar.rust_feed_refresh_enabled")
+def test_refresh_feed_uses_rust_feed_plan_when_raw_xml_exists(
+    mock_rust_enabled,
+    mock_fetch_raw,
+    mock_should_auto_whitelist,
+    mock_try_plan_feed_refresh,
+    mock_get_instance_dir,
+    mock_writer_client,
+    mock_feed,
+    mock_db_session,
+):
+    mock_rust_enabled.return_value = True
+    mock_fetch_raw.return_value = (
+        b"<rss><channel /></rss>",
+        "https://example.com/feed.xml",
+    )
+    mock_should_auto_whitelist.return_value = True
+    mock_get_instance_dir.return_value = Path("/tmp")
+    mock_try_plan_feed_refresh.return_value = {
+        "updates": {"image_url": "https://example.com/new-feed.jpg"},
+        "new_posts": [{"guid": "new-guid", "title": "New"}],
+        "existing_post_updates": [{"post_id": 1, "title": "Updated"}],
+    }
+
+    refresh_feed(mock_feed)
+
+    mock_try_plan_feed_refresh.assert_called_once_with(
+        db_path=Path("/tmp/sqlite3.db"),
+        feed_id=mock_feed.id,
+        feed_xml=b"<rss><channel /></rss>",
+        auto_whitelist_new_posts=True,
+    )
+    mock_writer_client.action.assert_called_once_with(
+        "refresh_feed",
+        {
+            "feed_id": mock_feed.id,
+            "updates": {"image_url": "https://example.com/new-feed.jpg"},
+            "new_posts": [{"guid": "new-guid", "title": "New"}],
+            "existing_post_updates": [{"post_id": 1, "title": "Updated"}],
+        },
+        wait=True,
+    )
+    mock_db_session.expire_all.assert_called_once()
+
+
+@mock.patch("app.feeds.writer_client")
+@mock.patch("app.feeds.try_plan_feed_refresh")
+@mock.patch("app.feeds._should_auto_whitelist_new_posts")
+@mock.patch("app.feeds.make_post")
+@mock.patch("app.feeds.fetch_feed")
+def test_refresh_feed_falls_back_to_python_when_raw_xml_is_absent(
+    mock_fetch_feed,
+    mock_make_post,
+    mock_should_auto_whitelist,
+    mock_try_plan_feed_refresh,
+    mock_writer_client,
+    mock_feed,
+    mock_feed_data,
+    mock_db_session,
+):
+    mock_fetch_feed.return_value = mock_feed_data
+    mock_should_auto_whitelist.return_value = True
+    post_one = MockPost(guid=str(uuid.uuid4()))
+    mock_make_post.return_value = post_one
+
+    refresh_feed(mock_feed)
+
+    mock_try_plan_feed_refresh.assert_not_called()
+    assert mock_make_post.call_count == len(mock_feed_data.entries)
     mock_writer_client.action.assert_called_once()
 
 
