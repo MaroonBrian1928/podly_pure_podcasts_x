@@ -64,6 +64,23 @@ function formatDateTime(value: string | null): string {
   }
 }
 
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '—';
+  }
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  }
+  return `${seconds}s`;
+}
+
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [managerStatus, setManagerStatus] = useState<JobManagerStatus | null>(null);
@@ -79,6 +96,7 @@ export default function JobsPage() {
   const [cleanupError, setCleanupError] = useState<string | null>(null);
   const [cleanupRunning, setCleanupRunning] = useState(false);
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
 
   const loadStatus = useCallback(async () => {
     try {
@@ -258,6 +276,17 @@ export default function JobsPage() {
 
     return () => clearInterval(interval);
   }, [managerStatus?.run?.queued_jobs, managerStatus?.run?.running_jobs, loadStatus]);
+
+  // Tick once per second while there's an active running job so elapsed timers
+  // and the pulse animations stay live without re-fetching from the server.
+  useEffect(() => {
+    const hasRunningJob = jobs.some(job => job.status === 'running');
+    if (!hasRunningJob) {
+      return undefined;
+    }
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [jobs]);
 
   useEffect(() => {
     const queued = managerStatus?.run?.queued_jobs ?? 0;
@@ -476,12 +505,53 @@ export default function JobsPage() {
                   <span>Priority</span>
                   <span className="font-medium">{job.priority}</span>
                 </div>
-                <div className="flex items-center justify-between text-xs text-gray-700">
-                  <span>Stage</span>
-                  <span className="font-medium">
-                    {progressModel.currentStep}/4 · {progressModel.currentStageLabel}
-                  </span>
-                </div>
+
+                {(() => {
+                  const isRunning = job.status === 'running';
+                  const activeStage =
+                    progressModel.stages.find(s => s.state === 'active') ??
+                    progressModel.stages.find(s => s.state === 'failed');
+                  const headlineLabel =
+                    activeStage?.label ??
+                    progressModel.stages[progressModel.currentStep]?.label ??
+                    'Queued';
+                  const subDetail =
+                    progressModel.currentStageLabel &&
+                    progressModel.currentStageLabel !== headlineLabel
+                      ? progressModel.currentStageLabel
+                      : null;
+                  const startedMs = job.started_at ? new Date(job.started_at).getTime() : NaN;
+                  const elapsedMs = Number.isFinite(startedMs) ? now - startedMs : NaN;
+                  return (
+                    <div className="rounded border border-gray-100 bg-gray-50/70 p-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[10px] uppercase tracking-wide text-gray-500">
+                            Stage {progressModel.currentStep}/{progressModel.stages.length - 1}
+                          </div>
+                          <div className="text-sm font-medium text-gray-900 truncate" title={headlineLabel}>
+                            {headlineLabel}
+                          </div>
+                        </div>
+                        {isRunning && Number.isFinite(elapsedMs) ? (
+                          <div className="flex items-center gap-1.5 whitespace-nowrap text-xs text-gray-600">
+                            <span className="relative inline-flex h-2 w-2">
+                              <span className="absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75 animate-ping" />
+                              <span className="relative inline-flex h-2 w-2 rounded-full bg-indigo-600" />
+                            </span>
+                            <span className="font-mono tabular-nums">{formatElapsed(elapsedMs)}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                      {subDetail ? (
+                        <div className="mt-1 text-xs text-gray-600 truncate" title={subDetail}>
+                          {subDetail}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })()}
+
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-gray-700">
                     <span>Progress</span>
@@ -504,14 +574,19 @@ export default function JobsPage() {
                               : 'text-gray-400'
                       }`}
                     >
-                      <span>
-                        {stage.state === 'completed'
-                          ? '✓'
-                          : stage.state === 'active'
-                            ? '●'
-                            : stage.state === 'failed'
-                              ? '!'
-                              : '○'}
+                      <span className="flex h-3 items-center justify-center">
+                        {stage.state === 'completed' ? (
+                          <span>✓</span>
+                        ) : stage.state === 'active' ? (
+                          <span className="relative inline-flex h-2 w-2">
+                            <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
+                            <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-600" />
+                          </span>
+                        ) : stage.state === 'failed' ? (
+                          <span>!</span>
+                        ) : (
+                          <span>○</span>
+                        )}
                       </span>
                       <span>{stage.shortLabel}</span>
                     </div>

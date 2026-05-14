@@ -14,6 +14,7 @@ from app.feeds import (
     _feed_item_duration_seconds,
     _get_base_url,
     _should_auto_whitelist_new_posts,
+    _sqlite_db_path_from_app_config,
     add_feed,
     db,
     feed_item,
@@ -1029,6 +1030,24 @@ def test_feed_item_prefers_stored_duration_over_processed_audio_probe(mock_post,
     if isinstance(xml, bytes):
         xml = xml.decode("utf-8")
     assert "<itunes:duration>1:02:03</itunes:duration>" in xml
+
+
+@pytest.mark.parametrize(
+    "uri,expected",
+    [
+        ("sqlite:///sqlite3.db", Path("sqlite3.db")),
+        ("sqlite:///sqlite3.db?timeout=60", Path("sqlite3.db")),
+        ("sqlite:////abs/path.db?timeout=60", Path("/abs/path.db")),
+        ("sqlite:///:memory:", None),
+        ("sqlite:///", None),
+        ("postgres://example", None),
+        ("", None),
+    ],
+)
+def test_sqlite_db_path_from_app_config_strips_query_string(app, uri, expected):
+    with app.app_context():
+        app.config["SQLALCHEMY_DATABASE_URI"] = uri
+        assert _sqlite_db_path_from_app_config() == expected
 
 
 def test_get_base_url_without_reverse_proxy():

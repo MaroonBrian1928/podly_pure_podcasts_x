@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import cast
 
-from mutagen.id3 import CHAP, CTOC, ID3, TIT2
+from mutagen.id3 import CHAP, CTOC, ID3, TIT2, TLEN
 from mutagen.mp3 import MP3
 
 from podcast_processor.chapter_reader import Chapter
@@ -143,6 +143,35 @@ def write_chapters(
     try:
         audio = MP3(audio_path)
 
+        # Clamp chapter end_times to the real audio duration. Some readers
+        # (notably Pocket Casts) silently drop chapters whose end_time exceeds
+        # the file length, which can happen after ad-removal recalculation if
+        # the cut math and ffmpeg's reported duration disagree by even a few ms.
+        audio_duration_ms = (
+            int(audio.info.length * 1000) if audio.info and audio.info.length else 0
+        )
+        if audio_duration_ms > 0:
+            clamped: list[Chapter] = []
+            for chapter in sorted_chapters:
+                if chapter.start_time_ms >= audio_duration_ms:
+                    logger.warning(
+                        "Dropping chapter '%s' starting past audio end (%d >= %d)",
+                        chapter.title,
+                        chapter.start_time_ms,
+                        audio_duration_ms,
+                    )
+                    continue
+                end_ms = min(chapter.end_time_ms, audio_duration_ms)
+                clamped.append(
+                    Chapter(
+                        element_id=chapter.element_id,
+                        title=chapter.title,
+                        start_time_ms=chapter.start_time_ms,
+                        end_time_ms=end_ms,
+                    )
+                )
+            sorted_chapters = clamped
+
         # Create ID3 tags if they don't exist
         if audio.tags is None:
             audio.add_tags()
@@ -155,37 +184,47 @@ def write_chapters(
         for key in keys_to_remove:
             del tags[key]
 
-        # Add new chapter frames
+        # Add new chapter frames. Encoding 1 (UTF-16) inside TIT2 matches what
+        # widely-compatible podcast feeds (e.g. Nextlander) ship and is what
+        # Pocket Casts parses most reliably.
         chapter_ids = []
         for i, chapter in enumerate(sorted_chapters):
             element_id = f"chp{i}"
             chapter_ids.append(element_id)
 
-            # Create TIT2 sub-frame for chapter title
-            tit2 = TIT2(encoding=3, text=[chapter.title])
+            tit2 = TIT2(encoding=1, text=[chapter.title])
 
-            # Create CHAP frame
             chap = CHAP(
                 element_id=element_id,
                 start_time=chapter.start_time_ms,
                 end_time=chapter.end_time_ms,
-                start_offset=0xFFFFFFFF,  # Not used
-                end_offset=0xFFFFFFFF,  # Not used
+                start_offset=0xFFFFFFFF,
+                end_offset=0xFFFFFFFF,
                 sub_frames=[tit2],
             )
             tags.add(chap)
 
-        # Create CTOC (Table of Contents) frame
         if chapter_ids:
             ctoc = CTOC(
                 element_id="toc",
-                flags=3,  # Top-level, ordered
+                flags=3,
                 child_element_ids=chapter_ids,
                 sub_frames=[],
             )
             tags.add(ctoc)
 
-        audio.save()
+        # TLEN keeps readers from discarding chapters whose end_time exceeds
+        # the file duration when no explicit length is otherwise advertised.
+        total_duration_ms = audio_duration_ms or max(
+            (chapter.end_time_ms for chapter in sorted_chapters), default=0
+        )
+        if total_duration_ms > 0:
+            tags.delall("TLEN")
+            tags.add(TLEN(encoding=0, text=[str(total_duration_ms)]))
+
+        # ID3v2.3 (not v2.4) is the de-facto podcast chapters standard;
+        # Pocket Casts and other readers parse it most reliably.
+        audio.save(v2_version=3)
 
         logger.info("Wrote %d chapters to %s", len(chapters), audio_path)
 

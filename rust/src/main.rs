@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use id3::frame::{Chapter as Id3Chapter, Content, Frame, TableOfContents};
-use id3::{Tag, TagLike, Version};
+use id3::{Encoding as Id3Encoding, Tag, TagLike, Version};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,8 @@ struct AudioBleepArgs {
     beep_volume: f32,
     #[arg(long = "duck-volume")]
     duck_volume: f32,
+    #[arg(long = "fade-ms", default_value_t = 5)]
+    fade_ms: u32,
     #[arg(long)]
     encoding: Encoding,
 }
@@ -2079,6 +2081,8 @@ fn cut_audio(args: AudioCutArgs) -> Result<OkResponse> {
     Ok(OkResponse { ok: true })
 }
 
+const BLEEP_MAX_WINDOWS_PER_PASS: usize = 96;
+
 fn bleep_audio(args: AudioBleepArgs) -> Result<OkResponse> {
     let duration_ms = probe_audio_path(&args.input)?.duration_ms;
     let windows = read_windows_ms(&args.windows_json)?;
@@ -2087,21 +2091,223 @@ fn bleep_audio(args: AudioBleepArgs) -> Result<OkResponse> {
         return Ok(OkResponse { ok: true });
     }
 
-    let condition = build_window_condition(&windows);
-    let filter = format!(
-        "[0:a]volume='if(gt({condition},0),{duck},1)':eval=frame[ducked];\
-         sine=frequency={freq}:duration={duration:.3}:sample_rate=44100,\
-         volume='if(gt({condition},0),{beep},0)':eval=frame[beep];\
-         [ducked][beep]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[out]",
-        condition = condition,
-        duck = args.duck_volume,
-        freq = args.beep_frequency_hz,
-        duration = duration_ms as f64 / 1000.0,
-        beep = args.beep_volume,
-    );
+    let chunks: Vec<&[(u64, u64)]> = windows.chunks(BLEEP_MAX_WINDOWS_PER_PASS).collect();
+    let total_passes = chunks.len();
 
-    run_filtered_output(&args.input, &args.output, &filter, &args.encoding)?;
+    if total_passes == 1 {
+        apply_bleep_pass_mp3(
+            &args.input,
+            &args.output,
+            chunks[0],
+            duration_ms,
+            args.beep_frequency_hz,
+            args.beep_volume,
+            args.duck_volume,
+            args.fade_ms,
+            &args.encoding,
+        )?;
+        return Ok(OkResponse { ok: true });
+    }
+
+    // Multi-pass: keep intermediates lossless (WAV) so only the final mp3 encode is lossy.
+    let temp_dir = tempfile::tempdir().with_context(|| "failed to create temp directory")?;
+    let mut current_input = args.input.clone();
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let is_last = idx == total_passes - 1;
+        if is_last {
+            apply_bleep_pass_mp3(
+                &current_input,
+                &args.output,
+                chunk,
+                duration_ms,
+                args.beep_frequency_hz,
+                args.beep_volume,
+                args.duck_volume,
+                args.fade_ms,
+                &args.encoding,
+            )?;
+        } else {
+            let pass_output = temp_dir.path().join(format!("bleep_pass_{idx}.wav"));
+            apply_bleep_pass_wav(
+                &current_input,
+                &pass_output,
+                chunk,
+                duration_ms,
+                args.beep_frequency_hz,
+                args.beep_volume,
+                args.duck_volume,
+                args.fade_ms,
+            )?;
+            current_input = pass_output;
+        }
+    }
     Ok(OkResponse { ok: true })
+}
+
+// Build the bleep filter graph using:
+//   * Voice: a chain of per-window `volume` filters with `enable=` so each
+//     filter only fires inside its own zone. Each filter ramps the gain
+//     between 1.0 and `duck` over `fade_ms` so window edges crossfade
+//     instead of cutting abruptly (which produced audible clicks).
+//   * Beep: one `sine` source per window, faded in/out and delayed to the
+//     window start, then `amix` of all beep sources with the ducked voice.
+// Both sides have matching crossfade curves so the voice attenuating and the
+// beep coming in happen smoothly across the fade window.
+fn bleep_filter_complex(
+    windows: &[(u64, u64)],
+    duration_ms: u64,
+    beep_frequency_hz: u32,
+    beep_volume: f32,
+    duck_volume: f32,
+    fade_ms: u32,
+) -> String {
+    let fade_s = (f64::from(fade_ms.max(1))) / 1000.0;
+    let duration_s = duration_ms as f64 / 1000.0;
+
+    // Expand each window by fade_ms on each side, then merge so adjacent
+    // fade zones don't overlap and double-attenuate the voice.
+    let zones: Vec<(f64, f64)> = {
+        let fade_ms_u64 = u64::from(fade_ms);
+        let expanded: Vec<(u64, u64)> = windows
+            .iter()
+            .map(|&(s, e)| (s.saturating_sub(fade_ms_u64), e.saturating_add(fade_ms_u64)))
+            .collect();
+        merge_windows(expanded)
+            .into_iter()
+            .map(|(zs, ze)| {
+                (
+                    (zs as f64 / 1000.0).max(0.0),
+                    (ze as f64 / 1000.0).min(duration_s),
+                )
+            })
+            .filter(|(zs, ze)| ze > zs)
+            .collect()
+    };
+
+    let voice_coef = (1.0 - f64::from(duck_volume)).clamp(0.0, 1.0);
+
+    let voice_filters: Vec<String> = zones
+        .iter()
+        .map(|&(zs, ze)| {
+            // trapezoidal bump: 0 outside the zone, ramps 0→1 over fade_s at the
+            // leading edge, holds at 1, ramps 1→0 at the trailing edge.
+            format!(
+                "volume='1-{coef:.4}*max(0,min(1,min((t-{zs:.4})/{r:.5},({ze:.4}-t)/{r:.5})))':eval=frame:enable='between(t,{zs:.4},{ze:.4})'",
+                coef = voice_coef,
+                zs = zs,
+                ze = ze,
+                r = fade_s,
+            )
+        })
+        .collect();
+
+    let voice_chain = if voice_filters.is_empty() {
+        "[0:a]anull[ducked]".to_string()
+    } else {
+        format!("[0:a]{}[ducked]", voice_filters.join(","))
+    };
+
+    let mut beep_parts: Vec<String> = Vec::new();
+    let mut beep_labels: Vec<String> = Vec::new();
+    for (i, &(zs, ze)) in zones.iter().enumerate() {
+        let beep_dur = ze - zs;
+        if beep_dur <= 0.0 {
+            continue;
+        }
+        let fade_actual = fade_s.min(beep_dur / 2.0);
+        let fade_out_start = (beep_dur - fade_actual).max(0.0);
+        let delay_ms_int = (zs * 1000.0).round() as u64;
+        let label = format!("b{i}");
+        beep_parts.push(format!(
+            "sine=frequency={freq}:duration={dur:.4}:sample_rate=44100,\
+             afade=t=in:d={fr:.5},\
+             afade=t=out:st={fo:.5}:d={fr:.5},\
+             volume={vol:.4},\
+             adelay={delay}[{label}]",
+            freq = beep_frequency_hz,
+            dur = beep_dur,
+            fr = fade_actual,
+            fo = fade_out_start,
+            vol = beep_volume,
+            delay = delay_ms_int,
+            label = label,
+        ));
+        beep_labels.push(format!("[{label}]"));
+    }
+
+    let mix = if beep_labels.is_empty() {
+        "[ducked]anull[out]".to_string()
+    } else {
+        format!(
+            "[ducked]{labels}amix=inputs={n}:duration=first:dropout_transition=0:normalize=0[out]",
+            labels = beep_labels.join(""),
+            n = beep_labels.len() + 1,
+        )
+    };
+
+    let mut parts = vec![voice_chain];
+    parts.extend(beep_parts);
+    parts.push(mix);
+    parts.join(";")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_bleep_pass_mp3(
+    input: &Path,
+    output: &Path,
+    windows: &[(u64, u64)],
+    duration_ms: u64,
+    beep_frequency_hz: u32,
+    beep_volume: f32,
+    duck_volume: f32,
+    fade_ms: u32,
+    encoding: &Encoding,
+) -> Result<()> {
+    let filter = bleep_filter_complex(
+        windows,
+        duration_ms,
+        beep_frequency_hz,
+        beep_volume,
+        duck_volume,
+        fade_ms,
+    );
+    run_filtered_output(input, output, &filter, encoding)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_bleep_pass_wav(
+    input: &Path,
+    output: &Path,
+    windows: &[(u64, u64)],
+    duration_ms: u64,
+    beep_frequency_hz: u32,
+    beep_volume: f32,
+    duck_volume: f32,
+    fade_ms: u32,
+) -> Result<()> {
+    let filter = bleep_filter_complex(
+        windows,
+        duration_ms,
+        beep_frequency_hz,
+        beep_volume,
+        duck_volume,
+        fade_ms,
+    );
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-y")
+        .arg("-v")
+        .arg("error")
+        .arg("-i")
+        .arg(input)
+        .arg("-filter_complex")
+        .arg(&filter)
+        .arg("-map")
+        .arg("[out]")
+        .arg("-codec:a")
+        .arg("pcm_s16le")
+        .arg(output);
+    run_command(command, "ffmpeg filter (wav intermediate)")
 }
 
 fn split_audio(args: AudioSplitArgs) -> Result<SplitResponse> {
@@ -2384,23 +2590,6 @@ fn keep_segments(windows: &[(u64, u64)], duration_ms: u64) -> Vec<(u64, u64)> {
     keep
 }
 
-fn build_window_condition(windows: &[(u64, u64)]) -> String {
-    if windows.is_empty() {
-        return "0".to_string();
-    }
-    windows
-        .iter()
-        .filter(|(start, end)| end > start)
-        .map(|(start, end)| {
-            format!(
-                "between(t,{:.3},{:.3})",
-                *start as f64 / 1000.0,
-                *end as f64 / 1000.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-}
 
 fn normalize_word_timestamps(args: TranscriptNormalizeArgs) -> Result<OkResponse> {
     let data = fs::read_to_string(&args.input)
@@ -2570,21 +2759,51 @@ fn write_chapters(args: ChaptersWriteArgs) -> Result<OkResponse> {
     }
     chapters.sort_by_key(|chapter| chapter.start_time_ms);
 
+    // Clamp chapter end_times to the real audio duration. Some readers
+    // (notably Pocket Casts) silently drop chapters whose end_time exceeds
+    // the file length, which can happen after ad-removal recalculation if
+    // the cut math and ffmpeg's reported duration disagree by even a few ms.
+    let audio_duration_ms_u64 = probe_audio_path(&args.audio).ok().map(|p| p.duration_ms);
+    if let Some(duration_ms) = audio_duration_ms_u64 {
+        let duration_u32 = duration_ms.min(u64::from(u32::MAX)) as u32;
+        chapters.retain(|chapter| chapter.start_time_ms < duration_u32);
+        for chapter in chapters.iter_mut() {
+            if chapter.end_time_ms > duration_u32 {
+                chapter.end_time_ms = duration_u32;
+            }
+        }
+    }
+    if chapters.is_empty() {
+        return Ok(OkResponse { ok: true });
+    }
+
     let mut tag = Tag::read_from_path(&args.audio).unwrap_or_else(|_| Tag::new());
     tag.remove("CHAP");
     tag.remove("CTOC");
+
+    let total_duration_ms = audio_duration_ms_u64
+        .map(|ms| ms.min(u64::from(u32::MAX)) as u32)
+        .unwrap_or_else(|| {
+            chapters
+                .iter()
+                .map(|chapter| chapter.end_time_ms)
+                .max()
+                .unwrap_or(0)
+        });
 
     let mut chapter_ids = Vec::new();
     for (index, chapter) in chapters.into_iter().enumerate() {
         let element_id = format!("chp{index}");
         chapter_ids.push(element_id.clone());
+        let title_frame = Frame::with_content("TIT2", Content::Text(chapter.title))
+            .set_encoding(Some(Id3Encoding::UTF16));
         tag.add_frame(Id3Chapter {
             element_id,
             start_time: chapter.start_time_ms,
             end_time: chapter.end_time_ms,
             start_offset: 0xFFFF_FFFF,
             end_offset: 0xFFFF_FFFF,
-            frames: vec![Frame::with_content("TIT2", Content::Text(chapter.title))],
+            frames: vec![title_frame],
         });
     }
 
@@ -2595,7 +2814,18 @@ fn write_chapters(args: ChaptersWriteArgs) -> Result<OkResponse> {
         elements: chapter_ids,
         frames: vec![],
     });
-    tag.write_to_path(&args.audio, Version::Id3v24)
+
+    // TLEN gives players the expected total duration; some readers (Pocket Casts)
+    // discard chapters whose end_time exceeds the file duration when TLEN is absent.
+    tag.remove("TLEN");
+    if total_duration_ms > 0 {
+        tag.add_frame(Frame::with_content(
+            "TLEN",
+            Content::Text(total_duration_ms.to_string()),
+        ));
+    }
+
+    tag.write_to_path(&args.audio, Version::Id3v23)
         .with_context(|| "failed to write chapter ID3 tags")?;
 
     Ok(OkResponse { ok: true })

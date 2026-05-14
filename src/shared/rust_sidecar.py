@@ -164,6 +164,7 @@ def try_bleep_audio(
     beep_volume: float,
     duck_volume: float,
     encoding: str,
+    fade_ms: int = 5,
 ) -> bool:
     if not rust_audio_enabled():
         return False
@@ -185,6 +186,8 @@ def try_bleep_audio(
                 str(beep_volume),
                 "--duck-volume",
                 str(duck_volume),
+                "--fade-ms",
+                str(fade_ms),
                 "--encoding",
                 encoding,
             ],

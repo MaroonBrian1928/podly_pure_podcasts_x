@@ -927,8 +927,10 @@ def _sqlite_db_path_from_app_config() -> Path | None:
     prefix = "sqlite:///"
     if not uri.startswith(prefix) or uri == "sqlite:///:memory:":
         return None
-    path = uri.removeprefix(prefix)
-    if not path:
+    # SQLAlchemy URIs may append a query string (e.g. "?timeout=60"); strip it
+    # so we hand sqlite a real filesystem path, not a URI fragment.
+    path = uri.removeprefix(prefix).split("?", 1)[0]
+    if not path or path == ":memory:":
         return None
     return Path(path)
 

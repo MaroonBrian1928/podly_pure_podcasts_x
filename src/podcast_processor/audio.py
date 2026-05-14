@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -188,7 +189,14 @@ def overlay_beeps_with_ducking(
     *,
     beep_frequency_hz: int = 1000,
     beep_volume: float = 0.65,
-    duck_volume: float = 0.08,
+    # Full mute under the beep. A multiplicative duck (e.g. 0.08) leaves loud
+    # peaks audible because it scales whatever was there; muting outright makes
+    # the censor deterministic regardless of the source level.
+    duck_volume: float = 0.0,
+    # Crossfade duration at the boundary of each censor window so the voice
+    # attenuating and the beep onset are smooth instead of producing edge
+    # clicks. Kept short so it doesn't bleed audible profanity.
+    fade_ms: int = 5,
     use_vbr: bool = False,
     vbr_quality: int = 2,
     cbr_bitrate: str = "192k",
@@ -201,6 +209,7 @@ def overlay_beeps_with_ducking(
         beep_volume=beep_volume,
         duck_volume=duck_volume,
         encoding="vbr" if use_vbr else "cbr",
+        fade_ms=fade_ms,
     ):
         return
 
@@ -210,51 +219,174 @@ def overlay_beeps_with_ducking(
 
     encoding_args = _get_encoding_args(use_vbr, vbr_quality, cbr_bitrate)
     merged_windows = _merge_time_windows_ms(censor_windows_ms)
-    window_condition = _build_window_condition_expression(merged_windows)
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
 
-    main_audio = ffmpeg.input(in_path).audio
-    ducked_audio = main_audio.filter(
-        "volume",
-        volume=f"if(gt({window_condition},0),{duck_volume},1)",
-        eval="frame",
-    )
-    beep_stream = ffmpeg.input(
-        (
-            "sine="
-            f"frequency={beep_frequency_hz}:"
-            f"duration={audio_duration_ms / 1000.0:.3f}:"
-            "sample_rate=44100"
-        ),
-        f="lavfi",
-    ).audio.filter(
-        "volume",
-        volume=f"if(gt({window_condition},0),{beep_volume},0)",
-        eval="frame",
-    )
+    chunks = [
+        merged_windows[i : i + _BLEEP_MAX_WINDOWS_PER_PASS]
+        for i in range(0, len(merged_windows), _BLEEP_MAX_WINDOWS_PER_PASS)
+    ]
 
-    mixed_audio = ffmpeg.filter(
-        [ducked_audio, beep_stream],
-        "amix",
-        inputs=2,
-        duration="first",
-        dropout_transition=0,
-        normalize=0,
-    )
-
-    (
-        mixed_audio.output(out_path, acodec="libmp3lame", **encoding_args)
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        current_input = in_path
+        for idx, chunk in enumerate(chunks):
+            is_last = idx == len(chunks) - 1
+            if is_last:
+                _apply_bleep_pass(
+                    current_input,
+                    out_path,
+                    chunk,
+                    audio_duration_ms,
+                    beep_frequency_hz=beep_frequency_hz,
+                    beep_volume=beep_volume,
+                    duck_volume=duck_volume,
+                    fade_ms=fade_ms,
+                    output_codec="libmp3lame",
+                    encoding_args=encoding_args,
+                )
+            else:
+                pass_output = os.path.join(temp_dir, f"bleep_pass_{idx}.wav")
+                _apply_bleep_pass(
+                    current_input,
+                    pass_output,
+                    chunk,
+                    audio_duration_ms,
+                    beep_frequency_hz=beep_frequency_hz,
+                    beep_volume=beep_volume,
+                    duck_volume=duck_volume,
+                    fade_ms=fade_ms,
+                    output_codec="pcm_s16le",
+                    encoding_args={},
+                )
+                current_input = pass_output
 
     logger.info(
-        "[FFMPEG_BLEEP] Applied %d censor windows: %s -> %s",
+        "[FFMPEG_BLEEP] Applied %d censor windows across %d pass(es): %s -> %s",
         len(merged_windows),
+        len(chunks),
         in_path,
         out_path,
     )
+
+
+_BLEEP_MAX_WINDOWS_PER_PASS = 96
+
+
+def _apply_bleep_pass(
+    in_path: str,
+    out_path: str,
+    windows: list[tuple[int, int]],
+    audio_duration_ms: int,
+    *,
+    beep_frequency_hz: int,
+    beep_volume: float,
+    duck_volume: float,
+    fade_ms: int,
+    output_codec: str,
+    encoding_args: dict[str, Any],
+) -> None:
+    filter_complex = _build_bleep_filter_complex(
+        windows,
+        audio_duration_ms,
+        beep_frequency_hz=beep_frequency_hz,
+        beep_volume=beep_volume,
+        duck_volume=duck_volume,
+        fade_ms=fade_ms,
+    )
+
+    cmd: list[str] = [
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        in_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[out]",
+        "-codec:a",
+        output_codec,
+    ]
+    for key, value in encoding_args.items():
+        cmd.extend([f"-{key}", str(value)])
+    cmd.append(out_path)
+
+    subprocess.run(cmd, check=True)
+
+
+def _build_bleep_filter_complex(
+    windows: list[tuple[int, int]],
+    audio_duration_ms: int,
+    *,
+    beep_frequency_hz: int,
+    beep_volume: float,
+    duck_volume: float,
+    fade_ms: int,
+) -> str:
+    """Build an ffmpeg filter_complex graph that crossfades voice and beep at
+    each censor window edge. Mirrors the Rust implementation: per-window voice
+    `volume` filters with `enable=` and per-window `sine` beep sources mixed
+    via `amix`.
+    """
+    fade_ms_eff = max(1, fade_ms)
+    fade_s = fade_ms_eff / 1000.0
+    duration_s = audio_duration_ms / 1000.0
+
+    expanded = [
+        (max(0, s - fade_ms_eff), e + fade_ms_eff) for s, e in windows
+    ]
+    zones_ms = _merge_time_windows_ms(expanded)
+    zones: list[tuple[float, float]] = []
+    for zs_ms, ze_ms in zones_ms:
+        zs = max(0.0, zs_ms / 1000.0)
+        ze = min(duration_s, ze_ms / 1000.0)
+        if ze > zs:
+            zones.append((zs, ze))
+
+    voice_coef = max(0.0, min(1.0, 1.0 - duck_volume))
+
+    if zones:
+        voice_filters = [
+            (
+                f"volume='1-{voice_coef:.4f}*max(0,min(1,min("
+                f"(t-{zs:.4f})/{fade_s:.5f},({ze:.4f}-t)/{fade_s:.5f})))'"
+                f":eval=frame:enable='between(t,{zs:.4f},{ze:.4f})'"
+            )
+            for zs, ze in zones
+        ]
+        voice_chain = f"[0:a]{','.join(voice_filters)}[ducked]"
+    else:
+        voice_chain = "[0:a]anull[ducked]"
+
+    beep_parts: list[str] = []
+    beep_labels: list[str] = []
+    for i, (zs, ze) in enumerate(zones):
+        beep_dur = ze - zs
+        if beep_dur <= 0:
+            continue
+        fade_actual = min(fade_s, beep_dur / 2.0)
+        fade_out_start = max(0.0, beep_dur - fade_actual)
+        delay_ms_int = round(zs * 1000.0)
+        label = f"b{i}"
+        beep_parts.append(
+            f"sine=frequency={beep_frequency_hz}:duration={beep_dur:.4f}:sample_rate=44100,"
+            f"afade=t=in:d={fade_actual:.5f},"
+            f"afade=t=out:st={fade_out_start:.5f}:d={fade_actual:.5f},"
+            f"volume={beep_volume:.4f},"
+            f"adelay={delay_ms_int}[{label}]"
+        )
+        beep_labels.append(f"[{label}]")
+
+    if beep_labels:
+        mix = (
+            f"[ducked]{''.join(beep_labels)}amix=inputs={len(beep_labels) + 1}"
+            ":duration=first:dropout_transition=0:normalize=0[out]"
+        )
+    else:
+        mix = "[ducked]anull[out]"
+
+    return ";".join([voice_chain, *beep_parts, mix])
 
 
 def _clip_segments_simple(
