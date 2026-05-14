@@ -1,4 +1,6 @@
+import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from queue import Empty, Queue
@@ -10,11 +12,19 @@ from app.ipc import make_client_manager
 from app.writer.model_ops import execute_model_command
 from app.writer.protocol import WriteCommand, WriteCommandType, WriteResult
 
+logger = logging.getLogger("global_logger")
+
 
 class WriterClient:
     def __init__(self) -> None:
         self.manager: Any = None
         self.queue: Queue[Any] | None = None
+        # Per-thread reply queue. Reusing a single Manager().Queue() per worker
+        # thread avoids leaking server-side Queue objects in the writer process
+        # (each manager.Queue() call allocates a new Queue in the writer's
+        # referent table that is only freed when the client-side proxy is
+        # garbage-collected — a path that's fragile under load).
+        self._tls = threading.local()
 
     def connect(self) -> None:
         if not self.manager:
@@ -126,6 +136,26 @@ class WriterClient:
             cmd=cmd, model_cls=model_cls, db_session=db.session
         )
 
+    def _get_thread_reply_queue(self) -> Queue[Any]:
+        if not self.manager:
+            raise RuntimeError("Manager not connected")
+        reply_q = cast("Queue[Any] | None", getattr(self._tls, "reply_q", None))
+        if reply_q is None:
+            reply_q = cast(Queue[Any], self.manager.Queue())
+            self._tls.reply_q = reply_q
+        return reply_q
+
+    @staticmethod
+    def _drain_queue(reply_q: Queue[Any]) -> int:
+        drained = 0
+        while True:
+            try:
+                reply_q.get_nowait()
+            except Empty:
+                break
+            drained += 1
+        return drained
+
     def submit(
         self, cmd: WriteCommand, wait: bool = False, timeout: int = 10
     ) -> WriteResult | None:
@@ -140,10 +170,14 @@ class WriterClient:
                 raise
 
         if wait:
-            if not self.manager:
-                raise RuntimeError("Manager not connected")
-            # Create a temporary queue for the reply
-            reply_q = cast(Queue[Any], self.manager.Queue())
+            reply_q = self._get_thread_reply_queue()
+            stale = self._drain_queue(reply_q)
+            if stale:
+                logger.warning(
+                    "WriterClient: drained %s stale reply(s) before cmd id=%s",
+                    stale,
+                    cmd.id,
+                )
             cmd.reply_queue = reply_q
 
         if self.queue:
@@ -153,9 +187,24 @@ class WriterClient:
             if reply_q is None:
                 raise RuntimeError("Reply queue was not initialized")
             try:
-                return cast(WriteResult, reply_q.get(timeout=timeout))
+                result = cast(WriteResult, reply_q.get(timeout=timeout))
             except Empty as exc:
                 raise TimeoutError("Writer service did not respond") from exc
+            # Thread-local queue means this thread's submits are serialized,
+            # so the next reply must be ours. Verify defensively.
+            result_cmd_id = getattr(result, "command_id", None)
+            if result_cmd_id != cmd.id:
+                logger.error(
+                    "WriterClient: reply id mismatch (expected=%s got=%s); "
+                    "discarding and retrying",
+                    cmd.id,
+                    result_cmd_id,
+                )
+                try:
+                    result = cast(WriteResult, reply_q.get(timeout=timeout))
+                except Empty as exc:
+                    raise TimeoutError("Writer service did not respond") from exc
+            return result
         return None
 
     def create(

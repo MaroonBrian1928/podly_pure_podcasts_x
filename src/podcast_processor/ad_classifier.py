@@ -1,15 +1,17 @@
+from __future__ import annotations
+
 import logging
 import math
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import litellm
 from jinja2 import Template
-from litellm.exceptions import InternalServerError
-from litellm.types.utils import Choices
 from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from litellm.exceptions import InternalServerError
 from sqlalchemy import and_
 
 from app.extensions import db
@@ -1053,6 +1055,8 @@ class AdClassifier:
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """Determine if an error should be retried."""
+        from litellm.exceptions import InternalServerError
+
         if isinstance(error, InternalServerError):
             return True
 
@@ -1115,6 +1119,9 @@ class AdClassifier:
                 completion_args = self._prepare_api_call(model_call_obj, system_prompt)
                 if completion_args is None:
                     return None  # Token limit exceeded
+
+                import litellm
+                from litellm.types.utils import Choices
 
                 # Use concurrency limiter if available
                 if self.concurrency_limiter:

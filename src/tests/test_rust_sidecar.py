@@ -129,14 +129,104 @@ def test_try_render_feed_xml_uses_rust_when_enabled(
             "12",
             "--base-url",
             "https://podly.example",
-            "--include-unprocessed",
-            "false",
             "--feed-token",
             "token",
             "--feed-secret",
             "secret",
         ]
     ]
+
+
+def test_try_render_feed_xml_passes_include_unprocessed_as_bare_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str]) -> dict[str, object]:
+        calls.append(args)
+        return {"xml": "<rss></rss>"}
+
+    monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    rust_sidecar.try_render_feed_xml(
+        db_path=Path("/tmp/db.sqlite"),
+        feed_id=12,
+        base_url="https://podly.example",
+        include_unprocessed=True,
+        feed_token=None,
+        feed_secret=None,
+    )
+
+    assert "--include-unprocessed" in calls[0]
+    idx = calls[0].index("--include-unprocessed")
+    assert calls[0][idx + 1 : idx + 2] != ["true"]
+    assert calls[0][idx + 1 : idx + 2] != ["false"]
+
+
+def test_try_render_aggregate_feed_xml_passes_require_auth_as_bare_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str]) -> dict[str, object]:
+        calls.append(args)
+        return {"xml": "<rss></rss>"}
+
+    monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    result = rust_sidecar.try_render_aggregate_feed_xml(
+        db_path=Path("/tmp/db.sqlite"),
+        user_id=7,
+        base_url="https://podly.example",
+        require_auth=True,
+        limit_per_feed=25,
+        feed_token=None,
+        feed_secret=None,
+    )
+
+    assert result == b"<rss></rss>"
+    assert calls == [
+        [
+            "feed",
+            "render-aggregate",
+            "--db",
+            "/tmp/db.sqlite",
+            "--user-id",
+            "7",
+            "--base-url",
+            "https://podly.example",
+            "--limit-per-feed",
+            "25",
+            "--require-auth",
+        ]
+    ]
+
+
+def test_try_render_aggregate_feed_xml_omits_require_auth_when_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str]) -> dict[str, object]:
+        calls.append(args)
+        return {"xml": "<rss></rss>"}
+
+    monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    rust_sidecar.try_render_aggregate_feed_xml(
+        db_path=Path("/tmp/db.sqlite"),
+        user_id=7,
+        base_url="https://podly.example",
+        require_auth=False,
+        limit_per_feed=25,
+        feed_token=None,
+        feed_secret=None,
+    )
+
+    assert "--require-auth" not in calls[0]
 
 
 def test_try_render_post_stats_returns_none_when_disabled(

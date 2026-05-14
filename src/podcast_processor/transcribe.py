@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from groq import Groq
-from openai import OpenAI
+
+# OpenAI is imported lazily inside OpenAIWhisperTranscriber.__init__ to avoid
+# pulling in openai (~566 modules) for runs that use a different transcriber.
 from pydantic import BaseModel
 
 from podcast_processor.audio import split_audio
@@ -162,6 +164,8 @@ class TestWhisperTranscriber(Transcriber):
 
 class OpenAIWhisperTranscriber(Transcriber):
     def __init__(self, logger: logging.Logger, config: RemoteWhisperConfig):
+        from openai import OpenAI
+
         self.logger = logger
         self.config = config
 

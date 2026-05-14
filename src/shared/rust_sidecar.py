@@ -20,6 +20,8 @@ RUST_FEED_REFRESH_ENABLED_ENV = "PODLY_RUST_FEED_REFRESH_ENABLED"
 RUST_JOBS_ENABLED_ENV = "PODLY_RUST_JOBS_ENABLED"
 RUST_STATS_ENABLED_ENV = "PODLY_RUST_STATS_ENABLED"
 RUST_TRANSCRIPT_ENABLED_ENV = "PODLY_RUST_TRANSCRIPT_ENABLED"
+RUST_AD_MERGE_ENABLED_ENV = "PODLY_RUST_AD_MERGE_ENABLED"
+RUST_PROFANITY_ENABLED_ENV = "PODLY_RUST_PROFANITY_ENABLED"
 
 
 class RustSidecarError(RuntimeError):
@@ -60,6 +62,14 @@ def rust_stats_enabled() -> bool:
 
 def rust_transcript_enabled() -> bool:
     return env_flag_enabled(RUST_TRANSCRIPT_ENABLED_ENV)
+
+
+def rust_ad_merge_enabled() -> bool:
+    return env_flag_enabled(RUST_AD_MERGE_ENABLED_ENV)
+
+
+def rust_profanity_enabled() -> bool:
+    return env_flag_enabled(RUST_PROFANITY_ENABLED_ENV)
 
 
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
@@ -273,9 +283,9 @@ def try_render_feed_xml(
         str(feed_id),
         "--base-url",
         base_url,
-        "--include-unprocessed",
-        "true" if include_unprocessed else "false",
     ]
+    if include_unprocessed:
+        args.append("--include-unprocessed")
     if feed_token:
         args.extend(["--feed-token", feed_token])
     if feed_secret:
@@ -305,11 +315,11 @@ def try_render_aggregate_feed_xml(
         str(user_id),
         "--base-url",
         base_url,
-        "--require-auth",
-        "true" if require_auth else "false",
         "--limit-per-feed",
         str(limit_per_feed),
     ]
+    if require_auth:
+        args.append("--require-auth")
     if feed_token:
         args.extend(["--feed-token", feed_token])
     if feed_secret:
@@ -641,3 +651,117 @@ class _json_file:
     def __exit__(self, *_args: object) -> None:
         if self._temp_file is not None:
             Path(self._temp_file.name).unlink(missing_ok=True)
+
+
+def try_merge_ad_segments(
+    *,
+    db_path: Path,
+    post_guid: str,
+    min_confidence: float,
+    max_gap: float,
+    enable_boundary_refinement: bool,
+) -> list[tuple[float, float]] | None:
+    """Run Rust ad merger. Returns list of (start_seconds, end_seconds) tuples, or None.
+
+    None means: flag off, sidecar failed, or returned an unexpected payload.
+    Callers should fall back to the Python AdMerger pipeline.
+    """
+    if not rust_ad_merge_enabled():
+        return None
+
+    try:
+        payload = run_podly_tools(
+            [
+                "transcript",
+                "ad-merge",
+                "--db",
+                str(db_path),
+                "--post-guid",
+                post_guid,
+                "--min-confidence",
+                str(min_confidence),
+                "--max-gap",
+                str(max_gap),
+                "--enable-boundary-refinement",
+                "true" if enable_boundary_refinement else "false",
+            ]
+        )
+    except RustSidecarError:
+        LOGGER.exception("Rust ad-merge failed; falling back to Python implementation")
+        return None
+
+    raw = payload.get("ad_segments")
+    if not isinstance(raw, list):
+        LOGGER.error("Rust ad-merge returned invalid payload: %r", payload)
+        return None
+
+    result: list[tuple[float, float]] = []
+    for item in raw:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or not all(isinstance(v, int | float) for v in item)
+        ):
+            LOGGER.error("Rust ad-merge returned bad segment: %r", item)
+            return None
+        result.append((float(item[0]), float(item[1])))
+    return result
+
+
+def try_extract_profanity_windows(
+    *,
+    words: list[dict[str, Any]],
+    profanity_terms: list[str],
+    pad_start_ms: int,
+    pad_end_ms: int,
+    merge_gap_ms: int,
+) -> list[tuple[int, int]] | None:
+    """Run Rust profanity-windows. Returns list of (start_ms, end_ms) tuples.
+
+    None means: flag off, sidecar failed, or invalid payload. Callers should
+    fall back to the Python implementation.
+
+    `words` is a list of dicts: {"word": str, "start": float_seconds, "end": float_seconds}.
+    """
+    if not rust_profanity_enabled():
+        return None
+
+    request_payload = {
+        "words": words,
+        "profanity_terms": profanity_terms,
+        "pad_start_ms": pad_start_ms,
+        "pad_end_ms": pad_end_ms,
+        "merge_gap_ms": merge_gap_ms,
+    }
+    try:
+        with _json_file(request_payload) as input_path:
+            payload = run_podly_tools(
+                [
+                    "transcript",
+                    "profanity-windows",
+                    "--input",
+                    str(input_path),
+                ]
+            )
+    except RustSidecarError:
+        LOGGER.exception(
+            "Rust profanity-windows failed; falling back to Python implementation"
+        )
+        return None
+
+    raw = payload.get("windows_ms")
+    if not isinstance(raw, list):
+        LOGGER.error("Rust profanity-windows returned invalid payload: %r", payload)
+        return None
+
+    result: list[tuple[int, int]] = []
+    for item in raw:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or not all(isinstance(v, int) for v in item)
+        ):
+            LOGGER.error("Rust profanity-windows returned bad window: %r", item)
+            return None
+        result.append((int(item[0]), int(item[1])))
+    return result

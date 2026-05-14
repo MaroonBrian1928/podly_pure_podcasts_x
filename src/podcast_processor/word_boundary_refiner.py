@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import litellm
 from jinja2 import Template
 
 from podcast_processor.llm_model_call_utils import (
@@ -101,6 +100,8 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         raw_response: str | None = None
 
         try:
+            import litellm
+
             response = litellm.completion(
                 model=self.config.llm_model,
                 messages=[{"role": "user", "content": prompt}],

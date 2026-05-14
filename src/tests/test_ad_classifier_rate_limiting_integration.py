@@ -81,7 +81,7 @@ class TestAdClassifierRateLimiting:
             for error in non_retryable_errors:
                 assert classifier._is_retryable_error(error) is False
 
-    @patch("podcast_processor.ad_classifier.litellm")
+    @patch("litellm")
     @patch("podcast_processor.ad_classifier.isinstance")
     def test_call_model_with_rate_limiter(self, mock_isinstance, mock_litellm):
         """Test that _call_model uses rate limiter when available."""

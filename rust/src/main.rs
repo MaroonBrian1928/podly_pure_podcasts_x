@@ -230,6 +230,28 @@ struct TranscriptCommand {
 enum TranscriptSubcommand {
     NormalizeWordTimestamps(TranscriptNormalizeArgs),
     ExportWordTimestamps(TranscriptExportArgs),
+    AdMerge(TranscriptAdMergeArgs),
+    ProfanityWindows(TranscriptProfanityWindowsArgs),
+}
+
+#[derive(Args)]
+struct TranscriptProfanityWindowsArgs {
+    #[arg(long)]
+    input: PathBuf,
+}
+
+#[derive(Args)]
+struct TranscriptAdMergeArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "min-confidence")]
+    min_confidence: f64,
+    #[arg(long = "max-gap")]
+    max_gap: f64,
+    #[arg(long = "enable-boundary-refinement", action = ArgAction::Set)]
+    enable_boundary_refinement: bool,
 }
 
 #[derive(Args)]
@@ -549,6 +571,10 @@ fn run() -> Result<()> {
             TranscriptSubcommand::ExportWordTimestamps(args) => {
                 print_json(&export_word_timestamps(args)?)
             }
+            TranscriptSubcommand::AdMerge(args) => print_json(&run_transcript_ad_merge(args)?),
+            TranscriptSubcommand::ProfanityWindows(args) => {
+                print_json(&run_transcript_profanity_windows(args)?)
+            }
         },
         Commands::Chapters(chapters) => match chapters.command {
             ChaptersSubcommand::Read(args) => print_json(&read_chapters(args)?),
@@ -556,6 +582,94 @@ fn run() -> Result<()> {
             ChaptersSubcommand::Write(args) => print_json(&write_chapters(args)?),
         },
     }
+}
+
+#[derive(Deserialize)]
+struct ProfanityWord {
+    word: Option<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct ProfanityRequest {
+    words: Vec<ProfanityWord>,
+    profanity_terms: Vec<String>,
+    pad_start_ms: i64,
+    pad_end_ms: i64,
+    merge_gap_ms: i64,
+}
+
+fn run_transcript_profanity_windows(args: TranscriptProfanityWindowsArgs) -> Result<Value> {
+    let raw = std::fs::read_to_string(&args.input)
+        .with_context(|| format!("failed to read profanity input {}", args.input.display()))?;
+    let request: ProfanityRequest = serde_json::from_str(&raw)
+        .context("failed to parse profanity-windows input as JSON")?;
+
+    static NORMALIZE_RE: OnceLock<Regex> = OnceLock::new();
+    let normalize_re = NORMALIZE_RE
+        .get_or_init(|| Regex::new(r"(^[^A-Za-z0-9']+)|([^A-Za-z0-9']+$)").unwrap());
+
+    let terms: HashSet<String> = request
+        .profanity_terms
+        .into_iter()
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    let mut raw_windows: Vec<(i64, i64)> = Vec::new();
+    for w in request.words {
+        let (Some(text), Some(start), Some(end)) = (w.word, w.start, w.end) else {
+            continue;
+        };
+        let normalized = normalize_re.replace_all(&text, "").to_lowercase();
+        if normalized.is_empty() || !terms.contains(&normalized) {
+            continue;
+        }
+        let start_ms = ((start * 1000.0).floor() as i64 - request.pad_start_ms).max(0);
+        let end_ms = ((end * 1000.0).ceil() as i64 + request.pad_end_ms).max(start_ms + 1);
+        raw_windows.push((start_ms, end_ms));
+    }
+
+    raw_windows.sort();
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(raw_windows.len());
+    for (start, end) in raw_windows {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 + request.merge_gap_ms {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    let windows: Vec<Value> = merged
+        .into_iter()
+        .map(|(s, e)| json!([s, e]))
+        .collect();
+    Ok(json!({ "windows_ms": windows }))
+}
+
+fn run_transcript_ad_merge(args: TranscriptAdMergeArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let transcript_segments = query_stats_transcript_segments(&conn, post.id)?;
+    let audio_segments = query_stats_audio_segments(&conn, post.id)?;
+    let identifications = query_stats_identifications(&conn, post.id)?;
+    let ad_blocks = build_stats_ad_blocks(
+        &post,
+        &transcript_segments,
+        &audio_segments,
+        &identifications,
+        args.min_confidence,
+        args.max_gap,
+        args.enable_boundary_refinement,
+    );
+    let ad_segments: Vec<Value> = ad_blocks
+        .iter()
+        .map(|(start, end)| json!([start, end]))
+        .collect();
+    Ok(json!({ "ad_segments": ad_segments }))
 }
 
 fn render_stats(args: StatsRenderArgs) -> Result<Value> {

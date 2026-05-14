@@ -61,7 +61,6 @@ interface ProcessingEstimate {
 }
 
 const EPISODES_PAGE_SIZE = 25;
-const MIN_FEED_TRANSITION_MS = 320;
 
 export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailProps) {
   const { requireAuth, isAuthenticated, user } = useAuth();
@@ -84,7 +83,6 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const [isFeedTransitionActive, setIsFeedTransitionActive] = useState(false);
   const [episodeDescriptionView, setEpisodeDescriptionView] =
     useState<EpisodeDescriptionView>(() => loadEpisodeDescriptionView(feed.id));
-  const feedTransitionStartRef = useRef<number | null>(null);
   const handleEpisodeDescriptionViewChange = (view: EpisodeDescriptionView) => {
     setEpisodeDescriptionView(view);
     persistEpisodeDescriptionView(currentFeed.id, view);
@@ -401,7 +399,6 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
   useEffect(() => {
     if (feed.id !== currentFeed.id) {
-      feedTransitionStartRef.current = Date.now();
       setIsFeedTransitionActive(true);
     }
     setCurrentFeed(feed);
@@ -416,15 +413,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
       return;
     }
 
-    const elapsed =
-      Date.now() - (feedTransitionStartRef.current ?? Date.now());
-    const remainingDelay = Math.max(0, MIN_FEED_TRANSITION_MS - elapsed);
-    const timeout = window.setTimeout(() => {
-      setIsFeedTransitionActive(false);
-    }, remainingDelay);
-    return () => {
-      window.clearTimeout(timeout);
-    };
+    setIsFeedTransitionActive(false);
   }, [isFeedTransitionActive, isFetching, isLoading]);
 
   useEffect(() => {

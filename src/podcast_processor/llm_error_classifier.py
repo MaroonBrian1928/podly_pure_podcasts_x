@@ -5,8 +5,18 @@ Provides more robust and extensible error handling beyond simple string matching
 """
 
 import re
+from typing import TYPE_CHECKING
 
-from litellm.exceptions import InternalServerError
+if TYPE_CHECKING:
+    pass
+
+
+def _internal_server_error_class() -> type:
+    # Import lazily so that loading this module does not pull in litellm
+    # (~700 modules, ~120 MB) until an LLM error is actually classified.
+    from litellm.exceptions import InternalServerError
+
+    return InternalServerError
 
 
 class LLMErrorClassifier:
@@ -59,7 +69,7 @@ class LLMErrorClassifier:
             True if the error should be retried, False otherwise
         """
         # Handle specific exception types
-        if isinstance(error, InternalServerError):
+        if isinstance(error, _internal_server_error_class()):
             return True
 
         # Convert to string for pattern matching

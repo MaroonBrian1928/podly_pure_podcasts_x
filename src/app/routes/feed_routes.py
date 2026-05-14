@@ -834,7 +834,11 @@ def api_feeds() -> ResponseReturnValue:
         feeds = Feed.query.all()
         current_user = getattr(g, "current_user", None)
 
-    feeds_data = [_serialize_feed(feed, current_user=current_user) for feed in feeds]
+    aggregates = _build_feed_aggregates([feed.id for feed in feeds])
+    feeds_data = [
+        _serialize_feed(feed, current_user=current_user, aggregates=aggregates)
+        for feed in feeds
+    ]
     return jsonify(feeds_data)
 
 
@@ -1117,13 +1121,100 @@ def _latest_episode_release_date(feed: Feed) -> str | None:
     return latest_release_date.isoformat() if latest_release_date else None
 
 
+class _FeedAggregate:
+    __slots__ = ("latest_release_date_iso", "member_ids", "posts_count")
+
+    def __init__(
+        self,
+        posts_count: int,
+        latest_release_date_iso: str | None,
+        member_ids: list[int],
+    ) -> None:
+        self.posts_count = posts_count
+        self.latest_release_date_iso = latest_release_date_iso
+        self.member_ids = member_ids
+
+
+FeedAggregateMap = dict[int, _FeedAggregate]
+_EMPTY_FEED_AGGREGATE = _FeedAggregate(0, None, [])
+
+
+def _build_feed_aggregates(feed_ids: list[int]) -> FeedAggregateMap:
+    """Batch-fetch post counts, latest release dates, and member IDs for feeds.
+
+    Replaces N+1 lazy loads of `feed.posts` and `feed.user_feeds` with two
+    grouped queries. For ~30 feeds with thousands of posts this drops route
+    time from seconds to milliseconds.
+    """
+    from sqlalchemy import func
+
+    if not feed_ids:
+        return {}
+
+    post_rows = (
+        db.session.query(
+            Post.feed_id,
+            func.count(Post.id),
+            func.max(Post.release_date),
+        )
+        .filter(Post.feed_id.in_(feed_ids))
+        .group_by(Post.feed_id)
+        .all()
+    )
+    post_map: dict[int, tuple[int, datetime.datetime | None]] = {
+        feed_id: (count, latest) for feed_id, count, latest in post_rows
+    }
+
+    membership_rows = (
+        db.session.query(UserFeed.feed_id, UserFeed.user_id)
+        .filter(UserFeed.feed_id.in_(feed_ids))
+        .all()
+    )
+    member_map: dict[int, list[int]] = {fid: [] for fid in feed_ids}
+    for feed_id, user_id in membership_rows:
+        member_map.setdefault(feed_id, []).append(user_id)
+
+    aggregates: FeedAggregateMap = {}
+    for feed_id in feed_ids:
+        count, latest = post_map.get(feed_id, (0, None))
+        latest_iso: str | None = None
+        if latest is not None:
+            normalized = latest
+            if normalized.tzinfo is None:
+                normalized = normalized.replace(tzinfo=datetime.UTC)
+            else:
+                normalized = normalized.astimezone(datetime.UTC)
+            latest_iso = normalized.isoformat()
+        aggregates[feed_id] = _FeedAggregate(
+            posts_count=count,
+            latest_release_date_iso=latest_iso,
+            member_ids=member_map.get(feed_id, []),
+        )
+    return aggregates
+
+
 def _serialize_feed(
     feed: Feed,
     *,
     current_user: User | None = None,
+    aggregates: FeedAggregateMap | None = None,
 ) -> dict[str, Any]:
     auth_enabled = is_auth_enabled()
-    member_ids = [membership.user_id for membership in getattr(feed, "user_feeds", [])]
+
+    if aggregates is not None:
+        agg = aggregates.get(feed.id)
+        if agg is None:
+            agg = _EMPTY_FEED_AGGREGATE
+        member_ids = agg.member_ids
+        posts_count = agg.posts_count
+        latest_release_date = agg.latest_release_date_iso
+    else:
+        # Fallback path (single-feed serialization). Triggers lazy loads.
+        member_ids = [
+            membership.user_id for membership in getattr(feed, "user_feeds", [])
+        ]
+        posts_count = len(cast(list[Any], feed.posts))
+        latest_release_date = _latest_episode_release_date(feed)
 
     # In no-auth mode, everyone is functionally a member.
     is_member = not auth_enabled or bool(
@@ -1151,8 +1242,8 @@ def _serialize_feed(
         "auto_whitelist_new_episodes_override": getattr(
             feed, "auto_whitelist_new_episodes_override", None
         ),
-        "posts_count": len(cast(list[Any], feed.posts)),
-        "latest_episode_release_date": _latest_episode_release_date(feed),
+        "posts_count": posts_count,
+        "latest_episode_release_date": latest_release_date,
         "member_count": len(member_ids),
         "is_member": is_member,
         "is_active_subscription": is_active_subscription,

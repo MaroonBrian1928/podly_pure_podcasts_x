@@ -11,18 +11,12 @@ services:
       - ./src/instance:/app/src/instance
     env_file:
       - ./.env.local
+    # All PODLY_RUST_* flags, SERVER_THREADS, and PODLY_RUST_TOOLS_BIN come
+    # from .env.local (loaded above). Only host-shell-overridable defaults that
+    # are NOT in .env.local belong here.
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - SERVER_THREADS=${SERVER_THREADS:-1}
-      - PODLY_RUST_TOOLS_BIN=${PODLY_RUST_TOOLS_BIN:-/app/bin/podly_tools}
-      - PODLY_RUST_AUDIO_ENABLED=${PODLY_RUST_AUDIO_ENABLED:-false}
-      - PODLY_RUST_CHAPTERS_ENABLED=${PODLY_RUST_CHAPTERS_ENABLED:-false}
-      - PODLY_RUST_FEED_REFRESH_ENABLED=${PODLY_RUST_FEED_REFRESH_ENABLED:-false}
-      - PODLY_RUST_FEED_XML_ENABLED=${PODLY_RUST_FEED_XML_ENABLED:-false}
-      - PODLY_RUST_JOBS_ENABLED=${PODLY_RUST_JOBS_ENABLED:-false}
-      - PODLY_RUST_STATS_ENABLED=${PODLY_RUST_STATS_ENABLED:-false}
-      - PODLY_RUST_TRANSCRIPT_ENABLED=${PODLY_RUST_TRANSCRIPT_ENABLED:-false}
     restart: unless-stopped
     healthcheck:
       test:
@@ -53,12 +47,12 @@ services:
   #         devices:
   #           - capabilities: ["gpu"]
   # ina-segmenter:
-    image: ghcr.io/maroonbrian1928/InaFastAPI:latest
-    ports:
-      - "8002:8000"
-    volumes:
-      - model-cache:/root/.cache
-    restart: unless-stopped
+  #   image: ghcr.io/maroonbrian1928/InaFastAPI:latest
+  #   ports:
+  #     - "8002:8000"
+  #   volumes:
+  #     - model-cache:/root/.cache
+  #   restart: unless-stopped
 
 
 networks:

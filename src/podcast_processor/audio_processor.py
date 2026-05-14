@@ -72,6 +72,13 @@ class AudioProcessor:
         Returns:
             A list of tuples containing start and end times (in seconds) of ad segments
         """
+        rust_segments = self._try_rust_get_ad_segments(post)
+        if rust_segments is not None:
+            self.logger.info(
+                f"Rust ad-merge produced {len(rust_segments)} ad windows for post {post.id}"
+            )
+            return rust_segments
+
         self.logger.info(f"Retrieving ad segments from database for post {post.id}.")
 
         query = (
@@ -159,6 +166,36 @@ class AudioProcessor:
             )
         ad_segments_times.sort(key=lambda x: x[0])
         return ad_segments_times
+
+    def _try_rust_get_ad_segments(self, post: Post) -> list[tuple[float, float]] | None:
+        from shared.processing_paths import get_instance_dir
+        from shared.rust_sidecar import rust_ad_merge_enabled, try_merge_ad_segments
+
+        if not rust_ad_merge_enabled():
+            return None
+
+        if self._identification_query_provided:
+            # Tests inject a custom query; the Rust path queries SQLite directly,
+            # so let it fall through to the Python implementation.
+            return None
+
+        try:
+            db_path = get_instance_dir() / "sqlite3.db"
+            return try_merge_ad_segments(
+                db_path=db_path,
+                post_guid=post.guid,
+                min_confidence=float(self.config.output.min_confidence),
+                max_gap=float(self.config.output.min_ad_segment_separation_seconds),
+                enable_boundary_refinement=bool(
+                    getattr(self.config, "enable_boundary_refinement", False)
+                ),
+            )
+        except Exception:
+            self.logger.exception(
+                "Rust ad-merge bootstrap failed for post %s; falling back",
+                post.id,
+            )
+            return None
 
     def _get_bridgeable_audio_windows(self, post: Post) -> list[tuple[float, float]]:
         try:

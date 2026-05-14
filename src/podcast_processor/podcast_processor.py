@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import litellm
 from jinja2 import Template
 from sqlalchemy import case, func
 from sqlalchemy.orm import object_session
@@ -42,7 +41,11 @@ from podcast_processor.chapter_writer import (
 from podcast_processor.ina_client import AudioSegmentResult, analyze_audio
 from podcast_processor.podcast_downloader import PodcastDownloader, sanitize_title
 from podcast_processor.processing_status_manager import ProcessingStatusManager
-from podcast_processor.profanity_filter import extract_profanity_windows
+from podcast_processor.profanity_filter import (
+    DEFAULT_PROFANITY_TERMS,
+    PROFANITY_MERGE_GAP_MS,
+    extract_profanity_windows,
+)
 from podcast_processor.prompt import (
     DEFAULT_SYSTEM_PROMPT_PATH,
     DEFAULT_USER_PROMPT_TEMPLATE_PATH,
@@ -136,6 +139,11 @@ class PodcastProcessor:
         self.status_manager = status_manager or ProcessingStatusManager(
             self.db_session, self.logger
         )
+
+        # litellm is loaded lazily here (not at module top) so that paths which
+        # never use LLM features (e.g. chapter-only) don't pay the ~120 MB
+        # litellm import cost.
+        import litellm
 
         litellm.api_base = self.config.openai_base_url
         litellm.api_key = self.config.llm_api_key
@@ -678,14 +686,14 @@ class PodcastProcessor:
                 )
 
             output_config = getattr(self.config, "output", None)
-            windows_ms, saw_word_timestamps = extract_profanity_windows(
+            pad_start_ms = int(
+                getattr(output_config, "bleep_padding_start_ms", 150) or 0
+            )
+            pad_end_ms = int(getattr(output_config, "bleep_padding_end_ms", 150) or 0)
+            windows_ms, saw_word_timestamps = self._extract_profanity_windows(
                 rich_transcript_segments or [],
-                pad_start_ms=int(
-                    getattr(output_config, "bleep_padding_start_ms", 150) or 0
-                ),
-                pad_end_ms=int(
-                    getattr(output_config, "bleep_padding_end_ms", 150) or 0
-                ),
+                pad_start_ms=pad_start_ms,
+                pad_end_ms=pad_end_ms,
             )
             if not saw_word_timestamps:
                 raise ProcessorException(
@@ -712,6 +720,61 @@ class PodcastProcessor:
             use_vbr=use_vbr,
         )
         return ProfanityBleepResult(temp_path, windows_ms)
+
+    def _extract_profanity_windows(
+        self,
+        rich_transcript_segments: list[Any],
+        *,
+        pad_start_ms: int,
+        pad_end_ms: int,
+    ) -> tuple[list[tuple[int, int]], bool]:
+        """Run profanity-window extraction. Tries Rust sidecar first, then falls
+        back to the Python implementation.
+        """
+        from shared.rust_sidecar import (
+            rust_profanity_enabled,
+            try_extract_profanity_windows,
+        )
+
+        # Flatten word list and detect whether word timestamps exist. Both the
+        # Rust path (which receives flat words) and the Python fallback need
+        # this signal, so compute it once here regardless of which path runs.
+        words: list[dict[str, Any]] = []
+        saw_word_timestamps = False
+        for segment in rich_transcript_segments:
+            seg_words = getattr(segment, "words", None) or []
+            if seg_words:
+                saw_word_timestamps = True
+            for w in seg_words:
+                word_text = getattr(w, "word", None)
+                start = getattr(w, "start", None)
+                end = getattr(w, "end", None)
+                if word_text is None or start is None or end is None:
+                    continue
+                words.append(
+                    {
+                        "word": str(word_text),
+                        "start": float(start),
+                        "end": float(end),
+                    }
+                )
+
+        if rust_profanity_enabled() and saw_word_timestamps:
+            rust_windows = try_extract_profanity_windows(
+                words=words,
+                profanity_terms=sorted(DEFAULT_PROFANITY_TERMS),
+                pad_start_ms=pad_start_ms,
+                pad_end_ms=pad_end_ms,
+                merge_gap_ms=PROFANITY_MERGE_GAP_MS,
+            )
+            if rust_windows is not None:
+                return rust_windows, saw_word_timestamps
+
+        return extract_profanity_windows(
+            rich_transcript_segments,
+            pad_start_ms=pad_start_ms,
+            pad_end_ms=pad_end_ms,
+        )
 
     def _serialize_bleep_windows(
         self, windows_ms: list[tuple[int, int]]
