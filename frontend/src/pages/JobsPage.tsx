@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { jobsApi } from '../services/api';
-import type { CleanupPreview, Job, JobManagerRun, JobManagerStatus } from '../types';
+import type {
+  CleanupPreview,
+  Job,
+  JobManagerRun,
+  JobManagerStatus,
+  JobStageEvent,
+} from '../types';
+import AnimatedDuration from '../components/AnimatedDuration';
+import { JobProgressBar, JobStageRail } from '../components/JobProgress';
+import {
+  backendDateMs,
+  formatBackendDateTime,
+  formatDuration,
+} from '../utils/datetime';
 import { buildProcessingProgressModel } from '../utils/processingProgress';
 
 function getStatusColor(status: string) {
@@ -31,15 +44,30 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function ProgressBar({ value, colorClass = 'bg-indigo-600' }: { value: number; colorClass?: string }) {
-  const clamped = Math.max(0, Math.min(100, Math.round(value)));
+// Fixed-width container for the live timer so the rest of the row doesn't
+// reflow as digits widen/narrow. Digit cells animate independently via
+// AnimatedDuration so only the characters that changed re-animate.
+function ElapsedBadge({ ms, accent }: { ms: number; accent: 'indigo' | 'gray' }) {
+  if (!Number.isFinite(ms)) {
+    return null;
+  }
+  const dotClass =
+    accent === 'indigo'
+      ? 'bg-indigo-400 opacity-75 animate-ping'
+      : 'bg-gray-300';
+  const dotCoreClass =
+    accent === 'indigo' ? 'bg-indigo-600' : 'bg-gray-400';
   return (
-    <div className="w-full bg-gray-200 rounded h-2">
-      <div
-        className={`${colorClass} h-2 rounded`}
-        style={{ width: `${clamped}%` }}
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-gray-600">
+      <span className="relative inline-flex h-2 w-2">
+        <span className={`absolute inline-flex h-full w-full rounded-full ${dotClass}`} />
+        <span className={`relative inline-flex h-2 w-2 rounded-full ${dotCoreClass}`} />
+      </span>
+      <AnimatedDuration
+        ms={ms}
+        className="min-w-[3.5rem] justify-end font-mono"
       />
-    </div>
+    </span>
   );
 }
 
@@ -52,33 +80,55 @@ function RunStat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return '—';
-  }
-  try {
-    return new Date(value).toLocaleString();
-  } catch (err) {
-    console.error('Failed to format date', err);
-    return value;
-  }
-}
+const formatDateTime = formatBackendDateTime;
 
-function formatElapsed(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) {
-    return '—';
+// Compute how long stage `stageIndex` ran, using only server-recorded
+// transitions in `history`. Returns NaN when we don't have enough info
+// (e.g. the stage hasn't started, or the previous stage was never logged).
+function computeStageDurationMs(
+  history: JobStageEvent[],
+  stageIndex: number,
+  job: Job,
+  now: number,
+): number {
+  if (history.length === 0) {
+    return NaN;
   }
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  // Use the latest entry for this step, in case a stage was re-entered.
+  const entryIndex = (() => {
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].step === stageIndex) return i;
+    }
+    return -1;
+  })();
+  if (entryIndex === -1) {
+    return NaN;
   }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  const start = backendDateMs(history[entryIndex].started_at);
+  if (!Number.isFinite(start)) {
+    return NaN;
   }
-  return `${seconds}s`;
+
+  // Stage end = the next history entry's start, if there is one, else the
+  // job's completed_at (for terminal jobs) or `now` (still running).
+  let end: number;
+  if (entryIndex < history.length - 1) {
+    end = backendDateMs(history[entryIndex + 1].started_at);
+  } else if (
+    job.status === 'completed' ||
+    job.status === 'skipped' ||
+    job.status === 'failed' ||
+    job.status === 'cancelled'
+  ) {
+    const completed = backendDateMs(job.completed_at);
+    end = Number.isFinite(completed) ? completed : now;
+  } else {
+    end = now;
+  }
+  if (!Number.isFinite(end)) {
+    return NaN;
+  }
+  return Math.max(0, end - start);
 }
 
 export default function JobsPage() {
@@ -136,6 +186,21 @@ export default function JobsPage() {
       setLoading(false);
     }
   }, []);
+
+  // Background refetch of the visible jobs list (no spinner, no error
+  // surfaces) so the polling effect can keep job rows fresh without making
+  // the manual "Refresh" button look like it's in flight.
+  const silentLoadJobs = useCallback(async () => {
+    try {
+      const data =
+        mode === 'active'
+          ? await jobsApi.getActiveJobs(100)
+          : await jobsApi.getAllJobs(200);
+      setJobs(data);
+    } catch (e) {
+      console.error('Background jobs refresh failed:', e);
+    }
+  }, [mode]);
 
   const loadCleanupPreview = useCallback(async () => {
     setCleanupLoading(true);
@@ -269,13 +334,22 @@ export default function JobsPage() {
       return undefined;
     }
 
-    // Poll every 15 seconds when jobs are active to reduce database contention
+    // Both endpoints prefer the Rust sidecar (read-only sqlite from a
+    // separate process), so polling doesn't pressure the Flask writer's
+    // connection pool. Keep them on the same brisk cadence so stage
+    // transitions and the manager counters stay in sync visually.
     const interval = setInterval(() => {
+      void silentLoadJobs();
       void loadStatus();
-    }, 15000);
+    }, 3000);
 
     return () => clearInterval(interval);
-  }, [managerStatus?.run?.queued_jobs, managerStatus?.run?.running_jobs, loadStatus]);
+  }, [
+    managerStatus?.run?.queued_jobs,
+    managerStatus?.run?.running_jobs,
+    loadStatus,
+    silentLoadJobs,
+  ]);
 
   // Tick once per second while there's an active running job so elapsed timers
   // and the pulse animations stay live without re-fetching from the server.
@@ -287,6 +361,7 @@ export default function JobsPage() {
     const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(tick);
   }, [jobs]);
+
 
   useEffect(() => {
     const queued = managerStatus?.run?.queued_jobs ?? 0;
@@ -343,7 +418,7 @@ export default function JobsPage() {
               <RunStat label="Failed" value={run.failed_jobs} />
             </div>
             <div className="mt-4 space-y-1">
-              <ProgressBar value={run.progress_percentage} />
+              <JobProgressBar value={run.progress_percentage} />
               <div className="text-xs text-gray-500">
                 {run.completed_jobs} completed · {run.skipped_jobs} skipped · {run.failed_jobs} failed of {run.total_jobs} jobs
               </div>
@@ -508,6 +583,11 @@ export default function JobsPage() {
 
                 {(() => {
                   const isRunning = job.status === 'running';
+                  const isTerminal =
+                    job.status === 'completed' ||
+                    job.status === 'skipped' ||
+                    job.status === 'failed' ||
+                    job.status === 'cancelled';
                   const activeStage =
                     progressModel.stages.find(s => s.state === 'active') ??
                     progressModel.stages.find(s => s.state === 'failed');
@@ -515,36 +595,42 @@ export default function JobsPage() {
                     activeStage?.label ??
                     progressModel.stages[progressModel.currentStep]?.label ??
                     'Queued';
+                  const headlineLower = headlineLabel.trim().toLowerCase();
+                  // Suppress sub-detail when it's just a paraphrase of the
+                  // headline (e.g. "Queued" + "Queued for processing").
+                  const subDetailRaw = progressModel.currentStageLabel?.trim();
                   const subDetail =
-                    progressModel.currentStageLabel &&
-                    progressModel.currentStageLabel !== headlineLabel
-                      ? progressModel.currentStageLabel
+                    subDetailRaw &&
+                    subDetailRaw.toLowerCase() !== headlineLower &&
+                    !subDetailRaw.toLowerCase().startsWith(headlineLower)
+                      ? subDetailRaw
                       : null;
-                  const startedMs = job.started_at ? new Date(job.started_at).getTime() : NaN;
-                  const elapsedMs = Number.isFinite(startedMs) ? now - startedMs : NaN;
+
+                  const endMs = isTerminal
+                    ? backendDateMs(job.completed_at) || now
+                    : now;
+
+                  const history = job.stage_history ?? [];
+                  const currentStageEntry = [...history]
+                    .reverse()
+                    .find(entry => entry.step === job.step);
+                  const stageStartMs = currentStageEntry
+                    ? backendDateMs(currentStageEntry.started_at)
+                    : NaN;
+                  const stageMs = Number.isFinite(stageStartMs)
+                    ? endMs - stageStartMs
+                    : NaN;
+
                   return (
-                    <div className="rounded border border-gray-100 bg-gray-50/70 p-2">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                            Stage {progressModel.currentStep}/{progressModel.stages.length - 1}
-                          </div>
-                          <div className="text-sm font-medium text-gray-900 truncate" title={headlineLabel}>
-                            {headlineLabel}
-                          </div>
+                    <div className="space-y-0.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 truncate text-sm font-medium text-gray-900" title={headlineLabel}>
+                          {headlineLabel}
                         </div>
-                        {isRunning && Number.isFinite(elapsedMs) ? (
-                          <div className="flex items-center gap-1.5 whitespace-nowrap text-xs text-gray-600">
-                            <span className="relative inline-flex h-2 w-2">
-                              <span className="absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75 animate-ping" />
-                              <span className="relative inline-flex h-2 w-2 rounded-full bg-indigo-600" />
-                            </span>
-                            <span className="font-mono tabular-nums">{formatElapsed(elapsedMs)}</span>
-                          </div>
-                        ) : null}
+                        {isRunning ? <ElapsedBadge ms={stageMs} accent="indigo" /> : null}
                       </div>
                       {subDetail ? (
-                        <div className="mt-1 text-xs text-gray-600 truncate" title={subDetail}>
+                        <div className="text-xs text-gray-500 truncate" title={subDetail}>
                           {subDetail}
                         </div>
                       ) : null}
@@ -557,41 +643,18 @@ export default function JobsPage() {
                     <span>Progress</span>
                     <span className="font-medium">{Math.round(progressModel.progress)}%</span>
                   </div>
-                  <ProgressBar value={progressModel.progress} colorClass={progressColorClass} />
+                  <JobProgressBar
+                    value={progressModel.progress}
+                    colorClass={progressColorClass}
+                    animated={job.status === 'running'}
+                  />
                 </div>
-                <div className="grid grid-cols-5 gap-1 text-[10px]">
-                  {progressModel.stages.map((stage) => (
-                    <div
-                      key={`${job.job_id}-stage-${stage.index}`}
-                      title={stage.label}
-                      className={`flex flex-col items-center leading-tight ${
-                        stage.state === 'active'
-                          ? 'text-blue-600 font-medium'
-                          : stage.state === 'completed'
-                            ? 'text-green-600'
-                            : stage.state === 'failed'
-                              ? 'text-red-600 font-medium'
-                              : 'text-gray-400'
-                      }`}
-                    >
-                      <span className="flex h-3 items-center justify-center">
-                        {stage.state === 'completed' ? (
-                          <span>✓</span>
-                        ) : stage.state === 'active' ? (
-                          <span className="relative inline-flex h-2 w-2">
-                            <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
-                            <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-600" />
-                          </span>
-                        ) : stage.state === 'failed' ? (
-                          <span>!</span>
-                        ) : (
-                          <span>○</span>
-                        )}
-                      </span>
-                      <span>{stage.shortLabel}</span>
-                    </div>
-                  ))}
-                </div>
+                <JobStageRail
+                  stages={progressModel.stages}
+                  stageDurationsMs={progressModel.stages.map((stage) =>
+                    computeStageDurationMs(job.stage_history ?? [], stage.index, job, now)
+                  )}
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
@@ -611,6 +674,28 @@ export default function JobsPage() {
                   <div className="text-gray-500">Started</div>
                   <div>{job.started_at ? formatDateTime(job.started_at) : '—'}</div>
                 </div>
+                {(() => {
+                  const isTerminal =
+                    job.status === 'completed' ||
+                    job.status === 'skipped' ||
+                    job.status === 'failed' ||
+                    job.status === 'cancelled';
+                  const startedMs = backendDateMs(job.started_at);
+                  const endMs = isTerminal
+                    ? backendDateMs(job.completed_at) || now
+                    : now;
+                  if (!Number.isFinite(startedMs)) {
+                    return null;
+                  }
+                  return (
+                    <div className="col-span-2">
+                      <div className="text-gray-500">Total time</div>
+                      <div className="font-mono tabular-nums">
+                        {formatDuration(endMs - startedMs)}
+                      </div>
+                    </div>
+                  );
+                })()}
                 {job.error_message ? (
                   <div className="col-span-2">
                     <div className="text-gray-500">Message</div>

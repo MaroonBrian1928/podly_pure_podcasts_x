@@ -354,6 +354,7 @@ class JobsManager:
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
                         "error_message": job.error_message,
+                        "stage_history": job.stage_history or [],
                     }
                 )
 
@@ -400,6 +401,7 @@ class JobsManager:
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
                         "error_message": job.error_message,
+                        "stage_history": job.stage_history or [],
                     }
                 )
 

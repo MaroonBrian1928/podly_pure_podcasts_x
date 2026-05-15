@@ -364,6 +364,13 @@ class ProcessingJob(db.Model):  # type: ignore[name-defined, misc]
     created_at = db.Column(db.DateTime, default=_utc_now_naive, index=True)
     requested_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     billing_user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # JSON list of {"step": int, "step_name": str, "started_at": ISO UTC} per
+    # observed stage transition, appended whenever the active step changes.
+    # The duration of stage N is `stage_history[N+1].started_at -
+    # stage_history[N].started_at` (or `completed_at - started_at` for the
+    # last one). Stored as naive UTC ISO strings to match the rest of the
+    # codebase's timestamp convention.
+    stage_history = db.Column(db.JSON, nullable=True)
 
     # Relationships
     post = db.relationship(

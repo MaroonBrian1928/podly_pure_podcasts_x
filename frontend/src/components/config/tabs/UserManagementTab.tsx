@@ -6,6 +6,7 @@ import { authApi } from '../../../services/api';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useConfigContext } from '../ConfigContext';
 import { Section, Field, SaveButton } from '../shared';
+import { backendDateMs, formatBackendDateTime } from '../../../utils/datetime';
 import type { ManagedUser } from '../../../types';
 
 export default function UserManagementTab() {
@@ -217,7 +218,7 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
       return [];
     }
     return [...managedUsers].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      (a, b) => backendDateMs(b.created_at) - backendDateMs(a.created_at)
     );
   }, [managedUsers]);
   const adminCount = useMemo(
@@ -397,9 +398,9 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
                       <div>
                         <div className="text-sm font-semibold text-gray-900">{managed.username}</div>
                         <div className="text-xs text-gray-500">
-                          Added {new Date(managed.created_at).toLocaleString()} • Role {managed.role} • Feeds {allowance} • Status {subscriptionStatus}
+                          Added {formatBackendDateTime(managed.created_at)} • Role {managed.role} • Feeds {allowance} • Status {subscriptionStatus}
                           {managed.last_active && (
-                            <> • Last Active {new Date(managed.last_active).toLocaleString()}</>
+                            <> • Last Active {formatBackendDateTime(managed.last_active)}</>
                           )}
                         </div>
                       </div>

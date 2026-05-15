@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'react-hot-toast';
 import { costsApi } from '../../../services/api';
 import type { CostSummary, CallLog } from '../../../types';
+import { formatBackendDateTime } from '../../../utils/datetime';
 
 function MonthSelector({
   year,
@@ -229,7 +230,7 @@ export default function CostsTab() {
                       </td>
                       <td className="py-2 pr-4 text-right text-gray-600">{c.retry_attempts}</td>
                       <td className="py-2 text-right text-gray-500 text-xs">
-                        {c.timestamp ? new Date(c.timestamp).toLocaleString() : '—'}
+                        {formatBackendDateTime(c.timestamp)}
                       </td>
                     </tr>
                   ))}

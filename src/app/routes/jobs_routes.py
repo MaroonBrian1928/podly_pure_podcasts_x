@@ -11,7 +11,11 @@ from app.jobs_manager_run_service import build_run_status_snapshot
 from app.post_cleanup import cleanup_processed_posts, count_cleanup_candidates
 from app.runtime_config import config as runtime_config
 from shared.processing_paths import get_instance_dir
-from shared.rust_sidecar import try_list_active_jobs, try_list_all_jobs
+from shared.rust_sidecar import (
+    try_get_jobs_manager_status,
+    try_list_active_jobs,
+    try_list_all_jobs,
+)
 
 logger = logging.getLogger("global_logger")
 
@@ -53,6 +57,15 @@ def api_list_all_jobs() -> ResponseReturnValue:
 
 @jobs_bp.route("/api/job-manager/status", methods=["GET"])
 def api_job_manager_status() -> ResponseReturnValue:
+    # Prefer the Rust read-only path: it opens its own sqlite connection in a
+    # short-lived subprocess so it doesn't touch the Flask writer's pool.
+    # Falls back to the Python aggregation when the sidecar is disabled or
+    # errors out.
+    rust_payload = try_get_jobs_manager_status(
+        db_path=get_instance_dir() / "sqlite3.db"
+    )
+    if rust_payload is not None:
+        return flask.jsonify(rust_payload)
     run_snapshot = build_run_status_snapshot(db.session)
     return flask.jsonify({"run": run_snapshot})
 

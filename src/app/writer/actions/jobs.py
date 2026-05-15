@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.extensions import db
+from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.models import ProcessingJob
 
@@ -81,6 +82,14 @@ def create_job_action(params: dict[str, Any]) -> dict[str, Any]:
         job_data["created_at"] = datetime.fromisoformat(job_data["created_at"])
 
     job = ProcessingJob(**job_data)
+    # Seed the queue (step 0) entry from creation time so the UI can report
+    # how long the job sat queued before it started running.
+    if not job.stage_history:
+        job.stage_history = initial_stage_history(
+            step=job.current_step or 0,
+            step_name=job.step_name or "Queued",
+            at=job.created_at,
+        )
     db.session.add(job)
 
     if job.jobs_manager_run_id:
@@ -142,6 +151,8 @@ def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
     if not job:
         raise ValueError(f"Job {job_id} not found")
 
+    now = datetime.now(UTC).replace(tzinfo=None)
+
     job.status = status
     job.current_step = step
     job.step_name = step_name
@@ -152,12 +163,26 @@ def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
         job.error_message = error_message
 
     if status == "running" and not job.started_at:
-        job.started_at = datetime.now(UTC).replace(tzinfo=None)
+        job.started_at = now
     elif (
         status in ["completed", "failed", "cancelled", "skipped"]
         and not job.completed_at
     ):
-        job.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        job.completed_at = now
+
+    # Record stage transitions so the UI can show per-stage durations without
+    # having to track them client-side. Append a new entry each time the step
+    # actually changes (or on the very first status update).
+    history = list(job.stage_history or [])
+    if not history or history[-1].get("step") != step:
+        history.append(
+            {
+                "step": step,
+                "step_name": step_name,
+                "started_at": now.isoformat(),
+            }
+        )
+        job.stage_history = history
 
     if job.jobs_manager_run_id:
         recalculate_run_counts(db.session)

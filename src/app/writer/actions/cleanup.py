@@ -1,9 +1,11 @@
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.extensions import db
+from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
@@ -65,6 +67,13 @@ def cleanup_missing_audio_paths_action(params: dict[str, Any]) -> int:
                 latest_job.error_message = None
                 latest_job.started_at = None
                 latest_job.completed_at = None
+                # Drop the previous run's stage history and reseed step 0 from
+                # the requeue moment so the UI reports the new queue wait and
+                # doesn't surface stale per-stage timings from the prior run.
+                requeued_at = datetime.now(UTC).replace(tzinfo=None)
+                latest_job.stage_history = initial_stage_history(
+                    step_name="Not started", at=requeued_at
+                )
 
             count += 1
 

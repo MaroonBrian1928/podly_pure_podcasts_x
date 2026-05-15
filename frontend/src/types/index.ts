@@ -52,6 +52,12 @@ export interface PagedResult<T> {
   whitelisted_total?: number;
 }
 
+export interface JobStageEvent {
+  step: number;
+  step_name: string | null;
+  started_at: string;
+}
+
 export interface Job {
   job_id: string;
   post_guid: string;
@@ -67,6 +73,7 @@ export interface Job {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  stage_history?: JobStageEvent[];
 }
 
 export interface JobManagerRun {

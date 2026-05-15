@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func
 
 from app.extensions import db
+from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.models import (
     Feed,
@@ -75,6 +76,7 @@ def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
 
     for post in created_posts:
         if post.whitelisted:
+            created_at = datetime.now(UTC).replace(tzinfo=None)
             job = ProcessingJob(
                 id=str(uuid.uuid4()),
                 post_guid=post.guid,
@@ -82,7 +84,8 @@ def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
                 current_step=0,
                 total_steps=4,
                 progress_percentage=0.0,
-                created_at=datetime.now(UTC).replace(tzinfo=None),
+                created_at=created_at,
+                stage_history=initial_stage_history(at=created_at),
             )
             db.session.add(job)
 
@@ -126,6 +129,7 @@ def add_feed_action(params: dict[str, Any]) -> dict[str, Any]:
 
     for post in created_posts:
         if post.whitelisted:
+            created_at = datetime.now(UTC).replace(tzinfo=None)
             job = ProcessingJob(
                 id=str(uuid.uuid4()),
                 post_guid=post.guid,
@@ -133,7 +137,8 @@ def add_feed_action(params: dict[str, Any]) -> dict[str, Any]:
                 current_step=0,
                 total_steps=4,
                 progress_percentage=0.0,
-                created_at=datetime.now(UTC).replace(tzinfo=None),
+                created_at=created_at,
+                stage_history=initial_stage_history(at=created_at),
             )
             db.session.add(job)
 
@@ -295,6 +300,9 @@ def create_dev_test_feed_action(params: dict[str, Any]) -> dict[str, Any]:
             started_at=now,
             completed_at=now,
             step_name="completed",
+            stage_history=initial_stage_history(
+                step=4, step_name="completed", at=now
+            ),
         )
         db.session.add(job)
 

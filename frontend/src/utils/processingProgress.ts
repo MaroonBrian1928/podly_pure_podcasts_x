@@ -56,12 +56,16 @@ const CHAPTER_INSERT_STAGES: StageDefinition[] = [
   { label: 'Copying audio and writing chapters', shortLabel: 'Write' },
 ];
 
+// Used when the pipeline variant can't be inferred from the step_name yet
+// (e.g. step 0). The LLM pipeline is the most common, so use its labels as a
+// readable default instead of `Stage 2 / Stage 3 / Stage 4` placeholders —
+// once a real transition happens, inferPipelineVariant takes over.
 const GENERIC_STAGES: StageDefinition[] = [
   { label: 'Queued', shortLabel: 'Queue' },
   { label: 'Downloading episode', shortLabel: 'Download' },
-  { label: 'Transcript or chapter stage', shortLabel: 'Stage 2' },
-  { label: 'Classification or chapter stage', shortLabel: 'Stage 3' },
-  { label: 'Audio processing or chapter write', shortLabel: 'Stage 4' },
+  { label: 'Transcribing audio', shortLabel: 'Transcribe' },
+  { label: 'Identifying ads', shortLabel: 'Identify' },
+  { label: 'Processing audio', shortLabel: 'Process' },
 ];
 
 const PIPELINE_MAP: Record<ProcessingPipelineVariant, StageDefinition[]> = {

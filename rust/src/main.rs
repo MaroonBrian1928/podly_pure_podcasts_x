@@ -158,6 +158,7 @@ struct JobsCommand {
 enum JobsSubcommand {
     Active(JobsListArgs),
     All(JobsListArgs),
+    Status(JobsStatusArgs),
 }
 
 #[derive(Args)]
@@ -166,6 +167,12 @@ struct JobsListArgs {
     db: PathBuf,
     #[arg(long, default_value_t = 100)]
     limit: i64,
+}
+
+#[derive(Args)]
+struct JobsStatusArgs {
+    #[arg(long)]
+    db: PathBuf,
 }
 
 #[derive(Args)]
@@ -587,6 +594,7 @@ fn run() -> Result<()> {
         Commands::Jobs(jobs) => match jobs.command {
             JobsSubcommand::Active(args) => print_json(&render_jobs(args, true)?),
             JobsSubcommand::All(args) => print_json(&render_jobs(args, false)?),
+            JobsSubcommand::Status(args) => print_json(&render_jobs_status(args)?),
         },
         Commands::Stats(stats) => match stats.command {
             StatsSubcommand::Render(args) => print_json(&render_stats(args)?),
@@ -927,7 +935,8 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             processing_job.created_at,
             processing_job.started_at,
             processing_job.completed_at,
-            processing_job.error_message
+            processing_job.error_message,
+            processing_job.stage_history
          FROM processing_job
          LEFT JOIN post ON processing_job.post_guid = post.guid
          LEFT JOIN feed ON post.feed_id = feed.id
@@ -937,6 +946,15 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([limit], |row| {
+        // SQLAlchemy stores the JSON column as TEXT; parse it back here so
+        // the API surface matches the Python `list_active_jobs` serializer.
+        // Tolerate legacy rows (NULL or invalid JSON) by emitting an empty
+        // array rather than failing the entire job listing.
+        let stage_history_raw: Option<String> = row.get(14)?;
+        let stage_history: Value = stage_history_raw
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .filter(|value| value.is_array())
+            .unwrap_or_else(|| Value::Array(Vec::new()));
         Ok(json!({
             "job_id": row.get::<_, String>(0)?,
             "post_guid": row.get::<_, String>(1)?,
@@ -952,10 +970,135 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             "started_at": row.get::<_, Option<String>>(11)?.map(|value| sqlite_datetime_to_iso(&value)),
             "completed_at": row.get::<_, Option<String>>(12)?.map(|value| sqlite_datetime_to_iso(&value)),
             "error_message": row.get::<_, Option<String>>(13)?,
+            "stage_history": stage_history,
         }))
     })?;
     let jobs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(json!({ "jobs": jobs }))
+}
+
+const JOBS_MANAGER_SINGLETON_RUN_ID: &str = "jobs-manager-singleton";
+
+// Read-only equivalent of `build_run_status_snapshot` in
+// app/jobs_manager_run_service.py: load the singleton run row, aggregate the
+// processing_job statuses scoped to that run, and shape the response the
+// same way the Python serializer does so the Flask route can transparently
+// fall through to either implementation.
+fn render_jobs_status(args: JobsStatusArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+
+    let run = conn.query_row(
+        "SELECT id, status, trigger, started_at, completed_at, updated_at,
+                counters_reset_at, context_json
+         FROM jobs_manager_run WHERE id = ?1",
+        [JOBS_MANAGER_SINGLETON_RUN_ID],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        },
+    );
+
+    // `prior_status` is intentionally discarded: Python computes status from
+    // the live counts, not from whatever was persisted on the run row.
+    let (
+        run_id,
+        _prior_status,
+        trigger,
+        started_at,
+        completed_at,
+        updated_at,
+        counters_reset_at,
+        context_json_raw,
+    ) = match run {
+        Ok(values) => values,
+        // The Python jobs-manager-status route returns `{"run": null}` when
+        // the singleton row hasn't been created yet; mirror that shape so
+        // callers can pass our payload through unchanged.
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(json!({ "run": Value::Null })),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut count_query = String::from(
+        "SELECT status, COUNT(id) FROM processing_job WHERE jobs_manager_run_id = ?1",
+    );
+    let mut params: Vec<rusqlite::types::Value> = vec![run_id.clone().into()];
+    if let Some(cutoff) = counters_reset_at.as_deref() {
+        count_query.push_str(" AND created_at >= ?2");
+        params.push(cutoff.to_string().into());
+    }
+    count_query.push_str(" GROUP BY status");
+
+    let mut stmt = conn.prepare(&count_query)?;
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for entry in rows {
+        let (status, count) = entry?;
+        counts.insert(status, count);
+    }
+
+    let queued =
+        counts.get("pending").copied().unwrap_or(0) + counts.get("queued").copied().unwrap_or(0);
+    let running = counts.get("running").copied().unwrap_or(0);
+    let completed = counts.get("completed").copied().unwrap_or(0);
+    let failed =
+        counts.get("failed").copied().unwrap_or(0) + counts.get("cancelled").copied().unwrap_or(0);
+    let skipped = counts.get("skipped").copied().unwrap_or(0);
+    let total_jobs: i64 = counts.values().sum();
+    let has_active_work = (queued + running) > 0;
+
+    let status = if has_active_work {
+        if running > 0 {
+            "running"
+        } else {
+            "pending"
+        }
+        .to_string()
+    } else {
+        // Matches Python: idle manager reports "pending".
+        "pending".to_string()
+    };
+
+    let progress_percentage = if total_jobs > 0 {
+        let pct = (f64::from((completed + skipped) as i32) / f64::from(total_jobs.max(1) as i32))
+            * 100.0;
+        (pct * 100.0).round() / 100.0
+    } else {
+        0.0
+    };
+
+    let context_value: Value = context_json_raw
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or(Value::Null);
+
+    Ok(json!({
+        "run": {
+            "id": run_id,
+            "status": status,
+            "trigger": trigger,
+            "started_at": started_at.map(|value| sqlite_datetime_to_iso(&value)),
+            "completed_at": completed_at.map(|value| sqlite_datetime_to_iso(&value)),
+            "updated_at": updated_at.map(|value| sqlite_datetime_to_iso(&value)),
+            "total_jobs": total_jobs,
+            "queued_jobs": queued,
+            "running_jobs": running,
+            "completed_jobs": completed,
+            "failed_jobs": failed,
+            "skipped_jobs": skipped,
+            "context": context_value,
+            "counters_reset_at": counters_reset_at.map(|value| sqlite_datetime_to_iso(&value)),
+            "progress_percentage": progress_percentage,
+        }
+    }))
 }
 
 fn query_stats_post(conn: &Connection, guid: &str) -> Result<Option<StatsPostRow>> {
@@ -4200,14 +4343,19 @@ mod tests {
                 id TEXT PRIMARY KEY, post_guid TEXT NOT NULL, status TEXT NOT NULL,
                 current_step INTEGER, step_name TEXT, total_steps INTEGER,
                 progress_percentage REAL, started_at TEXT, completed_at TEXT,
-                error_message TEXT, created_at TEXT
+                error_message TEXT, created_at TEXT, stage_history TEXT
             );
             INSERT INTO feed VALUES (1, 'Feed');
             INSERT INTO post VALUES (1, 1, 'guid-1', 'Episode 1');
             INSERT INTO processing_job VALUES
-                ('job-complete', 'guid-1', 'completed', 4, 'Done', 4, 100.0, NULL, '2026-05-08 12:02:00', NULL, '2026-05-08 12:02:00'),
-                ('job-pending', 'guid-1', 'pending', 0, 'Queued', 4, 0.0, NULL, NULL, NULL, '2026-05-08 12:01:00'),
-                ('job-running', 'missing-guid', 'running', 2, 'Work', 4, 50.0, '2026-05-08 12:00:00', NULL, NULL, '2026-05-08 12:00:00');",
+                ('job-complete', 'guid-1', 'completed', 4, 'Done', 4, 100.0, NULL,
+                    '2026-05-08 12:02:00', NULL, '2026-05-08 12:02:00',
+                    'this is not valid json'),
+                ('job-pending', 'guid-1', 'pending', 0, 'Queued', 4, 0.0, NULL, NULL, NULL,
+                    '2026-05-08 12:01:00', NULL),
+                ('job-running', 'missing-guid', 'running', 2, 'Work', 4, 50.0,
+                    '2026-05-08 12:00:00', NULL, NULL, '2026-05-08 12:00:00',
+                    '[{\"step\":0,\"step_name\":\"Queued\",\"started_at\":\"2026-05-08T12:00:00\"},{\"step\":2,\"step_name\":\"Work\",\"started_at\":\"2026-05-08T12:00:30\"}]');",
         )
         .unwrap();
         drop(conn);
@@ -4225,8 +4373,23 @@ mod tests {
         assert_eq!(active_jobs[0]["job_id"], "job-running");
         assert_eq!(active_jobs[0]["priority"], 2);
         assert_eq!(active_jobs[0]["post_title"], Value::Null);
+        // job-running has real JSON history; it must be surfaced as a parsed array.
+        let running_history = active_jobs[0]["stage_history"].as_array().unwrap();
+        assert_eq!(running_history.len(), 2);
+        assert_eq!(running_history[0]["step"], 0);
+        assert_eq!(running_history[0]["step_name"], "Queued");
+        assert_eq!(running_history[0]["started_at"], "2026-05-08T12:00:00");
+        assert_eq!(running_history[1]["step"], 2);
+        assert_eq!(running_history[1]["started_at"], "2026-05-08T12:00:30");
+
         assert_eq!(active_jobs[1]["job_id"], "job-pending");
         assert_eq!(active_jobs[1]["feed_title"], "Feed");
+        // job-pending has NULL stage_history; it must surface as an empty array,
+        // not null, so the frontend can iterate without a guard.
+        assert_eq!(
+            active_jobs[1]["stage_history"],
+            Value::Array(Vec::new())
+        );
 
         let all = render_jobs(
             JobsListArgs {
@@ -4240,5 +4403,154 @@ mod tests {
         assert_eq!(all_jobs.len(), 3);
         assert_eq!(all_jobs[2]["job_id"], "job-complete");
         assert_eq!(all_jobs[2]["completed_at"], "2026-05-08T12:02:00");
+        // job-complete has garbage in the column; falling back to [] keeps the
+        // listing healthy even if a row was written with malformed JSON.
+        assert_eq!(
+            all_jobs[2]["stage_history"],
+            Value::Array(Vec::new())
+        );
+    }
+
+    #[test]
+    fn jobs_status_mirrors_python_build_run_status_snapshot_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE jobs_manager_run (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                trigger TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT,
+                counters_reset_at TEXT,
+                context_json TEXT
+            );
+            CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY,
+                jobs_manager_run_id TEXT,
+                post_guid TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step INTEGER,
+                step_name TEXT,
+                total_steps INTEGER,
+                progress_percentage REAL,
+                started_at TEXT,
+                completed_at TEXT,
+                error_message TEXT,
+                created_at TEXT,
+                stage_history TEXT
+            );
+            INSERT INTO jobs_manager_run VALUES (
+                'jobs-manager-singleton', 'running', 'manual',
+                '2026-05-08 12:00:00', NULL, '2026-05-08 12:00:30',
+                '2026-05-08 12:00:00', '{\"last_trigger\":\"manual\"}'
+            );
+            INSERT INTO processing_job VALUES
+                ('j1', 'jobs-manager-singleton', 'g1', 'running', 2, 'Work', 4, 50.0, '2026-05-08 12:00:00', NULL, NULL, '2026-05-08 12:00:00', NULL),
+                ('j2', 'jobs-manager-singleton', 'g2', 'pending', 0, 'Queued', 4, 0.0, NULL, NULL, NULL, '2026-05-08 12:00:10', NULL),
+                ('j3', 'jobs-manager-singleton', 'g3', 'completed', 4, 'Done', 4, 100.0, '2026-05-08 12:00:00', '2026-05-08 12:00:20', NULL, '2026-05-08 12:00:00', NULL),
+                ('j4', 'jobs-manager-singleton', 'g4', 'skipped', 4, 'Skipped', 4, 100.0, NULL, '2026-05-08 12:00:25', NULL, '2026-05-08 12:00:00', NULL),
+                ('j5', 'jobs-manager-singleton', 'g5', 'failed', 2, 'Failed', 4, 50.0, '2026-05-08 12:00:00', '2026-05-08 12:00:15', 'boom', '2026-05-08 12:00:00', NULL),
+                ('j6', 'jobs-manager-singleton', 'g6', 'cancelled', 0, 'Cancelled', 4, 0.0, NULL, '2026-05-08 12:00:18', 'stopped', '2026-05-08 12:00:00', NULL),
+                ('j7', 'other-run', 'g7', 'running', 1, 'Work', 4, 25.0, NULL, NULL, NULL, '2026-05-08 12:00:00', NULL),
+                ('j8', 'jobs-manager-singleton', 'g8', 'pending', 0, 'Queued', 4, 0.0, NULL, NULL, NULL, '2026-05-08 11:59:00', NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let response = render_jobs_status(JobsStatusArgs { db: db_path.clone() }).unwrap();
+        let run = response["run"].as_object().unwrap();
+        assert_eq!(run["id"], "jobs-manager-singleton");
+        // running > 0 → status "running"; idle override only kicks in when
+        // queued + running == 0.
+        assert_eq!(run["status"], "running");
+        assert_eq!(run["trigger"], "manual");
+        // started_at gets the ISO-ified version of the SQLite naive timestamp.
+        assert_eq!(run["started_at"], "2026-05-08T12:00:00");
+        assert_eq!(run["counters_reset_at"], "2026-05-08T12:00:00");
+        // Only jobs scoped to this run AND created at/after counters_reset_at
+        // count. j7 (other run) and j8 (older created_at) must be excluded.
+        assert_eq!(run["queued_jobs"], 1);
+        assert_eq!(run["running_jobs"], 1);
+        assert_eq!(run["completed_jobs"], 1);
+        // failed + cancelled are summed into failed_jobs.
+        assert_eq!(run["failed_jobs"], 2);
+        assert_eq!(run["skipped_jobs"], 1);
+        assert_eq!(run["total_jobs"], 6);
+        // (completed + skipped) / total * 100 = 2/6 * 100 ≈ 33.33
+        assert!((run["progress_percentage"].as_f64().unwrap() - 33.33).abs() < 0.01);
+        // context_json gets parsed back to a real object, not left as a string.
+        assert_eq!(run["context"]["last_trigger"], "manual");
+    }
+
+    #[test]
+    fn jobs_status_returns_null_envelope_when_singleton_row_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE jobs_manager_run (
+                id TEXT PRIMARY KEY, status TEXT, trigger TEXT,
+                started_at TEXT, completed_at TEXT, updated_at TEXT,
+                counters_reset_at TEXT, context_json TEXT
+            );
+            CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY, jobs_manager_run_id TEXT,
+                post_guid TEXT NOT NULL, status TEXT NOT NULL,
+                current_step INTEGER, step_name TEXT, total_steps INTEGER,
+                progress_percentage REAL, started_at TEXT, completed_at TEXT,
+                error_message TEXT, created_at TEXT, stage_history TEXT
+            );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let response = render_jobs_status(JobsStatusArgs { db: db_path }).unwrap();
+        assert_eq!(response["run"], Value::Null);
+    }
+
+    #[test]
+    fn jobs_status_idle_when_no_queued_or_running_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE jobs_manager_run (
+                id TEXT PRIMARY KEY, status TEXT, trigger TEXT,
+                started_at TEXT, completed_at TEXT, updated_at TEXT,
+                counters_reset_at TEXT, context_json TEXT
+            );
+            CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY, jobs_manager_run_id TEXT,
+                post_guid TEXT NOT NULL, status TEXT NOT NULL,
+                current_step INTEGER, step_name TEXT, total_steps INTEGER,
+                progress_percentage REAL, started_at TEXT, completed_at TEXT,
+                error_message TEXT, created_at TEXT, stage_history TEXT
+            );
+            INSERT INTO jobs_manager_run VALUES (
+                'jobs-manager-singleton', 'running', 'manual',
+                '2026-05-08 12:00:00', NULL, '2026-05-08 12:00:30',
+                '2026-05-08 12:00:00', NULL
+            );
+            INSERT INTO processing_job VALUES
+                ('j1', 'jobs-manager-singleton', 'g1', 'completed', 4, 'Done', 4, 100.0,
+                    '2026-05-08 12:00:00', '2026-05-08 12:00:20', NULL,
+                    '2026-05-08 12:00:00', NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let response = render_jobs_status(JobsStatusArgs { db: db_path }).unwrap();
+        let run = response["run"].as_object().unwrap();
+        // No queued/running jobs left → idle override regardless of what
+        // status the run row carries.
+        assert_eq!(run["status"], "pending");
+        assert_eq!(run["completed_jobs"], 1);
+        assert_eq!(run["queued_jobs"], 0);
+        assert_eq!(run["running_jobs"], 0);
+        // 1/1 * 100 = 100.0
+        assert!((run["progress_percentage"].as_f64().unwrap() - 100.0).abs() < 0.01);
     }
 }

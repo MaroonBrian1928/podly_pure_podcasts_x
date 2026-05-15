@@ -403,6 +403,31 @@ def try_list_all_jobs(*, db_path: Path, limit: int) -> list[dict[str, Any]] | No
     return _try_list_jobs(db_path=db_path, active_only=False, limit=limit)
 
 
+def try_get_jobs_manager_status(*, db_path: Path) -> dict[str, Any] | None:
+    """Read-only snapshot of the singleton jobs-manager run via the Rust
+    sidecar. Returns the full ``{"run": <snapshot or null>}`` envelope so the
+    Flask route can pass it through unchanged. Returns ``None`` only when the
+    Rust path is disabled or the binary fails — the singleton-missing case
+    still returns ``{"run": None}`` so the caller doesn't fall back to
+    Python and re-query.
+    """
+    if not rust_jobs_enabled():
+        return None
+
+    try:
+        return run_podly_tools(
+            [
+                "jobs",
+                "status",
+                "--db",
+                str(db_path),
+            ]
+        )
+    except RustSidecarError:
+        LOGGER.exception("Rust jobs status failed; falling back to Python behavior")
+        return None
+
+
 def try_plan_feed_refresh(
     *,
     db_path: Path,

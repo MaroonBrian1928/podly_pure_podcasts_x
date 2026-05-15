@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
+import { formatBackendDateTime } from '../utils/datetime';
 import ProcessingStageLogs from './ProcessingStageLogs';
 import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
 import {
@@ -53,7 +54,7 @@ export default function LLMProcessingStats({
 
   const formatTimestamp = (timestamp: string | null) => {
     if (!timestamp) return 'N/A';
-    return new Date(timestamp).toLocaleString();
+    return formatBackendDateTime(timestamp);
   };
 
   const formatBytes = (bytes: number | null) => {
