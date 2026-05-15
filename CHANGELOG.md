@@ -1,3 +1,11 @@
+## [1.2.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v1.2.0...v1.2.1) (2026-05-15)
+
+
+### Bug Fixes
+
+* Add SQLite journal size limit and corresponding test ([f237895](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/f23789570bd655b1f30bb3c15d6813a894f1cadb))
+* Add SQLite journal size limit and fix CI issues ([60ceeb1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/60ceeb17a8fe35415233706698ce4d5ee020b146))
+
 # [1.2.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v1.1.0...v1.2.0) (2026-05-15)
 
 
