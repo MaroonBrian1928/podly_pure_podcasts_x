@@ -21,6 +21,7 @@ from shared.config import (
 from shared.processing_paths import get_base_podcast_data_dir
 
 from .transcribe import (
+    ChunkProgressCallback,
     GroqWhisperTranscriber,
     OpenAIWhisperTranscriber,
     Segment,
@@ -290,10 +291,16 @@ class TranscriptionManager:
         temp_path.replace(artifact_path)
         return artifact_path
 
-    def transcribe(self, post: Post) -> list[TranscriptSegment]:
+    def transcribe(
+        self,
+        post: Post,
+        *,
+        progress_callback: ChunkProgressCallback | None = None,
+    ) -> list[TranscriptSegment]:
         db_segments, _ = self.transcribe_for_processing(
             post,
             include_word_timestamps=False,
+            progress_callback=progress_callback,
         )
         return db_segments
 
@@ -302,6 +309,7 @@ class TranscriptionManager:
         post: Post,
         *,
         include_word_timestamps: bool = False,
+        progress_callback: ChunkProgressCallback | None = None,
     ) -> tuple[list[TranscriptSegment], list[Segment] | None]:
         """
         Transcribes a podcast audio file, or retrieves existing transcription.
@@ -335,6 +343,7 @@ class TranscriptionManager:
                         rich_segments = self.transcriber.transcribe(
                             post.unprocessed_audio_path,
                             include_word_timestamps=True,
+                            progress_callback=progress_callback,
                         )
                         self._persist_transcript_word_timestamps(
                             post.id,
@@ -369,6 +378,7 @@ class TranscriptionManager:
             pydantic_segments = self.transcriber.transcribe(
                 post.unprocessed_audio_path,
                 include_word_timestamps=include_word_timestamps,
+                progress_callback=progress_callback,
             )
             self.logger.info(
                 f"[TRANSCRIBE_COMPLETE] Transcription by {self.transcriber.model_name} for post {post.id} resulted in {len(pydantic_segments)} segments."

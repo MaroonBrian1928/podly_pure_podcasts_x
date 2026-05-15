@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Generator
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,11 +28,16 @@ class MockTranscriber(Transcriber):
         return self._model_name
 
     def transcribe(
-        self, audio_file_path: str, *, include_word_timestamps: bool = False
+        self,
+        audio_file_path: str,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: Any = None,
     ) -> list[Segment]:
         """Return mock segments or raise exception based on configuration."""
         del audio_file_path
         del include_word_timestamps
+        del progress_callback
         if isinstance(self.mock_response, Exception):
             raise self.mock_response
         return self.mock_response

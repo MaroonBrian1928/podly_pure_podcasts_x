@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from app.models import Post, ProcessingJob
 from app.runtime_config import config as runtime_config
@@ -486,6 +486,7 @@ def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> 
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=False,
+        progress_callback=ANY,
     )
     assert processor._prepare_profanity_bleeped_audio.call_args.kwargs[
         "saved_bleep_windows_ms"
@@ -537,6 +538,7 @@ def test_llm_processing_requests_word_timestamps_for_word_level_refiner() -> Non
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=True,
+        progress_callback=ANY,
     )
 
 
@@ -591,6 +593,7 @@ def test_llm_processing_reuses_saved_word_timestamps_for_word_level_refiner() ->
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=False,
+        progress_callback=ANY,
     )
 
 
@@ -684,7 +687,9 @@ def test_chapter_insert_strategy_writes_chapters_without_ad_removal() -> None:
         )
 
     assert resolve_mock.call_count == 2
-    transcription_manager.transcribe.assert_called_once_with(post)
+    transcription_manager.transcribe.assert_called_once_with(
+        post, progress_callback=ANY
+    )
     topic_mock.assert_called_once_with(
         transcript_segments,
         llm_model=config.llm_model,

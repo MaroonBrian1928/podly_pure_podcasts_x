@@ -1026,9 +1026,8 @@ fn render_jobs_status(args: JobsStatusArgs) -> Result<Value> {
         Err(err) => return Err(err.into()),
     };
 
-    let mut count_query = String::from(
-        "SELECT status, COUNT(id) FROM processing_job WHERE jobs_manager_run_id = ?1",
-    );
+    let mut count_query =
+        String::from("SELECT status, COUNT(id) FROM processing_job WHERE jobs_manager_run_id = ?1");
     let mut params: Vec<rusqlite::types::Value> = vec![run_id.clone().into()];
     if let Some(cutoff) = counters_reset_at.as_deref() {
         count_query.push_str(" AND created_at >= ?2");
@@ -1057,20 +1056,15 @@ fn render_jobs_status(args: JobsStatusArgs) -> Result<Value> {
     let has_active_work = (queued + running) > 0;
 
     let status = if has_active_work {
-        if running > 0 {
-            "running"
-        } else {
-            "pending"
-        }
-        .to_string()
+        if running > 0 { "running" } else { "pending" }.to_string()
     } else {
         // Matches Python: idle manager reports "pending".
         "pending".to_string()
     };
 
     let progress_percentage = if total_jobs > 0 {
-        let pct = (f64::from((completed + skipped) as i32) / f64::from(total_jobs.max(1) as i32))
-            * 100.0;
+        let pct =
+            (f64::from((completed + skipped) as i32) / f64::from(total_jobs.max(1) as i32)) * 100.0;
         (pct * 100.0).round() / 100.0
     } else {
         0.0
@@ -4386,10 +4380,7 @@ mod tests {
         assert_eq!(active_jobs[1]["feed_title"], "Feed");
         // job-pending has NULL stage_history; it must surface as an empty array,
         // not null, so the frontend can iterate without a guard.
-        assert_eq!(
-            active_jobs[1]["stage_history"],
-            Value::Array(Vec::new())
-        );
+        assert_eq!(active_jobs[1]["stage_history"], Value::Array(Vec::new()));
 
         let all = render_jobs(
             JobsListArgs {
@@ -4405,10 +4396,7 @@ mod tests {
         assert_eq!(all_jobs[2]["completed_at"], "2026-05-08T12:02:00");
         // job-complete has garbage in the column; falling back to [] keeps the
         // listing healthy even if a row was written with malformed JSON.
-        assert_eq!(
-            all_jobs[2]["stage_history"],
-            Value::Array(Vec::new())
-        );
+        assert_eq!(all_jobs[2]["stage_history"], Value::Array(Vec::new()));
     }
 
     #[test]
@@ -4460,7 +4448,10 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let response = render_jobs_status(JobsStatusArgs { db: db_path.clone() }).unwrap();
+        let response = render_jobs_status(JobsStatusArgs {
+            db: db_path.clone(),
+        })
+        .unwrap();
         let run = response["run"].as_object().unwrap();
         assert_eq!(run["id"], "jobs-manager-singleton");
         // running > 0 → status "running"; idle override only kicks in when

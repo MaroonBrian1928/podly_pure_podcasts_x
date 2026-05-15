@@ -300,9 +300,7 @@ def create_dev_test_feed_action(params: dict[str, Any]) -> dict[str, Any]:
             started_at=now,
             completed_at=now,
             step_name="completed",
-            stage_history=initial_stage_history(
-                step=4, step_name="completed", at=now
-            ),
+            stage_history=initial_stage_history(step=4, step_name="completed", at=now),
         )
         db.session.add(job)
 

@@ -596,15 +596,23 @@ export default function JobsPage() {
                     progressModel.stages[progressModel.currentStep]?.label ??
                     'Queued';
                   const headlineLower = headlineLabel.trim().toLowerCase();
-                  // Suppress sub-detail when it's just a paraphrase of the
-                  // headline (e.g. "Queued" + "Queued for processing").
+                  // Sub-detail dedup: suppress paraphrases of the headline
+                  // ("Queued" + "Queued for processing"), but let through
+                  // enrichments that add real signal — chunk counts, IDs,
+                  // anything parenthesised. The marker we use is "does the
+                  // remainder after stripping the headline contain a digit
+                  // or a parenthesis?" If yes, it's substantive; show it.
                   const subDetailRaw = progressModel.currentStageLabel?.trim();
-                  const subDetail =
-                    subDetailRaw &&
-                    subDetailRaw.toLowerCase() !== headlineLower &&
-                    !subDetailRaw.toLowerCase().startsWith(headlineLower)
-                      ? subDetailRaw
-                      : null;
+                  const subDetail = (() => {
+                    if (!subDetailRaw) return null;
+                    const subLower = subDetailRaw.toLowerCase();
+                    if (subLower === headlineLower) return null;
+                    if (subLower.startsWith(headlineLower)) {
+                      const remainder = subLower.slice(headlineLower.length).trim();
+                      if (!/[(\d]/.test(remainder)) return null;
+                    }
+                    return subDetailRaw;
+                  })();
 
                   const endMs = isTerminal
                     ? backendDateMs(job.completed_at) || now

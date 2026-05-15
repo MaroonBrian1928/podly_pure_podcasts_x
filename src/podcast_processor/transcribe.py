@@ -2,7 +2,7 @@ import logging
 import shutil
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,12 @@ def merge_segments_with_saved_word_timestamps(
     return merged_segments
 
 
+ChunkProgressCallback = Callable[[int, int], None]
+"""Invoked after each chunk transcription with (chunks_completed, total_chunks).
+Used to surface sub-stage progress (e.g. "Transcribing audio (chunk 2/3)")
+on the job status without requiring a separate progress channel."""
+
+
 class Transcriber(ABC):
     @property
     @abstractmethod
@@ -137,7 +143,11 @@ class Transcriber(ABC):
 
     @abstractmethod
     def transcribe(
-        self, audio_file_path: str, *, include_word_timestamps: bool = False
+        self,
+        audio_file_path: str,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: ChunkProgressCallback | None = None,
     ) -> list[Segment]:
         pass
 
@@ -151,11 +161,19 @@ class TestWhisperTranscriber(Transcriber):
         return "test_whisper"
 
     def transcribe(
-        self, audio_file_path: str, *, include_word_timestamps: bool = False
+        self,
+        audio_file_path: str,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: ChunkProgressCallback | None = None,
     ) -> list[Segment]:
         del audio_file_path
         del include_word_timestamps
         self.logger.info("Using test whisper")
+        # Pretend we did a single chunk so test-mode callers still observe
+        # the progress contract.
+        if progress_callback is not None:
+            progress_callback(1, 1)
         return [
             Segment(start=0, end=1, text="This is a test"),
             Segment(start=1, end=2, text="This is another test"),
@@ -180,7 +198,11 @@ class OpenAIWhisperTranscriber(Transcriber):
         return self.config.model  # e.g. "whisper-1"
 
     def transcribe(
-        self, audio_file_path: str, *, include_word_timestamps: bool = False
+        self,
+        audio_file_path: str,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: ChunkProgressCallback | None = None,
     ) -> list[Segment]:
         self.logger.info(
             "[WHISPER_REMOTE] Starting remote whisper transcription for: %s",
@@ -194,7 +216,8 @@ class OpenAIWhisperTranscriber(Transcriber):
             self.config.chunksize_mb * 1024 * 1024,
         )
 
-        self.logger.info("[WHISPER_REMOTE] Processing %d chunks", len(chunks))
+        total_chunks = len(chunks)
+        self.logger.info("[WHISPER_REMOTE] Processing %d chunks", total_chunks)
         all_segments: list[Segment] = []
 
         for idx, chunk in enumerate(chunks):
@@ -202,7 +225,7 @@ class OpenAIWhisperTranscriber(Transcriber):
             self.logger.info(
                 "[WHISPER_REMOTE] Processing chunk %d/%d: %s",
                 idx + 1,
-                len(chunks),
+                total_chunks,
                 chunk_path,
             )
             segments = self.get_segments_for_chunk(
@@ -212,10 +235,19 @@ class OpenAIWhisperTranscriber(Transcriber):
             self.logger.info(
                 "[WHISPER_REMOTE] Chunk %d/%d complete: %d segments",
                 idx + 1,
-                len(chunks),
+                total_chunks,
                 len(segments),
             )
             all_segments.extend(self.add_offset_to_segments(segments, offset))
+            if progress_callback is not None:
+                # Best-effort: never let a UI-only progress hook fail the
+                # actual transcription.
+                try:
+                    progress_callback(idx + 1, total_chunks)
+                except Exception:
+                    self.logger.exception(
+                        "[WHISPER_REMOTE] progress_callback raised; ignoring"
+                    )
 
         shutil.rmtree(audio_chunk_path)
         self.logger.info(
@@ -433,7 +465,11 @@ class GroqWhisperTranscriber(Transcriber):
         return f"groq_{self.config.model}"
 
     def transcribe(
-        self, audio_file_path: str, *, include_word_timestamps: bool = False
+        self,
+        audio_file_path: str,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: ChunkProgressCallback | None = None,
     ) -> list[Segment]:
         del include_word_timestamps
         self.logger.info(
@@ -447,7 +483,8 @@ class GroqWhisperTranscriber(Transcriber):
             Path(audio_file_path), Path(audio_chunk_path), 6 * 1024 * 1024
         )
 
-        self.logger.info("[WHISPER_GROQ] Processing %d chunks", len(chunks))
+        total_chunks = len(chunks)
+        self.logger.info("[WHISPER_GROQ] Processing %d chunks", total_chunks)
         all_segments: list[GroqTranscriptionSegment] = []
 
         for idx, chunk in enumerate(chunks):
@@ -455,17 +492,24 @@ class GroqWhisperTranscriber(Transcriber):
             self.logger.info(
                 "[WHISPER_GROQ] Processing chunk %d/%d: %s",
                 idx + 1,
-                len(chunks),
+                total_chunks,
                 chunk_path,
             )
             segments = self.get_segments_for_chunk(str(chunk_path))
             self.logger.info(
                 "[WHISPER_GROQ] Chunk %d/%d complete: %d segments",
                 idx + 1,
-                len(chunks),
+                total_chunks,
                 len(segments),
             )
             all_segments.extend(self.add_offset_to_segments(segments, offset))
+            if progress_callback is not None:
+                try:
+                    progress_callback(idx + 1, total_chunks)
+                except Exception:
+                    self.logger.exception(
+                        "[WHISPER_GROQ] progress_callback raised; ignoring"
+                    )
 
         shutil.rmtree(audio_chunk_path)
         self.logger.info(

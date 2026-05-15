@@ -843,11 +843,52 @@ class PodcastProcessor:
                 exc_info=True,
             )
 
+    def _make_transcribe_progress_callback(
+        self,
+        job: ProcessingJob,
+        *,
+        step: int,
+        label: str,
+        progress_base: float,
+        progress_span: float = 25.0,
+    ) -> Callable[[int, int], None]:
+        """Build a chunk-progress callback that updates the job's
+        ``step_name`` and ``progress_percentage`` after each whisper chunk
+        completes.
+
+        ``progress_base`` is the percentage to display before the first chunk
+        finishes (matches the value passed to the initial update_job_status
+        call). ``progress_span`` is how much of the bar this transcription
+        owns — defaults to 25% (one full stage).
+        """
+
+        def _on_chunk(chunks_done: int, total_chunks: int) -> None:
+            if total_chunks <= 0:
+                return
+            done = max(0, min(chunks_done, total_chunks))
+            sub_label = (
+                label if total_chunks <= 1 else f"{label} (chunk {done}/{total_chunks})"
+            )
+            progress = progress_base + progress_span * (done / total_chunks)
+            try:
+                self.status_manager.update_job_status(
+                    job, "running", step, sub_label, progress
+                )
+            except Exception:
+                # Sub-progress reporting must never break the actual job.
+                self.logger.exception(
+                    "Failed to publish transcription chunk progress for job %s",
+                    getattr(job, "id", None),
+                )
+
+        return _on_chunk
+
     def _transcribe_for_processing(
         self,
         post: Post,
         *,
         include_word_timestamps: bool,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[list[Any], list[Any] | None]:
         transcribe_for_processing = getattr(
             self.transcription_manager,
@@ -858,11 +899,17 @@ class PodcastProcessor:
             result = transcribe_for_processing(
                 post,
                 include_word_timestamps=include_word_timestamps,
+                progress_callback=progress_callback,
             )
             if isinstance(result, tuple) and len(result) == 2:
                 return result
 
-        return self.transcription_manager.transcribe(post), None
+        return (
+            self.transcription_manager.transcribe(
+                post, progress_callback=progress_callback
+            ),
+            None,
+        )
 
     def _perform_llm_based_processing(
         self,
@@ -889,8 +936,12 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job, "running", 2, "Transcribing audio", 50.0
         )
+        transcribe_progress = self._make_transcribe_progress_callback(
+            job, step=2, label="Transcribing audio", progress_base=50.0
+        )
         transcript_segments, rich_transcript_segments = self._transcribe_for_processing(
             post,
+            progress_callback=transcribe_progress,
             include_word_timestamps=(
                 (enable_profanity_bleeping and not has_saved_bleep_windows)
                 or (
@@ -1107,16 +1158,20 @@ class PodcastProcessor:
 
         # Only transcribe if we still need transcript-based fallback chapters
         if chapter_source == "none" or enable_profanity_bleeping:
+            fallback_label = (
+                "Transcribing audio for chapter generation"
+                if chapter_source == "none"
+                else "Transcribing audio for profanity bleeping"
+            )
             self.status_manager.update_job_status(
                 job,
                 "running",
                 3,
-                (
-                    "Transcribing audio for chapter generation"
-                    if chapter_source == "none"
-                    else "Transcribing audio for profanity bleeping"
-                ),
+                fallback_label,
                 75.0,
+            )
+            fallback_progress = self._make_transcribe_progress_callback(
+                job, step=3, label=fallback_label, progress_base=75.0
             )
             (
                 transcript_segments,
@@ -1126,6 +1181,7 @@ class PodcastProcessor:
                 include_word_timestamps=(
                     enable_profanity_bleeping and not has_saved_bleep_windows
                 ),
+                progress_callback=fallback_progress,
             )
             self._raise_if_cancelled(job, 3, cancel_callback)
 
