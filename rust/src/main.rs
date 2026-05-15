@@ -2944,6 +2944,26 @@ fn write_chapters(args: ChaptersWriteArgs) -> Result<OkResponse> {
         return Ok(OkResponse { ok: true });
     }
 
+    // Players (e.g. Apple Podcasts, Overcast) ignore chapter markup unless the
+    // chapters cover the entire file. Extend the first chapter back to 0 and
+    // the last chapter forward to the audio end so there are no gaps.
+    if let Some(first) = chapters.first_mut() {
+        if first.start_time_ms > 0 {
+            first.start_time_ms = 0;
+            if first.end_time_ms < first.start_time_ms {
+                first.end_time_ms = first.start_time_ms;
+            }
+        }
+    }
+    if let Some(duration_ms) = audio_duration_ms_u64 {
+        let duration_u32 = duration_ms.min(u64::from(u32::MAX)) as u32;
+        if let Some(last) = chapters.last_mut() {
+            if last.end_time_ms < duration_u32 {
+                last.end_time_ms = duration_u32;
+            }
+        }
+    }
+
     let mut tag = Tag::read_from_path(&args.audio).unwrap_or_else(|_| Tag::new());
     tag.remove("CHAP");
     tag.remove("CTOC");

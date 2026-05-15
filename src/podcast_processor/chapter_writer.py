@@ -104,6 +104,42 @@ def _normalize_removed_segments_ms(
     return merged
 
 
+def _fill_chapter_gaps(
+    chapters: list[Chapter],
+    audio_duration_ms: int,
+) -> list[Chapter]:
+    """Extend chapters so they cover [0, audio_duration_ms] with no gaps.
+
+    Some podcast players silently drop chapter markup when the markers do not
+    span the entire file. Stretching the first/last chapter outward (rather
+    than inserting filler chapters) keeps the title set unchanged.
+    """
+    if not chapters:
+        return chapters
+
+    filled = list(chapters)
+    first = filled[0]
+    if first.start_time_ms > 0:
+        filled[0] = Chapter(
+            element_id=first.element_id,
+            title=first.title,
+            start_time_ms=0,
+            end_time_ms=max(first.end_time_ms, 0),
+        )
+
+    if audio_duration_ms > 0:
+        last = filled[-1]
+        if last.end_time_ms < audio_duration_ms:
+            filled[-1] = Chapter(
+                element_id=last.element_id,
+                title=last.title,
+                start_time_ms=last.start_time_ms,
+                end_time_ms=audio_duration_ms,
+            )
+
+    return filled
+
+
 def _removed_offset_ms_at_time(
     time_ms: int,
     sorted_segments_ms: list[tuple[int, int]],
@@ -171,6 +207,11 @@ def write_chapters(
                     )
                 )
             sorted_chapters = clamped
+
+        # Players (e.g. Apple Podcasts, Overcast) ignore chapter markup unless the
+        # chapters cover the entire file. Extend the first chapter back to 0 and
+        # the last chapter forward to the audio end so there are no gaps.
+        sorted_chapters = _fill_chapter_gaps(sorted_chapters, audio_duration_ms)
 
         # Create ID3 tags if they don't exist
         if audio.tags is None:

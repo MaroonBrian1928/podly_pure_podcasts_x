@@ -1,8 +1,58 @@
 from podcast_processor.chapter_reader import Chapter
 from podcast_processor.chapter_writer import (
+    _fill_chapter_gaps,
     recalculate_chapter_times,
     write_adjusted_chapters,
 )
+
+
+def test_fill_chapter_gaps_extends_first_chapter_to_zero() -> None:
+    chapters = [
+        Chapter("c1", "Intro", 5_000, 60_000),
+        Chapter("c2", "Body", 60_000, 120_000),
+    ]
+
+    filled = _fill_chapter_gaps(chapters, audio_duration_ms=120_000)
+
+    assert filled[0].start_time_ms == 0
+    assert filled[0].end_time_ms == 60_000
+    assert filled[1].start_time_ms == 60_000
+    assert filled[1].end_time_ms == 120_000
+
+
+def test_fill_chapter_gaps_extends_last_chapter_to_audio_end() -> None:
+    chapters = [
+        Chapter("c1", "Intro", 0, 60_000),
+        Chapter("c2", "Body", 60_000, 100_000),
+    ]
+
+    filled = _fill_chapter_gaps(chapters, audio_duration_ms=180_000)
+
+    assert filled[-1].end_time_ms == 180_000
+
+
+def test_fill_chapter_gaps_no_op_when_already_spans_file() -> None:
+    chapters = [
+        Chapter("c1", "Intro", 0, 60_000),
+        Chapter("c2", "Body", 60_000, 120_000),
+    ]
+
+    filled = _fill_chapter_gaps(chapters, audio_duration_ms=120_000)
+
+    assert filled == chapters
+
+
+def test_fill_chapter_gaps_handles_unknown_audio_duration() -> None:
+    chapters = [
+        Chapter("c1", "Intro", 5_000, 60_000),
+    ]
+
+    filled = _fill_chapter_gaps(chapters, audio_duration_ms=0)
+
+    # First chapter is still pulled back to 0 even without a known duration.
+    assert filled[0].start_time_ms == 0
+    # Last chapter end is left alone when duration is unknown.
+    assert filled[0].end_time_ms == 60_000
 
 
 def test_recalculate_chapter_times_shrinks_chapter_when_cut_occurs_inside() -> None:
