@@ -667,7 +667,7 @@ class PodcastProcessor:
         rich_transcript_segments: list[Any] | None,
         saved_bleep_windows_ms: list[tuple[int, int]] | None = None,
         enable_profanity_bleeping: bool,
-        use_vbr: bool = True,
+        use_vbr: bool = False,
     ) -> ProfanityBleepResult:
         if not enable_profanity_bleeping:
             return ProfanityBleepResult(source_audio_path, [])

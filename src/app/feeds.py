@@ -932,7 +932,10 @@ def _sqlite_db_path_from_app_config() -> Path | None:
     path = uri.removeprefix(prefix).split("?", 1)[0]
     if not path or path == ":memory:":
         return None
-    return Path(path)
+    db_path = Path(path)
+    if db_path.is_absolute():
+        return db_path
+    return (Path(current_app.instance_path) / db_path).resolve()
 
 
 def _feed_token_request_values() -> tuple[str | None, str | None]:

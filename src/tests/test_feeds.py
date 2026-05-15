@@ -184,6 +184,7 @@ def test_fetch_feed(mock_get, mock_parse, mock_feed_data):
         headers={"User-Agent": "podly/1.0"},
     )
     mock_parse.assert_called_once_with(b"<rss/>")
+    assert result == mock_feed_data
 
 
 @mock.patch("app.feeds.feedparser.parse")
@@ -1047,6 +1048,8 @@ def test_feed_item_prefers_stored_duration_over_processed_audio_probe(mock_post,
 def test_sqlite_db_path_from_app_config_strips_query_string(app, uri, expected):
     with app.app_context():
         app.config["SQLALCHEMY_DATABASE_URI"] = uri
+        if expected is not None and not expected.is_absolute():
+            expected = (Path(app.instance_path) / expected).resolve()
         assert _sqlite_db_path_from_app_config() == expected
 
 

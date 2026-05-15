@@ -66,6 +66,10 @@ struct AudioCutArgs {
     fade_ms: u32,
     #[arg(long)]
     encoding: Encoding,
+    #[arg(long = "cbr-bitrate-bps")]
+    cbr_bitrate_bps: Option<u64>,
+    #[arg(long = "vbr-quality")]
+    vbr_quality: Option<u8>,
 }
 
 #[derive(Args)]
@@ -86,6 +90,10 @@ struct AudioBleepArgs {
     fade_ms: u32,
     #[arg(long)]
     encoding: Encoding,
+    #[arg(long = "cbr-bitrate-bps")]
+    cbr_bitrate_bps: Option<u64>,
+    #[arg(long = "vbr-quality")]
+    vbr_quality: Option<u8>,
 }
 
 #[derive(Args)]
@@ -108,6 +116,23 @@ enum CutMode {
 enum Encoding {
     Vbr,
     Cbr,
+}
+
+#[derive(Clone)]
+struct EncodingOptions {
+    mode: Encoding,
+    cbr_bitrate_bps: Option<u64>,
+    vbr_quality: Option<u8>,
+}
+
+impl EncodingOptions {
+    fn new(mode: Encoding, cbr_bitrate_bps: Option<u64>, vbr_quality: Option<u8>) -> Self {
+        Self {
+            mode,
+            cbr_bitrate_bps,
+            vbr_quality,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -605,12 +630,12 @@ struct ProfanityRequest {
 fn run_transcript_profanity_windows(args: TranscriptProfanityWindowsArgs) -> Result<Value> {
     let raw = std::fs::read_to_string(&args.input)
         .with_context(|| format!("failed to read profanity input {}", args.input.display()))?;
-    let request: ProfanityRequest = serde_json::from_str(&raw)
-        .context("failed to parse profanity-windows input as JSON")?;
+    let request: ProfanityRequest =
+        serde_json::from_str(&raw).context("failed to parse profanity-windows input as JSON")?;
 
     static NORMALIZE_RE: OnceLock<Regex> = OnceLock::new();
-    let normalize_re = NORMALIZE_RE
-        .get_or_init(|| Regex::new(r"(^[^A-Za-z0-9']+)|([^A-Za-z0-9']+$)").unwrap());
+    let normalize_re =
+        NORMALIZE_RE.get_or_init(|| Regex::new(r"(^[^A-Za-z0-9']+)|([^A-Za-z0-9']+$)").unwrap());
 
     let terms: HashSet<String> = request
         .profanity_terms
@@ -644,10 +669,7 @@ fn run_transcript_profanity_windows(args: TranscriptProfanityWindowsArgs) -> Res
         merged.push((start, end));
     }
 
-    let windows: Vec<Value> = merged
-        .into_iter()
-        .map(|(s, e)| json!([s, e]))
-        .collect();
+    let windows: Vec<Value> = merged.into_iter().map(|(s, e)| json!([s, e])).collect();
     Ok(json!({ "windows_ms": windows }))
 }
 
@@ -1943,8 +1965,7 @@ fn extract_log_field(message: &str, field_name: &str) -> Option<String> {
 
 fn extract_step_name(message: &str) -> Option<String> {
     static STEP_NAME_RE: OnceLock<Regex> = OnceLock::new();
-    let re =
-        STEP_NAME_RE.get_or_init(|| Regex::new(r"\bstep_name=(.*?)(?:\s+\w+=|$)").unwrap());
+    let re = STEP_NAME_RE.get_or_init(|| Regex::new(r"\bstep_name=(.*?)(?:\s+\w+=|$)").unwrap());
     re.captures(message)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().trim().to_string()))
         .filter(|value| !value.is_empty())
@@ -2059,22 +2080,23 @@ fn probe_audio_path(input: &Path) -> Result<ProbeResponse> {
 fn cut_audio(args: AudioCutArgs) -> Result<OkResponse> {
     let duration_ms = probe_audio_path(&args.input)?.duration_ms;
     let windows = read_windows_ms(&args.windows_json)?;
+    let encoding = EncodingOptions::new(
+        args.encoding.clone(),
+        args.cbr_bitrate_bps,
+        args.vbr_quality,
+    );
 
     match args.mode {
-        CutMode::Exact => cut_audio_simple(
-            &args.input,
-            &args.output,
-            &windows,
-            duration_ms,
-            &args.encoding,
-        )?,
+        CutMode::Exact => {
+            cut_audio_simple(&args.input, &args.output, &windows, duration_ms, &encoding)?
+        }
         CutMode::Fade => cut_audio_with_fade(
             &args.input,
             &args.output,
             &windows,
             duration_ms,
             args.fade_ms,
-            &args.encoding,
+            &encoding,
         )?,
     }
 
@@ -2090,6 +2112,11 @@ fn bleep_audio(args: AudioBleepArgs) -> Result<OkResponse> {
         fs::copy(&args.input, &args.output).with_context(|| "failed to copy input audio")?;
         return Ok(OkResponse { ok: true });
     }
+    let encoding = EncodingOptions::new(
+        args.encoding.clone(),
+        args.cbr_bitrate_bps,
+        args.vbr_quality,
+    );
 
     let chunks: Vec<&[(u64, u64)]> = windows.chunks(BLEEP_MAX_WINDOWS_PER_PASS).collect();
     let total_passes = chunks.len();
@@ -2104,7 +2131,7 @@ fn bleep_audio(args: AudioBleepArgs) -> Result<OkResponse> {
             args.beep_volume,
             args.duck_volume,
             args.fade_ms,
-            &args.encoding,
+            &encoding,
         )?;
         return Ok(OkResponse { ok: true });
     }
@@ -2124,7 +2151,7 @@ fn bleep_audio(args: AudioBleepArgs) -> Result<OkResponse> {
                 args.beep_volume,
                 args.duck_volume,
                 args.fade_ms,
-                &args.encoding,
+                &encoding,
             )?;
         } else {
             let pass_output = temp_dir.path().join(format!("bleep_pass_{idx}.wav"));
@@ -2261,7 +2288,7 @@ fn apply_bleep_pass_mp3(
     beep_volume: f32,
     duck_volume: f32,
     fade_ms: u32,
-    encoding: &Encoding,
+    encoding: &EncodingOptions,
 ) -> Result<()> {
     let filter = bleep_filter_complex(
         windows,
@@ -2352,7 +2379,7 @@ fn cut_audio_with_fade(
     windows: &[(u64, u64)],
     duration_ms: u64,
     fade_ms: u32,
-    encoding: &Encoding,
+    encoding: &EncodingOptions,
 ) -> Result<()> {
     let fade_ms = fade_ms as u64;
     let mut streams = Vec::new();
@@ -2409,7 +2436,7 @@ fn cut_audio_simple(
     output: &Path,
     windows: &[(u64, u64)],
     duration_ms: u64,
-    encoding: &Encoding,
+    encoding: &EncodingOptions,
 ) -> Result<()> {
     let keep_segments = keep_segments(windows, duration_ms);
     if keep_segments.is_empty() {
@@ -2419,8 +2446,8 @@ fn cut_audio_simple(
     let temp_dir = tempfile::tempdir().with_context(|| "failed to create temp directory")?;
     let mut segment_files = Vec::new();
     for (index, (start_ms, end_ms)) in keep_segments.iter().enumerate() {
-        let segment_path = temp_dir.path().join(format!("segment_{index}.mp3"));
-        trim_file_reencoded(input, &segment_path, *start_ms, *end_ms, encoding)?;
+        let segment_path = temp_dir.path().join(format!("segment_{index}.wav"));
+        trim_file_lossless(input, &segment_path, *start_ms, *end_ms)?;
         segment_files.push(segment_path);
     }
 
@@ -2474,13 +2501,7 @@ fn trim_file(input: &Path, output: &Path, start_ms: u64, end_ms: u64) -> Result<
     run_command(command, "ffmpeg trim")
 }
 
-fn trim_file_reencoded(
-    input: &Path,
-    output: &Path,
-    start_ms: u64,
-    end_ms: u64,
-    encoding: &Encoding,
-) -> Result<()> {
+fn trim_file_lossless(input: &Path, output: &Path, start_ms: u64, end_ms: u64) -> Result<()> {
     let duration_ms = end_ms.saturating_sub(start_ms);
     let mut command = Command::new("ffmpeg");
     command
@@ -2494,8 +2515,8 @@ fn trim_file_reencoded(
         .arg("-i")
         .arg(input)
         .arg("-codec:a")
-        .arg("libmp3lame");
-    add_encoding_args(&mut command, encoding);
+        .arg("pcm_s16le")
+        .arg("-vn");
     command.arg(output);
     run_command(command, "ffmpeg segment")
 }
@@ -2504,7 +2525,7 @@ fn run_filtered_output(
     input: &Path,
     output: &Path,
     filter: &str,
-    encoding: &Encoding,
+    encoding: &EncodingOptions,
 ) -> Result<()> {
     let mut command = Command::new("ffmpeg");
     command
@@ -2538,13 +2559,17 @@ fn run_command(mut command: Command, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn add_encoding_args(command: &mut Command, encoding: &Encoding) {
-    match encoding {
+fn add_encoding_args(command: &mut Command, encoding: &EncodingOptions) {
+    match &encoding.mode {
         Encoding::Vbr => {
-            command.arg("-q:a").arg("2");
+            command
+                .arg("-q:a")
+                .arg(encoding.vbr_quality.unwrap_or(2).to_string());
         }
         Encoding::Cbr => {
-            command.arg("-b:a").arg("192k");
+            command
+                .arg("-b:a")
+                .arg(encoding.cbr_bitrate_bps.unwrap_or(192_000).to_string());
         }
     }
 }
@@ -2589,7 +2614,6 @@ fn keep_segments(windows: &[(u64, u64)], duration_ms: u64) -> Vec<(u64, u64)> {
     }
     keep
 }
-
 
 fn normalize_word_timestamps(args: TranscriptNormalizeArgs) -> Result<OkResponse> {
     let data = fs::read_to_string(&args.input)

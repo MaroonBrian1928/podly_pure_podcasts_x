@@ -129,28 +129,35 @@ def try_cut_audio(
     mode: str,
     fade_ms: int,
     encoding: str,
+    cbr_bitrate_bps: int | None = None,
+    vbr_quality: int | None = None,
 ) -> bool:
     if not rust_audio_enabled():
         return False
 
     with _windows_json_file(windows_ms) as windows_path:
+        args = [
+            "audio",
+            "cut",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--windows-json",
+            str(windows_path),
+            "--mode",
+            mode,
+            "--fade-ms",
+            str(fade_ms),
+            "--encoding",
+            encoding,
+        ]
+        if cbr_bitrate_bps is not None:
+            args.extend(["--cbr-bitrate-bps", str(cbr_bitrate_bps)])
+        if vbr_quality is not None:
+            args.extend(["--vbr-quality", str(vbr_quality)])
         return _try_audio_command(
-            [
-                "audio",
-                "cut",
-                "--input",
-                str(input_path),
-                "--output",
-                str(output_path),
-                "--windows-json",
-                str(windows_path),
-                "--mode",
-                mode,
-                "--fade-ms",
-                str(fade_ms),
-                "--encoding",
-                encoding,
-            ],
+            args,
             "cut",
         )
 
@@ -165,32 +172,39 @@ def try_bleep_audio(
     duck_volume: float,
     encoding: str,
     fade_ms: int = 5,
+    cbr_bitrate_bps: int | None = None,
+    vbr_quality: int | None = None,
 ) -> bool:
     if not rust_audio_enabled():
         return False
 
     with _windows_json_file(windows_ms) as windows_path:
+        args = [
+            "audio",
+            "bleep",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--windows-json",
+            str(windows_path),
+            "--beep-frequency-hz",
+            str(beep_frequency_hz),
+            "--beep-volume",
+            str(beep_volume),
+            "--duck-volume",
+            str(duck_volume),
+            "--fade-ms",
+            str(fade_ms),
+            "--encoding",
+            encoding,
+        ]
+        if cbr_bitrate_bps is not None:
+            args.extend(["--cbr-bitrate-bps", str(cbr_bitrate_bps)])
+        if vbr_quality is not None:
+            args.extend(["--vbr-quality", str(vbr_quality)])
         return _try_audio_command(
-            [
-                "audio",
-                "bleep",
-                "--input",
-                str(input_path),
-                "--output",
-                str(output_path),
-                "--windows-json",
-                str(windows_path),
-                "--beep-frequency-hz",
-                str(beep_frequency_hz),
-                "--beep-volume",
-                str(beep_volume),
-                "--duck-volume",
-                str(duck_volume),
-                "--fade-ms",
-                str(fade_ms),
-                "--encoding",
-                encoding,
-            ],
+            args,
             "bleep",
         )
 

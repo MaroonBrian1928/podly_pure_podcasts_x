@@ -604,13 +604,11 @@ class AudioProcessor:
             ),
         )
 
-        # LLM strategy doesn't use chapter markers, so VBR is fine for smaller files
         clip_segments_with_fade(
             in_path=source_audio_path,
             ad_segments_ms=merged_ad_segments,
             fade_ms=self.config.output.fade_ms,
             out_path=output_path,
-            use_vbr=True,
         )
 
         processed_duration_ms = get_audio_duration_ms(output_path)

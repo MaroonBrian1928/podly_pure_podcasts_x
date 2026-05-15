@@ -233,6 +233,7 @@ def test_process_audio(
             # it is within the minimum separation threshold of the episode end.
             assert removed_segments == [(5000, 30000)]
             mock_clip.assert_called_once()
+            assert "use_vbr" not in mock_clip.call_args.kwargs
 
 
 def test_get_ad_segments_bridges_music_only_gap_with_ina_markers(app: Flask) -> None:

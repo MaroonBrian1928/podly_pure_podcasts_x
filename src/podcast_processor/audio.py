@@ -18,6 +18,9 @@ from shared.rust_sidecar import (
 
 logger = logging.getLogger("global_logger")
 
+DEFAULT_VBR_QUALITY = 2
+DEFAULT_CBR_BITRATE = "192k"
+
 
 def get_audio_duration_ms(file_path: str) -> int | None:
     rust_duration_ms = try_probe_audio_duration_ms(Path(file_path))
@@ -41,12 +44,58 @@ def get_audio_duration_ms(file_path: str) -> int | None:
         return None
 
 
+def get_audio_bitrate_bps(file_path: str) -> int | None:
+    try:
+        logger.debug("[FFMPEG_PROBE] Probing audio bitrate: %s", file_path)
+        probe = ffmpeg.probe(file_path)
+    except ffmpeg.Error as e:
+        logger.warning(
+            "[FFMPEG_PROBE] Error probing bitrate for %s: %s",
+            file_path,
+            e.stderr.decode() if e.stderr else str(e),
+        )
+        return None
+
+    streams = probe.get("streams", [])
+    if isinstance(streams, list):
+        for stream in streams:
+            if not isinstance(stream, dict) or stream.get("codec_type") != "audio":
+                continue
+            bitrate = _parse_bitrate_bps(stream.get("bit_rate"))
+            if bitrate is not None:
+                return bitrate
+
+    format_info = probe.get("format", {})
+    if isinstance(format_info, dict):
+        return _parse_bitrate_bps(format_info.get("bit_rate"))
+    return None
+
+
+def _parse_bitrate_bps(value: Any) -> int | None:
+    try:
+        bitrate = int(float(value))
+    except TypeError, ValueError:
+        return None
+    if bitrate <= 0:
+        return None
+    return bitrate
+
+
+def _format_bitrate_arg(bitrate_bps: int) -> str:
+    return str(max(1, int(bitrate_bps)))
+
+
 def _get_encoding_args(
-    use_vbr: bool = False, vbr_quality: int = 2, cbr_bitrate: str = "192k"
+    use_vbr: bool = False,
+    vbr_quality: int = DEFAULT_VBR_QUALITY,
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
+    source_bitrate_bps: int | None = None,
 ) -> dict[str, Any]:
     """Return ffmpeg encoding arguments for VBR or CBR."""
     if use_vbr:
         return {"q:a": vbr_quality}
+    if source_bitrate_bps is not None:
+        return {"b:a": _format_bitrate_arg(source_bitrate_bps)}
     return {"b:a": cbr_bitrate}
 
 
@@ -56,9 +105,10 @@ def clip_segments_with_fade(
     in_path: str,
     out_path: str,
     use_vbr: bool = False,
-    vbr_quality: int = 2,
-    cbr_bitrate: str = "192k",
+    vbr_quality: int = DEFAULT_VBR_QUALITY,
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
 ) -> None:
+    source_bitrate_bps = None if use_vbr else get_audio_bitrate_bps(in_path)
     if try_cut_audio(
         windows_ms=ad_segments_ms,
         input_path=Path(in_path),
@@ -66,13 +116,17 @@ def clip_segments_with_fade(
         mode="fade",
         fade_ms=fade_ms,
         encoding="vbr" if use_vbr else "cbr",
+        cbr_bitrate_bps=source_bitrate_bps,
+        vbr_quality=vbr_quality if use_vbr else None,
     ):
         return
 
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
 
-    encoding_args = _get_encoding_args(use_vbr, vbr_quality, cbr_bitrate)
+    encoding_args = _get_encoding_args(
+        use_vbr, vbr_quality, cbr_bitrate, source_bitrate_bps
+    )
 
     # Try the complex filter approach first, fall back to simple if it fails
     # Catch both ffmpeg.Error (runtime) and broader exceptions (filter graph construction)
@@ -156,13 +210,14 @@ def clip_segments_exact(
     ad_segments_ms: list[tuple[int, int]],
     in_path: str,
     out_path: str,
-    cbr_bitrate: str = "192k",
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
 ) -> None:
     """Remove segments with exact cuts at boundaries, no fades.
 
     Used by chapter-based ad detection. Always uses CBR encoding because VBR
     causes seeking inaccuracy with chapter markers.
     """
+    source_bitrate_bps = get_audio_bitrate_bps(in_path)
     if try_cut_audio(
         windows_ms=ad_segments_ms,
         input_path=Path(in_path),
@@ -170,13 +225,18 @@ def clip_segments_exact(
         mode="exact",
         fade_ms=0,
         encoding="cbr",
+        cbr_bitrate_bps=source_bitrate_bps,
     ):
         return
 
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
     # Chapter strategy always uses CBR for accurate chapter marker seeking
-    encoding_args = _get_encoding_args(use_vbr=False, cbr_bitrate=cbr_bitrate)
+    encoding_args = _get_encoding_args(
+        use_vbr=False,
+        cbr_bitrate=cbr_bitrate,
+        source_bitrate_bps=source_bitrate_bps,
+    )
     _clip_segments_simple(
         ad_segments_ms, in_path, out_path, audio_duration_ms, encoding_args
     )
@@ -198,9 +258,10 @@ def overlay_beeps_with_ducking(
     # clicks. Kept short so it doesn't bleed audible profanity.
     fade_ms: int = 5,
     use_vbr: bool = False,
-    vbr_quality: int = 2,
-    cbr_bitrate: str = "192k",
+    vbr_quality: int = DEFAULT_VBR_QUALITY,
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
 ) -> None:
+    source_bitrate_bps = None if use_vbr else get_audio_bitrate_bps(in_path)
     if try_bleep_audio(
         windows_ms=censor_windows_ms,
         input_path=Path(in_path),
@@ -210,6 +271,8 @@ def overlay_beeps_with_ducking(
         duck_volume=duck_volume,
         encoding="vbr" if use_vbr else "cbr",
         fade_ms=fade_ms,
+        cbr_bitrate_bps=source_bitrate_bps,
+        vbr_quality=vbr_quality if use_vbr else None,
     ):
         return
 
@@ -217,7 +280,9 @@ def overlay_beeps_with_ducking(
         shutil.copyfile(in_path, out_path)
         return
 
-    encoding_args = _get_encoding_args(use_vbr, vbr_quality, cbr_bitrate)
+    encoding_args = _get_encoding_args(
+        use_vbr, vbr_quality, cbr_bitrate, source_bitrate_bps
+    )
     merged_windows = _merge_time_windows_ms(censor_windows_ms)
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
@@ -333,9 +398,7 @@ def _build_bleep_filter_complex(
     fade_s = fade_ms_eff / 1000.0
     duration_s = audio_duration_ms / 1000.0
 
-    expanded = [
-        (max(0, s - fade_ms_eff), e + fade_ms_eff) for s, e in windows
-    ]
+    expanded = [(max(0, s - fade_ms_eff), e + fade_ms_eff) for s, e in windows]
     zones_ms = _merge_time_windows_ms(expanded)
     zones: list[tuple[float, float]] = []
     for zs_ms, ze_ms in zones_ms:
@@ -423,21 +486,12 @@ def _clip_segments_simple(
 
         # Extract each segment to keep
         for i, (start_ms, end_ms) in enumerate(keep_segments):
-            segment_path = os.path.join(temp_dir, f"segment_{i}.mp3")
-            start_sec = start_ms / 1000.0
-            duration_sec = (end_ms - start_ms) / 1000.0
-
-            (
-                ffmpeg.input(in_path)
-                .output(
-                    segment_path,
-                    ss=start_sec,
-                    t=duration_sec,
-                    acodec="libmp3lame",
-                    **encoding_args,
-                )
-                .overwrite_output()
-                .run(quiet=True)
+            segment_path = os.path.join(temp_dir, f"segment_{i}.wav")
+            _trim_file_lossless(
+                Path(in_path),
+                Path(segment_path),
+                start_ms,
+                end_ms,
             )
 
             segment_files.append(segment_path)
@@ -457,6 +511,31 @@ def _clip_segments_simple(
         )
 
     logger.info("[FFMPEG_SIMPLE] Completed simple audio concatenation: %s", out_path)
+
+
+def _trim_file_lossless(
+    in_path: Path, out_path: Path, start_ms: int, end_ms: int
+) -> None:
+    duration_ms = end_ms - start_ms
+
+    if duration_ms <= 0:
+        return
+
+    start_sec = max(start_ms, 0) / 1000.0
+    duration_sec = duration_ms / 1000.0
+
+    (
+        ffmpeg.input(str(in_path))
+        .output(
+            str(out_path),
+            ss=start_sec,
+            t=duration_sec,
+            acodec="pcm_s16le",
+            vn=None,
+        )
+        .overwrite_output()
+        .run(quiet=True)
+    )
 
 
 def _merge_time_windows_ms(
