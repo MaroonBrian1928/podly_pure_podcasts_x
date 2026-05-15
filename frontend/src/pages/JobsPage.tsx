@@ -341,7 +341,7 @@ export default function JobsPage() {
     const interval = setInterval(() => {
       void silentLoadJobs();
       void loadStatus();
-    }, 3000);
+    }, 1000);
 
     return () => clearInterval(interval);
   }, [
