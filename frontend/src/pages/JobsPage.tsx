@@ -7,7 +7,6 @@ import type {
   JobManagerStatus,
   JobStageEvent,
 } from '../types';
-import AnimatedDuration from '../components/AnimatedDuration';
 import { JobProgressBar, JobStageRail } from '../components/JobProgress';
 import {
   backendDateMs,
@@ -40,33 +39,6 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color}`}>
       {status}
-    </span>
-  );
-}
-
-// Fixed-width container for the live timer so the rest of the row doesn't
-// reflow as digits widen/narrow. Digit cells animate independently via
-// AnimatedDuration so only the characters that changed re-animate.
-function ElapsedBadge({ ms, accent }: { ms: number; accent: 'indigo' | 'gray' }) {
-  if (!Number.isFinite(ms)) {
-    return null;
-  }
-  const dotClass =
-    accent === 'indigo'
-      ? 'bg-indigo-400 opacity-75 animate-ping'
-      : 'bg-gray-300';
-  const dotCoreClass =
-    accent === 'indigo' ? 'bg-indigo-600' : 'bg-gray-400';
-  return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-gray-600">
-      <span className="relative inline-flex h-2 w-2">
-        <span className={`absolute inline-flex h-full w-full rounded-full ${dotClass}`} />
-        <span className={`relative inline-flex h-2 w-2 rounded-full ${dotCoreClass}`} />
-      </span>
-      <AnimatedDuration
-        ms={ms}
-        className="min-w-[3.5rem] justify-end font-mono"
-      />
     </span>
   );
 }
@@ -604,76 +576,6 @@ export default function JobsPage() {
               <div className="text-xs text-gray-600 truncate">{job.feed_title || 'Unknown feed'}</div>
 
               <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs text-gray-700">
-                  <span>Priority</span>
-                  <span className="font-medium">{job.priority}</span>
-                </div>
-
-                {(() => {
-                  const isRunning = job.status === 'running';
-                  const isTerminal =
-                    job.status === 'completed' ||
-                    job.status === 'skipped' ||
-                    job.status === 'failed' ||
-                    job.status === 'cancelled';
-                  const activeStage =
-                    progressModel.stages.find(s => s.state === 'active') ??
-                    progressModel.stages.find(s => s.state === 'failed');
-                  const headlineLabel =
-                    activeStage?.label ??
-                    progressModel.stages[progressModel.currentStep]?.label ??
-                    'Queued';
-                  const headlineLower = headlineLabel.trim().toLowerCase();
-                  // Sub-detail dedup: suppress paraphrases of the headline
-                  // ("Queued" + "Queued for processing"), but let through
-                  // enrichments that add real signal — chunk counts, IDs,
-                  // anything parenthesised. The marker we use is "does the
-                  // remainder after stripping the headline contain a digit
-                  // or a parenthesis?" If yes, it's substantive; show it.
-                  const subDetailRaw = progressModel.currentStageLabel?.trim();
-                  const subDetail = (() => {
-                    if (!subDetailRaw) return null;
-                    const subLower = subDetailRaw.toLowerCase();
-                    if (subLower === headlineLower) return null;
-                    if (subLower.startsWith(headlineLower)) {
-                      const remainder = subLower.slice(headlineLower.length).trim();
-                      if (!/[(\d]/.test(remainder)) return null;
-                    }
-                    return subDetailRaw;
-                  })();
-
-                  const endMs = isTerminal
-                    ? backendDateMs(job.completed_at) || now
-                    : now;
-
-                  const history = job.stage_history ?? [];
-                  const currentStageEntry = [...history]
-                    .reverse()
-                    .find(entry => entry.step === job.step);
-                  const stageStartMs = currentStageEntry
-                    ? backendDateMs(currentStageEntry.started_at)
-                    : NaN;
-                  const stageMs = Number.isFinite(stageStartMs)
-                    ? endMs - stageStartMs
-                    : NaN;
-
-                  return (
-                    <div className="space-y-0.5">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 truncate text-sm font-medium text-gray-900" title={headlineLabel}>
-                          {headlineLabel}
-                        </div>
-                        {isRunning ? <ElapsedBadge ms={stageMs} accent="indigo" /> : null}
-                      </div>
-                      {subDetail ? (
-                        <div className="text-xs text-gray-500 truncate" title={subDetail}>
-                          {subDetail}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })()}
-
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-gray-700">
                     <span>Progress</span>
