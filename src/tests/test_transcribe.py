@@ -1,16 +1,17 @@
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from openai.types.audio.transcription_segment import TranscriptionSegment
+from pydantic import ValidationError
 
 # from pytest_mock import MockerFixture
 
 
 @pytest.mark.skip
 def test_remote_transcribe() -> None:
-    # import here instead of the toplevel because torch is not installed properly in CI.
+    # Import here to keep this skipped integration check out of test collection.
     from podcast_processor.transcribe import (
         OpenAIWhisperTranscriber,
     )
@@ -23,19 +24,6 @@ def test_remote_transcribe() -> None:
     transcriber = OpenAIWhisperTranscriber(logger, config)
 
     transcription = transcriber.transcribe("file.mp3")
-    assert transcription == []
-
-
-@pytest.mark.skip
-def test_local_transcribe() -> None:
-    # import here instead of the toplevel because torch is not installed properly in CI.
-    from podcast_processor.transcribe import (
-        LocalWhisperTranscriber,
-    )
-
-    logger = logging.getLogger("global_logger")
-    transcriber = LocalWhisperTranscriber(logger, "base.en")
-    transcription = transcriber.transcribe("src/tests/file.mp3")
     assert transcription == []
 
 
@@ -80,38 +68,328 @@ def test_groq_transcribe(mocker: Any) -> None:
 
 
 def test_offset() -> None:
-    # import here instead of the toplevel because torch is not installed properly in CI.
+    # Import here to keep the test focused on the shared offset helper.
     from podcast_processor.transcribe import (
         OpenAIWhisperTranscriber,
+        Segment,
     )
 
     assert OpenAIWhisperTranscriber.add_offset_to_segments(
-        [
-            TranscriptionSegment(
-                id=1,
-                avg_logprob=2,
-                seek=6,
-                temperature=7,
-                text="hi",
-                tokens=[],
-                compression_ratio=3,
-                no_speech_prob=4,
-                start=12.345,
-                end=45.678,
-            )
-        ],
+        [Segment(start=12.345, end=45.678, text="hi")],
         123,
-    ) == [
-        TranscriptionSegment(
-            id=1,
-            avg_logprob=2,
-            seek=6,
-            temperature=7,
-            text="hi",
-            tokens=[],
-            compression_ratio=3,
-            no_speech_prob=4,
-            start=12.468,
-            end=45.800999999999995,
+    ) == [Segment(start=12.468, end=45.800999999999995, text="hi")]
+
+
+def test_remote_transcription_request_kwargs_include_diarization_flags() -> None:
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber
+    from shared.config import RemoteWhisperConfig
+
+    transcriber = OpenAIWhisperTranscriber(
+        logging.getLogger("global_logger"),
+        RemoteWhisperConfig(
+            api_key="test-key",
+            diarize=True,
+            speaker_embeddings=True,
+        ),
+    )
+
+    request_kwargs = transcriber.build_transcription_request_kwargs(MagicMock())
+
+    assert request_kwargs["extra_body"] == {
+        "align": True,
+        "diarize": True,
+        "speaker_embeddings": True,
+    }
+
+
+def test_remote_transcription_request_kwargs_match_whisperx_payload_defaults() -> None:
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber
+    from shared.config import RemoteWhisperConfig
+
+    transcriber = OpenAIWhisperTranscriber(
+        logging.getLogger("global_logger"),
+        RemoteWhisperConfig(
+            api_key="test-key",
+            diarize=True,
+            speaker_embeddings=False,
+        ),
+    )
+
+    request_kwargs = transcriber.build_transcription_request_kwargs(MagicMock())
+
+    assert request_kwargs["extra_body"] == {
+        "align": True,
+        "diarize": True,
+    }
+
+
+def test_remote_transcription_request_kwargs_include_word_timestamps_when_requested() -> (
+    None
+):
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber
+    from shared.config import RemoteWhisperConfig
+
+    transcriber = OpenAIWhisperTranscriber(
+        logging.getLogger("global_logger"),
+        RemoteWhisperConfig(api_key="test-key"),
+    )
+
+    request_kwargs = transcriber.build_transcription_request_kwargs(
+        MagicMock(),
+        include_word_timestamps=True,
+    )
+
+    assert request_kwargs["timestamp_granularities"] == ["segment", "word"]
+    assert request_kwargs["extra_body"] == {"align": True}
+
+
+def test_remote_transcription_request_kwargs_omit_diarization_flags_when_disabled() -> (
+    None
+):
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber
+    from shared.config import RemoteWhisperConfig
+
+    transcriber = OpenAIWhisperTranscriber(
+        logging.getLogger("global_logger"),
+        RemoteWhisperConfig(api_key="test-key"),
+    )
+
+    request_kwargs = transcriber.build_transcription_request_kwargs(MagicMock())
+
+    assert "extra_body" not in request_kwargs
+
+
+def test_remote_whisper_config_requires_diarize_for_speaker_embeddings() -> None:
+    from shared.config import RemoteWhisperConfig
+
+    with pytest.raises(ValidationError):
+        RemoteWhisperConfig(
+            api_key="test-key",
+            diarize=False,
+            speaker_embeddings=True,
+        )
+
+
+def test_extract_segments_from_dict_response() -> None:
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber, Segment
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        {
+            "segments": [
+                {"start": 0.311, "end": 3.815, "text": "Hello"},
+                {"start": 4.0, "end": 5.0, "text": "world"},
+            ]
+        }
+    )
+
+    assert segments == [
+        Segment(start=0.311, end=3.815, text="Hello"),
+        Segment(start=4.0, end=5.0, text="world"),
+    ]
+
+
+def test_extract_segments_from_nested_dict_response() -> None:
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber, Segment
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        {
+            "segments": {
+                "segments": [
+                    {"start": 0.311, "end": 3.815, "text": "Hello"},
+                ]
+            }
+        }
+    )
+
+    assert segments == [
+        Segment(start=0.311, end=3.815, text="Hello"),
+    ]
+
+
+def test_extract_segments_from_dict_response_preserves_speaker_labels() -> None:
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber, Segment
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        {
+            "segments": [
+                {
+                    "start": 0.311,
+                    "end": 3.815,
+                    "text": "Hello",
+                    "speaker": "SPEAKER_00",
+                },
+                {
+                    "start": 4.0,
+                    "end": 5.0,
+                    "text": "world",
+                    "speaker_label": "SPEAKER_01",
+                },
+            ]
+        }
+    )
+
+    assert segments == [
+        Segment(start=0.311, end=3.815, text="Hello", speaker_label="SPEAKER_00"),
+        Segment(start=4.0, end=5.0, text="world", speaker_label="SPEAKER_01"),
+    ]
+
+
+def test_extract_segments_from_dict_response_preserves_word_timestamps() -> None:
+    from podcast_processor.transcribe import (
+        OpenAIWhisperTranscriber,
+        Segment,
+        WordTimestamp,
+    )
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "Hello world",
+                    "words": [
+                        {
+                            "word": "Hello",
+                            "start": 0.0,
+                            "end": 0.4,
+                            "score": 0.98,
+                        },
+                        {
+                            "word": "world",
+                            "start": 0.41,
+                            "end": 1.0,
+                            "score": 0.97,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert segments == [
+        Segment(
+            start=0.0,
+            end=1.0,
+            text="Hello world",
+            words=[
+                WordTimestamp(word="Hello", start=0.0, end=0.4, score=0.98),
+                WordTimestamp(word="world", start=0.41, end=1.0, score=0.97),
+            ],
         )
     ]
+
+
+def test_extract_segments_from_sdk_like_response() -> None:
+    from podcast_processor.transcribe import OpenAIWhisperTranscriber, Segment
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        SimpleNamespace(
+            segments=[
+                SimpleNamespace(start=1.25, end=2.5, text="typed response"),
+            ]
+        )
+    )
+
+    assert segments == [
+        Segment(start=1.25, end=2.5, text="typed response"),
+    ]
+
+
+def test_offset_updates_word_timestamps() -> None:
+    from podcast_processor.transcribe import (
+        OpenAIWhisperTranscriber,
+        Segment,
+        WordTimestamp,
+    )
+
+    shifted = OpenAIWhisperTranscriber.add_offset_to_segments(
+        [
+            Segment(
+                start=1.0,
+                end=2.0,
+                text="bad word",
+                words=[WordTimestamp(word="bad", start=1.0, end=1.2, score=0.9)],
+            )
+        ],
+        500,
+    )
+
+    assert shifted == [
+        Segment(
+            start=1.5,
+            end=2.5,
+            text="bad word",
+            words=[WordTimestamp(word="bad", start=1.5, end=1.7, score=0.9)],
+        )
+    ]
+
+
+def test_serialize_segment_word_timestamps_compacts_payload() -> None:
+    from podcast_processor.transcribe import (
+        Segment,
+        WordTimestamp,
+        serialize_segment_word_timestamps,
+    )
+
+    payload = serialize_segment_word_timestamps(
+        [
+            Segment(
+                start=0.0,
+                end=1.0,
+                text="Hello world",
+                words=[
+                    WordTimestamp(word="Hello", start=0.0, end=0.4, score=0.98),
+                    WordTimestamp(word="world", start=0.41, end=1.0, score=0.97),
+                ],
+            ),
+            Segment(start=1.0, end=2.0, text="No word timings here"),
+        ]
+    )
+
+    assert payload == [
+        {
+            "sequence_num": 0,
+            "words": [
+                {"word": "Hello", "start": 0.0, "end": 0.4, "score": 0.98},
+                {"word": "world", "start": 0.41, "end": 1.0, "score": 0.97},
+            ],
+        }
+    ]
+
+
+def test_merge_segments_with_saved_word_timestamps_rebuilds_rich_segments() -> None:
+    from podcast_processor.transcribe import merge_segments_with_saved_word_timestamps
+
+    merged = merge_segments_with_saved_word_timestamps(
+        [
+            SimpleNamespace(
+                sequence_num=0,
+                start_time=0.0,
+                end_time=1.0,
+                text="Hello world",
+                speaker_label="SPEAKER_00",
+            ),
+            SimpleNamespace(
+                sequence_num=1,
+                start_time=1.0,
+                end_time=2.0,
+                text="No timings",
+                speaker_label=None,
+            ),
+        ],
+        [
+            {
+                "sequence_num": 0,
+                "words": [
+                    {"word": "Hello", "start": 0.0, "end": 0.4, "score": 0.98},
+                    {"word": "world", "start": 0.41, "end": 1.0, "score": 0.97},
+                ],
+            }
+        ],
+    )
+
+    assert merged is not None
+    assert merged[0].speaker_label == "SPEAKER_00"
+    assert [word.word for word in (merged[0].words or [])] == ["Hello", "world"]
+    assert merged[1].words is None

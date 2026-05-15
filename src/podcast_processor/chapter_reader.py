@@ -2,9 +2,12 @@
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from mutagen.id3 import CHAP, ID3
 from mutagen.mp3 import MP3
+
+from shared.rust_sidecar import try_read_chapters
 
 logger = logging.getLogger("global_logger")
 
@@ -30,6 +33,18 @@ def read_chapters(audio_path: str) -> list[Chapter]:
         List of Chapter objects, sorted by start time.
         Returns empty list if no chapters found or file has no ID3 tags.
     """
+    rust_chapters = try_read_chapters(Path(audio_path))
+    if rust_chapters is not None:
+        return [
+            Chapter(
+                element_id=chapter["element_id"],
+                title=chapter["title"],
+                start_time_ms=chapter["start_time_ms"],
+                end_time_ms=chapter["end_time_ms"],
+            )
+            for chapter in rust_chapters
+        ]
+
     chapters: list[Chapter] = []
 
     try:

@@ -1,22 +1,200 @@
 import datetime
+import html
+import json
 import logging
+import re
 import uuid
 from collections.abc import Iterable
 from email.utils import format_datetime, parsedate_to_datetime
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import feedparser
 import PyRSS2Gen
+import requests
 from flask import current_app, g, request
 
 from app.extensions import db
+from app.memory_pressure import release_memory_to_os, request_memory_trim_after_context
 from app.models import Feed, Post, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
 from podcast_processor.podcast_downloader import find_audio_link
+from shared.rust_sidecar import (
+    try_plan_feed_refresh,
+    try_render_aggregate_feed_xml,
+    try_render_feed_xml,
+)
 
 logger = logging.getLogger("global_logger")
+
+_FORWARDED_PROTO_RE = re.compile(
+    r"(?:^|[;,])\s*proto=(\"?)(https?|[A-Za-z]+)\1", re.IGNORECASE
+)
+_FEED_TEXT_NORMALIZE_TABLE = str.maketrans(
+    {
+        "\u00a0": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\u2060": "",
+        "\ufeff": "",
+    }
+)
+
+
+def _format_itunes_duration(duration_seconds: int) -> str:
+    total_seconds = max(0, int(duration_seconds))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _parse_duration_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value if value >= 0 else None
+
+    if isinstance(value, float):
+        return int(value) if value >= 0 else None
+
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = None
+
+    if parsed is not None:
+        return parsed if parsed >= 0 else None
+
+    parts = [part.strip() for part in raw_value.split(":")]
+    if len(parts) not in {2, 3} or any(not part for part in parts):
+        return None
+
+    try:
+        seconds = float(parts[-1])
+        minutes = int(parts[-2])
+        hours = int(parts[0]) if len(parts) == 3 else 0
+    except ValueError:
+        return None
+
+    if hours < 0 or minutes < 0 or seconds < 0:
+        return None
+
+    return int((hours * 3600) + (minutes * 60) + seconds)
+
+
+def _format_chapter_timestamp(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _chapters_for_description(post: Post) -> list[tuple[float, str]]:
+    raw_chapter_data = getattr(post, "chapter_data", None)
+    if not raw_chapter_data:
+        return []
+
+    try:
+        chapter_data = (
+            json.loads(raw_chapter_data)
+            if isinstance(raw_chapter_data, str)
+            else raw_chapter_data
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    if not isinstance(chapter_data, dict):
+        return []
+
+    chapters = chapter_data.get("chapters_for_output") or chapter_data.get(
+        "chapters_kept"
+    )
+    if not isinstance(chapters, list):
+        return []
+
+    out: list[tuple[float, str]] = []
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        title = str(chapter.get("title") or "").strip()
+        if not title:
+            continue
+        try:
+            start_time = float(chapter.get("start_time", 0.0))
+        except Exception:  # noqa: BLE001
+            continue
+        out.append((max(0.0, start_time), title))
+
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _render_podly_chapters_html(post: Post) -> str:
+    chapters = _chapters_for_description(post)
+    if not chapters:
+        return ""
+
+    items = "".join(
+        (f"<li>{_format_chapter_timestamp(start_time)} {html.escape(title)}</li>")
+        for start_time, title in chapters
+    )
+    return f"<p><strong>Podly Chapters</strong></p><ul>{items}</ul>"
+
+
+def _normalize_feed_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.translate(_FEED_TEXT_NORMALIZE_TABLE)
+
+
+def build_post_feed_description_html(post: Post) -> str:
+    """Build the description shown in Podly-generated RSS items for a post."""
+    description_parts: list[str] = []
+    if post.description:
+        description_parts.append(_normalize_feed_text(post.description))
+
+    chapters_html = _render_podly_chapters_html(post)
+    if chapters_html:
+        description_parts.append(chapters_html)
+
+    return "\n".join(description_parts)
+
+
+def _write_cdata(handler: Any, value: str) -> None:
+    if not value:
+        return
+
+    escaped_value = value.replace("]]>", "]]]]><![CDATA[>")
+    writer = getattr(handler, "_write", None)
+    if callable(writer):
+        writer(f"<![CDATA[{escaped_value}]]>")
+        return
+
+    handler.characters(value)
+
+
+def _publish_cdata_opt_element(handler: Any, name: str, value: str | None) -> None:
+    if value is None:
+        return
+
+    handler.startElement(name, {})
+    _write_cdata(handler, value)
+    handler.endElement(name)
 
 
 def is_feed_active_for_user(feed_id: int, user: User) -> bool:
@@ -85,6 +263,13 @@ def _should_auto_whitelist_new_posts(feed: Feed, post: Post | None = None) -> bo
 
 def _get_base_url() -> str:
     try:
+
+        def _normalize_proto(value: Any) -> str | None:
+            if value is None:
+                return None
+            first = str(value).split(",")[0].strip().strip('"').lower()
+            return first if first in {"http", "https"} else None
+
         # Check various ways HTTP/2 pseudo-headers might be available
         http2_scheme = (
             request.headers.get(":scheme")
@@ -103,16 +288,45 @@ def _get_base_url() -> str:
 
         # Fall back to Host header with scheme detection
         if host:
+            forwarded_proto = None
+            for header_name in (
+                "X-Forwarded-Proto",
+                "X-Forwarded-Protocol",
+                "X-Forwarded-Scheme",
+                "X-Url-Scheme",
+            ):
+                forwarded_proto = _normalize_proto(request.headers.get(header_name))
+                if forwarded_proto:
+                    break
+
+            if not forwarded_proto:
+                forwarded = request.headers.get("Forwarded")
+                if forwarded:
+                    match = _FORWARDED_PROTO_RE.search(forwarded)
+                    if match:
+                        forwarded_proto = _normalize_proto(match.group(2))
+
+            if not forwarded_proto:
+                cf_visitor = request.headers.get("CF-Visitor")
+                if cf_visitor:
+                    try:
+                        forwarded_proto = _normalize_proto(
+                            json.loads(cf_visitor).get("scheme")
+                        )
+                    except Exception:  # noqa: BLE001
+                        forwarded_proto = None
+
             # Check multiple indicators for HTTPS
-            is_https = (
+            is_https = forwarded_proto == "https" or (
                 request.is_secure
-                or request.headers.get("X-Forwarded-Proto") == "https"
                 or request.headers.get("Strict-Transport-Security") is not None
                 or request.headers.get("X-Forwarded-Ssl") == "on"
+                or request.headers.get("Front-End-Https") == "on"
+                or request.headers.get("X-Forwarded-Port") == "443"
                 or request.environ.get("HTTPS") == "on"
                 or request.scheme == "https"
             )
-            scheme = "https" if is_https else "http"
+            scheme = forwarded_proto or ("https" if is_https else "http")
             return f"{scheme}://{host}"
     except RuntimeError:
         # Working outside of request context
@@ -122,18 +336,38 @@ def _get_base_url() -> str:
     return "http://localhost:5001"
 
 
+def _fetch_raw_feed_bytes(url: str) -> tuple[bytes | None, str | None]:
+    try:
+        resp = requests.get(url, timeout=30, headers={"User-Agent": "podly/1.0"})
+        resp.raise_for_status()
+        return resp.content, resp.url
+    except requests.RequestException as exc:
+        logger.warning(f"requests fetch failed: {exc}")
+        return None, None
+
+
 def fetch_feed(url: str) -> feedparser.FeedParserDict:
     logger.info(f"Fetching feed from URL: {url}")
-    feed_data = feedparser.parse(url)
+    raw_xml, final_url = _fetch_raw_feed_bytes(url)
+    if raw_xml is None:
+        # Network failure via requests; fall back to feedparser's own fetch.
+        feed_data = feedparser.parse(url)
+        for entry in feed_data.entries:
+            entry.id = get_guid(entry)
+        return feed_data
+
+    feed_data = feedparser.parse(raw_xml)
+    feed_data["href"] = final_url
+    feed_data["podly_raw_xml"] = raw_xml
     for entry in feed_data.entries:
         entry.id = get_guid(entry)
     return feed_data
 
 
-def refresh_feed(feed: Feed) -> None:
-    logger.info(f"Refreshing feed with ID: {feed.id}")
-    feed_data = fetch_feed(feed.rss_url)
-
+def _build_refresh_feed_payload(
+    feed: Feed,
+    feed_data: feedparser.FeedParserDict,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     updates = {}
     image_info = feed_data.feed.get("image")
     if image_info and "href" in image_info:
@@ -141,7 +375,12 @@ def refresh_feed(feed: Feed) -> None:
         if feed.image_url != new_image_url:
             updates["image_url"] = new_image_url
 
-    existing_posts = {post.guid for post in feed.posts}  # type: ignore[attr-defined]
+    existing_posts = {post.guid: post for post in feed.posts}  # type: ignore[attr-defined]
+    existing_posts_by_url = {
+        post.download_url: post
+        for post in feed.posts  # type: ignore[attr-defined]
+        if post.download_url
+    }
     oldest_post = min(
         (post for post in feed.posts if post.release_date),  # type: ignore[attr-defined]
         key=lambda p: p.release_date,
@@ -149,46 +388,210 @@ def refresh_feed(feed: Feed) -> None:
     )
 
     new_posts = []
+    existing_post_updates = []
     for entry in feed_data.entries:
-        if entry.id not in existing_posts:
-            logger.debug("found new podcast: %s", entry.title)
-            p = make_post(feed, entry)
-            # do not allow automatic download of any backcatalog added to the feed
-            if (
-                oldest_post is not None
-                and p.release_date
-                and oldest_post.release_date
-                and p.release_date.date() < oldest_post.release_date.date()
-            ):
-                p.whitelisted = False
-                logger.debug(
-                    f"skipping post from archive due to \
+        existing_post = existing_posts.get(entry.id)
+        repaired_guid: str | None = None
+        if existing_post is None:
+            # GUID didn't match; try recovering by audio URL. This catches
+            # posts whose stored guid was synthesized from the enclosure URL
+            # by the legacy `get_guid` fallback. Without this lookup, the
+            # corrected upstream guid would orphan the existing row and the
+            # episode would re-appear to subscribers as new.
+            audio_url = find_audio_link(entry)
+            if audio_url:
+                existing_post = existing_posts_by_url.get(audio_url)
+                if existing_post is not None and existing_post.guid != entry.id:
+                    repaired_guid = entry.id
+        if existing_post is None:
+            new_posts.append(_new_post_refresh_payload(feed, entry, oldest_post))
+        else:
+            post_update = _existing_post_refresh_payload(
+                existing_post, entry, feed, repaired_guid=repaired_guid
+            )
+            if post_update:
+                existing_post_updates.append(post_update)
+
+    del existing_posts
+    return updates, new_posts, existing_post_updates
+
+
+def _new_post_refresh_payload(
+    feed: Feed,
+    entry: feedparser.FeedParserDict,
+    oldest_post: Post | None,
+) -> dict[str, Any]:
+    logger.debug("found new podcast: %s", entry.title)
+    post = make_post(feed, entry)
+    # do not allow automatic download of any backcatalog added to the feed
+    if (
+        oldest_post is not None
+        and post.release_date
+        and oldest_post.release_date
+        and post.release_date.date() < oldest_post.release_date.date()
+    ):
+        post.whitelisted = False
+        logger.debug(
+            f"skipping post from archive due to \
 number_of_episodes_to_whitelist_from_archive_of_new_feed setting: {entry.title}"
-                )
-            else:
-                p.whitelisted = _should_auto_whitelist_new_posts(feed, p)
-
-            post_data = {
-                "guid": p.guid,
-                "title": p.title,
-                "description": p.description,
-                "download_url": p.download_url,
-                "release_date": p.release_date.isoformat() if p.release_date else None,
-                "duration": p.duration,
-                "image_url": p.image_url,
-                "whitelisted": p.whitelisted,
-                "feed_id": feed.id,
-            }
-            new_posts.append(post_data)
-
-    if updates or new_posts:
-        writer_client.action(
-            "refresh_feed",
-            {"feed_id": feed.id, "updates": updates, "new_posts": new_posts},
-            wait=True,
         )
+    else:
+        post.whitelisted = _should_auto_whitelist_new_posts(feed, post)
 
-    logger.info(f"Feed with ID: {feed.id} refreshed")
+    return {
+        "guid": post.guid,
+        "title": post.title,
+        "description": post.description,
+        "download_url": post.download_url,
+        "release_date": post.release_date.isoformat() if post.release_date else None,
+        "duration": post.duration,
+        "image_url": post.image_url,
+        "whitelisted": post.whitelisted,
+        "feed_id": feed.id,
+    }
+
+
+def _existing_post_refresh_payload(
+    existing_post: Post,
+    entry: feedparser.FeedParserDict,
+    feed: Feed,
+    *,
+    repaired_guid: str | None = None,
+) -> dict[str, Any]:
+    post_update: dict[str, Any] = {"post_id": existing_post.id}
+
+    if repaired_guid is not None:
+        post_update["guid"] = repaired_guid
+
+    updated_title = str(getattr(entry, "title", "") or "").strip()
+    if updated_title and existing_post.title != updated_title:
+        post_update["title"] = updated_title
+
+    updated_description = _extract_post_description(entry)
+    if existing_post.description != updated_description:
+        post_update["description"] = updated_description
+
+    updated_image_url = _extract_episode_image_url(entry, feed)
+    if existing_post.image_url != updated_image_url:
+        post_update["image_url"] = updated_image_url
+
+    parsed_duration = get_duration(entry)
+    if (
+        existing_post.processed_audio_path is None
+        and parsed_duration is not None
+        and existing_post.duration != parsed_duration
+    ):
+        post_update["duration"] = parsed_duration
+
+    return post_update if len(post_update) > 1 else {}
+
+
+def refresh_feed(feed: Feed) -> None:
+    from shared.rust_sidecar import rust_feed_refresh_enabled
+
+    logger.info(f"Refreshing feed with ID: {feed.id}")
+    feed_id = feed.id
+    new_posts: list[dict[str, Any]] = []
+    existing_post_updates: list[dict[str, Any]] = []
+    updates: dict[str, Any] = {}
+    feed_data: feedparser.FeedParserDict | None = None
+    raw_xml: bytes | None = None
+
+    # When Rust planning is enabled, try the Rust path with just raw XML and
+    # skip the expensive feedparser.parse on the happy path. feedparser parsing
+    # of a 3MB+ feed can dominate refresh latency (1+ second).
+    if rust_feed_refresh_enabled():
+        logger.info(f"Fetching feed from URL: {feed.rss_url}")
+        raw_xml, _ = _fetch_raw_feed_bytes(feed.rss_url)
+
+    try:
+        rust_plan: dict[str, Any] | None = None
+        if raw_xml is not None:
+            rust_plan = _try_build_rust_refresh_feed_payload_from_xml(feed, raw_xml)
+
+        if rust_plan is not None:
+            updates = cast(dict[str, Any], rust_plan["updates"])
+            new_posts = cast(list[dict[str, Any]], rust_plan["new_posts"])
+            existing_post_updates = cast(
+                list[dict[str, Any]], rust_plan["existing_post_updates"]
+            )
+        else:
+            # Either Rust disabled, raw fetch failed, or Rust planner returned None.
+            # Run the standard feedparser-based path (parses raw_xml if we have it,
+            # otherwise fetches the URL again through feedparser).
+            if feed_data is None:
+                if raw_xml is not None:
+                    feed_data = feedparser.parse(raw_xml)
+                    for entry in feed_data.entries:
+                        entry.id = get_guid(entry)
+                else:
+                    feed_data = fetch_feed(feed.rss_url)
+            updates, new_posts, existing_post_updates = _build_refresh_feed_payload(
+                feed, feed_data
+            )
+        if updates or new_posts or existing_post_updates:
+            writer_client.action(
+                "refresh_feed",
+                {
+                    "feed_id": feed_id,
+                    "updates": updates,
+                    "new_posts": new_posts,
+                    "existing_post_updates": existing_post_updates,
+                },
+                wait=True,
+            )
+            # Refreshes are written through the separate writer service, so expire the
+            # current request session before serializing the feed response.
+            db.session.expire_all()
+    finally:
+        del feed_data, raw_xml, updates, new_posts, existing_post_updates
+        release_memory_to_os(f"feed refresh feed_id={feed_id}", logger)
+        request_memory_trim_after_context(f"feed refresh feed_id={feed_id}")
+
+    logger.info(f"Feed with ID: {feed_id} refreshed")
+
+
+def _try_build_rust_refresh_feed_payload(
+    feed: Feed,
+    feed_data: feedparser.FeedParserDict,
+) -> dict[str, Any] | None:
+    raw_xml = _raw_feed_xml_from_feedparser_result(feed_data)
+    if raw_xml is None:
+        logger.info(
+            "Rust feed refresh planning skipped because feedparser result has no raw XML"
+        )
+        return None
+    return _try_build_rust_refresh_feed_payload_from_xml(feed, raw_xml)
+
+
+def _try_build_rust_refresh_feed_payload_from_xml(
+    feed: Feed,
+    raw_xml: str | bytes,
+) -> dict[str, Any] | None:
+    from shared.processing_paths import get_instance_dir
+
+    db_path = get_instance_dir() / "sqlite3.db"
+
+    return try_plan_feed_refresh(
+        db_path=db_path,
+        feed_id=int(feed.id),
+        feed_xml=raw_xml,
+        auto_whitelist_new_posts=_should_auto_whitelist_new_posts(feed),
+    )
+
+
+def _raw_feed_xml_from_feedparser_result(
+    feed_data: feedparser.FeedParserDict,
+) -> str | bytes | None:
+    for field in ("content", "rawdata", "data", "podly_raw_xml", "_podly_raw_xml"):
+        value = getattr(feed_data, field, None)
+        if isinstance(value, str | bytes) and value:
+            return value
+        if isinstance(feed_data, dict):
+            value = feed_data.get(field)
+            if isinstance(value, str | bytes) and value:
+                return value
+    return None
 
 
 def add_or_refresh_feed(url: str) -> Feed:
@@ -278,9 +681,11 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
         guid: str,
         pubDate: str | None,
         image_url: str | None = None,
+        duration_seconds: int | None = None,
         **kwargs: Any,
     ) -> None:
         self.image_url = image_url
+        self.duration_seconds = duration_seconds
         super().__init__(
             title=title,
             enclosure=enclosure,
@@ -294,7 +699,53 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
         if self.image_url:
             handler.startElement("itunes:image", {"href": self.image_url})
             handler.endElement("itunes:image")
+        if self.duration_seconds:
+            handler.startElement("itunes:duration", {})
+            handler.characters(_format_itunes_duration(self.duration_seconds))
+            handler.endElement("itunes:duration")
+        _publish_cdata_opt_element(handler, "content:encoded", self.description)
         super().publish_extensions(handler)
+
+    def publish(self, handler: Any) -> None:
+        # PyRSS2Gen escapes item descriptions with handler.characters(), which
+        # flattens rich HTML from source feeds and the appended Podly chapters.
+        handler.startElement("item", self.element_attrs)
+        PyRSS2Gen._opt_element(handler, "title", self.title)
+        PyRSS2Gen._opt_element(handler, "link", self.link)
+        self.publish_extensions(handler)
+        _publish_cdata_opt_element(handler, "description", self.description)
+        PyRSS2Gen._opt_element(handler, "author", self.author)
+
+        for item_category in self.categories:
+            category = (
+                PyRSS2Gen.Category(item_category)
+                if isinstance(item_category, str)
+                else item_category
+            )
+            category.publish(handler)
+
+        PyRSS2Gen._opt_element(handler, "comments", self.comments)
+        if self.enclosure is not None:
+            self.enclosure.publish(handler)
+        PyRSS2Gen._opt_element(handler, "guid", self.guid)
+
+        pub_date = self.pubDate
+        if isinstance(pub_date, datetime.datetime):
+            pub_date = PyRSS2Gen.DateElement("pubDate", pub_date)
+        PyRSS2Gen._opt_element(handler, "pubDate", pub_date)
+
+        if self.source is not None:
+            self.source.publish(handler)
+
+        handler.endElement("item")
+
+
+def _feed_item_duration_seconds(post: Post) -> int | None:
+    parsed_duration = _parse_duration_seconds(getattr(post, "duration", None))
+    if parsed_duration is not None:
+        return parsed_duration
+
+    return None
 
 
 def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem:
@@ -305,17 +756,16 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
 
     base_url = _get_base_url()
 
-    # Generate URLs that will be proxied by the frontend to the backend
-    audio_url = _append_feed_token_params(f"{base_url}/api/posts/{post.guid}/download")
-    post_details_url = _append_feed_token_params(f"{base_url}/api/posts/{post.guid}")
-
-    description = (
-        f'{post.description}\n<p><a href="{post_details_url}">Podly Post Page</a></p>'
-    )
+    # Podcast clients stream enclosure URLs directly, so use the inline MP3 route
+    # rather than the attachment-style download endpoint.
+    audio_url = _append_feed_token_params(f"{base_url}/post/{post.guid}.mp3")
+    description = build_post_feed_description_html(post)
 
     title = post.title
     if prepend_feed_title and post.feed:
         title = f"[{post.feed.title}] {title}"
+
+    duration_seconds = _feed_item_duration_seconds(post)
 
     item = ItunesRSSItem(
         title=title,
@@ -328,15 +778,57 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
         guid=post.guid,
         pubDate=_format_pub_date(post.release_date),
         image_url=post.image_url,
+        duration_seconds=duration_seconds,
     )
 
     return item
+
+
+def _feed_last_changed_at_aware(feed: Feed) -> datetime.datetime:
+    """Return `feed.last_changed_at` as an aware UTC datetime.
+
+    `last_changed_at` is stored naive (UTC) to match other timestamps in
+    the schema; HTTP date / RFC 2822 formatters require an aware value.
+    Falls back to `now()` for legacy rows that may pre-date the column.
+    """
+    raw = getattr(feed, "last_changed_at", None)
+    if raw is None:
+        return datetime.datetime.now(datetime.UTC)
+    if raw.tzinfo is None:
+        return raw.replace(tzinfo=datetime.UTC)
+    return raw.astimezone(datetime.UTC)
+
+
+def get_aggregate_feed_last_changed_at(user: User | None) -> datetime.datetime:
+    """Return the max `last_changed_at` across feeds in this user's aggregate.
+
+    Used as the aggregate feed's `lastBuildDate` and for ETag freshness.
+    Falls back to `now()` when there are no feeds (or the configured user
+    has no subscriptions yet).
+    """
+    if not current_app.config.get("REQUIRE_AUTH") or user is None:
+        latest = db.session.query(db.func.max(Feed.last_changed_at)).scalar()
+    else:
+        latest = (
+            db.session.query(db.func.max(Feed.last_changed_at))
+            .join(UserFeed, UserFeed.feed_id == Feed.id)
+            .filter(UserFeed.user_id == user.id)
+            .scalar()
+        )
+    if latest is None:
+        return datetime.datetime.now(datetime.UTC)
+    if latest.tzinfo is None:
+        return latest.replace(tzinfo=datetime.UTC)
+    return latest.astimezone(datetime.UTC)
 
 
 def generate_feed_xml(feed: Feed) -> Any:
     logger.info(f"Generating XML for feed with ID: {feed.id}")
 
     include_unprocessed = getattr(config, "autoprocess_on_download", True)
+    rust_xml = _try_generate_feed_xml_with_rust(feed, include_unprocessed)
+    if rust_xml is not None:
+        return rust_xml
 
     if include_unprocessed:
         posts = list(cast(Iterable[Post], feed.posts))
@@ -356,12 +848,12 @@ def generate_feed_xml(feed: Feed) -> Any:
     base_url = _get_base_url()
     link = _append_feed_token_params(f"{base_url}/feed/{feed.id}")
 
-    last_build_date = format_datetime(datetime.datetime.now(datetime.UTC))
+    last_build_date = format_datetime(_feed_last_changed_at_aware(feed))
 
     rss_feed = PyRSS2Gen.RSS2(
         title="[podly] " + feed.title,
         link=link,
-        description=feed.description,
+        description=_normalize_feed_text(feed.description),
         lastBuildDate=last_build_date,
         image=PyRSS2Gen.Image(url=feed.image_url, title=feed.title, link=link),
         items=items,
@@ -370,8 +862,13 @@ def generate_feed_xml(feed: Feed) -> Any:
     rss_feed.rss_attrs["xmlns:itunes"] = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     rss_feed.rss_attrs["xmlns:content"] = "http://purl.org/rss/1.0/modules/content/"
 
+    xml_content = rss_feed.to_xml("utf-8")
+    del rss_feed, items, posts
+    release_memory_to_os(f"feed XML feed_id={feed.id}", logger)
+    request_memory_trim_after_context(f"feed XML feed_id={feed.id}")
+
     logger.info(f"XML generated for feed with ID: {feed.id}")
-    return rss_feed.to_xml("utf-8")
+    return xml_content
 
 
 def generate_aggregate_feed_xml(user: User | None) -> Any:
@@ -379,6 +876,9 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     username = user.username if user else "Public"
     user_id = user.id if user else 0
     logger.info(f"Generating aggregate feed XML for: {username}")
+    rust_xml = _try_generate_aggregate_feed_xml_with_rust(user)
+    if rust_xml is not None:
+        return rust_xml
 
     posts = get_user_aggregate_posts(user_id)
     items = [feed_item(post, prepend_feed_title=True) for post in posts]
@@ -386,7 +886,7 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     base_url = _get_base_url()
     link = _append_feed_token_params(f"{base_url}/feed/user/{user_id}")
 
-    last_build_date = format_datetime(datetime.datetime.now(datetime.UTC))
+    last_build_date = format_datetime(get_aggregate_feed_last_changed_at(user))
 
     if current_app.config.get("REQUIRE_AUTH") and user:
         feed_title = f"Podly Podcasts - {user.username}"
@@ -413,8 +913,86 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     rss_feed.rss_attrs["xmlns:itunes"] = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     rss_feed.rss_attrs["xmlns:content"] = "http://purl.org/rss/1.0/modules/content/"
 
+    xml_content = rss_feed.to_xml("utf-8")
+    del rss_feed, items, posts
+    release_memory_to_os(f"aggregate feed XML user_id={user_id}", logger)
+    request_memory_trim_after_context(f"aggregate feed XML user_id={user_id}")
+
     logger.info(f"Aggregate XML generated for: {username}")
-    return rss_feed.to_xml("utf-8")
+    return xml_content
+
+
+def _sqlite_db_path_from_app_config() -> Path | None:
+    uri = str(current_app.config.get("SQLALCHEMY_DATABASE_URI") or "")
+    prefix = "sqlite:///"
+    if not uri.startswith(prefix) or uri == "sqlite:///:memory:":
+        return None
+    # SQLAlchemy URIs may append a query string (e.g. "?timeout=60"); strip it
+    # so we hand sqlite a real filesystem path, not a URI fragment.
+    path = uri.removeprefix(prefix).split("?", 1)[0]
+    if not path or path == ":memory:":
+        return None
+    db_path = Path(path)
+    if db_path.is_absolute():
+        return db_path
+    return (Path(current_app.instance_path) / db_path).resolve()
+
+
+def _feed_token_request_values() -> tuple[str | None, str | None]:
+    try:
+        token_result = getattr(g, "feed_token", None)
+        token_id = request.args.get("feed_token")
+        secret = request.args.get("feed_secret")
+    except RuntimeError:
+        return None, None
+
+    if token_result is not None:
+        token_id = token_id or token_result.token.token_id
+        secret = secret or token_result.token.token_secret
+    return token_id, secret
+
+
+def _try_generate_feed_xml_with_rust(
+    feed: Feed,
+    include_unprocessed: bool,
+) -> bytes | None:
+    db_path = _sqlite_db_path_from_app_config()
+    if db_path is None:
+        return None
+    token_id, secret = _feed_token_request_values()
+    xml_content = try_render_feed_xml(
+        db_path=db_path,
+        feed_id=int(feed.id),
+        base_url=_get_base_url(),
+        include_unprocessed=bool(include_unprocessed),
+        feed_token=token_id,
+        feed_secret=secret,
+    )
+    if xml_content is not None:
+        release_memory_to_os(f"rust feed XML feed_id={feed.id}", logger)
+        request_memory_trim_after_context(f"rust feed XML feed_id={feed.id}")
+    return xml_content
+
+
+def _try_generate_aggregate_feed_xml_with_rust(user: User | None) -> bytes | None:
+    db_path = _sqlite_db_path_from_app_config()
+    if db_path is None:
+        return None
+    user_id = int(user.id) if user else 0
+    token_id, secret = _feed_token_request_values()
+    xml_content = try_render_aggregate_feed_xml(
+        db_path=db_path,
+        user_id=user_id,
+        base_url=_get_base_url(),
+        require_auth=bool(current_app.config.get("REQUIRE_AUTH")),
+        limit_per_feed=3,
+        feed_token=token_id,
+        feed_secret=secret,
+    )
+    if xml_content is not None:
+        release_memory_to_os(f"rust aggregate feed XML user_id={user_id}", logger)
+        request_memory_trim_after_context(f"rust aggregate feed XML user_id={user_id}")
+    return xml_content
 
 
 def get_user_aggregate_posts(user_id: int, limit_per_feed: int = 3) -> list[Post]:
@@ -472,8 +1050,11 @@ def _append_feed_token_params(url: str) -> str:
     return urlunparse(parsed._replace(query=new_query))
 
 
-def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
-    # Extract episode image URL, fallback to feed image
+def _extract_episode_image_url(
+    entry: feedparser.FeedParserDict,
+    feed: Feed,
+) -> str | None:
+    """Prefer episode-level artwork when the source feed exposes it."""
     episode_image_url = None
 
     # Try to get episode-specific image from various RSS fields
@@ -499,28 +1080,47 @@ def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
     if not episode_image_url:
         episode_image_url = feed.image_url
 
-    # Try multiple description fields in order of preference
-    description = entry.get("description", "")
-    if not description:
-        description = entry.get("summary", "")
-    if not description and hasattr(entry, "content") and entry.content:
-        description = entry.content[0].get("value", "")
-    if not description:
-        description = entry.get("subtitle", "")
+    return episode_image_url
 
+
+def _extract_post_description(entry: feedparser.FeedParserDict) -> str:
+    """Prefer rich HTML payloads when a source feed exposes them."""
+    content_items = getattr(entry, "content", None) or []
+    for content in content_items:
+        value = str(content.get("value", "") or "").strip()
+        content_type = str(content.get("type", "") or "").strip().lower()
+        if value and content_type in {"text/html", "application/xhtml+xml"}:
+            return value
+
+    for field in ("description", "summary"):
+        value = str(entry.get(field, "") or "").strip()
+        if value:
+            return value
+
+    for content in content_items:
+        value = str(content.get("value", "") or "").strip()
+        if value:
+            return value
+
+    return str(entry.get("subtitle", "") or "").strip()
+
+
+def make_post(feed: Feed, entry: feedparser.FeedParserDict) -> Post:
     return Post(
         feed_id=feed.id,
         guid=get_guid(entry),
         download_url=find_audio_link(entry),
         title=entry.title,
-        description=description,
+        description=_extract_post_description(entry),
         release_date=_parse_release_date(entry),
         duration=get_duration(entry),
-        image_url=episode_image_url,
+        image_url=_extract_episode_image_url(entry, feed),
     )
 
 
-def _get_entry_field(entry: feedparser.FeedParserDict, field: str) -> Any | None:
+def _get_entry_field(
+    entry: feedparser.FeedParserDict | dict[str, Any], field: str
+) -> Any | None:
     value = getattr(entry, field, None)
     return value if value is not None else entry.get(field)
 
@@ -530,7 +1130,7 @@ def _parse_datetime_string(value: str | None, field: str) -> datetime.datetime |
         return None
     try:
         return parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.debug("Failed to parse %s string for release date", field)
         return None
 
@@ -540,7 +1140,7 @@ def _parse_struct_time(value: Any | None, field: str) -> datetime.datetime | Non
         return None
     try:
         dt = datetime.datetime(*value[:6])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.debug("Failed to parse %s for release date", field)
         return None
     gmtoff = getattr(value, "tm_gmtoff", None)
@@ -587,20 +1187,27 @@ def _format_pub_date(release_date: datetime.datetime | None) -> str | None:
     return format_datetime(normalized.astimezone(datetime.UTC))
 
 
-# sometimes feed entry ids are the post url or something else
 def get_guid(entry: feedparser.FeedParserDict) -> str:
-    try:
-        uuid.UUID(entry.id)
-        return str(entry.id)
-    except ValueError:
-        dlurl = find_audio_link(entry)
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, dlurl))
+    """Return the post GUID, preferring the upstream `<guid>` verbatim.
+
+    Real feeds rarely use UUIDs as their `<guid>`; URLs and `tag:` URIs are
+    common. Hashing the enclosure URL as a substitute breaks subscriber
+    libraries whenever the CDN path or tracking params change, so we only
+    fall back to URL hashing when the upstream provides no usable id.
+    """
+    raw = getattr(entry, "id", None) or getattr(entry, "guid", None)
+    if isinstance(raw, str):
+        candidate = raw.strip()
+        if candidate:
+            return candidate
+    dlurl = find_audio_link(entry)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, dlurl))
 
 
 def get_duration(entry: feedparser.FeedParserDict | dict[str, Any]) -> int | None:
-    try:
-        return int(entry["itunes_duration"])
-    except Exception:  # noqa: BLE001
-        logger.error("Failed to get duration")
-        logger.error("Failed to get duration")
-        return None
+    for field in ("itunes_duration", "duration"):
+        parsed_duration = _parse_duration_seconds(_get_entry_field(entry, field))
+        if parsed_duration is not None:
+            return parsed_duration
+
+    return None

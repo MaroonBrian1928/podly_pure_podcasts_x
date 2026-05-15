@@ -34,7 +34,10 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     author = db.Column(db.Text)
     rss_url = db.Column(db.Text, unique=True, nullable=False)
     image_url = db.Column(db.Text)
-    # Ad detection strategy: "llm" (default) or "chapter".
+    # Ad detection strategy:
+    # - "llm" (default): LLM ad detection + ad removal
+    # - "chapter": chapter-title filter ad detection + ad removal
+    # - "chapter_insert": chapter insertion only (no ad removal)
     # Note: "chapter" strategy requires CBR audio encoding for accurate chapter marker
     # seeking. "llm" uses VBR for smaller files.
     ad_detection_strategy = db.Column(
@@ -42,7 +45,16 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     )
     # Per-feed filter strings override (comma-separated), null = use global defaults
     chapter_filter_strings = db.Column(db.Text, nullable=True)
+    # Per-feed override for LLM chapter fallback tagging, null = use global config
+    enable_llm_chapter_fallback_tagging = db.Column(db.Boolean, nullable=True)
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
+    enable_profanity_bleeping = db.Column(db.Boolean, nullable=False, default=False)
+    confirm_whisperx_endpoint = db.Column(db.Boolean, nullable=False, default=False)
+    # Bumped by `refresh_feed_action` whenever something actually changes
+    # (new posts, post field updates, channel-level updates). Used as the
+    # `lastBuildDate` and as the input to the response ETag, so unchanged
+    # feeds can short-circuit reader polls with a 304.
+    last_changed_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
 
     posts = db.relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
@@ -85,10 +97,8 @@ class FeedAccessToken(db.Model):  # type: ignore[name-defined, misc]
 class Post(db.Model):  # type: ignore[name-defined, misc]
     feed_id = db.Column(db.Integer, db.ForeignKey("feed.id"), nullable=False)
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    guid = db.Column(db.Text, unique=True, nullable=False)
-    download_url = db.Column(
-        db.Text, unique=True, nullable=False
-    )  # remote download URL, not podly url
+    guid = db.Column(db.Text, nullable=False)
+    download_url = db.Column(db.Text, nullable=False)
     title = db.Column(db.Text, nullable=False)
     unprocessed_audio_path = db.Column(db.Text)
     processed_audio_path = db.Column(db.Text)
@@ -100,6 +110,11 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     download_count = db.Column(db.Integer, nullable=True, default=0)
     # JSON data for chapter-based processing results
     chapter_data = db.Column(db.Text, nullable=True)
+    # Exact censor windows applied to the processed audio for this post.
+    bleep_windows = db.Column(db.JSON, nullable=True)
+    # Optional per-segment word timestamps from WhisperX-compatible transcription.
+    # Stored as reusable transcript metadata for exact intra-segment refinement.
+    transcript_word_timestamps = db.Column(db.JSON, nullable=True)
 
     # Latest (most recent) refined ad cut windows for this post.
     # This is written by the ad classifier boundary refinement step and read by the
@@ -112,6 +127,13 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
         backref="post",
         lazy="dynamic",
         order_by="TranscriptSegment.sequence_num",
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint("feed_id", "guid", name="uq_post_feed_id_guid"),
+        db.UniqueConstraint(
+            "feed_id", "download_url", name="uq_post_feed_id_download_url"
+        ),
     )
 
     def audio_len_bytes(self) -> int:
@@ -132,6 +154,7 @@ class TranscriptSegment(db.Model):  # type: ignore[name-defined, misc]
     start_time = db.Column(db.Float, nullable=False)
     end_time = db.Column(db.Float, nullable=False)
     text = db.Column(db.Text, nullable=False)
+    speaker_label = db.Column(db.Text, nullable=True)
 
     identifications = db.relationship(
         "Identification", backref="transcript_segment", lazy="dynamic"
@@ -148,6 +171,34 @@ class TranscriptSegment(db.Model):  # type: ignore[name-defined, misc]
 
     def __repr__(self) -> str:
         return f"<TranscriptSegment {self.id} P:{self.post_id} S:{self.sequence_num} T:{self.start_time:.1f}-{self.end_time:.1f}>"
+
+
+class AudioSegment(db.Model):  # type: ignore[name-defined, misc]
+    __tablename__ = "audio_segment"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    post_id = db.Column(db.Integer, db.ForeignKey("post.id"), nullable=False)
+    model_call_id = db.Column(db.Integer, db.ForeignKey("model_call.id"), nullable=True)
+    label = db.Column(db.String(32), nullable=False)
+    start_time = db.Column(db.Float, nullable=False)
+    end_time = db.Column(db.Float, nullable=False)
+
+    post = db.relationship(
+        "Post",
+        backref=db.backref(
+            "audio_segments", lazy="dynamic", order_by="AudioSegment.start_time"
+        ),
+    )
+
+    __table_args__ = (
+        db.Index("ix_audio_segment_post_id_start_time", "post_id", "start_time"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AudioSegment {self.id} P:{self.post_id} "
+            f"L:{self.label} T:{self.start_time:.1f}-{self.end_time:.1f}>"
+        )
 
 
 class User(db.Model):  # type: ignore[name-defined, misc]
@@ -313,6 +364,28 @@ class ProcessingJob(db.Model):  # type: ignore[name-defined, misc]
     created_at = db.Column(db.DateTime, default=_utc_now_naive, index=True)
     requested_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     billing_user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # JSON list of {"step": int, "step_name": str, "started_at": ISO UTC} per
+    # observed stage transition, appended whenever the active step changes.
+    # The duration of stage N is `stage_history[N+1].started_at -
+    # stage_history[N].started_at` (or `completed_at - started_at` for the
+    # last one). Stored as naive UTC ISO strings to match the rest of the
+    # codebase's timestamp convention.
+    stage_history = db.Column(db.JSON, nullable=True)
+    # Final ad-window count for this run. ``None`` while the run is in
+    # progress or when ad detection wasn't run; ``0`` is meaningful and
+    # different from ``None``. The frontend uses this to badge episodes
+    # that completed but yielded nothing for the user to review.
+    ad_windows_count = db.Column(db.Integer, nullable=True)
+    # True if at least one LLM classification response failed to parse
+    # during the run. Set by the ad classifier; cleared on requeue. Pairs
+    # with ``ad_windows_count == 0`` to drive the auto-retry decision.
+    had_classification_parse_error = db.Column(
+        db.Boolean, nullable=False, default=False
+    )
+    # Idempotency guard: once an auto-retry has been kicked off for this
+    # post in response to a zero-ads + parse-error outcome, we never do it
+    # again, even if the retry also hits a parse error.
+    auto_retry_attempted = db.Column(db.Boolean, nullable=False, default=False)
 
     # Relationships
     post = db.relationship(
@@ -391,6 +464,11 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
     )
+    enable_llm_chapter_fallback_tagging = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
+    )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
@@ -402,12 +480,7 @@ class WhisperSettings(db.Model):  # type: ignore[name-defined, misc]
     id = db.Column(db.Integer, primary_key=True, default=1)
     whisper_type = db.Column(
         db.Text, nullable=False, default=DEFAULTS.WHISPER_DEFAULT_TYPE
-    )  # local|remote|groq|test
-
-    # Local
-    local_model = db.Column(
-        db.Text, nullable=False, default=DEFAULTS.WHISPER_LOCAL_MODEL
-    )
+    )  # remote|groq|test
 
     # Remote
     remote_model = db.Column(
@@ -425,6 +498,14 @@ class WhisperSettings(db.Model):  # type: ignore[name-defined, misc]
     )
     remote_chunksize_mb = db.Column(
         db.Integer, nullable=False, default=DEFAULTS.WHISPER_REMOTE_CHUNKSIZE_MB
+    )
+    remote_diarize = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.WHISPER_REMOTE_DIARIZE
+    )
+    remote_speaker_embeddings = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.WHISPER_REMOTE_SPEAKER_EMBEDDINGS,
     )
 
     # Groq
@@ -467,6 +548,16 @@ class OutputSettings(db.Model):  # type: ignore[name-defined, misc]
 
     id = db.Column(db.Integer, primary_key=True, default=1)
     fade_ms = db.Column(db.Integer, nullable=False, default=DEFAULTS.OUTPUT_FADE_MS)
+    bleep_padding_start_ms = db.Column(
+        db.Integer,
+        nullable=False,
+        default=DEFAULTS.OUTPUT_BLEEP_PADDING_START_MS,
+    )
+    bleep_padding_end_ms = db.Column(
+        db.Integer,
+        nullable=False,
+        default=DEFAULTS.OUTPUT_BLEEP_PADDING_END_MS,
+    )
     min_ad_segement_separation_seconds = db.Column(
         db.Integer,
         nullable=False,
@@ -479,6 +570,15 @@ class OutputSettings(db.Model):  # type: ignore[name-defined, misc]
     )
     min_confidence = db.Column(
         db.Float, nullable=False, default=DEFAULTS.OUTPUT_MIN_CONFIDENCE
+    )
+    # Opt-in guard: when an LLM-strategy run finishes with zero ad windows
+    # and at least one batch parse-failed, automatically requeue the job
+    # once. The classifier-parse signal usually means the model returned
+    # malformed JSON for a batch that very likely contained ads.
+    auto_retry_zero_ads_on_parse_error = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.OUTPUT_AUTO_RETRY_ZERO_ADS_ON_PARSE_ERROR,
     )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
@@ -517,6 +617,11 @@ class AppSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Boolean,
         nullable=False,
         default=DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
+    )
+    cost_rate_per_hour = db.Column(
+        db.Float,
+        nullable=False,
+        default=DEFAULTS.APP_COST_RATE_PER_HOUR,
     )
 
     # Hash of the environment variables used to seed configuration.

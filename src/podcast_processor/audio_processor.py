@@ -1,12 +1,39 @@
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from app.extensions import db
-from app.models import Identification, ModelCall, Post, TranscriptSegment
+from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
 from app.writer.client import writer_client
 from podcast_processor.ad_merger import AdMerger
 from podcast_processor.audio import clip_segments_with_fade, get_audio_duration_ms
+from shared.audio_segment_utils import (
+    bridge_ad_windows_with_audio,
+    expand_episode_edge_ad_windows_with_audio,
+    extract_audio_windows,
+    extract_edge_audio_windows,
+)
 from shared.config import Config
+
+ATOMIC_AD_BLOCK_GAP_SECONDS = 10.0
+REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS = 0.75
+EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS = 30.0
+SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS = 20.0
+MIN_NEIGHBOR_AD_DURATION_FOR_EDGE_MERGE_SECONDS = 15.0
+
+
+@dataclass(frozen=True)
+class TimeWindow:
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
+class RefinedBoundary:
+    orig_start: float
+    orig_end: float
+    refined_start: float
+    refined_end: float
 
 
 class AudioProcessor:
@@ -45,6 +72,13 @@ class AudioProcessor:
         Returns:
             A list of tuples containing start and end times (in seconds) of ad segments
         """
+        rust_segments = self._try_rust_get_ad_segments(post)
+        if rust_segments is not None:
+            self.logger.info(
+                f"Rust ad-merge produced {len(rust_segments)} ad windows for post {post.id}"
+            )
+            return rust_segments
+
         self.logger.info(f"Retrieving ad segments from database for post {post.id}.")
 
         query = (
@@ -104,39 +138,224 @@ class AudioProcessor:
             min_content_gap=12.0,
         )
 
-        # If boundary refinement persisted refined windows on the post, prefer those
-        # refined timestamps for audio cutting (this allows word-level refinement to
-        # affect the actual cut start time).
-        if getattr(self.config, "enable_boundary_refinement", False):
-            self._apply_refined_boundaries(post, ad_groups)
-
         self.logger.info(
             f"Merged {len(ad_segments_with_text)} segments into {len(ad_groups)} groups for post {post.id}"
         )
 
-        # Convert to time tuples for merge_ad_segments()
-        ad_segments_times = [(g.start_time, g.end_time) for g in ad_groups]
+        refined_boundaries = self._load_refined_boundaries(post)
+        ad_segments_times = [
+            self._cut_window_for_ad_group(group, refined_boundaries)
+            for group in ad_groups
+        ]
+        bridgeable_audio_windows = self._get_bridgeable_audio_windows(post)
+        if bridgeable_audio_windows:
+            ad_segments_times = bridge_ad_windows_with_audio(
+                ad_segments_times,
+                bridgeable_audio_windows,
+            )
+        edge_audio_windows = self._get_edge_expansion_audio_windows(post)
+        if edge_audio_windows and not self._has_transcript_content_before_first_ad(
+            post,
+            ad_segments_times,
+            valid_identifications,
+        ):
+            ad_segments_times = expand_episode_edge_ad_windows_with_audio(
+                ad_segments_times,
+                edge_audio_windows,
+                edge_window_seconds=EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS,
+            )
         ad_segments_times.sort(key=lambda x: x[0])
         return ad_segments_times
 
-    def _apply_refined_boundaries(self, post: Post, ad_groups: Any) -> None:
+    def _try_rust_get_ad_segments(self, post: Post) -> list[tuple[float, float]] | None:
+        from shared.processing_paths import get_instance_dir
+        from shared.rust_sidecar import rust_ad_merge_enabled, try_merge_ad_segments
+
+        if not rust_ad_merge_enabled():
+            return None
+
+        if self._identification_query_provided:
+            # Tests inject a custom query; the Rust path queries SQLite directly,
+            # so let it fall through to the Python implementation.
+            return None
+
+        try:
+            db_path = get_instance_dir() / "sqlite3.db"
+            return try_merge_ad_segments(
+                db_path=db_path,
+                post_guid=post.guid,
+                min_confidence=float(self.config.output.min_confidence),
+                max_gap=float(self.config.output.min_ad_segment_separation_seconds),
+                enable_boundary_refinement=bool(
+                    getattr(self.config, "enable_boundary_refinement", False)
+                ),
+            )
+        except Exception:
+            self.logger.exception(
+                "Rust ad-merge bootstrap failed for post %s; falling back",
+                post.id,
+            )
+            return None
+
+    def _get_bridgeable_audio_windows(self, post: Post) -> list[tuple[float, float]]:
+        try:
+            audio_segments = (
+                self.db_session.query(AudioSegment)
+                .filter(AudioSegment.post_id == post.id)
+                .order_by(AudioSegment.start_time.asc())
+                .all()
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.warning(
+                "Failed to load INA audio segments while building cut windows for post %s",
+                post.id,
+                exc_info=True,
+            )
+            return []
+
+        return extract_audio_windows(audio_segments)
+
+    def _get_edge_expansion_audio_windows(
+        self, post: Post
+    ) -> list[tuple[float, float]]:
+        try:
+            audio_segments = (
+                self.db_session.query(AudioSegment)
+                .filter(AudioSegment.post_id == post.id)
+                .order_by(AudioSegment.start_time.asc())
+                .all()
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.warning(
+                "Failed to load INA audio segments while expanding edge ad windows for post %s",
+                post.id,
+                exc_info=True,
+            )
+            return []
+
+        return extract_edge_audio_windows(audio_segments)
+
+    def _has_transcript_content_before_first_ad(
+        self,
+        post: Post,
+        ad_segments: list[tuple[float, float]],
+        ad_identifications: list[Identification],
+    ) -> bool:
+        if not ad_segments:
+            return False
+
+        first_start = min(start for start, _ in ad_segments)
+        if first_start > EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS:
+            return False
+
+        ad_segment_ids = {
+            ident.transcript_segment_id
+            for ident in ad_identifications
+            if ident.transcript_segment_id is not None
+        }
+        try:
+            preceding_segments = (
+                self.db_session.query(TranscriptSegment)
+                .filter(
+                    TranscriptSegment.post_id == post.id,
+                    TranscriptSegment.start_time < first_start,
+                )
+                .all()
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.warning(
+                "Failed to load leading transcript segments while expanding edge ad windows for post %s",
+                post.id,
+                exc_info=True,
+            )
+            return True
+
+        return any(segment.id not in ad_segment_ids for segment in preceding_segments)
+
+    def _load_refined_boundaries(self, post: Post) -> list[RefinedBoundary]:
+        if not getattr(self.config, "enable_boundary_refinement", False):
+            return []
+
         post_row = self._safe_get_post_row(post)
         refined = getattr(post_row, "refined_ad_boundaries", None) if post_row else None
-        parsed = self._parse_refined_boundaries(refined)
-        if not parsed:
-            return
+        return self._parse_refined_boundaries(refined)
 
-        for group in ad_groups:
-            overlap_window = self._refined_overlap_window_for_group(group, parsed)
-            if overlap_window is None:
+    def _cut_window_for_ad_group(
+        self,
+        group: Any,
+        refined_boundaries: list[RefinedBoundary],
+    ) -> tuple[float, float]:
+        atomic_blocks = self._atomic_ad_blocks_for_group(group)
+        if not atomic_blocks:
+            return (float(group.start_time), float(group.end_time))
+
+        projected_blocks = [
+            self._project_atomic_block(block, refined_boundaries)
+            for block in atomic_blocks
+        ]
+        return (
+            min(block.start for block in projected_blocks),
+            max(block.end for block in projected_blocks),
+        )
+
+    @staticmethod
+    def _atomic_ad_blocks_for_group(group: Any) -> list[TimeWindow]:
+        segments = sorted(
+            list(getattr(group, "segments", []) or []),
+            key=lambda segment: float(getattr(segment, "start_time", 0.0) or 0.0),
+        )
+        if not segments:
+            return []
+
+        blocks: list[TimeWindow] = []
+        current_start = float(segments[0].start_time)
+        current_end = float(segments[0].end_time)
+
+        for segment in segments[1:]:
+            segment_start = float(segment.start_time)
+            segment_end = float(segment.end_time)
+            if segment_start - current_end <= ATOMIC_AD_BLOCK_GAP_SECONDS:
+                current_end = max(current_end, segment_end)
                 continue
-            refined_start_min, refined_end_max = overlap_window
 
-            new_start = max(group.start_time, refined_start_min)
-            new_end = min(group.end_time, refined_end_max)
-            if new_end > new_start:
-                group.start_time = new_start
-                group.end_time = new_end
+            blocks.append(TimeWindow(start=current_start, end=current_end))
+            current_start = segment_start
+            current_end = segment_end
+
+        blocks.append(TimeWindow(start=current_start, end=current_end))
+        return blocks
+
+    def _project_atomic_block(
+        self,
+        block: TimeWindow,
+        refined_boundaries: list[RefinedBoundary],
+    ) -> TimeWindow:
+        matched = self._best_refined_boundary_match(block, refined_boundaries)
+        if matched is None:
+            return block
+        return TimeWindow(start=matched.refined_start, end=matched.refined_end)
+
+    @staticmethod
+    def _best_refined_boundary_match(
+        block: TimeWindow,
+        refined_boundaries: list[RefinedBoundary],
+    ) -> RefinedBoundary | None:
+        best_match: RefinedBoundary | None = None
+        best_overlap = 0.0
+
+        for refined in refined_boundaries:
+            overlap = min(
+                block.end + REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+                refined.orig_end + REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+            ) - max(
+                block.start - REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+                refined.orig_start - REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+            )
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_match = refined
+
+        return best_match if best_overlap > 0.0 else None
 
     def _safe_get_post_row(self, post: Post) -> Post | None:
         try:
@@ -147,11 +366,11 @@ class AudioProcessor:
     @staticmethod
     def _parse_refined_boundaries(
         refined: Any,
-    ) -> list[tuple[float, float, float, float]]:
+    ) -> list[RefinedBoundary]:
         if not refined or not isinstance(refined, list):
             return []
 
-        parsed: list[tuple[float, float, float, float]] = []
+        parsed: list[RefinedBoundary] = []
         for item in refined:
             if not isinstance(item, dict):
                 continue
@@ -176,33 +395,19 @@ class AudioProcessor:
             except Exception:  # noqa: BLE001
                 continue
 
-            if refined_end <= refined_start:
+            if orig_end <= orig_start or refined_end <= refined_start:
                 continue
 
-            parsed.append((orig_start, orig_end, refined_start, refined_end))
+            parsed.append(
+                RefinedBoundary(
+                    orig_start=orig_start,
+                    orig_end=orig_end,
+                    refined_start=refined_start,
+                    refined_end=refined_end,
+                )
+            )
 
         return parsed
-
-    @staticmethod
-    def _refined_overlap_window_for_group(
-        group: Any,
-        parsed: list[tuple[float, float, float, float]],
-    ) -> tuple[float, float] | None:
-        overlaps: list[tuple[float, float]] = []
-        for orig_start, orig_end, refined_start, refined_end in parsed:
-            overlap = max(
-                0.0,
-                min(group.end_time, orig_end) - max(group.start_time, orig_start),
-            )
-            if overlap > 0.0:
-                overlaps.append((refined_start, refined_end))
-
-        if not overlaps:
-            return None
-
-        refined_start_min = min(s for s, _ in overlaps)
-        refined_end_max = max(e for _, e in overlaps)
-        return refined_start_min, refined_end_max
 
     def merge_ad_segments(
         self,
@@ -240,6 +445,11 @@ class AudioProcessor:
             min_separation=min_ad_segment_separation_seconds,
         )
 
+        ad_segments = self._merge_short_episode_edge_segments(
+            ad_segments,
+            audio_duration_seconds=audio_duration_seconds,
+            min_length=min_ad_segment_length_seconds,
+        )
         ad_segments = self._merge_close_segments(
             ad_segments, min_separation=min_ad_segment_separation_seconds
         )
@@ -268,6 +478,47 @@ class AudioProcessor:
         if (audio_duration_seconds - ad_segments[-1][1]) < min_separation:
             return ad_segments[-1]
         return None
+
+    def _merge_short_episode_edge_segments(
+        self,
+        ad_segments: list[tuple[float, float]],
+        *,
+        audio_duration_seconds: float,
+        min_length: float,
+    ) -> list[tuple[float, float]]:
+        if len(ad_segments) < 2:
+            return ad_segments
+
+        merged = list(ad_segments)
+        leading_duration = merged[0][1] - merged[0][0]
+        leading_gap = merged[1][0] - merged[0][1]
+        following_duration = merged[1][1] - merged[1][0]
+        if (
+            merged[0][0] <= EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS
+            and leading_duration < min_length
+            and following_duration >= MIN_NEIGHBOR_AD_DURATION_FOR_EDGE_MERGE_SECONDS
+            and leading_gap <= SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS
+        ):
+            merged[1] = (merged[0][0], merged[1][1])
+            merged.pop(0)
+
+        if len(merged) < 2:
+            return merged
+
+        trailing_duration = merged[-1][1] - merged[-1][0]
+        trailing_gap = merged[-1][0] - merged[-2][1]
+        previous_duration = merged[-2][1] - merged[-2][0]
+        if (
+            audio_duration_seconds - merged[-1][1]
+            <= EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS
+            and trailing_duration < min_length
+            and previous_duration >= MIN_NEIGHBOR_AD_DURATION_FOR_EDGE_MERGE_SECONDS
+            and trailing_gap <= SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS
+        ):
+            merged[-2] = (merged[-2][0], merged[-1][1])
+            merged.pop()
+
+        return merged
 
     def _merge_close_segments(
         self,
@@ -317,24 +568,30 @@ class AudioProcessor:
             return [*ad_segments[:-1], (ad_segments[-1][0], audio_duration_seconds)]
         return ad_segments
 
-    def process_audio(self, post: Post, output_path: str) -> None:
+    def process_audio(
+        self,
+        post: Post,
+        output_path: str,
+        *,
+        input_audio_path: str | None = None,
+    ) -> list[tuple[int, int]]:
         """
         Process the podcast audio by removing ad segments.
 
         Args:
             post: The Post object containing the podcast to process
             output_path: Path where the processed audio file should be saved
+        Returns:
+            The merged ad segments that were removed, as millisecond windows.
         """
         ad_segments = self.get_ad_segments(post)
+        source_audio_path = input_audio_path or post.unprocessed_audio_path
 
-        duration_ms = get_audio_duration_ms(post.unprocessed_audio_path)
+        duration_ms = get_audio_duration_ms(source_audio_path)
         if duration_ms is None:
             raise ValueError(
-                f"Could not determine duration for audio: {post.unprocessed_audio_path}"
+                f"Could not determine duration for audio: {source_audio_path}"
             )
-
-        # Store duration in seconds
-        post.duration = duration_ms / 1000.0
 
         merged_ad_segments = self.merge_ad_segments(
             duration_ms=duration_ms,
@@ -347,15 +604,26 @@ class AudioProcessor:
             ),
         )
 
-        # LLM strategy doesn't use chapter markers, so VBR is fine for smaller files
         clip_segments_with_fade(
-            in_path=post.unprocessed_audio_path,
+            in_path=source_audio_path,
             ad_segments_ms=merged_ad_segments,
             fade_ms=self.config.output.fade_ms,
             out_path=output_path,
-            use_vbr=True,
         )
 
+        processed_duration_ms = get_audio_duration_ms(output_path)
+        if processed_duration_ms is None:
+            self.logger.warning(
+                "Could not determine processed audio duration for post %s at %s; "
+                "falling back to source duration",
+                post.id,
+                output_path,
+            )
+            processed_duration_ms = duration_ms
+
+        # Persist the final MP3 runtime so downstream RSS/stats reflect ad-removed
+        # audio rather than the source episode length.
+        post.duration = processed_duration_ms / 1000.0
         post.processed_audio_path = output_path
         result = writer_client.update(
             "Post",
@@ -373,3 +641,4 @@ class AudioProcessor:
         self.logger.info(
             f"Audio processing complete for post {post.id}, saved to {output_path}"
         )
+        return merged_ad_segments

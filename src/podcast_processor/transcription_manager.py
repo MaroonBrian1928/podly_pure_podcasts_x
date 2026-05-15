@@ -1,23 +1,34 @@
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.extensions import db
+from app.memory_pressure import collect_incremental
 from app.models import ModelCall, Post, TranscriptSegment
+from app.writer.batching import (
+    batch_count_for,
+    get_writer_batch_size,
+    iter_writer_batches,
+)
 from app.writer.client import writer_client
 from shared.config import (
     Config,
     GroqWhisperConfig,
-    LocalWhisperConfig,
     RemoteWhisperConfig,
     TestWhisperConfig,
 )
+from shared.processing_paths import get_base_podcast_data_dir
 
 from .transcribe import (
+    ChunkProgressCallback,
     GroqWhisperTranscriber,
-    LocalWhisperTranscriber,
     OpenAIWhisperTranscriber,
+    Segment,
     TestWhisperTranscriber,
     Transcriber,
+    merge_segments_with_saved_word_timestamps,
+    serialize_segment_word_timestamps,
 )
 
 
@@ -53,8 +64,6 @@ class TranscriptionManager:
             return TestWhisperTranscriber(self.logger)
         if isinstance(self.config.whisper, RemoteWhisperConfig):
             return OpenAIWhisperTranscriber(self.logger, self.config.whisper)
-        if isinstance(self.config.whisper, LocalWhisperConfig):
-            return LocalWhisperTranscriber(self.logger, self.config.whisper.model)
         if isinstance(self.config.whisper, GroqWhisperConfig):
             return GroqWhisperTranscriber(self.logger, self.config.whisper)
         raise ValueError(f"unhandled whisper config {self.config.whisper}")
@@ -119,6 +128,14 @@ class TranscriptionManager:
             )
         return None
 
+    def get_reusable_transcription(self, post: Post) -> list[TranscriptSegment] | None:
+        """Return existing transcript segments only when they are reusable as-is.
+
+        Reuse requires a successful Whisper model call for the active transcriber
+        model and a matching set of persisted transcript segments.
+        """
+        return self._check_existing_transcription(post)
+
     def _get_or_create_whisper_model_call(self, post: Post) -> ModelCall:
         """Create or reuse the placeholder ModelCall row for a Whisper run via writer."""
         result = writer_client.action(
@@ -143,7 +160,157 @@ class TranscriptionManager:
             raise RuntimeError(f"ModelCall {model_call_id} not found after upsert")
         return model_call
 
-    def transcribe(self, post: Post) -> list[TranscriptSegment]:
+    def _persist_transcript_word_timestamps(
+        self,
+        post_id: int,
+        transcript_word_timestamps: list[dict[str, Any]] | None,
+    ) -> None:
+        result = writer_client.update(
+            "Post",
+            post_id,
+            {"transcript_word_timestamps": transcript_word_timestamps},
+            wait=True,
+        )
+        if not result or not result.success:
+            raise RuntimeError(
+                getattr(result, "error", "Failed to persist transcript word timestamps")
+            )
+
+    def _transcriber_supports_word_timestamps(self) -> bool:
+        return isinstance(self.transcriber, OpenAIWhisperTranscriber)
+
+    def _persist_transcription_chunks(
+        self,
+        *,
+        post: Post,
+        model_call_id: int,
+        segments: list[Segment],
+        transcript_word_timestamps: list[dict[str, Any]] | None,
+    ) -> None:
+        start_res = writer_client.action(
+            "start_transcription_replace",
+            {"post_id": post.id, "model_call_id": model_call_id},
+            wait=True,
+        )
+        if not start_res or not start_res.success:
+            raise RuntimeError(
+                getattr(start_res, "error", "Failed to start transcription replace")
+            )
+
+        batch_size = get_writer_batch_size()
+        total_batches = batch_count_for(len(segments), batch_size=batch_size)
+        inserted_count = 0
+        self.logger.info(
+            "[TRANSCRIBE_WRITE] post_id=%s model_call_id=%s segments=%s batches=%s batch_size=%s",
+            post.id,
+            model_call_id,
+            len(segments),
+            total_batches,
+            batch_size,
+        )
+
+        for batch_index, batch in enumerate(
+            iter_writer_batches(enumerate(segments), batch_size=batch_size), start=1
+        ):
+            segment_batch = [
+                {
+                    "sequence_num": i,
+                    "start_time": round(seg.start, 1),
+                    "end_time": round(seg.end, 1),
+                    "text": seg.text,
+                    "speaker_label": seg.speaker_label,
+                }
+                for i, seg in batch
+            ]
+            write_res = writer_client.action(
+                "insert_transcript_segments",
+                {"post_id": post.id, "segments": segment_batch},
+                wait=True,
+            )
+            if not write_res or not write_res.success:
+                raise RuntimeError(
+                    getattr(write_res, "error", "Failed to insert transcript segments")
+                )
+            inserted_count += int((write_res.data or {}).get("inserted") or 0)
+            collect_incremental(
+                f"transcription manager batch {batch_index}/{total_batches}",
+                self.logger,
+            )
+
+        finish_action = "finish_transcription_replace"
+        finish_payload: dict[str, Any] = {
+            "post_id": post.id,
+            "model_call_id": model_call_id,
+            "segment_count": inserted_count,
+            "transcript_word_timestamps": transcript_word_timestamps,
+        }
+        if transcript_word_timestamps is not None:
+            artifact_path = self._write_transcript_word_timestamps_artifact(
+                post_id=post.id,
+                model_call_id=model_call_id,
+                transcript_word_timestamps=transcript_word_timestamps,
+            )
+            finish_action = "finish_transcription_replace_from_artifact"
+            finish_payload = {
+                "post_id": post.id,
+                "model_call_id": model_call_id,
+                "segment_count": inserted_count,
+                "artifact_path": str(artifact_path),
+            }
+
+        finish_res = writer_client.action(
+            finish_action,
+            finish_payload,
+            wait=True,
+        )
+        if not finish_res or not finish_res.success:
+            raise RuntimeError(
+                getattr(finish_res, "error", "Failed to finish transcription replace")
+            )
+
+    def _write_transcript_word_timestamps_artifact(
+        self,
+        *,
+        post_id: int,
+        model_call_id: int,
+        transcript_word_timestamps: list[dict[str, Any]],
+    ) -> Path:
+        artifact_dir = (
+            get_base_podcast_data_dir()
+            / "transcript_artifacts"
+            / f"post_{post_id}"
+            / f"model_call_{model_call_id}"
+        )
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / "word_timestamps.json"
+        temp_path = artifact_path.with_suffix(".json.tmp")
+        temp_path.write_text(
+            json.dumps(transcript_word_timestamps, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temp_path.replace(artifact_path)
+        return artifact_path
+
+    def transcribe(
+        self,
+        post: Post,
+        *,
+        progress_callback: ChunkProgressCallback | None = None,
+    ) -> list[TranscriptSegment]:
+        db_segments, _ = self.transcribe_for_processing(
+            post,
+            include_word_timestamps=False,
+            progress_callback=progress_callback,
+        )
+        return db_segments
+
+    def transcribe_for_processing(
+        self,
+        post: Post,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: ChunkProgressCallback | None = None,
+    ) -> tuple[list[TranscriptSegment], list[Segment] | None]:
         """
         Transcribes a podcast audio file, or retrieves existing transcription.
 
@@ -151,15 +318,49 @@ class TranscriptionManager:
             post: The Post object containing the podcast audio to transcribe
 
         Returns:
-            A list of TranscriptSegment objects with the transcription results
+            The persisted transcript segments and, when requested, the richer
+            in-memory transcription payload that may include word timestamps.
         """
         self.logger.info(
             f"Starting transcription process for post {post.id} using {self.transcriber.model_name}"
         )
 
-        existing_segments = self._check_existing_transcription(post)
+        existing_segments = self.get_reusable_transcription(post)
         if existing_segments is not None:
-            return existing_segments
+            rich_segments = None
+            if include_word_timestamps:
+                rich_segments = merge_segments_with_saved_word_timestamps(
+                    existing_segments,
+                    getattr(post, "transcript_word_timestamps", None),
+                )
+                if rich_segments is None:
+                    if self._transcriber_supports_word_timestamps():
+                        self.logger.info(
+                            "Existing transcript found for post %s but no saved word timestamps were available; requesting them from %s.",
+                            post.id,
+                            self.transcriber.model_name,
+                        )
+                        rich_segments = self.transcriber.transcribe(
+                            post.unprocessed_audio_path,
+                            include_word_timestamps=True,
+                            progress_callback=progress_callback,
+                        )
+                        self._persist_transcript_word_timestamps(
+                            post.id,
+                            serialize_segment_word_timestamps(rich_segments),
+                        )
+                    else:
+                        self.logger.info(
+                            "Existing transcript found for post %s, but transcriber %s does not provide reusable word timestamps. Falling back to segment-level refinement.",
+                            post.id,
+                            self.transcriber.model_name,
+                        )
+                else:
+                    self.logger.info(
+                        "Reused saved word timestamps for existing transcript on post %s.",
+                        post.id,
+                    )
+            return existing_segments, rich_segments
 
         # Create or reuse the ModelCall record for this transcription attempt
         current_whisper_call = self._get_or_create_whisper_model_call(post)
@@ -174,34 +375,23 @@ class TranscriptionManager:
             # Expire session state before long-running transcription to avoid stale locks
             self.db_session.expire_all()
 
-            pydantic_segments = self.transcriber.transcribe(post.unprocessed_audio_path)
+            pydantic_segments = self.transcriber.transcribe(
+                post.unprocessed_audio_path,
+                include_word_timestamps=include_word_timestamps,
+                progress_callback=progress_callback,
+            )
             self.logger.info(
                 f"[TRANSCRIBE_COMPLETE] Transcription by {self.transcriber.model_name} for post {post.id} resulted in {len(pydantic_segments)} segments."
             )
 
-            segments_payload = [
-                {
-                    "sequence_num": i,
-                    "start_time": round(seg.start, 1),
-                    "end_time": round(seg.end, 1),
-                    "text": seg.text,
-                }
-                for i, seg in enumerate(pydantic_segments or [])
-            ]
-
-            write_res = writer_client.action(
-                "replace_transcription",
-                {
-                    "post_id": post.id,
-                    "segments": segments_payload,
-                    "model_call_id": current_whisper_call.id,
-                },
-                wait=True,
+            self._persist_transcription_chunks(
+                post=post,
+                model_call_id=current_whisper_call.id,
+                segments=pydantic_segments or [],
+                transcript_word_timestamps=serialize_segment_word_timestamps(
+                    pydantic_segments
+                ),
             )
-            if not write_res or not write_res.success:
-                raise RuntimeError(
-                    getattr(write_res, "error", "Failed to persist transcription")
-                )
 
             segment_query = (
                 self.segment_query
@@ -216,7 +406,7 @@ class TranscriptionManager:
             self.logger.info(
                 f"Successfully stored {len(db_segments)} transcript segments and updated ModelCall {current_whisper_call.id} for post {post.id}."
             )
-            return db_segments
+            return db_segments, (pydantic_segments if include_word_timestamps else None)
 
         except Exception as e:
             self.logger.error(

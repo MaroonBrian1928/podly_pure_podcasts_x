@@ -34,6 +34,23 @@ ENV/
 dist/
 build/
 
+# Rust build output and local package artifacts
+rust/target/
+target/
+*.rs.bk
+*.rlib
+*.rmeta
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.gcov
+rust/*.profraw
+rust/*.profdata
+rust/flamegraph.svg
+rust/perf.data
+rust/perf.data.old
+
 # Input/Output directories (these can be mounted as volumes instead)
 in/
 processing/

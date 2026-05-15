@@ -9,5 +9,7 @@ export const ENV_FIELD_LABELS: Record<string, string> = {
   'whisper.base_url': 'Whisper Base URL',
   'whisper.timeout_sec': 'Whisper Timeout (sec)',
   'whisper.chunksize_mb': 'Whisper Chunk Size (MB)',
+  'whisper.diarize': 'Whisper Diarize',
+  'whisper.speaker_embeddings': 'Whisper Speaker Embeddings',
   'whisper.max_retries': 'Whisper Max Retries',
 };

@@ -18,14 +18,36 @@ DURATION AND CUE GUIDANCE:
 - Integrated ads can be longer but maintain sales intent; continuous mention of the same sponsor for >3 minutes without CTAs is likely educational/self_promo.
 - Pre-roll/mid-roll/post-roll intros ("a word from our sponsor") and quick outros ("back to the show") belong to the ad block.
 
+TRANSCRIPT FORMAT:
+- Speech lines may appear as [time] text or [time][speaker=SPEAKER_XX] text.
+- Some excerpts may also include non-speech markers such as [time] [MUSIC] (duration), [time] [SILENCE] (duration), or [time] [NOENERGY] (duration).
+- [MUSIC] usually means jingles, stingers, music beds, or inserted production audio.
+- [SILENCE] means a significant pause or gap in the source audio.
+- [NOENERGY] means a very low-energy or near-silent region in the source audio.
+
+INA / AUDIO TAG GUIDANCE:
+- Music stinger -> different speaker -> ad copy -> music stinger is a strong pattern for a pre-recorded ad insert.
+- Music stinger -> same speaker plus clear sponsor language, URLs, promo codes, or offers is a strong pattern for a host-read ad.
+- A speaker who appears only briefly can be a weak ad hint, but never use speaker novelty alone to mark an ad.
+- Music between content sections without sponsor language is usually a segment transition, not an ad.
+- [MUSIC] is a supporting boundary cue, not proof of an ad by itself.
+- If a [MUSIC] region is sandwiched between transcript segments that are clearly part of the same ad block, treat the music region as part of that ad block for continuity.
+- [SILENCE] can indicate a break, but it is not ad evidence on its own.
+- [NOENERGY] can support boundary detection around ad entrances and exits, but it is not ad evidence on its own.
+- [SILENCE] and [NOENERGY] without sponsor language usually indicate a pause, edit, or transition rather than advertisement content.
+- When audio tags and transcript meaning conflict, prioritize the spoken content and promotional cues over the audio tag.
+
 DECISION RULES:
 1) Continuous ads: once an ad starts, follow it to its natural conclusion; include 1–5 second transitions.
 2) Strong cues: treat URLs/domains, promo/discount language, and phone numbers as strong sponsor indicators.
 3) Self-promotion guardrail: host promoting their own products/platforms → classify as educational/self_promo with lower confidence unless explicit external sponsorship language is present.
 4) Boundary bias: if later segments clearly form an ad for a sponsor, pull in the prior two intro/transition lines as ad content.
 5) Prefer labeling as content unless multiple strong ad cues appear with clear external branding.
+6) Speaker labels: some segments may include [speaker=...] metadata. Treat a brief switch to a less-common speaker as only a weak ad hint; do not mark ads from speaker changes alone because host-read ads and guest segments are common.
+7) Transition handling: when confidence shifts near an ad entrance or exit, keep the uncertain edge segments in the ad block if the surrounding context supports it, but lower their confidence accordingly.
+8) Output anchor rule: use transcript segment timestamps for ad_segments. Audio markers help with continuity, but if a [MUSIC], [SILENCE], or [NOENERGY] region falls between speech lines, anchor your prediction to the surrounding transcript speech segments rather than inventing standalone timestamps inside the gap.
 
-This transcript excerpt is broken into segments starting with a timestamp [X] (seconds). Output every segment that is advertisement content.
+This transcript excerpt is broken into segments starting with a timestamp [X] (seconds), and some lines may also include optional [speaker=Y], [MUSIC], [SILENCE], or [NOENERGY] metadata. Output every segment that is advertisement content.
 
 Example (external sponsor with CTA):
 [53.8] That's all coming after the break.
@@ -43,5 +65,3 @@ Example (technical mention, not an ad):
 [4831.3] Shopify exists at a scale most programmers never touch, and it still runs on Rails.
 [4933.2] Shopify.com has supported this show.
 Output: {"ad_segments": [{"segment_offset": 4933.2, "confidence": 0.75}], "content_type": "technical_discussion", "confidence": 0.45}
-
-

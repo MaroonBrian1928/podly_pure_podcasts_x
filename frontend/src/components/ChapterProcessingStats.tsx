@@ -1,6 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import ModalShell from './ModalShell';
+import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
+import ProcessingStageLogs from './ProcessingStageLogs';
+import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
+import {
+  formatTimelineRange,
+} from '../utils/processingTimeline';
 
 interface ChapterProcessingStatsProps {
   episodeGuid: string;
@@ -8,7 +15,7 @@ interface ChapterProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'chapters';
+type TabId = 'overview' | 'audio' | 'chapters' | 'speakers' | 'transcript' | 'logs';
 
 export default function ChapterProcessingStats({
   episodeGuid,
@@ -23,6 +30,24 @@ export default function ChapterProcessingStats({
     queryFn: () => feedsApi.getPostStats(episodeGuid),
     enabled: showModal && hasProcessedAudio,
   });
+  const isChapterInsert = stats?.ad_detection_strategy === 'chapter_insert';
+  const showTranscriptTab = isChapterInsert;
+  const showSpeakerTab = isChapterInsert
+    && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
+  const hasAudioSegments = (stats?.audio_segments?.length || 0) > 0;
+  const modelEntries = Object.entries(stats?.processing_stats?.model_types || {});
+
+  useEffect(() => {
+    if (!showTranscriptTab && activeTab === 'transcript') {
+      setActiveTab('overview');
+    }
+    if (!showSpeakerTab && activeTab === 'speakers') {
+      setActiveTab('overview');
+    }
+    if (!hasAudioSegments && activeTab === 'audio') {
+      setActiveTab('overview');
+    }
+  }, [activeTab, hasAudioSegments, showSpeakerTab, showTranscriptTab]);
 
   const formatDuration = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -34,6 +59,87 @@ export default function ChapterProcessingStats({
     }
     return `${minutes}m ${secs}s`;
   };
+
+  const formatBytes = (bytes: number | null) => {
+    if (bytes === null || Number.isNaN(bytes)) return 'unknown';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const getAdConfidence = (segment: {
+    identifications?: Array<{ label: string; confidence: number | null }>;
+  }) => {
+    const adConfidences = (segment.identifications || [])
+      .filter((identification) => identification.label === 'ad' && identification.confidence !== null)
+      .map((identification) => identification.confidence as number);
+
+    if (!adConfidences.length) {
+      return null;
+    }
+
+    return Math.max(...adConfidences);
+  };
+
+  const hasSpeakerLabels = (stats?.transcript_segments || []).some(
+    (segment) => Boolean(segment.speaker_label)
+  );
+  const contentViewKey = isLoading
+    ? 'loading'
+    : error
+      ? 'error'
+      : stats
+        ? activeTab
+        : 'empty';
+  const durationFallbackCandidates = [
+    ...(stats?.transcript_segments || []).map((segment) => segment.end_time),
+    ...((stats?.processing_stats?.bleep_windows || []).map((window) => window.end_time)),
+  ];
+  const fallbackDurationSeconds = durationFallbackCandidates.length
+    ? Math.max(...durationFallbackCandidates)
+    : 0;
+  const bleepBlocks = (stats?.processing_stats?.bleep_windows || []).map((window) => ({
+    startTime: window.start_time,
+    endTime: window.end_time,
+  }));
+  const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
+    ?? bleepBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const originalDurationSeconds = stats?.processing_stats?.original_duration_seconds
+    ?? (
+      stats?.post?.duration != null
+        ? stats.post.duration
+        : fallbackDurationSeconds
+    );
+  const editedDurationSeconds = stats?.processing_stats?.edited_duration_seconds
+    ?? originalDurationSeconds;
+  const editedBleepPercent = editedDurationSeconds > 0
+    ? (bleepTimeSeconds / editedDurationSeconds) * 100
+    : 0;
+  const bleepTimelineSegments = (stats?.processing_stats?.edited_bleep_windows || []).map((window) => ({
+    startTime: (window.edited_start_time + window.edited_end_time) / 2,
+    endTime: (window.edited_start_time + window.edited_end_time) / 2,
+    kind: 'point' as const,
+    visualDurationSeconds: Math.max(0, window.edited_end_time - window.edited_start_time),
+    tooltipTitle: 'Bleeped Section',
+    tooltipRows: [
+      {
+        label: 'Edited',
+        value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
+      },
+      {
+        label: 'Source',
+        value: formatTimelineRange(window.original_start_time, window.original_end_time),
+      },
+    ],
+    ariaLabel: [
+      'Bleeped section.',
+      `Edited audio range ${formatTimelineRange(window.edited_start_time, window.edited_end_time)}.`,
+      `Source audio range ${formatTimelineRange(window.original_start_time, window.original_end_time)}.`,
+    ].join(' '),
+  }));
+  const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
+    ? bleepTimelineSegments.length > 0
+    : (stats?.processing_stats?.has_bleep_windows ?? bleepBlocks.length > 0);
 
   if (!hasProcessedAudio) {
     return null;
@@ -48,9 +154,11 @@ export default function ChapterProcessingStats({
         Stats
       </button>
 
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-6xl w-full max-h-[90vh] overflow-hidden">
+      <ModalShell
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        panelClassName="bg-white rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
+      >
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-xl font-bold text-gray-900 text-left">Processing Statistics & Debug</h2>
               <button
@@ -63,11 +171,15 @@ export default function ChapterProcessingStats({
               </button>
             </div>
 
-            <div className="border-b">
-              <nav className="flex space-x-8 px-6">
+            <div className="border-b overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+              <nav className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
-                  { id: 'chapters', label: 'Chapters' }
+                  ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
+                  { id: 'chapters', label: 'Chapters' },
+                  ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
+                  { id: 'logs', label: 'Related Logs' },
+                  ...(showTranscriptTab ? [{ id: 'transcript', label: 'Transcript' }] : []),
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -76,23 +188,31 @@ export default function ChapterProcessingStats({
                       activeTab === tab.id
                         ? 'border-blue-500 text-blue-600'
                         : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
+                    } shrink-0 whitespace-nowrap`}
                   >
                     {tab.label}
+                    {stats && tab.id === 'audio' && ` (${stats.audio_segments?.length || 0})`}
                     {stats && tab.id === 'chapters' && stats.chapters && ` (${stats.chapters.chapters?.length || 0})`}
+                    {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
+                    {stats && tab.id === 'logs' && ` (${stats.related_logs?.entries.length || 0})`}
+                    {stats && tab.id === 'transcript' && ` (${stats.transcript_segments?.length || 0})`}
                   </button>
                 ))}
               </nav>
             </div>
 
-            <div className="p-6 overflow-y-auto max-h-[calc(90vh-200px)]">
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              <div
+                key={contentViewKey}
+                className="podly-tab-panel-enter min-h-full"
+              >
               {isLoading ? (
-                <div className="flex items-center justify-center py-12">
+                <div className="flex min-h-full items-center justify-center py-12">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
                   <span className="ml-3 text-gray-600">Loading stats...</span>
                 </div>
               ) : error ? (
-                <div className="text-center py-12">
+                <div className="flex min-h-full items-center justify-center text-center py-12">
                   <p className="text-red-600">Failed to load processing statistics</p>
                 </div>
               ) : stats ? (
@@ -115,7 +235,7 @@ export default function ChapterProcessingStats({
                           <div className="text-left">
                             <span className="font-medium text-gray-700">Detection Method:</span>
                             <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
-                              Chapter-based
+                              {isChapterInsert ? 'Chapter insertion only' : 'Chapter-based removal'}
                             </span>
                           </div>
                         </div>
@@ -124,40 +244,173 @@ export default function ChapterProcessingStats({
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                          <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4 text-center">
-                            <div className="text-2xl font-bold text-purple-600">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-purple-50 to-purple-100 p-4 text-center dark:border-purple-800/70 dark:from-purple-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold text-purple-600 dark:text-purple-200">
                               {stats.chapters?.total_chapters || 0}
                             </div>
-                            <div className="text-sm text-purple-800">Total Chapters</div>
+                            <div className="text-sm text-purple-800 dark:text-purple-100">Total Chapters</div>
                           </div>
 
-                          <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-4 text-center">
-                            <div className="text-2xl font-bold text-green-600">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-green-800/70 dark:from-green-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold text-green-600 dark:text-green-200">
                               {stats.chapters?.chapters_kept || 0}
                             </div>
-                            <div className="text-sm text-green-800">Chapters Kept</div>
+                            <div className="text-sm text-green-800 dark:text-green-100">
+                              {isChapterInsert ? 'Chapters Inserted' : 'Chapters Kept'}
+                            </div>
                           </div>
 
-                          <div className="bg-gradient-to-br from-red-50 to-red-100 rounded-lg p-4 text-center">
-                            <div className="text-2xl font-bold text-red-600">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-red-800/70 dark:from-red-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold text-red-600 dark:text-red-200">
                               {stats.chapters?.chapters_removed || 0}
                             </div>
-                            <div className="text-sm text-red-800">Chapters Removed</div>
+                            <div className="text-sm text-red-800 dark:text-red-100">
+                              {isChapterInsert ? 'Chapters Removed (N/A)' : 'Chapters Removed'}
+                            </div>
                           </div>
                         </div>
                       </div>
 
-                      {stats.chapters?.filter_strings && (
+                      {isChapterInsert && (
+                        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+                          Chapter insertion mode preserves episode timing and only writes chapter metadata unless profanity bleeping was applied.
+                        </div>
+                      )}
+
+                      {isChapterInsert && hasBleepWindows && (
+                        <ProcessingTimelineSummaryCard
+                          title="Bleeps Added"
+                          itemCount={bleepTimelineSegments.length}
+                          itemLabel="Bleeped Sections"
+                          totalTimeSeconds={bleepTimeSeconds}
+                          totalTimeLabel="Time Bleeped"
+                          percentage={editedBleepPercent}
+                          percentageLabel="Edited Audio Bleeped"
+                          durationSeconds={editedDurationSeconds}
+                          timelineDurationSeconds={originalDurationSeconds}
+                          minimumSegmentWidthPx={2}
+                          minimumPointWidthPx={6}
+                          segments={bleepTimelineSegments}
+                          metricAccentClassName="text-amber-600 dark:text-amber-200"
+                          percentageAccentClassName="text-amber-700 dark:text-amber-300"
+                          tooltipAccentClassName="text-amber-700 dark:text-amber-300"
+                          segmentClassName="bg-amber-500 dark:bg-amber-400"
+                          legendBaseLabel="Unbleeped audio"
+                          legendSegmentLabel="Bleep markers"
+                        />
+                      )}
+
+                      <div>
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">
+                          Models Used ({stats.processing_stats?.total_model_calls || 0} calls)
+                        </h3>
+                        {modelEntries.length === 0 ? (
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                            No model calls were recorded for this run.
+                          </div>
+                        ) : (
+                          <div className="bg-white border rounded-lg p-4">
+                            <div className="space-y-2">
+                              {modelEntries.map(([model, count]) => (
+                                <div key={model} className="flex justify-between items-center">
+                                  <span className="text-sm text-gray-600">{model}</span>
+                                  <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                                    {count} calls
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {!isChapterInsert && (stats.chapters?.filter_strings ?? []).length > 0 && (
                         <div>
                           <h3 className="font-semibold text-gray-900 mb-4 text-left">Filter Strings</h3>
                           <div className="bg-white border rounded-lg p-4">
                             <div className="flex flex-wrap gap-2">
-                              {stats.chapters.filter_strings.map((filter: string, idx: number) => (
+                              {(stats.chapters?.filter_strings ?? []).map((filter: string, idx: number) => (
                                 <span key={idx} className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm">
                                   {filter}
                                 </span>
                               ))}
                             </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {stats.debug_info && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                          <h3 className="font-semibold text-gray-900 mb-2 text-left">Debug Details</h3>
+                          <p className="text-xs text-amber-700 mb-4 text-left">
+                            Visible because <code>PODLY_STATS_DEBUG</code> is enabled.
+                          </p>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                            <div className="text-left">
+                              <span className="font-medium text-gray-700">GUID:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">{stats.debug_info.guid}</span>
+                            </div>
+                            <div className="text-left">
+                              <span className="font-medium text-gray-700">Post ID / Feed ID:</span>
+                              <span className="ml-2 text-gray-600">{stats.debug_info.post_id} / {stats.debug_info.feed_id}</span>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Download URL:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">{stats.debug_info.download_url}</span>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Processed Audio Path:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">
+                                {stats.debug_info.processed_audio.path || 'missing'}
+                              </span>
+                              <div className="text-xs text-gray-500 mt-1">
+                                {stats.debug_info.processed_audio.exists
+                                  ? `exists (${formatBytes(stats.debug_info.processed_audio.size_bytes)})`
+                                  : 'missing'}
+                              </div>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Unprocessed Audio Path:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">
+                                {stats.debug_info.unprocessed_audio.path || 'missing'}
+                              </span>
+                              <div className="text-xs text-gray-500 mt-1">
+                                {stats.debug_info.unprocessed_audio.exists
+                                  ? `exists (${formatBytes(stats.debug_info.unprocessed_audio.size_bytes)})`
+                                  : 'missing'}
+                              </div>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Data Roots:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">
+                                in: {stats.debug_info.processing_roots.in_root} | srv: {stats.debug_info.processing_roots.srv_root}
+                              </span>
+                            </div>
+                            <div className="text-left">
+                              <span className="font-medium text-gray-700">Record Counts:</span>
+                              <span className="ml-2 text-gray-600">
+                                segments {stats.debug_info.record_counts.transcript_segments}, calls {stats.debug_info.record_counts.model_calls}, ids {stats.debug_info.record_counts.identifications}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="mt-4">
+                            <h4 className="font-medium text-gray-900 mb-2 text-left">Processed Audio Path Candidates</h4>
+                            {(stats.debug_info.processed_audio_path_candidates || []).length === 0 ? (
+                              <p className="text-xs text-gray-500 text-left">No candidates derived.</p>
+                            ) : (
+                              <div className="space-y-2">
+                                {(stats.debug_info.processed_audio_path_candidates || []).map((candidate, idx) => (
+                                  <div key={`${candidate.path}-${idx}`} className="bg-white border border-amber-100 rounded p-2">
+                                    <div className="font-mono text-xs text-gray-700 break-all text-left">{candidate.path}</div>
+                                    <div className="text-xs text-gray-500 mt-1 text-left">
+                                      {candidate.exists ? `exists (${formatBytes(candidate.size_bytes)})` : 'missing'}
+                                      {candidate.error ? ` - ${candidate.error}` : ''}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}
@@ -182,7 +435,7 @@ export default function ChapterProcessingStats({
                             <tbody className="bg-white divide-y divide-gray-200">
                               {(stats.chapters?.chapters || []).map((chapter: { title: string; start_time: number; end_time: number; label: string }, idx: number) => (
                                 <tr key={idx} className={`hover:bg-gray-50 ${
-                                  chapter.label === 'ad' ? 'bg-red-50' : ''
+                                  chapter.label === 'ad' && !isChapterInsert ? 'bg-red-50' : ''
                                 }`}>
                                   <td className="px-4 py-3 text-sm text-gray-900">{idx + 1}</td>
                                   <td className="px-4 py-3 text-sm text-gray-900 font-medium">{chapter.title}</td>
@@ -198,7 +451,9 @@ export default function ChapterProcessingStats({
                                         ? 'bg-red-100 text-red-800'
                                         : 'bg-green-100 text-green-800'
                                     }`}>
-                                      {chapter.label === 'ad' ? 'Removed' : 'Kept'}
+                                      {chapter.label === 'ad'
+                                        ? (isChapterInsert ? 'Excluded' : 'Removed')
+                                        : (isChapterInsert ? 'Included' : 'Kept')}
                                     </span>
                                   </td>
                                 </tr>
@@ -219,12 +474,130 @@ export default function ChapterProcessingStats({
                       )}
                     </div>
                   )}
+
+                  {activeTab === 'audio' && hasAudioSegments && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">
+                        Audio Segments ({stats.audio_segments?.length || 0})
+                      </h3>
+                      <div className="bg-white border rounded-lg overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {(stats.audio_segments || []).map((segment) => (
+                                <tr key={segment.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {segment.start_time}s - {segment.end_time}s
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {formatDuration(Math.max(0, segment.end_time - segment.start_time))}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-slate-100 text-slate-700">
+                                      {segment.label}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {activeTab === 'logs' && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">
+                        Related Logs ({stats.related_logs?.entries.length || 0})
+                      </h3>
+                      <ProcessingStageLogs relatedLogs={stats.related_logs} />
+                    </div>
+                  )}
+
+                  {activeTab === 'speakers' && showSpeakerTab && (
+                    <div>
+                      <SpeakerTimeBreakdown
+                        speakerBreakdown={stats.processing_stats?.speaker_breakdown}
+                      />
+                    </div>
+                  )}
+
+                  {activeTab === 'transcript' && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">
+                        Transcript Segments ({stats.transcript_segments?.length || 0})
+                      </h3>
+                      {(!stats.transcript_segments || stats.transcript_segments.length === 0) ? (
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                          No transcript segments were generated for this episode.
+                        </div>
+                      ) : (
+                        <div className="bg-white border rounded-lg overflow-hidden">
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">#</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Start</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">End</th>
+                                  {hasSpeakerLabels && (
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
+                                  )}
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ad Confidence</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Text</th>
+                                </tr>
+                              </thead>
+                              <tbody className="bg-white divide-y divide-gray-200">
+                                {(stats.transcript_segments || []).map((segment, idx) => {
+                                  const adConfidence = getAdConfidence(segment);
+
+                                  return (
+                                    <tr key={segment.id ?? idx} className="hover:bg-gray-50">
+                                      <td className="px-4 py-3 text-sm text-gray-900">{segment.sequence_num}</td>
+                                      <td className="px-4 py-3 text-sm text-gray-600">{segment.start_time}s</td>
+                                      <td className="px-4 py-3 text-sm text-gray-600">{segment.end_time}s</td>
+                                      {hasSpeakerLabels && (
+                                        <td className="px-4 py-3 text-sm text-gray-600">
+                                          {segment.speaker_label ? (
+                                            <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-700">
+                                              {segment.speaker_label}
+                                            </span>
+                                          ) : (
+                                            <span className="text-gray-400">-</span>
+                                          )}
+                                        </td>
+                                      )}
+                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                        {adConfidence !== null ? adConfidence.toFixed(2) : '-'}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-700 min-w-[28rem] max-w-4xl">
+                                        <div className="whitespace-pre-wrap break-words text-left leading-6">
+                                          {segment.text}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : null}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+      </ModalShell>
     </>
   );
 }

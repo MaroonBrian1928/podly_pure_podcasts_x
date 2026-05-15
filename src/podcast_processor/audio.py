@@ -1,16 +1,32 @@
 import logging
 import math
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import ffmpeg
 
+from shared.rust_sidecar import (
+    try_bleep_audio,
+    try_cut_audio,
+    try_probe_audio_duration_ms,
+    try_split_audio,
+)
+
 logger = logging.getLogger("global_logger")
+
+DEFAULT_VBR_QUALITY = 2
+DEFAULT_CBR_BITRATE = "192k"
 
 
 def get_audio_duration_ms(file_path: str) -> int | None:
+    rust_duration_ms = try_probe_audio_duration_ms(Path(file_path))
+    if rust_duration_ms is not None:
+        return rust_duration_ms
+
     try:
         logger.debug("[FFMPEG_PROBE] Probing audio file: %s", file_path)
         probe = ffmpeg.probe(file_path)
@@ -28,12 +44,58 @@ def get_audio_duration_ms(file_path: str) -> int | None:
         return None
 
 
+def get_audio_bitrate_bps(file_path: str) -> int | None:
+    try:
+        logger.debug("[FFMPEG_PROBE] Probing audio bitrate: %s", file_path)
+        probe = ffmpeg.probe(file_path)
+    except ffmpeg.Error as e:
+        logger.warning(
+            "[FFMPEG_PROBE] Error probing bitrate for %s: %s",
+            file_path,
+            e.stderr.decode() if e.stderr else str(e),
+        )
+        return None
+
+    streams = probe.get("streams", [])
+    if isinstance(streams, list):
+        for stream in streams:
+            if not isinstance(stream, dict) or stream.get("codec_type") != "audio":
+                continue
+            bitrate = _parse_bitrate_bps(stream.get("bit_rate"))
+            if bitrate is not None:
+                return bitrate
+
+    format_info = probe.get("format", {})
+    if isinstance(format_info, dict):
+        return _parse_bitrate_bps(format_info.get("bit_rate"))
+    return None
+
+
+def _parse_bitrate_bps(value: Any) -> int | None:
+    try:
+        bitrate = int(float(value))
+    except TypeError, ValueError:
+        return None
+    if bitrate <= 0:
+        return None
+    return bitrate
+
+
+def _format_bitrate_arg(bitrate_bps: int) -> str:
+    return str(max(1, int(bitrate_bps)))
+
+
 def _get_encoding_args(
-    use_vbr: bool = False, vbr_quality: int = 2, cbr_bitrate: str = "192k"
+    use_vbr: bool = False,
+    vbr_quality: int = DEFAULT_VBR_QUALITY,
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
+    source_bitrate_bps: int | None = None,
 ) -> dict[str, Any]:
     """Return ffmpeg encoding arguments for VBR or CBR."""
     if use_vbr:
         return {"q:a": vbr_quality}
+    if source_bitrate_bps is not None:
+        return {"b:a": _format_bitrate_arg(source_bitrate_bps)}
     return {"b:a": cbr_bitrate}
 
 
@@ -43,14 +105,28 @@ def clip_segments_with_fade(
     in_path: str,
     out_path: str,
     use_vbr: bool = False,
-    vbr_quality: int = 2,
-    cbr_bitrate: str = "192k",
+    vbr_quality: int = DEFAULT_VBR_QUALITY,
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
 ) -> None:
+    source_bitrate_bps = None if use_vbr else get_audio_bitrate_bps(in_path)
+    if try_cut_audio(
+        windows_ms=ad_segments_ms,
+        input_path=Path(in_path),
+        output_path=Path(out_path),
+        mode="fade",
+        fade_ms=fade_ms,
+        encoding="vbr" if use_vbr else "cbr",
+        cbr_bitrate_bps=source_bitrate_bps,
+        vbr_quality=vbr_quality if use_vbr else None,
+    ):
+        return
 
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
 
-    encoding_args = _get_encoding_args(use_vbr, vbr_quality, cbr_bitrate)
+    encoding_args = _get_encoding_args(
+        use_vbr, vbr_quality, cbr_bitrate, source_bitrate_bps
+    )
 
     # Try the complex filter approach first, fall back to simple if it fails
     # Catch both ffmpeg.Error (runtime) and broader exceptions (filter graph construction)
@@ -134,20 +210,246 @@ def clip_segments_exact(
     ad_segments_ms: list[tuple[int, int]],
     in_path: str,
     out_path: str,
-    cbr_bitrate: str = "192k",
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
 ) -> None:
     """Remove segments with exact cuts at boundaries, no fades.
 
     Used by chapter-based ad detection. Always uses CBR encoding because VBR
     causes seeking inaccuracy with chapter markers.
     """
+    source_bitrate_bps = get_audio_bitrate_bps(in_path)
+    if try_cut_audio(
+        windows_ms=ad_segments_ms,
+        input_path=Path(in_path),
+        output_path=Path(out_path),
+        mode="exact",
+        fade_ms=0,
+        encoding="cbr",
+        cbr_bitrate_bps=source_bitrate_bps,
+    ):
+        return
+
     audio_duration_ms = get_audio_duration_ms(in_path)
     assert audio_duration_ms is not None
     # Chapter strategy always uses CBR for accurate chapter marker seeking
-    encoding_args = _get_encoding_args(use_vbr=False, cbr_bitrate=cbr_bitrate)
+    encoding_args = _get_encoding_args(
+        use_vbr=False,
+        cbr_bitrate=cbr_bitrate,
+        source_bitrate_bps=source_bitrate_bps,
+    )
     _clip_segments_simple(
         ad_segments_ms, in_path, out_path, audio_duration_ms, encoding_args
     )
+
+
+def overlay_beeps_with_ducking(
+    censor_windows_ms: list[tuple[int, int]],
+    in_path: str,
+    out_path: str,
+    *,
+    beep_frequency_hz: int = 1000,
+    beep_volume: float = 0.65,
+    # Full mute under the beep. A multiplicative duck (e.g. 0.08) leaves loud
+    # peaks audible because it scales whatever was there; muting outright makes
+    # the censor deterministic regardless of the source level.
+    duck_volume: float = 0.0,
+    # Crossfade duration at the boundary of each censor window so the voice
+    # attenuating and the beep onset are smooth instead of producing edge
+    # clicks. Kept short so it doesn't bleed audible profanity.
+    fade_ms: int = 5,
+    use_vbr: bool = False,
+    vbr_quality: int = DEFAULT_VBR_QUALITY,
+    cbr_bitrate: str = DEFAULT_CBR_BITRATE,
+) -> None:
+    source_bitrate_bps = None if use_vbr else get_audio_bitrate_bps(in_path)
+    if try_bleep_audio(
+        windows_ms=censor_windows_ms,
+        input_path=Path(in_path),
+        output_path=Path(out_path),
+        beep_frequency_hz=beep_frequency_hz,
+        beep_volume=beep_volume,
+        duck_volume=duck_volume,
+        encoding="vbr" if use_vbr else "cbr",
+        fade_ms=fade_ms,
+        cbr_bitrate_bps=source_bitrate_bps,
+        vbr_quality=vbr_quality if use_vbr else None,
+    ):
+        return
+
+    if not censor_windows_ms:
+        shutil.copyfile(in_path, out_path)
+        return
+
+    encoding_args = _get_encoding_args(
+        use_vbr, vbr_quality, cbr_bitrate, source_bitrate_bps
+    )
+    merged_windows = _merge_time_windows_ms(censor_windows_ms)
+    audio_duration_ms = get_audio_duration_ms(in_path)
+    assert audio_duration_ms is not None
+
+    chunks = [
+        merged_windows[i : i + _BLEEP_MAX_WINDOWS_PER_PASS]
+        for i in range(0, len(merged_windows), _BLEEP_MAX_WINDOWS_PER_PASS)
+    ]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        current_input = in_path
+        for idx, chunk in enumerate(chunks):
+            is_last = idx == len(chunks) - 1
+            if is_last:
+                _apply_bleep_pass(
+                    current_input,
+                    out_path,
+                    chunk,
+                    audio_duration_ms,
+                    beep_frequency_hz=beep_frequency_hz,
+                    beep_volume=beep_volume,
+                    duck_volume=duck_volume,
+                    fade_ms=fade_ms,
+                    output_codec="libmp3lame",
+                    encoding_args=encoding_args,
+                )
+            else:
+                pass_output = os.path.join(temp_dir, f"bleep_pass_{idx}.wav")
+                _apply_bleep_pass(
+                    current_input,
+                    pass_output,
+                    chunk,
+                    audio_duration_ms,
+                    beep_frequency_hz=beep_frequency_hz,
+                    beep_volume=beep_volume,
+                    duck_volume=duck_volume,
+                    fade_ms=fade_ms,
+                    output_codec="pcm_s16le",
+                    encoding_args={},
+                )
+                current_input = pass_output
+
+    logger.info(
+        "[FFMPEG_BLEEP] Applied %d censor windows across %d pass(es): %s -> %s",
+        len(merged_windows),
+        len(chunks),
+        in_path,
+        out_path,
+    )
+
+
+_BLEEP_MAX_WINDOWS_PER_PASS = 96
+
+
+def _apply_bleep_pass(
+    in_path: str,
+    out_path: str,
+    windows: list[tuple[int, int]],
+    audio_duration_ms: int,
+    *,
+    beep_frequency_hz: int,
+    beep_volume: float,
+    duck_volume: float,
+    fade_ms: int,
+    output_codec: str,
+    encoding_args: dict[str, Any],
+) -> None:
+    filter_complex = _build_bleep_filter_complex(
+        windows,
+        audio_duration_ms,
+        beep_frequency_hz=beep_frequency_hz,
+        beep_volume=beep_volume,
+        duck_volume=duck_volume,
+        fade_ms=fade_ms,
+    )
+
+    cmd: list[str] = [
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        in_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[out]",
+        "-codec:a",
+        output_codec,
+    ]
+    for key, value in encoding_args.items():
+        cmd.extend([f"-{key}", str(value)])
+    cmd.append(out_path)
+
+    subprocess.run(cmd, check=True)
+
+
+def _build_bleep_filter_complex(
+    windows: list[tuple[int, int]],
+    audio_duration_ms: int,
+    *,
+    beep_frequency_hz: int,
+    beep_volume: float,
+    duck_volume: float,
+    fade_ms: int,
+) -> str:
+    """Build an ffmpeg filter_complex graph that crossfades voice and beep at
+    each censor window edge. Mirrors the Rust implementation: per-window voice
+    `volume` filters with `enable=` and per-window `sine` beep sources mixed
+    via `amix`.
+    """
+    fade_ms_eff = max(1, fade_ms)
+    fade_s = fade_ms_eff / 1000.0
+    duration_s = audio_duration_ms / 1000.0
+
+    expanded = [(max(0, s - fade_ms_eff), e + fade_ms_eff) for s, e in windows]
+    zones_ms = _merge_time_windows_ms(expanded)
+    zones: list[tuple[float, float]] = []
+    for zs_ms, ze_ms in zones_ms:
+        zs = max(0.0, zs_ms / 1000.0)
+        ze = min(duration_s, ze_ms / 1000.0)
+        if ze > zs:
+            zones.append((zs, ze))
+
+    voice_coef = max(0.0, min(1.0, 1.0 - duck_volume))
+
+    if zones:
+        voice_filters = [
+            (
+                f"volume='1-{voice_coef:.4f}*max(0,min(1,min("
+                f"(t-{zs:.4f})/{fade_s:.5f},({ze:.4f}-t)/{fade_s:.5f})))'"
+                f":eval=frame:enable='between(t,{zs:.4f},{ze:.4f})'"
+            )
+            for zs, ze in zones
+        ]
+        voice_chain = f"[0:a]{','.join(voice_filters)}[ducked]"
+    else:
+        voice_chain = "[0:a]anull[ducked]"
+
+    beep_parts: list[str] = []
+    beep_labels: list[str] = []
+    for i, (zs, ze) in enumerate(zones):
+        beep_dur = ze - zs
+        if beep_dur <= 0:
+            continue
+        fade_actual = min(fade_s, beep_dur / 2.0)
+        fade_out_start = max(0.0, beep_dur - fade_actual)
+        delay_ms_int = round(zs * 1000.0)
+        label = f"b{i}"
+        beep_parts.append(
+            f"sine=frequency={beep_frequency_hz}:duration={beep_dur:.4f}:sample_rate=44100,"
+            f"afade=t=in:d={fade_actual:.5f},"
+            f"afade=t=out:st={fade_out_start:.5f}:d={fade_actual:.5f},"
+            f"volume={beep_volume:.4f},"
+            f"adelay={delay_ms_int}[{label}]"
+        )
+        beep_labels.append(f"[{label}]")
+
+    if beep_labels:
+        mix = (
+            f"[ducked]{''.join(beep_labels)}amix=inputs={len(beep_labels) + 1}"
+            ":duration=first:dropout_transition=0:normalize=0[out]"
+        )
+    else:
+        mix = "[ducked]anull[out]"
+
+    return ";".join([voice_chain, *beep_parts, mix])
 
 
 def _clip_segments_simple(
@@ -184,21 +486,12 @@ def _clip_segments_simple(
 
         # Extract each segment to keep
         for i, (start_ms, end_ms) in enumerate(keep_segments):
-            segment_path = os.path.join(temp_dir, f"segment_{i}.mp3")
-            start_sec = start_ms / 1000.0
-            duration_sec = (end_ms - start_ms) / 1000.0
-
-            (
-                ffmpeg.input(in_path)
-                .output(
-                    segment_path,
-                    ss=start_sec,
-                    t=duration_sec,
-                    acodec="libmp3lame",
-                    **encoding_args,
-                )
-                .overwrite_output()
-                .run(quiet=True)
+            segment_path = os.path.join(temp_dir, f"segment_{i}.wav")
+            _trim_file_lossless(
+                Path(in_path),
+                Path(segment_path),
+                start_ms,
+                end_ms,
             )
 
             segment_files.append(segment_path)
@@ -218,6 +511,70 @@ def _clip_segments_simple(
         )
 
     logger.info("[FFMPEG_SIMPLE] Completed simple audio concatenation: %s", out_path)
+
+
+def _trim_file_lossless(
+    in_path: Path, out_path: Path, start_ms: int, end_ms: int
+) -> None:
+    duration_ms = end_ms - start_ms
+
+    if duration_ms <= 0:
+        return
+
+    start_sec = max(start_ms, 0) / 1000.0
+    duration_sec = duration_ms / 1000.0
+
+    (
+        ffmpeg.input(str(in_path))
+        .output(
+            str(out_path),
+            ss=start_sec,
+            t=duration_sec,
+            acodec="pcm_s16le",
+            vn=None,
+        )
+        .overwrite_output()
+        .run(quiet=True)
+    )
+
+
+def _merge_time_windows_ms(
+    windows: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if not windows:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    for raw_start_ms, raw_end_ms in sorted(windows):
+        start_ms = max(0, int(raw_start_ms))
+        end_ms = max(start_ms, int(raw_end_ms))
+
+        if not merged:
+            merged.append((start_ms, end_ms))
+            continue
+
+        prev_start_ms, prev_end_ms = merged[-1]
+        if start_ms <= prev_end_ms:
+            merged[-1] = (prev_start_ms, max(prev_end_ms, end_ms))
+            continue
+
+        merged.append((start_ms, end_ms))
+
+    return merged
+
+
+def _build_window_condition_expression(windows: list[tuple[int, int]]) -> str:
+    if not windows:
+        return "0"
+
+    expressions = [
+        f"between(t,{start_ms / 1000.0:.3f},{end_ms / 1000.0:.3f})"
+        for start_ms, end_ms in windows
+        if end_ms > start_ms
+    ]
+    if not expressions:
+        return "0"
+    return "+".join(expressions)
 
 
 def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:
@@ -257,6 +614,14 @@ def split_audio(
 ) -> list[tuple[Path, int]]:
 
     audio_chunk_path.mkdir(parents=True, exist_ok=True)
+
+    rust_chunks = try_split_audio(
+        input_path=audio_file_path,
+        output_dir=audio_chunk_path,
+        chunk_size_bytes=chunk_size_bytes,
+    )
+    if rust_chunks is not None:
+        return rust_chunks
 
     logger.info(
         "[FFMPEG_SPLIT] Splitting audio file: %s into chunks of %d bytes",

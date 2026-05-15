@@ -41,13 +41,62 @@ You have a few options to get started:
 - Podly removes the ad segments
 - Podly delivers the ad-free version of the podcast to you
 
+## Whisper Configuration
+
+Podly does not run embedded local Whisper inside the app container. Use Groq or
+set `WHISPER_TYPE=remote` with `WHISPER_REMOTE_BASE_URL` pointed at an
+OpenAI-compatible transcription service such as `whisper-x-fastapi`,
+`speaches.ai`, or another compatible endpoint.
+
+If you are using `WHISPER_TYPE=remote`, Podly also supports OpenAI-compatible
+transcription flags for diarization:
+
+```env
+WHISPER_REMOTE_DIARIZE=false
+WHISPER_REMOTE_SPEAKER_EMBEDDINGS=false
+```
+
+Set `WHISPER_REMOTE_DIARIZE=true` to request speaker diarization from a
+compatible remote Whisper endpoint. `WHISPER_REMOTE_SPEAKER_EMBEDDINGS=true`
+adds speaker embeddings to the diarization payload and requires diarization to
+be enabled. See [.env.local.example](.env.local.example) for the full set of
+environment variables.
+
+Podly can also optionally call a separate INA-compatible audio segmenter to
+detect non-speech regions such as music, noise, and silence-like gaps:
+
+```env
+INA_ENABLED=false
+INA_BASE_URL=http://localhost:8001
+INA_TIMEOUT_SEC=3600
+```
+
+Set `INA_ENABLED=true` and point `INA_BASE_URL` at a service that exposes
+`POST /segment`. INA analysis is best-effort: processing still completes if the
+INA service is unavailable, but the extra audio segment metadata will be
+missing from stats/debug views. This is separate from remote Whisper
+speaker diarization, which continues to use the `WHISPER_REMOTE_*` flags above.
+
+## Optional UI Flags
+
+These environment variables let you hide specific UI surfaces without changing
+the rest of the application behavior:
+
+```env
+PODLY_HIDE_DISCORD_INTEGRATION=false
+PODLY_HIDE_REPORT_ISSUE_BUTTON=false
+```
+
+- `PODLY_HIDE_DISCORD_INTEGRATION=true` hides the Discord SSO/config integration
+  UI, including the login button and the admin Discord config tab.
+- `PODLY_HIDE_REPORT_ISSUE_BUTTON=true` hides the `Report issue` button from the
+  desktop nav and mobile menu.
+
 ### Cost Breakdown
 *Monthly cost breakdown for 5 podcasts*
 
 | Cost    | Hosting  | Transcription | LLM    |
 |---------|----------|---------------|--------|
-| **free**| local    | local         | local  |
-| **$2**  | local    | local         | remote |
 | **$5**  | local    | remote        | remote |
 | **$10** | public (railway)  | remote        | remote |
 | **Pay What You Want** | [preview server](https://podly.up.railway.app/)    | n/a         | n/a  |

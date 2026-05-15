@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.extensions import db
+from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.models import ProcessingJob
 
@@ -58,6 +59,19 @@ def clear_all_jobs_action(params: dict[str, Any]) -> int:
     return count
 
 
+def clear_active_jobs_action(params: dict[str, Any]) -> int:
+    """Clear only pending and running jobs. Preserves completed/failed/skipped/cancelled."""
+    active_jobs = ProcessingJob.query.filter(
+        ProcessingJob.status.in_(["pending", "running"])
+    ).all()
+    count = len(active_jobs)
+    for job in active_jobs:
+        db.session.delete(job)
+    if count > 0:
+        recalculate_run_counts(db.session)
+    return count
+
+
 def create_job_action(params: dict[str, Any]) -> dict[str, Any]:
     job_data = params.get("job_data")
     if not isinstance(job_data, dict):
@@ -68,6 +82,14 @@ def create_job_action(params: dict[str, Any]) -> dict[str, Any]:
         job_data["created_at"] = datetime.fromisoformat(job_data["created_at"])
 
     job = ProcessingJob(**job_data)
+    # Seed the queue (step 0) entry from creation time so the UI can report
+    # how long the job sat queued before it started running.
+    if not job.stage_history:
+        job.stage_history = initial_stage_history(
+            step=job.current_step or 0,
+            step_name=job.step_name or "Queued",
+            at=job.created_at,
+        )
     db.session.add(job)
 
     if job.jobs_manager_run_id:
@@ -75,6 +97,23 @@ def create_job_action(params: dict[str, Any]) -> dict[str, Any]:
 
     db.session.flush()
     return {"job_id": job.id}
+
+
+def create_job_if_missing_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a new pending job only if no completed/skipped job already exists for the post."""
+    job_data = params.get("job_data")
+    if not isinstance(job_data, dict):
+        raise ValueError("job_data must be a dictionary")
+
+    post_guid = job_data.get("post_guid")
+    if not post_guid:
+        raise ValueError("job_data must contain post_guid")
+
+    existing = ProcessingJob.query.filter_by(post_guid=post_guid).first()
+    if existing:
+        return {"job_id": None, "skipped": True}
+
+    return create_job_action({"job_data": job_data})
 
 
 def cancel_existing_jobs_action(params: dict[str, Any]) -> int:
@@ -112,6 +151,8 @@ def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
     if not job:
         raise ValueError(f"Job {job_id} not found")
 
+    now = datetime.now(UTC).replace(tzinfo=None)
+
     job.status = status
     job.current_step = step
     job.step_name = step_name
@@ -122,12 +163,26 @@ def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
         job.error_message = error_message
 
     if status == "running" and not job.started_at:
-        job.started_at = datetime.now(UTC).replace(tzinfo=None)
+        job.started_at = now
     elif (
         status in ["completed", "failed", "cancelled", "skipped"]
         and not job.completed_at
     ):
-        job.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        job.completed_at = now
+
+    # Record stage transitions so the UI can show per-stage durations without
+    # having to track them client-side. Append a new entry each time the step
+    # actually changes (or on the very first status update).
+    history = list(job.stage_history or [])
+    if not history or history[-1].get("step") != step:
+        history.append(
+            {
+                "step": step,
+                "step_name": step_name,
+                "started_at": now.isoformat(),
+            }
+        )
+        job.stage_history = history
 
     if job.jobs_manager_run_id:
         recalculate_run_counts(db.session)
@@ -137,13 +192,14 @@ def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
 
 def mark_cancelled_action(params: dict[str, Any]) -> dict[str, Any]:
     job_id = params.get("job_id")
-    reason = params.get("reason")
+    reason = params.get("reason") or "Cancelled by user request"
 
     job = db.session.get(ProcessingJob, job_id)
     if not job:
         raise ValueError(f"Job {job_id} not found")
 
     job.status = "cancelled"
+    job.step_name = reason
     job.error_message = reason
     job.completed_at = datetime.now(UTC).replace(tzinfo=None)
 
@@ -151,6 +207,53 @@ def mark_cancelled_action(params: dict[str, Any]) -> dict[str, Any]:
         recalculate_run_counts(db.session)
 
     return {"job_id": job.id, "status": "cancelled"}
+
+
+def mark_classification_parse_error_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Flag a job's run as having hit at least one LLM-response parse error.
+
+    Pairs with ``ad_windows_count == 0`` in the zero-ads-guard logic to drive
+    the optional auto-retry. Idempotent: subsequent batches that also fail to
+    parse just leave the flag at True.
+    """
+    job_id = params.get("job_id")
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    job.had_classification_parse_error = True
+    return {"job_id": job.id}
+
+
+def record_ad_windows_count_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Record the final ad-window count for a run.
+
+    Set after ad detection has produced its segments-to-remove list. ``0``
+    is meaningful (no ads found) and different from ``None`` (not yet
+    recorded / wasn't an LLM run).
+    """
+    job_id = params.get("job_id")
+    count = params.get("count")
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    if count is not None:
+        job.ad_windows_count = int(count)
+    return {"job_id": job.id}
+
+
+def mark_auto_retry_attempted_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Idempotency guard for the zero-ads auto-retry.
+
+    Set just before enqueueing a retry job; the worker checks this flag
+    before deciding to retry, so we can never retry twice for the same
+    post even if the retry itself also produces zero ads with parse errors.
+    """
+    job_id = params.get("job_id")
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    job.auto_retry_attempted = True
+    return {"job_id": job.id}
 
 
 def reassign_pending_jobs_action(params: dict[str, Any]) -> int:

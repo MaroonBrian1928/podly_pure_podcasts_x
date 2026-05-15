@@ -13,6 +13,19 @@ from app.writer.protocol import WriteCommand, WriteCommandType, WriteResult
 logger = logging.getLogger("writer")
 
 
+def _command_action_name(cmd: WriteCommand) -> str | None:
+    if cmd.type != WriteCommandType.ACTION:
+        return None
+    if not isinstance(cmd.data, dict):
+        return None
+    action = cmd.data.get("action")
+    return action if isinstance(action, str) else None
+
+
+def _is_dequeue_job_poll(cmd: WriteCommand) -> bool:
+    return _command_action_name(cmd) == "dequeue_job"
+
+
 class CommandExecutor:
     def __init__(self, app: Flask):
         self.app = app
@@ -30,10 +43,16 @@ class CommandExecutor:
         )
         self.register_action("clear_all_jobs", writer_actions.clear_all_jobs_action)
         self.register_action(
+            "clear_active_jobs", writer_actions.clear_active_jobs_action
+        )
+        self.register_action(
             "cleanup_missing_audio_paths",
             writer_actions.cleanup_missing_audio_paths_action,
         )
         self.register_action("create_job", writer_actions.create_job_action)
+        self.register_action(
+            "create_job_if_missing", writer_actions.create_job_if_missing_action
+        )
         self.register_action(
             "cancel_existing_jobs", writer_actions.cancel_existing_jobs_action
         )
@@ -41,6 +60,18 @@ class CommandExecutor:
             "update_job_status", writer_actions.update_job_status_action
         )
         self.register_action("mark_cancelled", writer_actions.mark_cancelled_action)
+        self.register_action(
+            "mark_classification_parse_error",
+            writer_actions.mark_classification_parse_error_action,
+        )
+        self.register_action(
+            "record_ad_windows_count",
+            writer_actions.record_ad_windows_count_action,
+        )
+        self.register_action(
+            "mark_auto_retry_attempted",
+            writer_actions.mark_auto_retry_attempted_action,
+        )
         self.register_action(
             "reassign_pending_jobs", writer_actions.reassign_pending_jobs_action
         )
@@ -54,11 +85,19 @@ class CommandExecutor:
             writer_actions.clear_post_processing_data_action,
         )
         self.register_action(
+            "clear_post_processing_data_keep_transcript",
+            writer_actions.clear_post_processing_data_keep_transcript_action,
+        )
+        self.register_action(
             "cleanup_processed_post", writer_actions.cleanup_processed_post_action
         )
         self.register_action(
             "cleanup_processed_post_files_only",
             writer_actions.cleanup_processed_post_files_only_action,
+        )
+        self.register_action(
+            "prepare_post_for_auto_retry",
+            writer_actions.prepare_post_for_auto_retry_action,
         )
         self.register_action(
             "increment_download_count", writer_actions.increment_download_count_action
@@ -131,6 +170,22 @@ class CommandExecutor:
             "replace_transcription", writer_actions.replace_transcription_action
         )
         self.register_action(
+            "start_transcription_replace",
+            writer_actions.start_transcription_replace_action,
+        )
+        self.register_action(
+            "insert_transcript_segments",
+            writer_actions.insert_transcript_segments_action,
+        )
+        self.register_action(
+            "finish_transcription_replace",
+            writer_actions.finish_transcription_replace_action,
+        )
+        self.register_action(
+            "finish_transcription_replace_from_artifact",
+            writer_actions.finish_transcription_replace_from_artifact_action,
+        )
+        self.register_action(
             "mark_model_call_failed", writer_actions.mark_model_call_failed_action
         )
         self.register_action(
@@ -138,6 +193,9 @@ class CommandExecutor:
         )
         self.register_action(
             "replace_identifications", writer_actions.replace_identifications_action
+        )
+        self.register_action(
+            "replace_audio_segments", writer_actions.replace_audio_segments_action
         )
         self.register_action(
             "update_user_last_active", writer_actions.update_user_last_active_action
@@ -157,12 +215,16 @@ class CommandExecutor:
     def process_command(self, cmd: WriteCommand) -> WriteResult:
         with self.app.app_context():
             try:
-                logger.info(
-                    "[WRITER] Processing command: id=%s type=%s model=%s",
-                    cmd.id,
-                    cmd.type,
-                    cmd.model,
-                )
+                action_name = _command_action_name(cmd)
+                is_dequeue_poll = _is_dequeue_job_poll(cmd)
+                if not is_dequeue_poll:
+                    logger.info(
+                        "[WRITER] Processing command: id=%s type=%s model=%s action=%s",
+                        cmd.id,
+                        cmd.type,
+                        cmd.model,
+                        action_name,
+                    )
                 if cmd.type == WriteCommandType.TRANSACTION:
                     result = self._handle_transaction(cmd)
                     if result.success:
@@ -181,11 +243,7 @@ class CommandExecutor:
                 result = self._execute_single_command(cmd)
                 if result.success:
                     # Suppress commit log for empty dequeue_job actions (polling)
-                    is_polling_noop = (
-                        cmd.type == WriteCommandType.ACTION
-                        and cmd.data.get("action") == "dequeue_job"
-                        and not result.data
-                    )
+                    is_polling_noop = is_dequeue_poll and not result.data
 
                     if not is_polling_noop:
                         logger.info("[WRITER] Committing single command id=%s", cmd.id)
@@ -204,6 +262,26 @@ class CommandExecutor:
                 )
                 db.session.rollback()
                 return WriteResult(cmd.id, False, error=str(e))
+            finally:
+                self._cleanup_session(cmd.id)
+
+    def _cleanup_session(self, command_id: str) -> None:
+        try:
+            db.session.expunge_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[WRITER] Failed to expunge session for command id=%s: %s",
+                command_id,
+                exc,
+            )
+        try:
+            db.session.remove()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[WRITER] Failed to remove session for command id=%s: %s",
+                command_id,
+                exc,
+            )
 
     def _execute_single_command(self, cmd: WriteCommand) -> WriteResult:
         if cmd.type == WriteCommandType.ACTION:

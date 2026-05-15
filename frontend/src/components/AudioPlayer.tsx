@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useAudioPlayer } from '../contexts/AudioPlayerContext';
+import { feedsApi } from '../services/api';
 
 // Simple SVG icons to replace Heroicons
 const PlayIcon = ({ className }: { className: string }) => (
@@ -53,6 +55,12 @@ export default function AudioPlayer() {
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
   const volumeSliderRef = useRef<HTMLDivElement>(null);
+  const { data: chapterData } = useQuery({
+    queryKey: ['episode-chapters', currentEpisode?.guid],
+    queryFn: () => feedsApi.getPostChapters(currentEpisode?.guid ?? ''),
+    enabled: Boolean(currentEpisode?.guid && currentEpisode.has_processed_audio),
+    staleTime: 5 * 60 * 1000,
+  });
 
   // Reset dismissed error when a new error occurs
   useEffect(() => {
@@ -100,26 +108,35 @@ export default function AudioPlayer() {
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
-  const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressBarRef.current || !duration) return;
-    
+  const getTimeFromProgressEvent = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!progressBarRef.current || !duration) return null;
+
     const rect = progressBarRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
-    const newTime = (clickX / rect.width) * duration;
+    return Math.max(0, Math.min((clickX / rect.width) * duration, duration));
+  };
+
+  const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const newTime = getTimeFromProgressEvent(e);
+    if (newTime === null) return;
+
     seekTo(newTime);
   };
 
   const handleProgressMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const newTime = getTimeFromProgressEvent(e);
+    if (newTime === null) return;
+
     setIsDragging(true);
-    handleProgressClick(e);
+    setDragTime(newTime);
   };
 
   const handleProgressMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDragging || !progressBarRef.current || !duration) return;
-    
-    const rect = progressBarRef.current.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const newTime = Math.max(0, Math.min((clickX / rect.width) * duration, duration));
+    if (!isDragging) return;
+
+    const newTime = getTimeFromProgressEvent(e);
+    if (newTime === null) return;
+
     setDragTime(newTime);
   };
 
@@ -150,16 +167,22 @@ export default function AudioPlayer() {
   const displayTime = isDragging ? dragTime : currentTime;
   const progressPercentage = duration > 0 ? (displayTime / duration) * 100 : 0;
   const shouldShowError = error && error !== dismissedError;
+  const chapters = chapterData?.chapters ?? [];
+  const currentChapter = chapters.find((chapter, index) => {
+    const nextChapter = chapters[index + 1];
+    const chapterEnd = nextChapter?.start_time ?? chapter.end_time ?? duration;
+    return displayTime >= chapter.start_time && displayTime < chapterEnd;
+  });
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-50">
+    <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-gray-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
       <div className="max-w-7xl mx-auto px-4 py-3">
         {shouldShowError && (
-          <div className="mb-2 p-2 bg-red-100 border border-red-300 rounded text-red-700 text-sm flex items-center justify-between">
+          <div className="mb-2 flex items-center justify-between rounded border border-red-300 bg-red-100 p-2 text-sm text-red-700 dark:border-red-900/70 dark:bg-red-950 dark:text-red-200">
             <span>{error}</span>
             <button
               onClick={dismissError}
-              className="ml-2 p-1 hover:bg-red-200 rounded transition-colors"
+              className="ml-2 rounded p-1 transition-colors hover:bg-red-200 dark:hover:bg-red-900"
               aria-label="Dismiss error"
             >
               <XMarkIcon className="w-4 h-4" />
@@ -171,16 +194,29 @@ export default function AudioPlayer() {
           {/* Episode Info */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 bg-gray-200 rounded flex-shrink-0 flex items-center justify-center">
-                <span className="text-gray-500 text-xs">🎵</span>
-              </div>
+              {currentEpisode.image_url ? (
+                <img
+                  src={currentEpisode.image_url}
+                  alt=""
+                  className="h-12 w-12 flex-shrink-0 rounded object-cover"
+                />
+              ) : (
+                <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded bg-gray-200 text-gray-500 dark:bg-slate-800 dark:text-slate-400">
+                  <span className="text-xs">♪</span>
+                </div>
+              )}
               <div className="min-w-0 flex-1">
-                <h4 className="text-sm font-medium text-gray-900 truncate">
+                <h4 className="truncate text-sm font-semibold text-gray-900 dark:text-slate-50">
                   {currentEpisode.title}
                 </h4>
-                <p className="text-xs text-gray-500 truncate">
+                <p className="truncate text-xs text-gray-500 dark:text-slate-300">
                   Episode • {formatTime(duration)}
                 </p>
+                {currentChapter && (
+                  <p className="truncate text-xs font-medium text-gray-700 dark:text-slate-200">
+                    {currentChapter.title}
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -196,7 +232,7 @@ export default function AudioPlayer() {
               <button
                 onClick={togglePlayPause}
                 disabled={isLoading}
-                className="p-2 bg-gray-900 text-white rounded-full hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-full bg-gray-900 p-2 text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-white"
               >
                 {isLoading ? (
                   <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -209,34 +245,38 @@ export default function AudioPlayer() {
               
               {/* Keyboard Shortcuts Tooltip */}
               {showKeyboardShortcuts && (
-                <div className="absolute bottom-full mb-2 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white text-xs rounded py-2 px-3 whitespace-nowrap z-10">
+                <div className="absolute bottom-full left-1/2 z-10 mb-2 -translate-x-1/2 transform whitespace-nowrap rounded bg-gray-900 px-3 py-2 text-xs text-white dark:bg-slate-100 dark:text-slate-950">
                   <div className="space-y-1">
                     <div>Space: Play/Pause</div>
                     <div>← →: Seek ±10s</div>
                     <div>↑ ↓: Volume ±10%</div>
                   </div>
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                  <div className="absolute left-1/2 top-full -translate-x-1/2 transform border-4 border-transparent border-t-gray-900 dark:border-t-slate-100"></div>
                 </div>
               )}
             </div>
 
             {/* Progress Bar */}
-            <div className="flex items-center space-x-2 text-xs text-gray-500">
+            <div className="flex items-center space-x-2 text-xs font-medium text-gray-500 dark:text-slate-300">
               <span className="w-10 text-right">{formatTime(displayTime)}</span>
               <div
                 ref={progressBarRef}
-                className="flex-1 h-1 bg-gray-200 rounded-full cursor-pointer relative group audio-player-progress"
+                className="audio-player-progress group relative h-1 flex-1 cursor-pointer rounded-full bg-gray-200 dark:bg-slate-700"
                 onMouseDown={handleProgressMouseDown}
                 onMouseMove={handleProgressMouseMove}
                 onMouseUp={handleProgressMouseUp}
                 onMouseLeave={handleProgressMouseUp}
-                onClick={handleProgressClick}
+                onClick={(e) => {
+                  if (!isDragging) {
+                    handleProgressClick(e);
+                  }
+                }}
               >
                 <div
-                  className="h-full bg-gray-900 rounded-full relative"
+                  className="relative h-full rounded-full bg-gray-900 dark:bg-slate-100"
                   style={{ width: `${progressPercentage}%` }}
                 >
-                  <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-3 h-3 bg-gray-900 rounded-full audio-player-progress-thumb" />
+                  <div className="audio-player-progress-thumb absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 transform rounded-full bg-gray-900 dark:bg-slate-100" />
                 </div>
               </div>
               <span className="w-10">{formatTime(duration)}</span>
@@ -248,7 +288,7 @@ export default function AudioPlayer() {
             <button
               onClick={toggleMute}
               onMouseEnter={() => setShowVolumeSlider(true)}
-              className="p-1 text-gray-600 hover:text-gray-900 transition-colors"
+              className="p-1 text-gray-600 transition-colors hover:text-gray-900 dark:text-slate-300 dark:hover:text-white"
             >
               {volume === 0 ? (
                 <SpeakerXMarkIcon className="w-5 h-5" />
@@ -260,18 +300,18 @@ export default function AudioPlayer() {
             {showVolumeSlider && (
               <div
                 ref={volumeSliderRef}
-                className="absolute bottom-full right-0 mb-2 p-2 bg-white border border-gray-200 rounded shadow-lg audio-player-volume-slider"
+                className="audio-player-volume-slider absolute bottom-full right-0 mb-2 rounded border border-gray-200 bg-white p-2 shadow-lg dark:border-slate-700 dark:bg-slate-900"
                 onMouseEnter={() => setShowVolumeSlider(true)}
               >
                 <div
-                  className="w-20 h-1 bg-gray-200 rounded-full cursor-pointer relative group"
+                  className="group relative h-1 w-20 cursor-pointer rounded-full bg-gray-200 dark:bg-slate-700"
                   onClick={handleVolumeChange}
                 >
                   <div
-                    className="h-full bg-gray-900 rounded-full relative"
+                    className="relative h-full rounded-full bg-gray-900 dark:bg-slate-100"
                     style={{ width: `${volume * 100}%` }}
                   >
-                    <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-3 h-3 bg-gray-900 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <div className="absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 transform rounded-full bg-gray-900 opacity-0 transition-opacity group-hover:opacity-100 dark:bg-slate-100" />
                   </div>
                 </div>
               </div>

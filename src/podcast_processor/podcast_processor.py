@@ -1,29 +1,51 @@
+import concurrent.futures
+import json
 import logging
 import os
 import shutil
+import tempfile
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import litellm
 from jinja2 import Template
+from sqlalchemy import case, func
 from sqlalchemy.orm import object_session
 
 from app.extensions import db
-from app.models import Post, ProcessingJob, TranscriptSegment
+from app.model_call_utils import whisper_model_call_filter
+from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
+from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
-from podcast_processor.audio import clip_segments_exact
+from podcast_processor.audio import clip_segments_exact, overlay_beeps_with_ducking
 from podcast_processor.audio_processor import AudioProcessor
 from podcast_processor.chapter_ad_detector import (
     ChapterAdDetector,
     ChapterDetectionError,
 )
+from podcast_processor.chapter_fallback import (
+    generate_chapters_from_transcript,
+    generate_topic_chapters_from_transcript_with_llm,
+    refine_generated_chapter_titles_with_llm,
+    refine_transcript_chapters_with_word_refiner,
+    resolve_llm_path_chapters,
+)
 from podcast_processor.chapter_filter import parse_filter_strings
-from podcast_processor.chapter_writer import write_adjusted_chapters
+from podcast_processor.chapter_writer import (
+    recalculate_chapter_times,
+    write_adjusted_chapters,
+)
+from podcast_processor.ina_client import AudioSegmentResult, analyze_audio
 from podcast_processor.podcast_downloader import PodcastDownloader, sanitize_title
 from podcast_processor.processing_status_manager import ProcessingStatusManager
+from podcast_processor.profanity_filter import (
+    DEFAULT_PROFANITY_TERMS,
+    PROFANITY_MERGE_GAP_MS,
+    extract_profanity_windows,
+)
 from podcast_processor.prompt import (
     DEFAULT_SYSTEM_PROMPT_PATH,
     DEFAULT_USER_PROMPT_TEMPLATE_PATH,
@@ -32,12 +54,19 @@ from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config
 from shared.processing_paths import (
     ProcessingPaths,
+    find_existing_processed_audio_path,
     get_job_unprocessed_path,
     get_srv_root,
     paths_from_unprocessed_path,
 )
 
 logger = logging.getLogger("global_logger")
+
+
+@dataclass(frozen=True)
+class ProfanityBleepResult:
+    audio_path: str | None
+    windows_ms: list[tuple[int, int]]
 
 
 def get_post_processed_audio_path(post: Post) -> ProcessingPaths | None:
@@ -111,6 +140,11 @@ class PodcastProcessor:
             self.db_session, self.logger
         )
 
+        # litellm is loaded lazily here (not at module top) so that paths which
+        # never use LLM features (e.g. chapter-only) don't pay the ~120 MB
+        # litellm import cost.
+        import litellm
+
         litellm.api_base = self.config.openai_base_url
         litellm.api_key = self.config.llm_api_key
 
@@ -129,6 +163,18 @@ class PodcastProcessor:
             self.audio_processor = AudioProcessor(config=config, logger=self.logger)
         else:
             self.audio_processor = audio_processor
+
+        # In-memory marker: when the zero-ads guard triggers an auto-retry,
+        # the current (failed) job is still mid-flight. Its finalization
+        # would otherwise delete the unprocessed audio file via
+        # ``_remove_unprocessed_audio``, which would force the retry to
+        # re-download — dangerous for dynamic-ad-insertion feeds where
+        # different bytes arrive each request and the saved transcripts
+        # would no longer line up. Holding the post guid here tells
+        # ``_remove_unprocessed_audio`` to skip cleanup so the retry can
+        # reuse the exact file the transcripts were made from. Cleared
+        # after the next ``process()`` call.
+        self._suppress_unprocessed_cleanup_for_guid: str | None = None
 
     def process(  # noqa: PLR0912
         self,
@@ -165,6 +211,15 @@ class PodcastProcessor:
         cached_chapter_filter_strings = getattr(
             post.feed, "chapter_filter_strings", None
         )
+        cached_enable_llm_chapter_fallback_tagging = (
+            self._resolve_llm_chapter_fallback_tagging_enabled(
+                getattr(post, "feed", None),
+                ad_detection_strategy=cached_ad_detection_strategy,
+            )
+        )
+        cached_enable_profanity_bleeping = self._resolve_profanity_bleeping_enabled(
+            getattr(post, "feed", None)
+        )
 
         try:
             self.logger.debug(
@@ -183,6 +238,34 @@ class PodcastProcessor:
                 raise ProcessorException(
                     f"Post with GUID {cached_post_guid} not whitelisted"
                 )
+
+            # Zero-ads guard auto-retry: when the worker dequeues a job
+            # carrying ``auto_retry_attempted=True`` it's a fresh retry for a
+            # post whose prior run produced 0 ads + a classifier parse error.
+            # Without this cleanup, _check_existing_processed_audio (below)
+            # would find the prior run's processed mp3 on disk and exit
+            # immediately, no-oping the retry. Cleanup wipes the bad
+            # processed file + classifier outputs while preserving the
+            # transcripts so Whisper isn't re-billed.
+            if getattr(job, "auto_retry_attempted", False):
+                self.logger.info(
+                    "[ZERO_ADS_GUARD] Job %s is an auto-retry; clearing "
+                    "prior classification artifacts before reprocessing.",
+                    job.id,
+                )
+                try:
+                    writer_client.action(
+                        "prepare_post_for_auto_retry",
+                        {"post_id": post.id},
+                        wait=True,
+                    )
+                    self.db_session.refresh(post)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to prepare post %s for auto-retry; "
+                        "continuing anyway (early-exit may fire).",
+                        post.id,
+                    )
 
             # Check if processed audio already exists (database or disk)
             if self._check_existing_processed_audio(post):
@@ -244,6 +327,8 @@ class PodcastProcessor:
                     cancel_callback,
                     cached_ad_detection_strategy,
                     cached_chapter_filter_strings,
+                    cached_enable_llm_chapter_fallback_tagging,
+                    cached_enable_profanity_bleeping,
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
@@ -338,6 +423,169 @@ class PodcastProcessor:
         self.make_dirs(working_paths)
         return processed_audio_path
 
+    def _ina_enabled(self) -> bool:
+        raw_value = os.environ.get("INA_ENABLED", "")
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _ina_base_url(self) -> str | None:
+        raw_value = os.environ.get("INA_BASE_URL")
+        if raw_value is None:
+            return None
+        base_url = raw_value.strip()
+        return base_url or None
+
+    def _ina_timeout_sec(self) -> int:
+        raw_value = os.environ.get("INA_TIMEOUT_SEC")
+        if raw_value is None:
+            return 3600
+        try:
+            return max(1, int(raw_value))
+        except TypeError, ValueError:
+            self.logger.warning(
+                "Invalid INA_TIMEOUT_SEC=%r; defaulting to 3600 seconds",
+                raw_value,
+            )
+            return 3600
+
+    def _start_optional_ina_analysis(
+        self,
+        post: Post,
+    ) -> tuple[
+        concurrent.futures.ThreadPoolExecutor | None,
+        concurrent.futures.Future[list[AudioSegmentResult]] | None,
+    ]:
+        unprocessed_audio_path = getattr(post, "unprocessed_audio_path", None)
+        if not self._ina_enabled():
+            return None, None
+        if not unprocessed_audio_path or not isinstance(unprocessed_audio_path, str):
+            return None, None
+        if not self._ina_base_url():
+            self.logger.warning(
+                "INA_ENABLED is true but INA_BASE_URL is not set; skipping INA analysis"
+            )
+            return None, None
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            self._run_ina_analysis,
+            int(post.id),
+            unprocessed_audio_path,
+        )
+        return executor, future
+
+    def _await_optional_ina_analysis(
+        self,
+        executor: concurrent.futures.ThreadPoolExecutor | None,
+        future: concurrent.futures.Future[list[AudioSegmentResult]] | None,
+    ) -> None:
+        if future is None:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=False)
+            return
+
+        try:
+            future.result(timeout=self._ina_timeout_sec() + 30)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("INA analysis failed: %s", exc, exc_info=True)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=False)
+
+    def _run_ina_analysis(
+        self,
+        post_id: int,
+        audio_path: str,
+    ) -> list[AudioSegmentResult]:
+        self.logger.info("[INA] Starting INA analysis for post %s", post_id)
+        model_call_id: int | None = None
+        try:
+            upsert_res = writer_client.action(
+                "upsert_model_call",
+                {
+                    "post_id": post_id,
+                    "model_name": "ina:speech_music_noise",
+                    "first_segment_sequence_num": 0,
+                    "last_segment_sequence_num": 0,
+                    "prompt": "INA speech segmenter analysis",
+                },
+                wait=True,
+            )
+            if upsert_res and upsert_res.success:
+                model_call_id = (upsert_res.data or {}).get("model_call_id")
+
+            base_url = self._ina_base_url()
+            if base_url is None:
+                raise RuntimeError(
+                    "INA_BASE_URL is required when INA analysis is enabled"
+                )
+
+            results, raw_response = analyze_audio(
+                audio_path=audio_path,
+                base_url=base_url,
+                timeout=self._ina_timeout_sec(),
+            )
+
+            write_res = writer_client.action(
+                "replace_audio_segments",
+                {
+                    "post_id": post_id,
+                    "segments": [
+                        {
+                            "label": result.label,
+                            "start_time": result.start_time,
+                            "end_time": result.end_time,
+                        }
+                        for result in results
+                    ],
+                    "model_call_id": model_call_id,
+                },
+                wait=True,
+            )
+            if not write_res or not write_res.success:
+                raise RuntimeError(
+                    getattr(write_res, "error", "Failed to persist INA audio segments")
+                )
+
+            if model_call_id is not None:
+                writer_client.update(
+                    "ModelCall",
+                    int(model_call_id),
+                    {
+                        "status": "success",
+                        "response": raw_response,
+                        "error_message": None,
+                        "first_segment_sequence_num": 0,
+                        "last_segment_sequence_num": max(len(results) - 1, 0),
+                    },
+                    wait=True,
+                )
+
+            self.logger.info(
+                "[INA] INA analysis complete for post %s: %s segments",
+                post_id,
+                len(results),
+            )
+            return results
+        except Exception as exc:
+            if model_call_id is not None:
+                try:
+                    writer_client.action(
+                        "mark_model_call_failed",
+                        {
+                            "model_call_id": int(model_call_id),
+                            "error_message": str(exc),
+                            "status": "failed_permanent",
+                        },
+                        wait=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    self.logger.warning(
+                        "[INA] Failed to mark model call %s as failed",
+                        model_call_id,
+                        exc_info=True,
+                    )
+            raise
+
     def _perform_processing_steps(
         self,
         post: Post,
@@ -346,6 +594,8 @@ class PodcastProcessor:
         cancel_callback: Callable[[], bool] | None = None,
         ad_detection_strategy: str = "llm",
         chapter_filter_strings: str | None = None,
+        enable_llm_chapter_fallback_tagging: bool | None = None,
+        enable_profanity_bleeping: bool = False,
     ) -> None:
         """
         Perform the main processing steps based on the ad detection strategy.
@@ -355,17 +605,491 @@ class PodcastProcessor:
             job: The ProcessingJob for tracking
             processed_audio_path: Path where the processed audio will be saved
             cancel_callback: Optional callback to check for cancellation
-            ad_detection_strategy: "llm" or "chapter"
+            ad_detection_strategy: "llm", "chapter", or "chapter_insert"
             chapter_filter_strings: Comma-separated filter strings for chapter strategy
         """
-        if ad_detection_strategy == "chapter":
-            self._perform_chapter_based_processing(
-                post, job, processed_audio_path, cancel_callback, chapter_filter_strings
+        if enable_profanity_bleeping and ad_detection_strategy == "chapter":
+            raise ProcessorException(
+                "Profanity bleeping requires transcripts and is not supported for "
+                "chapter-based ad removal"
             )
-        else:
-            self._perform_llm_based_processing(
-                post, job, processed_audio_path, cancel_callback
+
+        ina_executor, ina_future = self._start_optional_ina_analysis(post)
+        try:
+            if ad_detection_strategy == "chapter":
+                self._perform_chapter_based_processing(
+                    post,
+                    job,
+                    processed_audio_path,
+                    cancel_callback,
+                    chapter_filter_strings,
+                )
+            elif ad_detection_strategy == "chapter_insert":
+                if enable_profanity_bleeping:
+                    self._perform_chapter_insertion_only_processing(
+                        post,
+                        job,
+                        processed_audio_path,
+                        cancel_callback,
+                        enable_profanity_bleeping,
+                    )
+                else:
+                    self._perform_chapter_insertion_only_processing(
+                        post,
+                        job,
+                        processed_audio_path,
+                        cancel_callback,
+                    )
+            else:
+                self._perform_llm_based_processing(
+                    post,
+                    job,
+                    processed_audio_path,
+                    cancel_callback,
+                    enable_llm_chapter_fallback_tagging,
+                    enable_profanity_bleeping,
+                )
+        finally:
+            self._await_optional_ina_analysis(ina_executor, ina_future)
+
+    def _resolve_llm_chapter_fallback_tagging_enabled(
+        self,
+        feed: Any | None,
+        *,
+        ad_detection_strategy: str,
+    ) -> bool:
+        if ad_detection_strategy == "chapter_insert":
+            return True
+
+        feed_override = (
+            getattr(feed, "enable_llm_chapter_fallback_tagging", None)
+            if feed is not None
+            else None
+        )
+        if feed_override is not None:
+            return bool(feed_override)
+
+        return bool(getattr(self.config, "enable_llm_chapter_fallback_tagging", False))
+
+    def _resolve_profanity_bleeping_enabled(self, feed: Any | None) -> bool:
+        if feed is None:
+            return False
+        return bool(getattr(feed, "enable_profanity_bleeping", False))
+
+    def _word_level_boundary_refiner_enabled(self) -> bool:
+        return bool(
+            getattr(self.config, "enable_boundary_refinement", False)
+            and getattr(self.config, "enable_word_level_boundary_refinder", False)
+        )
+
+    def _has_saved_transcript_word_timestamps(self, post: Post | None) -> bool:
+        if post is None:
+            return False
+
+        raw_payload = getattr(post, "transcript_word_timestamps", None)
+        if not isinstance(raw_payload, list):
+            return False
+
+        for segment_payload in raw_payload:
+            if not isinstance(segment_payload, dict):
+                continue
+            words = segment_payload.get("words")
+            if isinstance(words, list) and words:
+                return True
+
+        return False
+
+    def _prepare_profanity_bleeped_audio(
+        self,
+        *,
+        source_audio_path: str | None,
+        processed_audio_path: str,
+        rich_transcript_segments: list[Any] | None,
+        saved_bleep_windows_ms: list[tuple[int, int]] | None = None,
+        enable_profanity_bleeping: bool,
+        use_vbr: bool = False,
+    ) -> ProfanityBleepResult:
+        if not enable_profanity_bleeping:
+            return ProfanityBleepResult(source_audio_path, [])
+        if not source_audio_path:
+            raise ProcessorException(
+                "No unprocessed audio available for profanity bleeping"
             )
+
+        windows_ms = list(saved_bleep_windows_ms or [])
+        if not windows_ms and saved_bleep_windows_ms is None:
+            runtime_whisper = getattr(runtime_config, "whisper", None)
+            if getattr(runtime_whisper, "whisper_type", None) != "remote":
+                raise ProcessorException(
+                    "Profanity bleeping currently requires remote transcription with "
+                    "a WhisperX-compatible endpoint"
+                )
+
+            output_config = getattr(self.config, "output", None)
+            pad_start_ms = int(
+                getattr(output_config, "bleep_padding_start_ms", 150) or 0
+            )
+            pad_end_ms = int(getattr(output_config, "bleep_padding_end_ms", 150) or 0)
+            windows_ms, saw_word_timestamps = self._extract_profanity_windows(
+                rich_transcript_segments or [],
+                pad_start_ms=pad_start_ms,
+                pad_end_ms=pad_end_ms,
+            )
+            if not saw_word_timestamps:
+                raise ProcessorException(
+                    "Profanity bleeping requires WhisperX word timestamps, but the "
+                    "current transcription response did not include them"
+                )
+
+        if not windows_ms:
+            return ProfanityBleepResult(source_audio_path, [])
+
+        temp_dir = str(Path(processed_audio_path).parent)
+        with tempfile.NamedTemporaryFile(
+            suffix=".mp3",
+            prefix="bleeped_source_",
+            delete=False,
+            dir=temp_dir,
+        ) as temp_file:
+            temp_path = temp_file.name
+
+        overlay_beeps_with_ducking(
+            windows_ms,
+            source_audio_path,
+            temp_path,
+            use_vbr=use_vbr,
+        )
+        return ProfanityBleepResult(temp_path, windows_ms)
+
+    def _extract_profanity_windows(
+        self,
+        rich_transcript_segments: list[Any],
+        *,
+        pad_start_ms: int,
+        pad_end_ms: int,
+    ) -> tuple[list[tuple[int, int]], bool]:
+        """Run profanity-window extraction. Tries Rust sidecar first, then falls
+        back to the Python implementation.
+        """
+        from shared.rust_sidecar import (
+            rust_profanity_enabled,
+            try_extract_profanity_windows,
+        )
+
+        # Flatten word list and detect whether word timestamps exist. Both the
+        # Rust path (which receives flat words) and the Python fallback need
+        # this signal, so compute it once here regardless of which path runs.
+        words: list[dict[str, Any]] = []
+        saw_word_timestamps = False
+        for segment in rich_transcript_segments:
+            seg_words = getattr(segment, "words", None) or []
+            if seg_words:
+                saw_word_timestamps = True
+            for w in seg_words:
+                word_text = getattr(w, "word", None)
+                start = getattr(w, "start", None)
+                end = getattr(w, "end", None)
+                if word_text is None or start is None or end is None:
+                    continue
+                words.append(
+                    {
+                        "word": str(word_text),
+                        "start": float(start),
+                        "end": float(end),
+                    }
+                )
+
+        if rust_profanity_enabled() and saw_word_timestamps:
+            rust_windows = try_extract_profanity_windows(
+                words=words,
+                profanity_terms=sorted(DEFAULT_PROFANITY_TERMS),
+                pad_start_ms=pad_start_ms,
+                pad_end_ms=pad_end_ms,
+                merge_gap_ms=PROFANITY_MERGE_GAP_MS,
+            )
+            if rust_windows is not None:
+                return rust_windows, saw_word_timestamps
+
+        return extract_profanity_windows(
+            rich_transcript_segments,
+            pad_start_ms=pad_start_ms,
+            pad_end_ms=pad_end_ms,
+        )
+
+    def _serialize_bleep_windows(
+        self, windows_ms: list[tuple[int, int]]
+    ) -> list[dict[str, float]]:
+        return [
+            {
+                "start_time": round(start_ms / 1000.0, 3),
+                "end_time": round(end_ms / 1000.0, 3),
+            }
+            for start_ms, end_ms in windows_ms
+            if end_ms > start_ms
+        ]
+
+    def _load_saved_bleep_windows(
+        self, post: Post | None
+    ) -> tuple[bool, list[tuple[int, int]]]:
+        if post is None:
+            return False, []
+
+        raw_windows = getattr(post, "bleep_windows", None)
+        if raw_windows is None:
+            return False, []
+        if not isinstance(raw_windows, list):
+            return True, []
+
+        windows_ms: list[tuple[int, int]] = []
+        for item in raw_windows:
+            if not isinstance(item, dict):
+                continue
+
+            start_raw = item.get("start_time")
+            end_raw = item.get("end_time")
+            if start_raw is None or end_raw is None:
+                continue
+
+            try:
+                start_ms = max(0, round(float(start_raw) * 1000.0))
+                end_ms = max(start_ms, round(float(end_raw) * 1000.0))
+            except Exception:  # noqa: BLE001
+                continue
+
+            if end_ms > start_ms:
+                windows_ms.append((start_ms, end_ms))
+
+        return True, windows_ms
+
+    def _cleanup_temp_audio_path(
+        self,
+        temp_audio_path: str | None,
+        *,
+        original_audio_path: str | None,
+    ) -> None:
+        if (
+            not temp_audio_path
+            or temp_audio_path == original_audio_path
+            or not os.path.exists(temp_audio_path)
+        ):
+            return
+
+        try:
+            os.remove(temp_audio_path)
+        except OSError:
+            self.logger.warning(
+                "Failed to remove temporary audio file %s",
+                temp_audio_path,
+                exc_info=True,
+            )
+
+    def _evaluate_zero_ads_guard(
+        self,
+        post: Post,
+        job: ProcessingJob,
+        *,
+        ad_windows_count: int,
+        had_classification_parse_error: bool,
+    ) -> None:
+        """Record the run's final ad-window count and react to a zero-ads
+        outcome.
+
+        Always:
+          - persists ``ad_windows_count`` on the job (visible to the UI)
+          - persists ``had_classification_parse_error`` on the job when set
+          - logs a WARNING when the LLM run produced zero ad windows
+
+        Conditional (LLM run, zero ads, parse error, setting enabled, no
+        prior retry): marks ``auto_retry_attempted`` on the current job and
+        enqueues a fresh pending job for the same post. The worker picks it
+        up on the next tick; the prior job stays in place (with the badge)
+        so the operator can see the failure context.
+        """
+        try:
+            writer_client.action(
+                "record_ad_windows_count",
+                {"job_id": job.id, "count": ad_windows_count},
+                wait=True,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to record ad_windows_count=%s for job %s",
+                ad_windows_count,
+                getattr(job, "id", None),
+            )
+
+        if had_classification_parse_error:
+            try:
+                writer_client.action(
+                    "mark_classification_parse_error",
+                    {"job_id": job.id},
+                    wait=True,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to mark had_classification_parse_error for job %s",
+                    getattr(job, "id", None),
+                )
+
+        if ad_windows_count > 0:
+            return
+
+        feed = getattr(post, "feed", None)
+        strategy = getattr(feed, "ad_detection_strategy", "llm") or "llm"
+        # The chapter strategies legitimately produce zero windows for
+        # episodes that have no advertisement chapters tagged. The guard is
+        # only meaningful for the LLM strategy where zero usually means the
+        # model fumbled.
+        if strategy != "llm":
+            return
+
+        self.logger.warning(
+            "[ZERO_ADS_GUARD] Post %s (job %s) completed with 0 ad windows "
+            "(had_parse_error=%s, auto_retry_attempted=%s). Review whether "
+            "this is a genuine ad-free episode or a classification miss.",
+            getattr(post, "id", None),
+            getattr(job, "id", None),
+            had_classification_parse_error,
+            getattr(job, "auto_retry_attempted", False),
+        )
+
+        if not had_classification_parse_error:
+            return
+
+        if getattr(job, "auto_retry_attempted", False):
+            self.logger.info(
+                "[ZERO_ADS_GUARD] Skipping auto-retry for post %s: a prior "
+                "retry has already been attempted.",
+                getattr(post, "id", None),
+            )
+            return
+
+        output_cfg = getattr(self.config, "output", None)
+        auto_retry_enabled = bool(
+            getattr(output_cfg, "auto_retry_zero_ads_on_parse_error", False)
+        )
+        if not auto_retry_enabled:
+            self.logger.info(
+                "[ZERO_ADS_GUARD] Auto-retry disabled in settings; leaving "
+                "post %s as-is (set output.auto_retry_zero_ads_on_parse_error "
+                "to true to enable).",
+                getattr(post, "id", None),
+            )
+            return
+
+        self.logger.warning(
+            "[ZERO_ADS_GUARD] Auto-requeuing post %s once due to "
+            "classification parse error + zero ad windows.",
+            getattr(post, "id", None),
+        )
+        # Hold the post guid so this run's finalization doesn't delete the
+        # unprocessed audio file before the retry job can reuse it. Vital
+        # for DAI feeds (Megaphone et al.) where re-downloading would yield
+        # different bytes and break transcript alignment.
+        self._suppress_unprocessed_cleanup_for_guid = post.guid
+        try:
+            writer_client.action(
+                "mark_auto_retry_attempted",
+                {"job_id": job.id},
+                wait=True,
+            )
+            writer_client.action(
+                "create_job",
+                {
+                    "job_data": {
+                        "post_guid": post.guid,
+                        "status": "pending",
+                        "current_step": 0,
+                        "total_steps": 4,
+                        "progress_percentage": 0.0,
+                        "step_name": "Queued (auto-retry)",
+                        "jobs_manager_run_id": getattr(
+                            job, "jobs_manager_run_id", None
+                        ),
+                        # Propagate the guard onto the *retry* job too. If
+                        # the retry also produces zero ads + parse error,
+                        # its own evaluation sees this flag and skips
+                        # enqueueing yet another retry. Without this, the
+                        # flag only lives on the failed job we just marked
+                        # and a malformed retry could loop indefinitely.
+                        "auto_retry_attempted": True,
+                    }
+                },
+                wait=True,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to enqueue zero-ads auto-retry for post %s",
+                getattr(post, "id", None),
+            )
+
+    def _make_transcribe_progress_callback(
+        self,
+        job: ProcessingJob,
+        *,
+        step: int,
+        label: str,
+        progress_base: float,
+        progress_span: float = 25.0,
+    ) -> Callable[[int, int], None]:
+        """Build a chunk-progress callback that updates the job's
+        ``step_name`` and ``progress_percentage`` after each whisper chunk
+        completes.
+
+        ``progress_base`` is the percentage to display before the first chunk
+        finishes (matches the value passed to the initial update_job_status
+        call). ``progress_span`` is how much of the bar this transcription
+        owns — defaults to 25% (one full stage).
+        """
+
+        def _on_chunk(chunks_done: int, total_chunks: int) -> None:
+            if total_chunks <= 0:
+                return
+            done = max(0, min(chunks_done, total_chunks))
+            sub_label = (
+                label if total_chunks <= 1 else f"{label} (chunk {done}/{total_chunks})"
+            )
+            progress = progress_base + progress_span * (done / total_chunks)
+            try:
+                self.status_manager.update_job_status(
+                    job, "running", step, sub_label, progress
+                )
+            except Exception:
+                # Sub-progress reporting must never break the actual job.
+                self.logger.exception(
+                    "Failed to publish transcription chunk progress for job %s",
+                    getattr(job, "id", None),
+                )
+
+        return _on_chunk
+
+    def _transcribe_for_processing(
+        self,
+        post: Post,
+        *,
+        include_word_timestamps: bool,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> tuple[list[Any], list[Any] | None]:
+        transcribe_for_processing = getattr(
+            self.transcription_manager,
+            "transcribe_for_processing",
+            None,
+        )
+        if callable(transcribe_for_processing):
+            result = transcribe_for_processing(
+                post,
+                include_word_timestamps=include_word_timestamps,
+                progress_callback=progress_callback,
+            )
+            if isinstance(result, tuple) and len(result) == 2:
+                return result
+
+        return (
+            self.transcription_manager.transcribe(
+                post, progress_callback=progress_callback
+            ),
+            None,
+        )
 
     def _perform_llm_based_processing(
         self,
@@ -373,28 +1097,482 @@ class PodcastProcessor:
         job: ProcessingJob,
         processed_audio_path: str,
         cancel_callback: Callable[[], bool] | None = None,
+        enable_llm_chapter_fallback_tagging: bool | None = None,
+        enable_profanity_bleeping: bool = False,
     ) -> None:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
         """
+        needs_word_timestamps_for_refiner = self._word_level_boundary_refiner_enabled()
+        has_saved_transcript_word_timestamps = (
+            self._has_saved_transcript_word_timestamps(
+                post if needs_word_timestamps_for_refiner else None
+            )
+        )
+        has_saved_bleep_windows, saved_bleep_windows_ms = (
+            self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
+        )
         # Step 2: Transcribe audio
         self.status_manager.update_job_status(
             job, "running", 2, "Transcribing audio", 50.0
         )
-        transcript_segments = self.transcription_manager.transcribe(post)
+        transcribe_progress = self._make_transcribe_progress_callback(
+            job, step=2, label="Transcribing audio", progress_base=50.0
+        )
+        transcript_segments, rich_transcript_segments = self._transcribe_for_processing(
+            post,
+            progress_callback=transcribe_progress,
+            include_word_timestamps=(
+                (enable_profanity_bleeping and not has_saved_bleep_windows)
+                or (
+                    needs_word_timestamps_for_refiner
+                    and not has_saved_transcript_word_timestamps
+                )
+            ),
+        )
         self._raise_if_cancelled(job, 2, cancel_callback)
+        unprocessed_audio_path = (
+            str(post.unprocessed_audio_path) if post.unprocessed_audio_path else None
+        )
+        post_description = post.description
 
         # Step 3: Classify ad segments
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
 
+        # Fail the job if every LLM classification call failed (e.g. rate limit /
+        # service unavailable). Whisper transcription calls are excluded — only
+        # LLM ad-classification calls count. Without at least one successful
+        # classification call there are no identifications, so the episode would
+        # be "completed" with zero ads removed — silently wrong.
+        call_counts = self._get_llm_classification_model_call_counts(int(post.id))
+        if call_counts is None:
+            self.logger.debug(
+                "Skipping LLM classification model call status check for post %s "
+                "because no processor database session is available.",
+                post.id,
+            )
+        elif call_counts.total == 0:
+            self.logger.debug(
+                "No LLM classification model calls recorded for post %s — "
+                "no segments to classify or classification was skipped.",
+                post.id,
+            )
+        elif call_counts.successful == 0:
+            raise ProcessorException(
+                f"LLM classification failed: all {call_counts.total} model call(s) were "
+                "unsuccessful (rate limit or service unavailable). Reprocess to retry."
+            )
+
         # Step 4: Process audio (remove ad segments)
         self.status_manager.update_job_status(
             job, "running", 4, "Processing audio", 90.0
         )
-        self.audio_processor.process_audio(post, processed_audio_path)
+        profanity_bleep_result = self._prepare_profanity_bleeped_audio(
+            source_audio_path=unprocessed_audio_path,
+            processed_audio_path=processed_audio_path,
+            rich_transcript_segments=rich_transcript_segments,
+            saved_bleep_windows_ms=(
+                saved_bleep_windows_ms if has_saved_bleep_windows else None
+            ),
+            enable_profanity_bleeping=enable_profanity_bleeping,
+        )
+        profanity_source_audio_path = profanity_bleep_result.audio_path
+        bleep_windows = (
+            self._serialize_bleep_windows(profanity_bleep_result.windows_ms)
+            if enable_profanity_bleeping
+            else None
+        )
+        try:
+            if profanity_source_audio_path == unprocessed_audio_path:
+                removed_segments_ms = self.audio_processor.process_audio(
+                    post,
+                    processed_audio_path,
+                )
+            else:
+                removed_segments_ms = self.audio_processor.process_audio(
+                    post,
+                    processed_audio_path,
+                    input_audio_path=profanity_source_audio_path,
+                )
+        finally:
+            self._cleanup_temp_audio_path(
+                profanity_source_audio_path,
+                original_audio_path=unprocessed_audio_path,
+            )
+        removed_segments_sec = [
+            (start_ms / 1000.0, end_ms / 1000.0)
+            for start_ms, end_ms in removed_segments_ms
+        ]
 
-        self._finalize_processing(post, job, processed_audio_path)
+        # Zero-ads guard: the LLM strategy occasionally yields zero ad
+        # windows because the model returned malformed JSON for a batch
+        # (parse error swallowed in ad_classifier) rather than because the
+        # episode is genuinely ad-free. Record the count + parse-error flag
+        # so the UI can badge the run, and optionally requeue once.
+        ad_classifier = getattr(self, "ad_classifier", None)
+        self._evaluate_zero_ads_guard(
+            post,
+            job,
+            ad_windows_count=len(removed_segments_ms),
+            had_classification_parse_error=bool(
+                getattr(ad_classifier, "had_parse_error", False)
+            ),
+        )
+
+        chapters_for_output = []
+        chapter_source = "none"
+        chapter_fallback_enabled = (
+            bool(enable_llm_chapter_fallback_tagging)
+            if enable_llm_chapter_fallback_tagging is not None
+            else bool(
+                getattr(self.config, "enable_llm_chapter_fallback_tagging", False)
+            )
+        )
+        if chapter_fallback_enabled:
+            chapters_for_output, chapter_source = resolve_llm_path_chapters(
+                unprocessed_audio_path=unprocessed_audio_path,
+                description=post_description,
+                transcript_segments=transcript_segments,
+                logger_override=self.logger,
+            )
+            if chapter_source == "transcript" and chapters_for_output:
+                transcript_segments_for_chapters = (
+                    self._filter_transcript_segments_for_chapters(
+                        transcript_segments, removed_segments_ms
+                    )
+                )
+                if not transcript_segments_for_chapters:
+                    self.logger.warning(
+                        "All transcript segments overlap removed ad windows for post "
+                        "%s; retaining original transcript-derived chapters",
+                        post.id,
+                    )
+                    transcript_segments_for_chapters = transcript_segments
+
+                chapters_for_output = self._refine_transcript_sourced_chapters(
+                    chapters_for_output=chapters_for_output,
+                    transcript_segments=transcript_segments_for_chapters,
+                    post_id=post.id,
+                )
+            if chapters_for_output:
+                self.logger.info(
+                    "LLM path chapter fallback resolved %d chapters via %s",
+                    len(chapters_for_output),
+                    chapter_source,
+                )
+
+        chapter_data_json: str | None = None
+        if chapters_for_output:
+            write_adjusted_chapters(
+                audio_path=processed_audio_path,
+                chapters_to_keep=chapters_for_output,
+                removed_segments=removed_segments_sec,
+            )
+            adjusted_chapters = recalculate_chapter_times(
+                chapters_for_output, removed_segments_sec
+            )
+            chapter_data_json = json.dumps(
+                {
+                    "chapter_source": chapter_source,
+                    "chapters_for_output": [
+                        {
+                            "title": ch.title,
+                            "start_time": round(ch.start_time_ms / 1000.0, 1),
+                            "end_time": round(ch.end_time_ms / 1000.0, 1),
+                        }
+                        for ch in adjusted_chapters
+                    ],
+                }
+            )
+
+        self._finalize_processing(
+            post,
+            job,
+            processed_audio_path,
+            chapter_data=chapter_data_json,
+            bleep_windows=bleep_windows,
+        )
+
+    def _get_llm_classification_model_call_counts(self, post_id: int) -> Any | None:
+        session = getattr(self, "db_session", None)
+        if session is None:
+            return None
+
+        return (
+            session.query(
+                func.count(ModelCall.id).label("total"),
+                func.count(case((ModelCall.status == "success", 1))).label(
+                    "successful"
+                ),
+            )
+            .filter(
+                ModelCall.post_id == post_id,
+                ~whisper_model_call_filter(),
+            )
+            .one()
+        )
+
+    def _perform_chapter_insertion_only_processing(
+        self,
+        post: Post,
+        job: ProcessingJob,
+        processed_audio_path: str,
+        cancel_callback: Callable[[], bool] | None = None,
+        enable_profanity_bleeping: bool = False,
+    ) -> None:
+        """
+        Resolve and write chapters without ad detection or ad removal.
+        """
+        unprocessed_audio_path = (
+            str(post.unprocessed_audio_path) if post.unprocessed_audio_path else None
+        )
+        if not unprocessed_audio_path:
+            raise ProcessorException(
+                "No unprocessed audio available for chapter insert"
+            )
+
+        post_description = post.description
+        transcript_segments: list[Any] = []
+        rich_transcript_segments: list[Any] | None = None
+        has_saved_bleep_windows, saved_bleep_windows_ms = (
+            self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
+        )
+
+        # First attempt chapter resolution without transcription
+        self.status_manager.update_job_status(
+            job, "running", 2, "Resolving chapters", 50.0
+        )
+        chapters_for_output, chapter_source = resolve_llm_path_chapters(
+            unprocessed_audio_path=unprocessed_audio_path,
+            description=post_description,
+            transcript_segments=transcript_segments,
+            logger_override=self.logger,
+        )
+        self._raise_if_cancelled(job, 2, cancel_callback)
+
+        # Only transcribe if we still need transcript-based fallback chapters
+        if chapter_source == "none" or enable_profanity_bleeping:
+            fallback_label = (
+                "Transcribing audio for chapter generation"
+                if chapter_source == "none"
+                else "Transcribing audio for profanity bleeping"
+            )
+            self.status_manager.update_job_status(
+                job,
+                "running",
+                3,
+                fallback_label,
+                75.0,
+            )
+            fallback_progress = self._make_transcribe_progress_callback(
+                job, step=3, label=fallback_label, progress_base=75.0
+            )
+            (
+                transcript_segments,
+                rich_transcript_segments,
+            ) = self._transcribe_for_processing(
+                post,
+                include_word_timestamps=(
+                    enable_profanity_bleeping and not has_saved_bleep_windows
+                ),
+                progress_callback=fallback_progress,
+            )
+            self._raise_if_cancelled(job, 3, cancel_callback)
+
+            if chapter_source == "none":
+                chapters_for_output, chapter_source = resolve_llm_path_chapters(
+                    unprocessed_audio_path=unprocessed_audio_path,
+                    description=post_description,
+                    transcript_segments=transcript_segments,
+                    logger_override=self.logger,
+                )
+        else:
+            self.status_manager.update_job_status(
+                job, "running", 3, "Chapters resolved", 75.0
+            )
+            self._raise_if_cancelled(job, 3, cancel_callback)
+
+        if (
+            chapter_source == "transcript"
+            and chapters_for_output
+            and transcript_segments
+        ):
+            chapters_for_output = self._refine_transcript_sourced_chapters(
+                chapters_for_output=chapters_for_output,
+                transcript_segments=transcript_segments,
+                post_id=post.id,
+            )
+
+        self.status_manager.update_job_status(
+            job, "running", 4, "Copying audio and writing chapters", 90.0
+        )
+        profanity_bleep_result = self._prepare_profanity_bleeped_audio(
+            source_audio_path=unprocessed_audio_path,
+            processed_audio_path=processed_audio_path,
+            rich_transcript_segments=rich_transcript_segments,
+            saved_bleep_windows_ms=(
+                saved_bleep_windows_ms if has_saved_bleep_windows else None
+            ),
+            enable_profanity_bleeping=enable_profanity_bleeping,
+            use_vbr=False,
+        )
+        profanity_source_audio_path = profanity_bleep_result.audio_path
+        bleep_windows = (
+            self._serialize_bleep_windows(profanity_bleep_result.windows_ms)
+            if enable_profanity_bleeping
+            else None
+        )
+        try:
+            assert profanity_source_audio_path is not None
+            shutil.copyfile(profanity_source_audio_path, processed_audio_path)
+        finally:
+            self._cleanup_temp_audio_path(
+                profanity_source_audio_path,
+                original_audio_path=unprocessed_audio_path,
+            )
+
+        chapter_data_json: str | None = None
+        if chapters_for_output:
+            write_adjusted_chapters(
+                audio_path=processed_audio_path,
+                chapters_to_keep=chapters_for_output,
+                removed_segments=[],
+            )
+            chapter_data_json = json.dumps(
+                {
+                    "chapter_source": chapter_source,
+                    "chapters_for_output": [
+                        {
+                            "title": ch.title,
+                            "start_time": round(ch.start_time_ms / 1000.0, 1),
+                            "end_time": round(ch.end_time_ms / 1000.0, 1),
+                        }
+                        for ch in chapters_for_output
+                    ],
+                }
+            )
+
+        self._finalize_processing(
+            post,
+            job,
+            processed_audio_path,
+            chapter_data=chapter_data_json,
+            bleep_windows=bleep_windows,
+        )
+
+    def _refine_transcript_sourced_chapters(
+        self,
+        *,
+        chapters_for_output: list[Any],
+        transcript_segments: list[Any],
+        post_id: int | None,
+    ) -> list[Any]:
+        if not chapters_for_output or not transcript_segments:
+            return chapters_for_output
+
+        topic_chapters = generate_topic_chapters_from_transcript_with_llm(
+            transcript_segments,
+            llm_model=getattr(self.config, "llm_model", None),
+            llm_api_key=getattr(self.config, "llm_api_key", None),
+            openai_base_url=getattr(self.config, "openai_base_url", None),
+            openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
+            logger_override=self.logger,
+        )
+        if topic_chapters:
+            refined_topic_chapters = refine_transcript_chapters_with_word_refiner(
+                topic_chapters,
+                transcript_segments,
+                config=self.config,
+                logger_override=self.logger,
+            )
+            self.logger.info(
+                "Using %d topic-based transcript chapters from LLM",
+                len(refined_topic_chapters),
+            )
+            return refined_topic_chapters
+
+        self.logger.warning(
+            "Topic-based transcript chapter generation returned no usable plan; "
+            "falling back to heuristic transcript chapter boundaries for post %s",
+            post_id,
+        )
+        fallback_chapters = generate_chapters_from_transcript(transcript_segments)
+        if fallback_chapters:
+            refined_fallback = refine_generated_chapter_titles_with_llm(
+                fallback_chapters,
+                transcript_segments,
+                llm_model=getattr(self.config, "llm_model", None),
+                llm_api_key=getattr(self.config, "llm_api_key", None),
+                openai_base_url=getattr(self.config, "openai_base_url", None),
+                openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
+                logger_override=self.logger,
+            )
+            self.logger.info(
+                "Heuristic transcript chapter boundaries retained after LLM "
+                "title refinement (count=%d)",
+                len(refined_fallback),
+            )
+            return refined_fallback
+
+        self.logger.warning(
+            "No usable transcript segments remained for chapter fallback on post %s; "
+            "retaining original transcript-derived chapters",
+            post_id,
+        )
+        return chapters_for_output
+
+    @staticmethod
+    def _segment_overlaps_removed_audio(
+        segment_start_ms: int,
+        segment_end_ms: int,
+        removed_segments_ms: list[tuple[int, int]],
+    ) -> bool:
+        for removed_start_ms, removed_end_ms in removed_segments_ms:
+            if removed_end_ms <= segment_start_ms:
+                continue
+            if removed_start_ms >= segment_end_ms:
+                return False
+            return True
+        return False
+
+    def _filter_transcript_segments_for_chapters(
+        self,
+        transcript_segments: list[Any],
+        removed_segments_ms: list[tuple[int, int]],
+    ) -> list[Any]:
+        if not transcript_segments or not removed_segments_ms:
+            return transcript_segments
+
+        sorted_removed_segments = sorted(
+            removed_segments_ms, key=lambda window: window[0]
+        )
+        kept_segments: list[Any] = []
+
+        for segment in transcript_segments:
+            segment_start_ms = int(float(getattr(segment, "start_time", 0.0)) * 1000)
+            segment_end_ms = int(float(getattr(segment, "end_time", 0.0)) * 1000)
+            segment_end_ms = max(segment_start_ms, segment_end_ms)
+
+            if self._segment_overlaps_removed_audio(
+                segment_start_ms,
+                segment_end_ms,
+                sorted_removed_segments,
+            ):
+                continue
+
+            kept_segments.append(segment)
+
+        removed_count = len(transcript_segments) - len(kept_segments)
+        if removed_count > 0:
+            self.logger.info(
+                "Excluded %d/%d transcript segments from transcript chapter "
+                "generation because they overlap removed ad windows",
+                removed_count,
+                len(transcript_segments),
+            )
+
+        return kept_segments
 
     def _perform_chapter_based_processing(
         self,
@@ -462,10 +1640,19 @@ class PodcastProcessor:
         )
 
         # Build chapter data for stats
-        import json
-
+        adjusted_kept_chapters = recalculate_chapter_times(
+            chapters_to_keep, ad_segments
+        )
         chapter_data = {
             "filter_strings": filter_strings,
+            "chapters_for_output": [
+                {
+                    "title": ch.title,
+                    "start_time": round(ch.start_time_ms / 1000.0, 1),
+                    "end_time": round(ch.end_time_ms / 1000.0, 1),
+                }
+                for ch in adjusted_kept_chapters
+            ],
             "chapters_kept": [
                 {
                     "title": ch.title,
@@ -494,16 +1681,33 @@ class PodcastProcessor:
         job: ProcessingJob,
         processed_audio_path: str,
         chapter_data: str | None = None,
+        bleep_windows: list[dict[str, float]] | None = None,
     ) -> None:
         """
         Finalize processing: update database and mark job complete.
         """
+        # Capture this BEFORE _remove_unprocessed_audio clears the flag, so
+        # we can match the DB update to the on-disk preservation decision.
+        suppress_for_retry = (
+            self._suppress_unprocessed_cleanup_for_guid is not None
+            and post.guid == self._suppress_unprocessed_cleanup_for_guid
+        )
+        original_unprocessed_path = post.unprocessed_audio_path
+
         # Update the database with the processed audio path
         self._remove_unprocessed_audio(post)
-        update_data = {
+        update_data: dict[str, Any] = {
             "processed_audio_path": processed_audio_path,
-            "unprocessed_audio_path": None,
+            "bleep_windows": bleep_windows,
         }
+        # For the auto-retry handoff we keep the unprocessed path pointed at
+        # the original download. Setting it to None here would force the
+        # retry to re-download — see _remove_unprocessed_audio for the
+        # full DAI rationale.
+        if suppress_for_retry and original_unprocessed_path:
+            update_data["unprocessed_audio_path"] = original_unprocessed_path
+        else:
+            update_data["unprocessed_audio_path"] = None
         if chapter_data is not None:
             update_data["chapter_data"] = chapter_data
         result = writer_client.update(
@@ -784,6 +1988,26 @@ class PodcastProcessor:
         Used after we have a finalized processed file so stale downloads do not
         accumulate on disk.
         """
+        # DAI-safety: if this run just triggered a zero-ads-guard auto-retry
+        # for this post, keep the downloaded bytes so the retry can reuse
+        # them. Re-downloading on a dynamic-ad-insertion feed would yield
+        # different audio than the transcripts describe, which would silently
+        # poison the retry's classifier output. Clear the flag once consumed
+        # so subsequent post finalizations (including the retry's own) clean
+        # up normally.
+        if (
+            self._suppress_unprocessed_cleanup_for_guid is not None
+            and post.guid == self._suppress_unprocessed_cleanup_for_guid
+        ):
+            self.logger.info(
+                "[ZERO_ADS_GUARD] Preserving unprocessed audio for post %s "
+                "so the auto-retry job can reuse the exact bytes the "
+                "retained transcripts were made from.",
+                post.guid,
+            )
+            self._suppress_unprocessed_cleanup_for_guid = None
+            return
+
         path = post.unprocessed_audio_path
         if not path:
             return
@@ -806,51 +2030,48 @@ class PodcastProcessor:
         Returns:
             True if processed audio exists and is valid, False otherwise
         """
-        # If we have a path in the database, check if the file actually exists
-        if post.processed_audio_path is not None:
-            if (
-                os.path.exists(post.processed_audio_path)
-                and os.path.getsize(post.processed_audio_path) > 0
-            ):
+        existing_processed_path = find_existing_processed_audio_path(
+            processed_audio_path=post.processed_audio_path,
+            unprocessed_audio_path=post.unprocessed_audio_path,
+            feed_title=getattr(post.feed, "title", None),
+            post_title=post.title,
+        )
+        if existing_processed_path:
+            processed_path_str = str(existing_processed_path)
+            if post.processed_audio_path != processed_path_str:
                 self.logger.info(
-                    f"Processed audio already available at: {post.processed_audio_path}"
+                    "Found existing processed audio for post '%s' at '%s'. "
+                    "Updated the database path.",
+                    post.title,
+                    processed_path_str,
                 )
-                return True
+                result = writer_client.update(
+                    "Post",
+                    post.id,
+                    {"processed_audio_path": processed_path_str},
+                    wait=True,
+                )
+                if not result or not result.success:
+                    raise RuntimeError(
+                        getattr(result, "error", "Failed to update post")
+                    )
+            else:
+                self.logger.info(
+                    "Processed audio already available at: %s",
+                    post.processed_audio_path,
+                )
+            return True
+
+        if post.processed_audio_path is not None:
             self.logger.info(
-                f"Database path {post.processed_audio_path} doesn't exist or is empty, resetting"
+                "Database path %s doesn't exist or is empty, resetting",
+                post.processed_audio_path,
             )
             result = writer_client.update(
                 "Post", post.id, {"processed_audio_path": None}, wait=True
             )
             if not result or not result.success:
                 raise RuntimeError(getattr(result, "error", "Failed to update post"))
-
-        # Check if file exists on disk at expected location
-        safe_feed_title = sanitize_title(post.feed.title)
-        safe_post_title = sanitize_title(post.title)
-        expected_processed_path = (
-            get_srv_root() / safe_feed_title / f"{safe_post_title}.mp3"
-        )
-
-        if (
-            expected_processed_path.exists()
-            and expected_processed_path.stat().st_size > 0
-        ):
-            # Found a local processed file
-            processed_path_str = str(expected_processed_path.resolve())
-            self.logger.info(
-                f"Found existing processed audio for post '{post.title}' at '{processed_path_str}'. "
-                "Updated the database path."
-            )
-            result = writer_client.update(
-                "Post",
-                post.id,
-                {"processed_audio_path": processed_path_str},
-                wait=True,
-            )
-            if not result or not result.success:
-                raise RuntimeError(getattr(result, "error", "Failed to update post"))
-            return True
 
         return False
 

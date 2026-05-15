@@ -1,0 +1,81 @@
+# Per-Job Processing Worker Process
+
+## Summary
+Move podcast processing out of the long-lived web process by spawning a fresh Python child process for each dequeued job. The web process will keep scheduling, dequeueing, status polling, and cancellation coordination; the child process will load the heavy processing stack, run exactly one job, then exit so its memory is returned to the OS. Keep the existing writer service as the only database-write path.
+
+## Key Changes
+- Add a minimal processing app role:
+  - Add `create_processing_app()` using the existing app factory with `run_startup=False`, `start_scheduler=False`, and no HTTP route/session/CORS setup.
+  - Apply the same no-direct-write SQLAlchemy guard used by the web app to the processing role, so processing continues to write through `writer_client`.
+
+- Add a per-job worker entrypoint:
+  - Create `python -m app.processing_worker --job-id <id> --post-guid <guid>`.
+  - The worker creates the processing app context, hydrates runtime config, fetches the post by GUID, builds the current cancellation callback, runs `PodcastProcessor.process(...)`, logs the result, and exits.
+  - The worker should use process exit only as a transport signal; job truth remains in `ProcessingJob.status`.
+
+- Change `JobsManager._process_job`:
+  - Replace direct `get_processor().process(...)` with a `subprocess.Popen` call using `sys.executable -m app.processing_worker`.
+  - Pass only `job_id` and `post_guid`; do not pass ORM objects across process boundaries.
+  - Ensure the subprocess environment includes the repo `src` path in `PYTHONPATH`.
+  - Keep the existing single-job lock and dequeue behavior, so concurrency stays one job at a time.
+  - Poll the child every 2 seconds. If the DB job becomes `cancelled`, send `terminate()`, wait 10 seconds, then `kill()` if needed.
+  - If the child exits nonzero and the job is not already terminal, mark it `failed` through `ProcessingStatusManager`.
+
+- Keep deployment shape unchanged:
+  - `start_services.sh` still starts only writer plus web.
+  - No new Compose service is required.
+  - No database schema changes or Alembic migration.
+
+## Interfaces
+- New internal CLI:
+  - `python -m app.processing_worker --job-id JOB_ID --post-guid POST_GUID`
+  - Exit `0`: worker completed or job reached a terminal state.
+  - Exit nonzero: parent should inspect DB status and mark failed only if still nonterminal.
+
+- New optional env vars:
+  - `PODLY_PROCESS_WORKER_POLL_SEC`, default `2`
+  - `PODLY_PROCESS_WORKER_TERMINATE_GRACE_SEC`, default `10`
+
+## Test Plan
+- Add worker unit tests for:
+  - missing post marks job failed;
+  - successful processor call exits cleanly;
+  - processor exception does not cause double-failure when job is already terminal;
+  - unexpected exception marks a nonterminal job failed.
+
+- Add `JobsManager` tests for:
+  - spawning the expected `sys.executable -m app.processing_worker` command;
+  - nonzero child exit marks nonterminal job failed;
+  - nonzero child exit leaves completed/cancelled/failed jobs alone;
+  - cancellation polling terminates a running child.
+
+- Add an import/startup regression test:
+  - creating the web app must not import `podcast_processor.podcast_processor`, `litellm`, `openai`, or `groq`.
+
+- Verify with:
+  - `mise exec -- ./scripts/ci.sh`
+  - `docker compose -f compose.yml build`
+
+## Assumptions
+- The requested worker is a per-job child process, not a long-lived daemon or separate container.
+- Existing job queue semantics stay the same: one job at a time, writer owns all writes, web owns scheduling.
+- Existing cancellation remains cooperative inside processing, with parent-side termination added so a cancelled job can also release child memory promptly.
+
+## Implementation Progress
+- [x] Read current plan and job-processing/app-factory code.
+- [x] Confirmed implementation target with claude-context code search.
+- [x] Add minimal processing app role.
+- [x] Add per-job processing worker CLI.
+- [x] Replace in-process `JobsManager` processing with subprocess launch/poll/cancel handling.
+- [x] Add worker and `JobsManager` regression tests.
+- [x] Run `mise exec -- ./scripts/ci.sh`. (`359 passed, 2 skipped`)
+- [x] Run `docker compose -f compose.yml build`.
+
+## Memory Follow-Up Progress
+- [x] Confirmed live post-job RSS was retained by long-lived `web` and `writer` processes, not a lingering processing worker.
+- [x] Added post-worker memory cleanup in the web supervisor.
+- [x] Added writer session removal after every writer command.
+- [x] Added writer payload release and memory cleanup after large processor/feed writer actions.
+- [x] Run `mise exec -- ./scripts/ci.sh`. (`365 passed, 2 skipped`)
+- [x] Run `docker compose -f compose.yml build`.
+- [x] Recreated the running container on the rebuilt image; fresh idle baseline is about 168 MiB container memory (`web` about 111 MiB RSS, `writer` about 94 MiB RSS).

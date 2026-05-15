@@ -1,4 +1,8 @@
 You are analyzing "{{podcast_title}}", a podcast about {{podcast_topic}}.
 Return only the JSON contract described in the system prompt using the transcript excerpt below.
 
+{% if speaker_context %}
+{{speaker_context}}
+
+{% endif %}
 {{transcript}}

@@ -1,4 +1,6 @@
 import { useEpisodeStatus } from '../hooks/useEpisodeStatus';
+import { buildProcessingProgressModel } from '../utils/processingProgress';
+import { JobProgressIndicator } from './JobProgress';
 
 interface EpisodeProcessingStatusProps {
   episodeGuid: string;
@@ -24,61 +26,28 @@ export default function EpisodeProcessingStatus({
     return null;
   }
 
-  const getProgressPercentage = () => {
-    if (!status) return 0;
-    return (status.step / status.total_steps) * 100;
-  };
+  const model = buildProcessingProgressModel({
+    status: status.status,
+    step: status.step,
+    totalSteps: status.total_steps,
+    stepName: status.step_name,
+    progressPercentage: status.progress_percentage,
+  });
 
-  const getStepIcon = (stepNumber: number) => {
-    if (!status) return '○';
-
-    if (status.step > stepNumber) {
-      return '✓'; // Completed
-    } else if (status.step === stepNumber) {
-      return '●'; // Current
-    } else {
-      return '○'; // Not started
-    }
-  };
+  const clamped = Math.max(0, Math.min(100, Math.round(model.progress)));
 
   return (
     <div className={`space-y-2 min-w-[200px] ${className}`}>
-      {/* Progress indicator */}
-      <div className="space-y-1">
-        {/* Progress bar */}
-        <div className="w-full bg-gray-200 rounded-full h-1.5">
-          <div
-            className={`h-1.5 rounded-full transition-all duration-300 ${
-              status.status === 'error' || status.status === 'failed' ? 'bg-red-500' : 'bg-blue-500'
-            }`}
-            style={{ width: `${getProgressPercentage()}%` }}
-          />
-        </div>
+      <JobProgressIndicator
+        model={model}
+        status={status.status}
+        size="compact"
+      />
 
-        {/* Step indicators */}
-        <div className="flex justify-between text-xs text-gray-600">
-          {[1, 2, 3, 4].map((stepNumber) => (
-            <div
-              key={stepNumber}
-              className={`flex flex-col items-center ${
-                status.step === stepNumber ? 'text-blue-600 font-medium' : ''
-              } ${
-                status.step > stepNumber ? 'text-green-600' : ''
-              }`}
-            >
-              <span className="text-xs">{getStepIcon(stepNumber)}</span>
-              <span className="text-xs">{stepNumber}/4</span>
-            </div>
-          ))}
-        </div>
-
-        {/* Current step name */}
-        <div className="text-xs text-center text-gray-600">
-          {status.step_name}
-        </div>
+      <div className="text-xs text-center text-gray-600">
+        {model.currentStageLabel} ({clamped}%)
       </div>
 
-      {/* Error message */}
       {(status.error || status.status === 'failed' || status.status === 'error') && (
         <div className="text-xs text-red-600 text-center">
           {status.error || 'Processing failed'}

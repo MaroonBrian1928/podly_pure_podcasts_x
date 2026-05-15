@@ -1,9 +1,12 @@
+import datetime
+import hashlib
 import logging
 import secrets
+import time
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, cast
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import urlencode
 
 import requests
 import validators
@@ -21,21 +24,25 @@ from flask import (
     url_for,
 )
 from flask.typing import ResponseReturnValue
+from werkzeug.http import http_date
 
 from app.auth import is_auth_enabled
 from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
 from app.extensions import db
 from app.feeds import (
+    _get_base_url,
     add_or_refresh_feed,
     generate_aggregate_feed_xml,
     generate_feed_xml,
+    get_aggregate_feed_last_changed_at,
     is_feed_active_for_user,
     refresh_feed,
 )
 from app.jobs_manager import get_jobs_manager
 from app.models import (
     Feed,
+    Post,
     User,
     UserFeed,
 )
@@ -48,6 +55,7 @@ from app.routes.feed_utils import (
     user_feed_count,
     whitelist_latest_for_first_member,
 )
+from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 
 from .auth_routes import _require_authenticated_user as _auth_get_user
@@ -56,6 +64,228 @@ logger = logging.getLogger("global_logger")
 
 
 feed_bp = Blueprint("feed", __name__)
+_MISSING = object()
+
+# Per-feed debounce so that bursty reader polls don't fan out into N background
+# refresh threads. The scheduled `refresh_all_feeds` job
+# (`src/app/background.py`) is the primary freshness mechanism; this just
+# opportunistically nudges a single-feed refresh on read traffic without ever
+# blocking the response. In-memory state is fine: a process restart simply
+# resets the cooldown and the next poll triggers a fresh kickoff.
+_BACKGROUND_REFRESH_LOCK = Lock()
+_BACKGROUND_REFRESH_LAST_KICKOFF: dict[int, float] = {}
+_AUTO_REFRESH_COOLDOWN_SECONDS = 60.0
+
+
+def _parse_optional_feed_bool(
+    payload: dict[str, Any],
+    field_name: str,
+) -> tuple[object, ResponseReturnValue | None]:
+    if field_name not in payload:
+        return _MISSING, None
+
+    value = payload[field_name]
+    if value is not None and not isinstance(value, bool):
+        return (
+            _MISSING,
+            (
+                jsonify({"error": f"{field_name} must be a boolean or null."}),
+                400,
+            ),
+        )
+    return value, None
+
+
+def _parse_nonnullable_feed_bool(
+    payload: dict[str, Any],
+    field_name: str,
+) -> tuple[object, ResponseReturnValue | None]:
+    value, error_response = _parse_optional_feed_bool(payload, field_name)
+    if error_response is not None:
+        return _MISSING, error_response
+    if value is None:
+        return (
+            _MISSING,
+            (
+                jsonify({"error": f"{field_name} must be a boolean."}),
+                400,
+            ),
+        )
+    return value, None
+
+
+def _validate_profanity_bleeping_settings(
+    *,
+    feed: Feed,
+    updates: dict[str, Any],
+    resolved_strategy: str,
+) -> ResponseReturnValue | None:
+    resolved_bleeping_enabled = updates.get(
+        "enable_profanity_bleeping",
+        bool(getattr(feed, "enable_profanity_bleeping", False)),
+    )
+    if not resolved_bleeping_enabled:
+        return None
+
+    if resolved_strategy not in ("llm", "chapter_insert"):
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "enable_profanity_bleeping is only supported when "
+                        "ad_detection_strategy is 'llm' or 'chapter_insert'"
+                    )
+                }
+            ),
+            400,
+        )
+
+    resolved_confirm_whisperx = updates.get(
+        "confirm_whisperx_endpoint",
+        bool(getattr(feed, "confirm_whisperx_endpoint", False)),
+    )
+    if not resolved_confirm_whisperx:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "confirm_whisperx_endpoint must be true before "
+                        "enable_profanity_bleeping can be enabled"
+                    )
+                }
+            ),
+            400,
+        )
+
+    runtime_whisper = getattr(runtime_config, "whisper", None)
+    runtime_whisper_type = getattr(runtime_whisper, "whisper_type", None)
+    if runtime_whisper_type != "remote":
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "enable_profanity_bleeping currently requires "
+                        "WHISPER_TYPE=remote with a WhisperX-compatible endpoint"
+                    )
+                }
+            ),
+            400,
+        )
+
+    return None
+
+
+def _apply_feed_bool_update(
+    payload: dict[str, Any],
+    updates: dict[str, Any],
+    *,
+    field_name: str,
+    allow_null: bool,
+) -> ResponseReturnValue | None:
+    parser = _parse_optional_feed_bool if allow_null else _parse_nonnullable_feed_bool
+    value, error_response = parser(payload, field_name)
+    if error_response is not None:
+        return error_response
+    if value is not _MISSING:
+        updates[field_name] = value
+    return None
+
+
+def _build_feed_settings_updates(
+    feed: Feed,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, ResponseReturnValue | None]:
+    updates: dict[str, Any] = {}
+
+    if "ad_detection_strategy" in payload:
+        strategy = payload["ad_detection_strategy"]
+        if strategy not in ("llm", "chapter", "chapter_insert"):
+            return (
+                None,
+                (
+                    jsonify(
+                        {
+                            "error": (
+                                "Invalid ad_detection_strategy. Must be "
+                                "'llm', 'chapter', or 'chapter_insert'"
+                            )
+                        }
+                    ),
+                    400,
+                ),
+            )
+        updates["ad_detection_strategy"] = strategy
+
+    if "chapter_filter_strings" in payload:
+        filter_strings = payload["chapter_filter_strings"]
+        if filter_strings is not None and not isinstance(filter_strings, str):
+            return (
+                None,
+                (
+                    jsonify(
+                        {"error": "chapter_filter_strings must be a string or null"}
+                    ),
+                    400,
+                ),
+            )
+        updates["chapter_filter_strings"] = filter_strings
+
+    for field_name, allow_null in (
+        ("enable_llm_chapter_fallback_tagging", True),
+        ("auto_whitelist_new_episodes_override", True),
+        ("enable_profanity_bleeping", False),
+        ("confirm_whisperx_endpoint", False),
+    ):
+        error_response = _apply_feed_bool_update(
+            payload,
+            updates,
+            field_name=field_name,
+            allow_null=allow_null,
+        )
+        if error_response is not None:
+            return None, error_response
+
+    chapter_fallback_enabled = updates.get(
+        "enable_llm_chapter_fallback_tagging",
+        _MISSING,
+    )
+
+    resolved_strategy = updates.get(
+        "ad_detection_strategy",
+        getattr(feed, "ad_detection_strategy", "llm"),
+    )
+    if (
+        resolved_strategy == "chapter_insert"
+        and chapter_fallback_enabled is not _MISSING
+        and chapter_fallback_enabled is False
+    ):
+        return (
+            None,
+            (
+                jsonify(
+                    {
+                        "error": (
+                            "enable_llm_chapter_fallback_tagging cannot be false "
+                            "when ad_detection_strategy is 'chapter_insert'"
+                        )
+                    }
+                ),
+                400,
+            ),
+        )
+
+    profanity_error = _validate_profanity_bleeping_settings(
+        feed=feed,
+        updates=updates,
+        resolved_strategy=resolved_strategy,
+    )
+    if profanity_error is not None:
+        return None, profanity_error
+
+    if not updates:
+        return None, (jsonify({"error": "No settings provided."}), 400)
+
+    return updates, None
 
 
 @feed_bp.route("/feed", methods=["POST"])
@@ -132,12 +362,10 @@ def create_feed_share_link(feed_id: int) -> ResponseReturnValue:
     token_id = str(result.data["token_id"])
     secret = str(result.data["secret"])
 
-    parsed = urlparse(request.host_url)
-    netloc = parsed.netloc
-    scheme = parsed.scheme
+    base_url = _get_base_url()
     path = f"/feed/{feed.id}"
     query = urlencode({"feed_token": token_id, "feed_secret": secret})
-    prefilled_url = urlunparse((scheme, netloc, path, "", query, ""))
+    prefilled_url = f"{base_url}{path}?{query}"
 
     return (
         jsonify(
@@ -235,6 +463,110 @@ def search_feeds() -> ResponseReturnValue:
     )
 
 
+def _aware_utc(value: datetime.datetime | None) -> datetime.datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.UTC)
+    return value.astimezone(datetime.UTC)
+
+
+def _compute_feed_etag(feed: Feed) -> str:
+    """Build a strong ETag value (bare hash, unquoted) for `feed`'s state.
+
+    Inputs are chosen so the tag changes whenever rendered XML can change:
+    `last_changed_at` covers post / channel updates; the post-count and max
+    post-id together catch row creations and (rare) row deletions even if
+    `last_changed_at` is briefly stale.
+    """
+    post_count, max_post_id = (
+        db.session.query(db.func.count(Post.id), db.func.max(Post.id))
+        .filter(Post.feed_id == feed.id)
+        .one()
+    )
+    last_changed = feed.last_changed_at or datetime.datetime.now(datetime.UTC)
+    payload = (
+        f"{feed.id}:{last_changed.isoformat()}:{post_count or 0}:{max_post_id or 0}"
+    )
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
+def _compute_aggregate_etag(user: User | None) -> str:
+    """Build a strong ETag value (bare hash) for the aggregate feed.
+
+    Folds in the set of feed ids so subscribing/unsubscribing invalidates
+    cached responses on the next poll.
+    """
+    if not current_app.config.get("REQUIRE_AUTH") or user is None:
+        feed_ids = sorted(r[0] for r in db.session.query(Feed.id).all())
+    else:
+        feed_ids = sorted(
+            r[0]
+            for r in db.session.query(UserFeed.feed_id)
+            .filter(UserFeed.user_id == user.id)
+            .all()
+        )
+    last_changed = get_aggregate_feed_last_changed_at(user)
+    user_id = user.id if user else 0
+    payload = f"agg:{user_id}:{last_changed.isoformat()}:{','.join(map(str, feed_ids))}"
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
+def _client_has_current_version(
+    etag: str, last_modified_aware: datetime.datetime | None
+) -> bool:
+    """True if the request signals it already has this exact response.
+
+    Honors `If-None-Match` (preferred) and `If-Modified-Since` (legacy).
+    `etag` is the bare digest (without surrounding quotes).
+    """
+    if request.if_none_match and request.if_none_match.contains(etag):
+        return True
+    if last_modified_aware is not None and request.if_modified_since is not None:
+        # HTTP dates are second-resolution; drop microseconds before comparing.
+        lm = last_modified_aware.replace(microsecond=0)
+        ims = request.if_modified_since
+        if ims.tzinfo is None:
+            ims = ims.replace(tzinfo=datetime.UTC)
+        if lm <= ims:
+            return True
+    return False
+
+
+def _apply_feed_response_headers(
+    response: Response, etag: str, last_modified_aware: datetime.datetime
+) -> None:
+    response.headers["ETag"] = f'"{etag}"'
+    response.headers["Last-Modified"] = http_date(last_modified_aware)
+    response.headers["Cache-Control"] = "public, max-age=60"
+
+
+def _make_feed_304(etag: str, last_modified_aware: datetime.datetime) -> Response:
+    response = make_response("", 304)
+    _apply_feed_response_headers(response, etag, last_modified_aware)
+    return response
+
+
+def _should_kickoff_async_refresh(feed_id: int) -> bool:
+    """True iff the per-feed cooldown has elapsed; reserves the next slot."""
+    now = time.monotonic()
+    with _BACKGROUND_REFRESH_LOCK:
+        last = _BACKGROUND_REFRESH_LAST_KICKOFF.get(feed_id)
+        if last is not None and now - last < _AUTO_REFRESH_COOLDOWN_SECONDS:
+            return False
+        _BACKGROUND_REFRESH_LAST_KICKOFF[feed_id] = now
+        return True
+
+
+def _spawn_async_refresh(app: Flask, feed_id: int) -> None:
+    Thread(
+        target=_refresh_feed_background,
+        args=(app, feed_id),
+        daemon=True,
+        name=f"feed-auto-refresh-{feed_id}",
+    ).start()
+
+
 @feed_bp.route("/feed/<int:f_id>", methods=["GET"])
 def get_feed(f_id: int) -> Response:
     if hasattr(g, "current_user") and g.current_user:
@@ -242,14 +574,32 @@ def get_feed(f_id: int) -> Response:
 
     feed = Feed.query.get_or_404(f_id)
 
-    # Refresh the feed
-    refresh_feed(feed)
+    # Fast path: if the reader already has the current version, return 304
+    # before doing any upstream fetch or XML build. Stays correct because the
+    # background scheduler is responsible for keeping `last_changed_at` fresh;
+    # readers just see the previous version one cycle longer when the
+    # scheduler hasn't run yet.
+    cached_etag = _compute_feed_etag(feed)
+    cached_last_modified = _aware_utc(feed.last_changed_at)
+    if cached_last_modified is not None and _client_has_current_version(
+        cached_etag, cached_last_modified
+    ):
+        return _make_feed_304(cached_etag, cached_last_modified)
 
-    # Generate the XML
+    # Don't block the response on an upstream RSS fetch. The scheduled
+    # `refresh_all_feeds` job is the primary freshness source; we additionally
+    # nudge a per-feed refresh on read traffic, debounced so bursty pollers
+    # don't fan out into N threads.
+    if _should_kickoff_async_refresh(f_id):
+        app = cast(Any, current_app)._get_current_object()
+        _spawn_async_refresh(app, f_id)
+
+    response_last_modified = cached_last_modified or datetime.datetime.now(datetime.UTC)
     xml_content = generate_feed_xml(feed)
 
     response = make_response(xml_content)
     response.headers["Content-Type"] = "application/rss+xml"
+    _apply_feed_response_headers(response, cached_etag, response_last_modified)
     return response
 
 
@@ -344,37 +694,59 @@ def update_feed_settings_endpoint(feed_id: int) -> ResponseReturnValue:
     if error_response is not None:
         return error_response
 
+    feed = Feed.query.get_or_404(feed_id)
     payload = request.get_json(silent=True) or {}
-    if "auto_whitelist_new_episodes_override" not in payload:
+    updates, error_response = _build_feed_settings_updates(feed, payload)
+    if error_response is not None:
+        return error_response
+    if updates is None:
         return jsonify({"error": "No settings provided."}), 400
 
-    override = payload.get("auto_whitelist_new_episodes_override")
-    if override is not None and not isinstance(override, bool):
-        return (
-            jsonify(
-                {
-                    "error": "auto_whitelist_new_episodes_override must be a boolean or null."
-                }
-            ),
-            400,
-        )
-
-    result = writer_client.action(
-        "update_feed_settings",
-        {"feed_id": feed_id, "auto_whitelist_new_episodes_override": override},
-        wait=True,
-    )
+    result = writer_client.update("Feed", feed_id, updates, wait=True)
     if result is None or not result.success:
         return (
             jsonify({"error": getattr(result, "error", "Failed to update feed")}),
             500,
         )
 
+    # The writer may commit in a separate process/session; expire local state so the
+    # response reflects the newly persisted values instead of any cached identity-map
+    # object loaded earlier in this request.
+    db.session.expire_all()
     feed = db.session.get(Feed, feed_id)
     if feed is None:
         return jsonify({"error": "Feed not found"}), 404
 
     return jsonify(_serialize_feed(feed, current_user=getattr(g, "current_user", None)))
+
+
+@feed_bp.route("/api/feeds/<int:feed_id>/subscribers", methods=["GET"])
+def get_feed_subscribers(feed_id: int) -> ResponseReturnValue:
+    """Return subscriber list for a feed (admin only)."""
+    _, error_response = require_admin("view feed subscribers")
+    if error_response is not None:
+        return error_response
+
+    feed = db.session.get(Feed, feed_id)
+    if feed is None:
+        return jsonify({"error": "Feed not found"}), 404
+
+    subscribers = []
+    for uf in cast(list[UserFeed], feed.user_feeds):
+        u = uf.user
+        if u is None:
+            continue
+        subscribers.append(
+            {
+                "user_id": u.id,
+                "username": u.username,
+                "role": u.role,
+                "subscription_status": u.feed_subscription_status,
+                "joined_at": uf.created_at.isoformat() if uf.created_at else None,
+            }
+        )
+
+    return jsonify({"feed_id": feed_id, "subscribers": subscribers})
 
 
 def _refresh_feed_background(app: Flask, feed_id: int) -> None:
@@ -462,7 +834,11 @@ def api_feeds() -> ResponseReturnValue:
         feeds = Feed.query.all()
         current_user = getattr(g, "current_user", None)
 
-    feeds_data = [_serialize_feed(feed, current_user=current_user) for feed in feeds]
+    aggregates = _build_feed_aggregates([feed.id for feed in feeds])
+    feeds_data = [
+        _serialize_feed(feed, current_user=current_user, aggregates=aggregates)
+        for feed in feeds
+    ]
     return jsonify(feeds_data)
 
 
@@ -568,18 +944,18 @@ def get_user_aggregate_feed(user_id: int) -> Response:
             return make_response(("Forbidden", 403))
 
     user = db.session.get(User, user_id)
-    if not user:
-        if user_id == 0 and not is_auth_enabled():
-            # Support anonymous aggregate feed when auth is disabled
-            xml_content = generate_aggregate_feed_xml(None)
-            response = make_response(xml_content)
-            response.headers["Content-Type"] = "application/rss+xml"
-            return response
+    if not user and not (user_id == 0 and not is_auth_enabled()):
         return make_response(("User not found", 404))
+
+    etag = _compute_aggregate_etag(user)
+    last_modified = get_aggregate_feed_last_changed_at(user)
+    if _client_has_current_version(etag, last_modified):
+        return _make_feed_304(etag, last_modified)
 
     xml_content = generate_aggregate_feed_xml(user)
     response = make_response(xml_content)
     response.headers["Content-Type"] = "application/rss+xml"
+    _apply_feed_response_headers(response, etag, last_modified)
     return response
 
 
@@ -618,42 +994,9 @@ def get_aggregate_feed_redirect() -> ResponseReturnValue:
 def create_aggregate_feed_link() -> ResponseReturnValue:
     """Generate a unique RSS link for the current user's aggregate feed."""
     settings = current_app.config.get("AUTH_SETTINGS")
-
-    user = None
-    if not settings or not settings.require_auth:
-        # Auth disabled: Use admin user or first available user
-        user = User.query.filter_by(role="admin").first()
-        if not user:
-            user = User.query.first()
-
-        if not user:
-            # Create a default admin user if none exists
-            default_username = "admin"
-            default_password = secrets.token_urlsafe(16)
-
-            result = writer_client.action(
-                "create_user",
-                {
-                    "username": default_username,
-                    "password": default_password,
-                    "role": "admin",
-                },
-                wait=True,
-            )
-            if result and result.success and isinstance(result.data, dict):
-                user_id = result.data.get("user_id")
-                if user_id:
-                    user = db.session.get(User, user_id)
-
-            if not user:
-                return (
-                    jsonify({"error": "No user found and failed to create one."}),
-                    500,
-                )
-    else:
-        user, error = _require_user_or_error()
-        if error:
-            return error
+    user, error = _resolve_aggregate_link_user_or_error(settings)
+    if error:
+        return error
 
     if user is None:
         return jsonify({"error": "Authentication required."}), 401
@@ -670,9 +1013,7 @@ def create_aggregate_feed_link() -> ResponseReturnValue:
     token_id = str(result.data["token_id"])
     secret = str(result.data["secret"])
 
-    parsed = urlparse(request.host_url)
-    netloc = parsed.netloc
-    scheme = parsed.scheme
+    base_url = _get_base_url()
     path = f"/feed/user/{user.id}"
 
     # If auth is disabled, we don't strictly need the token params,
@@ -684,7 +1025,9 @@ def create_aggregate_feed_link() -> ResponseReturnValue:
     else:
         query = ""
 
-    full_url = urlunparse((scheme, netloc, path, "", query, ""))
+    full_url = f"{base_url}{path}"
+    if query:
+        full_url = f"{full_url}?{query}"
 
     return (
         jsonify(
@@ -696,6 +1039,44 @@ def create_aggregate_feed_link() -> ResponseReturnValue:
         ),
         201,
     )
+
+
+def _resolve_aggregate_link_user_or_error(
+    settings: Any,
+) -> tuple[User | None, ResponseReturnValue | None]:
+    if settings and settings.require_auth:
+        return _require_user_or_error()
+    return _get_or_create_default_aggregate_user()
+
+
+def _get_or_create_default_aggregate_user() -> tuple[
+    User | None, ResponseReturnValue | None
+]:
+    user = User.query.filter_by(role="admin").first() or User.query.first()
+    if user is not None:
+        return user, None
+
+    result = writer_client.action(
+        "create_user",
+        {
+            "username": "admin",
+            "password": secrets.token_urlsafe(16),
+            "role": "admin",
+        },
+        wait=True,
+    )
+    if result and result.success and isinstance(result.data, dict):
+        user_id = result.data.get("user_id")
+        if user_id:
+            user = db.session.get(User, user_id)
+
+    if user is None:
+        return None, (
+            jsonify({"error": "No user found and failed to create one."}),
+            500,
+        )
+
+    return user, None
 
 
 def _require_user_or_error(
@@ -718,74 +1099,122 @@ def _require_user_or_error(
     return user, None
 
 
-@feed_bp.route("/api/feeds/<int:feed_id>/settings", methods=["PATCH"])
-def update_feed_settings(feed_id: int) -> ResponseReturnValue:
-    """Update feed settings (ad detection strategy, chapter filter strings)."""
-    user, error = _require_user_or_error(allow_missing_auth=True)
-    if error:
-        return error
+def _latest_episode_release_date(feed: Feed) -> str | None:
+    latest_release_date: datetime.datetime | None = None
 
-    # Only admins can change feed settings
-    if user is not None and user.role != "admin":
-        return jsonify({"error": "Only administrators can modify feed settings."}), 403
+    for post in cast(list[Any], getattr(feed, "posts", [])):
+        release_date = getattr(post, "release_date", None)
+        if release_date is None:
+            continue
 
-    feed = Feed.query.get_or_404(feed_id)
-
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    updates = {}
-
-    # Validate and extract ad_detection_strategy
-    if "ad_detection_strategy" in data:
-        strategy = data["ad_detection_strategy"]
-        if strategy not in ("llm", "chapter"):
-            return (
-                jsonify(
-                    {
-                        "error": "Invalid ad_detection_strategy. Must be 'llm' or 'chapter'"
-                    }
-                ),
-                400,
+        normalized_release_date = release_date
+        if normalized_release_date.tzinfo is None:
+            normalized_release_date = normalized_release_date.replace(
+                tzinfo=datetime.UTC
             )
-        updates["ad_detection_strategy"] = strategy
+        else:
+            normalized_release_date = normalized_release_date.astimezone(datetime.UTC)
 
-    # Validate and extract chapter_filter_strings
-    if "chapter_filter_strings" in data:
-        filter_strings = data["chapter_filter_strings"]
-        if filter_strings is not None and not isinstance(filter_strings, str):
-            return (
-                jsonify({"error": "chapter_filter_strings must be a string or null"}),
-                400,
-            )
-        updates["chapter_filter_strings"] = filter_strings
+        if latest_release_date is None or normalized_release_date > latest_release_date:
+            latest_release_date = normalized_release_date
 
-    if not updates:
-        return jsonify({"error": "No valid fields to update"}), 400
+    return latest_release_date.isoformat() if latest_release_date else None
 
-    result = writer_client.update("Feed", feed.id, updates, wait=True)
-    if not result or not result.success:
-        return (
-            jsonify(
-                {"error": getattr(result, "error", "Failed to update feed settings")}
-            ),
-            500,
+
+class _FeedAggregate:
+    __slots__ = ("latest_release_date_iso", "member_ids", "posts_count")
+
+    def __init__(
+        self,
+        posts_count: int,
+        latest_release_date_iso: str | None,
+        member_ids: list[int],
+    ) -> None:
+        self.posts_count = posts_count
+        self.latest_release_date_iso = latest_release_date_iso
+        self.member_ids = member_ids
+
+
+FeedAggregateMap = dict[int, _FeedAggregate]
+_EMPTY_FEED_AGGREGATE = _FeedAggregate(0, None, [])
+
+
+def _build_feed_aggregates(feed_ids: list[int]) -> FeedAggregateMap:
+    """Batch-fetch post counts, latest release dates, and member IDs for feeds.
+
+    Replaces N+1 lazy loads of `feed.posts` and `feed.user_feeds` with two
+    grouped queries. For ~30 feeds with thousands of posts this drops route
+    time from seconds to milliseconds.
+    """
+    from sqlalchemy import func
+
+    if not feed_ids:
+        return {}
+
+    post_rows = (
+        db.session.query(
+            Post.feed_id,
+            func.count(Post.id),
+            func.max(Post.release_date),
         )
+        .filter(Post.feed_id.in_(feed_ids))
+        .group_by(Post.feed_id)
+        .all()
+    )
+    post_map: dict[int, tuple[int, datetime.datetime | None]] = {
+        feed_id: (count, latest) for feed_id, count, latest in post_rows
+    }
 
-    # Refresh and return updated feed
-    refreshed = Feed.query.get(feed_id)
-    current_user = getattr(g, "current_user", None)
-    return jsonify(_serialize_feed(refreshed or feed, current_user=current_user)), 200
+    membership_rows = (
+        db.session.query(UserFeed.feed_id, UserFeed.user_id)
+        .filter(UserFeed.feed_id.in_(feed_ids))
+        .all()
+    )
+    member_map: dict[int, list[int]] = {fid: [] for fid in feed_ids}
+    for feed_id, user_id in membership_rows:
+        member_map.setdefault(feed_id, []).append(user_id)
+
+    aggregates: FeedAggregateMap = {}
+    for feed_id in feed_ids:
+        count, latest = post_map.get(feed_id, (0, None))
+        latest_iso: str | None = None
+        if latest is not None:
+            normalized = latest
+            if normalized.tzinfo is None:
+                normalized = normalized.replace(tzinfo=datetime.UTC)
+            else:
+                normalized = normalized.astimezone(datetime.UTC)
+            latest_iso = normalized.isoformat()
+        aggregates[feed_id] = _FeedAggregate(
+            posts_count=count,
+            latest_release_date_iso=latest_iso,
+            member_ids=member_map.get(feed_id, []),
+        )
+    return aggregates
 
 
 def _serialize_feed(
     feed: Feed,
     *,
     current_user: User | None = None,
+    aggregates: FeedAggregateMap | None = None,
 ) -> dict[str, Any]:
     auth_enabled = is_auth_enabled()
-    member_ids = [membership.user_id for membership in getattr(feed, "user_feeds", [])]
+
+    if aggregates is not None:
+        agg = aggregates.get(feed.id)
+        if agg is None:
+            agg = _EMPTY_FEED_AGGREGATE
+        member_ids = agg.member_ids
+        posts_count = agg.posts_count
+        latest_release_date = agg.latest_release_date_iso
+    else:
+        # Fallback path (single-feed serialization). Triggers lazy loads.
+        member_ids = [
+            membership.user_id for membership in getattr(feed, "user_feeds", [])
+        ]
+        posts_count = len(cast(list[Any], feed.posts))
+        latest_release_date = _latest_episode_release_date(feed)
 
     # In no-auth mode, everyone is functionally a member.
     is_member = not auth_enabled or bool(
@@ -813,11 +1242,21 @@ def _serialize_feed(
         "auto_whitelist_new_episodes_override": getattr(
             feed, "auto_whitelist_new_episodes_override", None
         ),
-        "posts_count": len(cast(list[Any], feed.posts)),
+        "posts_count": posts_count,
+        "latest_episode_release_date": latest_release_date,
         "member_count": len(member_ids),
         "is_member": is_member,
         "is_active_subscription": is_active_subscription,
         "ad_detection_strategy": getattr(feed, "ad_detection_strategy", "llm"),
         "chapter_filter_strings": getattr(feed, "chapter_filter_strings", None),
+        "enable_llm_chapter_fallback_tagging": getattr(
+            feed, "enable_llm_chapter_fallback_tagging", None
+        ),
+        "enable_profanity_bleeping": bool(
+            getattr(feed, "enable_profanity_bleeping", False)
+        ),
+        "confirm_whisperx_endpoint": bool(
+            getattr(feed, "confirm_whisperx_endpoint", False)
+        ),
     }
     return feed_payload

@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import litellm
 from jinja2 import Template
 
 from app.writer.client import writer_client
@@ -119,6 +118,8 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 )
 
         try:
+            import litellm
+
             response = litellm.completion(
                 model=self.config.llm_model,
                 messages=[{"role": "user", "content": prompt}],

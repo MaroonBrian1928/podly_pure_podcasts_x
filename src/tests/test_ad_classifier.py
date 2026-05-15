@@ -9,7 +9,7 @@ from litellm.exceptions import InternalServerError
 from litellm.types.utils import Choices
 
 from app.extensions import db
-from app.models import ModelCall, Post, TranscriptSegment
+from app.models import AudioSegment, Feed, ModelCall, Post, TranscriptSegment
 from podcast_processor.ad_classifier import AdClassifier
 from podcast_processor.model_output import (
     AdSegmentPrediction,
@@ -20,7 +20,7 @@ from shared.test_utils import create_standard_test_config
 
 
 @pytest.fixture
-def app() -> Generator[Flask, None, None]:
+def app() -> Generator[Flask]:
     """Create and configure a Flask app for testing."""
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
@@ -210,6 +210,7 @@ def test_process_chunk(test_config: Config, app: Flask) -> None:
 
         user_prompt = classifier._generate_user_prompt(
             current_chunk_db_segments=segments,
+            all_transcript_segments=segments,
             post=post,
             user_prompt_template=user_template,
             includes_start=True,
@@ -246,6 +247,159 @@ def test_process_chunk(test_config: Config, app: Flask) -> None:
             mock_get_model_call.assert_called_once()
             mock_process_response.assert_called_once()
             assert result == segments
+
+
+def test_generate_user_prompt_includes_optional_speaker_hints(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    post = Post(id=1, title="Test Post")
+    segments = [
+        TranscriptSegment(
+            id=1,
+            post_id=1,
+            sequence_num=0,
+            start_time=0.0,
+            end_time=10.0,
+            text="Host intro",
+            speaker_label="SPEAKER_00",
+        ),
+        TranscriptSegment(
+            id=2,
+            post_id=1,
+            sequence_num=1,
+            start_time=10.0,
+            end_time=20.0,
+            text="Promo read",
+            speaker_label="SPEAKER_01",
+        ),
+        TranscriptSegment(
+            id=3,
+            post_id=1,
+            sequence_num=2,
+            start_time=20.0,
+            end_time=30.0,
+            text="Back to the show",
+            speaker_label="SPEAKER_00",
+        ),
+    ]
+
+    user_prompt = classifier._generate_user_prompt(
+        current_chunk_db_segments=segments,
+        all_transcript_segments=segments,
+        post=post,
+        user_prompt_template=Template("{{ speaker_context }}\n{{ transcript }}"),
+        includes_start=False,
+        includes_end=False,
+    )
+
+    assert "Speaker context:" in user_prompt
+    assert "SPEAKER_00" in user_prompt
+    assert "SPEAKER_01" in user_prompt
+    assert "[0.0][speaker=SPEAKER_00] Host intro" in user_prompt
+
+
+def test_generate_user_prompt_omits_speaker_hints_when_labels_missing(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    post = Post(id=1, title="Test Post")
+    segments = [
+        TranscriptSegment(
+            id=1,
+            post_id=1,
+            sequence_num=0,
+            start_time=0.0,
+            end_time=10.0,
+            text="Host intro",
+        ),
+    ]
+
+    user_prompt = classifier._generate_user_prompt(
+        current_chunk_db_segments=segments,
+        all_transcript_segments=segments,
+        post=post,
+        user_prompt_template=Template("{{ speaker_context }}\n{{ transcript }}"),
+        includes_start=False,
+        includes_end=False,
+    )
+
+    assert "Speaker context:" not in user_prompt
+    assert "[0.0] Host intro" in user_prompt
+
+
+def test_generate_user_prompt_includes_ina_audio_markers(
+    test_config: Config,
+    app: Flask,
+) -> None:
+    with app.app_context():
+        classifier = AdClassifier(config=test_config, db_session=db.session)
+
+        feed = Feed(title="Prompt Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="prompt-audio-guid",
+            title="Prompt Audio Episode",
+            download_url="https://example.com/audio.mp3",
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                AudioSegment(
+                    post_id=post.id,
+                    start_time=27.4,
+                    end_time=39.0,
+                    label="music",
+                ),
+                AudioSegment(
+                    post_id=post.id,
+                    start_time=39.0,
+                    end_time=40.2,
+                    label="noEnergy",
+                ),
+            ]
+        )
+        db.session.commit()
+
+        segments = [
+            TranscriptSegment(
+                id=1,
+                post_id=post.id,
+                sequence_num=8,
+                start_time=27.3,
+                end_time=29.0,
+                text="No such thing.",
+                speaker_label="SPEAKER_01",
+            ),
+            TranscriptSegment(
+                id=2,
+                post_id=post.id,
+                sequence_num=9,
+                start_time=40.3,
+                end_time=41.6,
+                text="This is an iHeart Podcast.",
+                speaker_label="SPEAKER_12",
+            ),
+        ]
+
+        user_prompt = classifier._generate_user_prompt(
+            current_chunk_db_segments=segments,
+            all_transcript_segments=segments,
+            post=post,
+            user_prompt_template=Template("{{ transcript }}"),
+            includes_start=False,
+            includes_end=False,
+        )
+
+    assert "[27.4] [MUSIC] (11.6s)" in user_prompt
+    assert "[39.0] [NOENERGY] (1.2s)" in user_prompt
+    assert "[40.3][speaker=SPEAKER_12]" in user_prompt
+    assert "This is an iHeart Podcast." in user_prompt
 
 
 def test_compute_next_overlap_segments_includes_context(

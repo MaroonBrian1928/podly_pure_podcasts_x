@@ -8,7 +8,7 @@ import sys
 
 from shared import defaults as DEFAULTS
 from shared.config import Config as RuntimeConfig
-from shared.config import LocalWhisperConfig, OutputConfig, ProcessingConfig
+from shared.config import GroqWhisperConfig, OutputConfig, ProcessingConfig
 
 is_test = "pytest" in sys.modules
 
@@ -27,6 +27,8 @@ else:
         openai_timeout=DEFAULTS.OPENAI_DEFAULT_TIMEOUT_SEC,
         output=OutputConfig(
             fade_ms=DEFAULTS.OUTPUT_FADE_MS,
+            bleep_padding_start_ms=DEFAULTS.OUTPUT_BLEEP_PADDING_START_MS,
+            bleep_padding_end_ms=DEFAULTS.OUTPUT_BLEEP_PADDING_END_MS,
             min_ad_segement_separation_seconds=DEFAULTS.OUTPUT_MIN_AD_SEGMENT_SEPARATION_SECONDS,
             min_ad_segment_length_seconds=DEFAULTS.OUTPUT_MIN_AD_SEGMENT_LENGTH_SECONDS,
             min_confidence=DEFAULTS.OUTPUT_MIN_CONFIDENCE,
@@ -44,7 +46,7 @@ else:
         llm_max_input_tokens_per_minute=DEFAULTS.LLM_MAX_INPUT_TOKENS_PER_MINUTE,
         automatically_whitelist_new_episodes=DEFAULTS.APP_AUTOMATICALLY_WHITELIST_NEW_EPISODES,
         number_of_episodes_to_whitelist_from_archive_of_new_feed=DEFAULTS.APP_NUM_EPISODES_TO_WHITELIST_FROM_ARCHIVE_OF_NEW_FEED,
-        whisper=LocalWhisperConfig(model=DEFAULTS.WHISPER_LOCAL_MODEL),
+        whisper=GroqWhisperConfig(api_key=""),
         enable_public_landing_page=DEFAULTS.APP_ENABLE_PUBLIC_LANDING_PAGE,
         user_limit_total=DEFAULTS.APP_USER_LIMIT_TOTAL,
         developer_mode=os.environ.get("DEVELOPER_MODE", "false").lower() == "true",

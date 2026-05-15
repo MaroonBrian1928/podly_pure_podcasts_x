@@ -1,6 +1,10 @@
 import logging
 import os
+import subprocess
+import sys
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, cast
 
@@ -11,13 +15,14 @@ from app.extensions import db as _db
 from app.extensions import scheduler
 from app.feeds import refresh_feed
 from app.job_manager import JobManager as SingleJobManager
+from app.memory_pressure import collect_incremental, release_memory_to_os
 from app.models import Feed, JobsManagerRun, Post, ProcessingJob
-from app.processor import get_processor
 from app.writer.client import writer_client
-from podcast_processor.podcast_processor import ProcessorException
 from podcast_processor.processing_status_manager import ProcessingStatusManager
+from shared.processing_paths import find_existing_processed_audio_path
 
 logger = logging.getLogger("global_logger")
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 
 
 def _scheduler_app_context() -> Any:
@@ -25,6 +30,18 @@ def _scheduler_app_context() -> Any:
     if scheduler_app is None:
         raise RuntimeError("Scheduler app is not initialized")
     return scheduler_app.app_context()
+
+
+def _env_float(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.2f", name, raw, default)
+        return default
+    return max(minimum, value)
 
 
 class JobsManager:
@@ -170,8 +187,26 @@ class JobsManager:
         created = 0
         for post in posts_without_jobs:
             # Avoid recreating jobs for posts that already have processed audio.
-            # Startup clears ProcessingJob rows, so we must key off post/file state too.
-            if post.processed_audio_path and os.path.exists(post.processed_audio_path):
+            existing_processed_path = find_existing_processed_audio_path(
+                processed_audio_path=post.processed_audio_path,
+                unprocessed_audio_path=post.unprocessed_audio_path,
+                feed_title=getattr(post.feed, "title", None),
+                post_title=post.title,
+            )
+            if existing_processed_path:
+                processed_path_str = str(existing_processed_path)
+                if post.processed_audio_path != processed_path_str:
+                    result = writer_client.update(
+                        "Post",
+                        post.id,
+                        {"processed_audio_path": processed_path_str},
+                        wait=True,
+                    )
+                    if not result or not result.success:
+                        logger.warning(
+                            "Failed to update recovered processed path for post %s",
+                            post.guid,
+                        )
                 continue
 
             SingleJobManager(
@@ -200,9 +235,13 @@ class JobsManager:
             )
 
             if not job:
-                if post.processed_audio_path and os.path.exists(
-                    post.processed_audio_path
-                ):
+                existing_processed_path = find_existing_processed_audio_path(
+                    processed_audio_path=post.processed_audio_path,
+                    unprocessed_audio_path=post.unprocessed_audio_path,
+                    feed_title=getattr(post.feed, "title", None),
+                    post_title=post.title,
+                )
+                if existing_processed_path:
                     return {
                         "status": "skipped",
                         "step": 4,
@@ -232,16 +271,21 @@ class JobsManager:
             }
             if job.started_at:
                 response["started_at"] = job.started_at.isoformat()
-            if (
-                job.status in {"completed", "skipped"}
-                and post.processed_audio_path
-                and os.path.exists(post.processed_audio_path)
+            if job.status in {
+                "completed",
+                "skipped",
+            } and find_existing_processed_audio_path(
+                processed_audio_path=post.processed_audio_path,
+                unprocessed_audio_path=post.unprocessed_audio_path,
+                feed_title=getattr(post.feed, "title", None),
+                post_title=post.title,
             ):
                 response["download_url"] = f"/api/posts/{post_guid}/download"
             if job.status == "failed" and job.error_message:
                 response["error"] = job.error_message
             if job.status == "cancelled" and job.error_message:
                 response["message"] = job.error_message
+                response["step_name"] = job.error_message
             return response
 
     def get_job_status(self, job_id: str) -> dict[str, Any]:
@@ -310,6 +354,12 @@ class JobsManager:
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
                         "error_message": job.error_message,
+                        "stage_history": job.stage_history or [],
+                        "ad_windows_count": job.ad_windows_count,
+                        "had_classification_parse_error": bool(
+                            job.had_classification_parse_error
+                        ),
+                        "auto_retry_attempted": bool(job.auto_retry_attempted),
                     }
                 )
 
@@ -356,6 +406,12 @@ class JobsManager:
                             job.completed_at.isoformat() if job.completed_at else None
                         ),
                         "error_message": job.error_message,
+                        "stage_history": job.stage_history or [],
+                        "ad_windows_count": job.ad_windows_count,
+                        "had_classification_parse_error": bool(
+                            job.had_classification_parse_error
+                        ),
+                        "auto_retry_attempted": bool(job.auto_retry_attempted),
                     }
                 )
 
@@ -405,6 +461,26 @@ class JobsManager:
                 "post_guid": post_guid,
                 "job_ids": job_ids,
                 "message": f"Cancelled {len(job_ids)} jobs",
+            }
+
+    def cancel_queued_jobs(self) -> dict[str, Any]:
+        """Cancel all queued (pending) jobs."""
+        with _scheduler_app_context():
+            queued_jobs = (
+                ProcessingJob.query.filter(ProcessingJob.status == "pending")
+                .order_by(ProcessingJob.created_at.asc())
+                .all()
+            )
+
+            cancelled_job_ids: list[str] = []
+            for job in queued_jobs:
+                self._status_manager.mark_cancelled(job.id, "Cancelled by user request")
+                cancelled_job_ids.append(job.id)
+
+            return {
+                "status": "cancelled",
+                "cancelled_count": len(cancelled_job_ids),
+                "message": f"Cancelled {len(cancelled_job_ids)} queued jobs",
             }
 
     def cleanup_stale_jobs(self, older_than: timedelta) -> int:
@@ -469,6 +545,24 @@ class JobsManager:
             logger.error(f"Error clearing all jobs: {e}")
             return {"status": "error", "message": f"Failed to clear jobs: {e!s}"}
 
+    def clear_active_jobs(self) -> dict[str, Any]:
+        """
+        Clear only pending and running jobs on startup.
+        Completed, failed, skipped, and cancelled jobs are preserved for history.
+        """
+        try:
+            result = writer_client.action("clear_active_jobs", {}, wait=True)
+            count = result.data if result and result.success else 0
+            logger.info(f"Cleared {count} active (pending/running) jobs on startup")
+            return {
+                "status": "success",
+                "cleared_jobs": count,
+                "message": f"Cleared {count} active jobs from database",
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error clearing active jobs: {e}")
+            return {"status": "error", "message": f"Failed to clear active jobs: {e!s}"}
+
     def start_refresh_all_feeds(
         self,
         trigger: str = "scheduled",
@@ -478,17 +572,53 @@ class JobsManager:
         Refresh feeds and enqueue per-post processing into internal worker pool.
         """
         with _scheduler_app_context():
-            feeds = Feed.query.all()
-            for feed in feeds:
-                refresh_feed(feed)
+            feed_ids = [feed_id for (feed_id,) in _db.session.query(Feed.id).all()]
 
-            # Clean up posts with missing audio files
-            self._cleanup_inconsistent_posts()
+        for feed_id in feed_ids:
+            self._refresh_feed_in_short_context(feed_id)
 
-            # Process new posts
-            return self.enqueue_pending_jobs(trigger=trigger, context=context)
+        # Clean up posts with missing audio files
+        self._cleanup_inconsistent_posts()
+
+        # Process new posts
+        return self.enqueue_pending_jobs(trigger=trigger, context=context)
 
     # ------------------------ Helpers ------------------------
+    def _refresh_feed_in_short_context(self, feed_id: int) -> None:
+        """Refresh one feed without keeping the whole scheduled batch in memory."""
+        with _scheduler_app_context():
+            try:
+                feed = _db.session.get(Feed, feed_id)
+                if feed is None:
+                    logger.warning(
+                        "Skipping missing feed during refresh: id=%s", feed_id
+                    )
+                    return
+                refresh_feed(feed)
+            finally:
+                try:
+                    _db.session.expunge_all()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Failed to expunge session after feed refresh id=%s: %s",
+                        feed_id,
+                        exc,
+                        exc_info=True,
+                    )
+                try:
+                    _db.session.remove()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Failed to remove session after feed refresh id=%s: %s",
+                        feed_id,
+                        exc,
+                        exc_info=True,
+                    )
+                collect_incremental(f"scheduled feed refresh feed_id={feed_id}", logger)
+                release_memory_to_os(
+                    f"scheduled feed refresh context feed_id={feed_id}", logger
+                )
+
     def _cleanup_inconsistent_posts(self) -> None:
         """Clean up posts with missing audio files."""
         try:
@@ -589,7 +719,7 @@ class JobsManager:
                 reset_session(_db.session, logger, "worker_loop_exception", exc)
 
     def _process_job(self, job_id: str, post_guid: str) -> None:
-        """Execute a single job using the processor.
+        """Execute a single job in a short-lived child process.
 
         Uses a global processing lock to absolutely guarantee single-job execution.
         """
@@ -620,64 +750,22 @@ class JobsManager:
                         logger.debug(
                             "Worker starting job_id=%s post_guid=%s", job_id, post_guid
                         )
-                        worker_post = Post.query.filter_by(guid=post_guid).first()
-                        if not worker_post:
-                            logger.error(
-                                "Post with GUID %s not found; failing job %s",
-                                post_guid,
+                        process = self._launch_processing_worker(job_id, post_guid)
+                        exit_code = self._wait_for_processing_worker(
+                            process, job_id, post_guid
+                        )
+                        if exit_code:
+                            self._fail_job_if_nonterminal(
                                 job_id,
+                                f"Processing worker exited with status {exit_code}",
                             )
-                            job = _db.session.get(ProcessingJob, job_id)
-                            if job:
-                                self._status_manager.update_job_status(
-                                    job,
-                                    "failed",
-                                    job.current_step or 0,
-                                    "Post not found",
-                                    0.0,
-                                )
-                            return
-
-                        def _cancelled() -> bool:
-                            # Expire the job before re-querying to get fresh state
-                            _db.session.expire_all()
-                            current_job = _db.session.get(ProcessingJob, job_id)
-                            return (
-                                current_job is None or current_job.status == "cancelled"
-                            )
-
-                        get_processor().process(
-                            worker_post, job_id=job_id, cancel_callback=_cancelled
-                        )
-                    except ProcessorException as exc:
-                        logger.info(
-                            "Job %s finished with processor exception: %s", job_id, exc
-                        )
                     except Exception as exc:
                         logger.error(
                             "Unexpected error in job %s: %s", job_id, exc, exc_info=True
                         )
-                        try:
-                            _db.session.expire_all()
-                            failed_job = _db.session.get(ProcessingJob, job_id)
-                            if failed_job and failed_job.status not in [
-                                "completed",
-                                "cancelled",
-                                "failed",
-                            ]:
-                                self._status_manager.update_job_status(
-                                    failed_job,
-                                    "failed",
-                                    failed_job.current_step or 0,
-                                    f"Job execution failed: {exc}",
-                                    failed_job.progress_percentage or 0.0,
-                                )
-                        except Exception as cleanup_error:
-                            logger.error(
-                                "Failed to update job status after error: %s",
-                                cleanup_error,
-                                exc_info=True,
-                            )
+                        self._fail_job_if_nonterminal(
+                            job_id, f"Job execution failed: {exc}"
+                        )
                     finally:
                         # Always clean up session state after job processing to release any locks
                         try:
@@ -690,10 +778,117 @@ class JobsManager:
                             logger.warning(
                                 "Failed to remove session after job: %s", exc
                             )
+                        release_memory_to_os(
+                            f"web supervisor after processing job {job_id}", logger
+                        )
             logger.info(
                 "[JOB_PROCESS] Released processing lock: job_id=%s post_guid=%s",
                 job_id,
                 post_guid,
+            )
+
+    def _launch_processing_worker(
+        self, job_id: str, post_guid: str
+    ) -> subprocess.Popen[bytes]:
+        command = [
+            sys.executable,
+            "-m",
+            "app.processing_worker",
+            "--job-id",
+            job_id,
+            "--post-guid",
+            post_guid,
+        ]
+        logger.info(
+            "Launching processing worker: job_id=%s post_guid=%s command=%s",
+            job_id,
+            post_guid,
+            command,
+        )
+        return subprocess.Popen(command, env=self._processing_worker_env())
+
+    def _processing_worker_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        src_root = Path(__file__).resolve().parents[1]
+        existing_pythonpath = env.get("PYTHONPATH")
+        src_root_str = str(src_root)
+        if existing_pythonpath:
+            entries = existing_pythonpath.split(os.pathsep)
+            if src_root_str not in entries:
+                env["PYTHONPATH"] = os.pathsep.join([src_root_str, existing_pythonpath])
+        else:
+            env["PYTHONPATH"] = src_root_str
+        return env
+
+    def _wait_for_processing_worker(
+        self,
+        process: Any,
+        job_id: str,
+        post_guid: str,
+    ) -> int:
+        poll_seconds = _env_float("PODLY_PROCESS_WORKER_POLL_SEC", 2.0, minimum=0.1)
+        grace_seconds = _env_float(
+            "PODLY_PROCESS_WORKER_TERMINATE_GRACE_SEC", 10.0, minimum=0.0
+        )
+
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
+                logger.info(
+                    "Processing worker exited: job_id=%s post_guid=%s exit_code=%s",
+                    job_id,
+                    post_guid,
+                    exit_code,
+                )
+                return int(exit_code)
+
+            status = self._job_status(job_id)
+            if status == "cancelled":
+                logger.info(
+                    "Processing worker job cancelled; terminating child: "
+                    "job_id=%s post_guid=%s pid=%s",
+                    job_id,
+                    post_guid,
+                    getattr(process, "pid", None),
+                )
+                process.terminate()
+                try:
+                    return int(process.wait(timeout=grace_seconds))
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Processing worker did not exit after cancellation; killing: "
+                        "job_id=%s post_guid=%s pid=%s",
+                        job_id,
+                        post_guid,
+                        getattr(process, "pid", None),
+                    )
+                    process.kill()
+                    return int(process.wait())
+
+            time.sleep(poll_seconds)
+
+    def _job_status(self, job_id: str) -> str | None:
+        _db.session.expire_all()
+        job = _db.session.get(ProcessingJob, job_id)
+        return None if job is None else job.status
+
+    def _fail_job_if_nonterminal(self, job_id: str, message: str) -> None:
+        try:
+            _db.session.expire_all()
+            failed_job = _db.session.get(ProcessingJob, job_id)
+            if failed_job and failed_job.status not in TERMINAL_JOB_STATUSES:
+                self._status_manager.update_job_status(
+                    failed_job,
+                    "failed",
+                    failed_job.current_step or 0,
+                    message,
+                    failed_job.progress_percentage or 0.0,
+                )
+        except Exception as cleanup_error:
+            logger.error(
+                "Failed to update job status after error: %s",
+                cleanup_error,
+                exc_info=True,
             )
 
 

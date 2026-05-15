@@ -67,7 +67,7 @@ def test_refine_tags_parse_failures_with_finish_reason(
             return_value=("prompt", 42),
         ),
         patch(
-            "podcast_processor.word_boundary_refiner.litellm.completion",
+            "litellm.completion",
             return_value=response,
         ),
         caplog.at_level("DEBUG"),
@@ -204,3 +204,122 @@ def test_refine_end_uses_segment_seq_without_phrase() -> None:
     assert err is None
     assert changed is True
     assert refined_end == 205.0
+
+
+def test_estimate_phrase_time_prefers_exact_word_timestamps() -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+
+    estimated = refiner._estimate_phrase_time(
+        all_segments=[
+            {
+                "sequence_num": 12,
+                "start_time": 100.0,
+                "end_time": 110.0,
+                "text": "this is brought to you by a sponsor today",
+                "words": [
+                    {"word": "this", "start": 100.0, "end": 100.4},
+                    {"word": "is", "start": 100.4, "end": 100.8},
+                    {"word": "brought", "start": 100.8, "end": 101.3},
+                    {"word": "to", "start": 101.3, "end": 101.5},
+                    {"word": "you", "start": 101.5, "end": 101.9},
+                    {"word": "by", "start": 101.9, "end": 102.1},
+                    {"word": "a", "start": 102.1, "end": 102.2},
+                    {"word": "sponsor", "start": 104.75, "end": 105.4},
+                    {"word": "today", "start": 105.4, "end": 106.0},
+                ],
+            }
+        ],
+        context_segments=[],
+        preferred_segment_seq=12,
+        phrase="sponsor today",
+        direction="start",
+    )
+
+    assert estimated == 104.75
+
+
+def test_estimate_word_time_prefers_exact_word_timestamps() -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+
+    estimated = refiner._estimate_word_time(
+        all_segments=[
+            {
+                "sequence_num": 15,
+                "start_time": 200.0,
+                "end_time": 210.0,
+                "text": "alpha beta gamma delta",
+                "words": [
+                    {"word": "alpha", "start": 200.0, "end": 200.5},
+                    {"word": "beta", "start": 200.5, "end": 201.0},
+                    {"word": "gamma", "start": 205.25, "end": 205.8},
+                    {"word": "delta", "start": 205.8, "end": 206.4},
+                ],
+            }
+        ],
+        segment_seq=15,
+        word="gamma",
+        occurrence="first",
+        word_index=None,
+    )
+
+    assert estimated == 205.25
+
+
+def test_refine_reverts_invalid_start_only_partial_response() -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    refiner._update_model_call = MagicMock()  # type: ignore[method-assign]
+
+    response = _build_response(
+        content="""
+{
+  "refined_start_segment_seq": 1356,
+  "refined_start_phrase": "we got to take",
+  "refined_end_segment_seq": 0,
+  "refined_end_phrase": null,
+  "start_adjustment_reason": "Transition phrase marks the ad start.",
+  "end_adjustment_reason": "Ad content continues past provided segments."
+}
+""",
+        finish_reason="stop",
+    )
+    all_segments = [
+        {
+            "sequence_num": 1356,
+            "start_time": 12.0,
+            "end_time": 15.0,
+            "text": "we got to take another quick pause for our sponsor",
+        }
+    ]
+
+    with (
+        patch(
+            "podcast_processor.word_boundary_refiner.render_prompt_and_upsert_model_call",
+            return_value=("prompt", 42),
+        ),
+        patch(
+            "litellm.completion",
+            return_value=response,
+        ),
+    ):
+        result = refiner.refine(
+            ad_start=10.0,
+            ad_end=12.0,
+            confidence=0.9,
+            all_segments=all_segments,
+            post_id=99,
+            first_seq_num=1356,
+            last_seq_num=1356,
+        )
+
+    assert result.refined_start == 10.0
+    assert result.refined_end == 12.0
+    assert result.start_adjustment_reason == "unchanged"
+    assert (
+        result.end_adjustment_reason == "Ad content continues past provided segments."
+    )
+
+    update_calls = cast(MagicMock, refiner._update_model_call).call_args_list
+    assert update_calls[0].kwargs["status"] == "received_response"
+    assert update_calls[1].kwargs["status"] == "success_heuristic"
+    assert update_calls[1].kwargs["error_message"] == "start_out_of_window"
+    assert update_calls[2].kwargs["status"] == "success"

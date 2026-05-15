@@ -1,6 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
+import ModalShell from './ModalShell';
+import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
+import { formatBackendDateTime } from '../utils/datetime';
+import ProcessingStageLogs from './ProcessingStageLogs';
+import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
+import {
+  formatTimelineLabel,
+  formatTimelineRange,
+} from '../utils/processingTimeline';
 
 interface LLMProcessingStatsProps {
   episodeGuid: string;
@@ -8,7 +17,14 @@ interface LLMProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'model-calls' | 'transcript' | 'identifications';
+type TabId =
+  | 'overview'
+  | 'audio'
+  | 'speakers'
+  | 'model-calls'
+  | 'transcript'
+  | 'identifications'
+  | 'logs';
 
 export default function LLMProcessingStats({
   episodeGuid,
@@ -36,21 +52,16 @@ export default function LLMProcessingStats({
     return `${minutes}m ${secs}s`;
   };
 
-  const formatTimelineLabel = (seconds: number) => {
-    const totalSeconds = Math.max(0, Math.round(seconds));
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${minutes}:${secs.toString().padStart(2, '0')}`;
-  };
-
   const formatTimestamp = (timestamp: string | null) => {
     if (!timestamp) return 'N/A';
-    return new Date(timestamp).toLocaleString();
+    return formatBackendDateTime(timestamp);
+  };
+
+  const formatBytes = (bytes: number | null) => {
+    if (bytes === null || Number.isNaN(bytes)) return 'unknown';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   const toggleModelCallDetails = (callId: number) => {
@@ -62,6 +73,194 @@ export default function LLMProcessingStats({
     }
     setExpandedModelCalls(newExpanded);
   };
+
+  const getAdConfidence = (segment: {
+    identifications?: Array<{ label: string; confidence: number | null }>;
+  }) => {
+    const adConfidences = (segment.identifications || [])
+      .filter((identification) => identification.label === 'ad' && identification.confidence !== null)
+      .map((identification) => identification.confidence as number);
+
+    if (!adConfidences.length) {
+      return null;
+    }
+
+    return Math.max(...adConfidences);
+  };
+
+  const hasSpeakerLabels = (stats?.transcript_segments || []).some(
+    (segment) => Boolean(segment.speaker_label)
+  );
+  const hasAudioSegments = (stats?.audio_segments?.length || 0) > 0;
+  const nonSpeechAudioSegments = (stats?.audio_segments || []).filter(
+    (segment) => segment.label !== 'speech'
+  );
+  const mergedTranscriptRows = [
+    ...(stats?.transcript_segments || []).map((segment) => ({
+      kind: 'transcript' as const,
+      startTime: segment.start_time,
+      id: `transcript-${segment.id}`,
+      segment,
+    })),
+    ...nonSpeechAudioSegments.map((segment) => ({
+      kind: 'audio' as const,
+      startTime: segment.start_time,
+      id: `audio-${segment.id}`,
+      segment,
+    })),
+  ].sort((left, right) => {
+    if (left.startTime !== right.startTime) {
+      return left.startTime - right.startTime;
+    }
+    if (left.kind === right.kind) {
+      return 0;
+    }
+    return left.kind === 'audio' ? -1 : 1;
+  });
+  const showSpeakerTab = hasSpeakerLabels
+    && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
+  const contentViewKey = isLoading
+    ? 'loading'
+    : error
+      ? 'error'
+      : stats
+        ? activeTab
+        : 'empty';
+  const durationFallbackCandidates = [
+    ...(stats?.transcript_segments || []).map((segment) => segment.end_time),
+    ...((stats?.processing_stats?.bleep_windows || []).map((window) => window.end_time)),
+  ];
+  const fallbackDurationSeconds = durationFallbackCandidates.length
+    ? Math.max(...durationFallbackCandidates)
+    : 0;
+  const fallbackAdBlocks = ((stats?.transcript_segments || [])
+    .filter((segment) => segment.primary_label === 'ad')
+    .map((segment) => ({ startTime: segment.start_time, endTime: segment.end_time }))
+    .sort((a, b) => a.startTime - b.startTime));
+  const mergedFallbackAdBlocks = fallbackAdBlocks.reduce<Array<{ startTime: number; endTime: number }>>((merged, segment) => {
+    if (!merged.length) {
+      return [{ ...segment }];
+    }
+
+    const current = merged[merged.length - 1];
+    if (segment.startTime <= current.endTime + 1) {
+      current.endTime = Math.max(current.endTime, segment.endTime);
+      return merged;
+    }
+
+    merged.push({ ...segment });
+    return merged;
+  }, []);
+  const apiAdBlocks = (stats?.processing_stats?.ad_blocks || []).map((block) => ({
+    startTime: block.start_time,
+    endTime: block.end_time,
+  }));
+  const adBlocks = apiAdBlocks.length ? apiAdBlocks : mergedFallbackAdBlocks;
+  const adTimeSeconds = stats?.processing_stats?.estimated_ad_time_seconds
+    ?? adBlocks.reduce((sum, block) => sum + Math.max(0, block.endTime - block.startTime), 0);
+  const originalDurationSeconds = stats?.processing_stats?.original_duration_seconds
+    ?? (
+      stats?.post?.duration != null
+        ? stats.post.duration + adTimeSeconds
+        : fallbackDurationSeconds
+    );
+  const editedDurationSeconds = stats?.processing_stats?.edited_duration_seconds
+    ?? Math.max(0, originalDurationSeconds - adTimeSeconds);
+  const adPercent = stats?.processing_stats?.ad_percentage
+    ?? (originalDurationSeconds > 0 ? (adTimeSeconds / originalDurationSeconds) * 100 : 0);
+  const bleepTimeSeconds = stats?.processing_stats?.bleeped_time_seconds
+    ?? (stats?.processing_stats?.bleep_windows || []).reduce(
+      (sum, block) => sum + Math.max(0, block.end_time - block.start_time),
+      0
+    );
+  const editedBleepPercent = editedDurationSeconds > 0
+    ? (bleepTimeSeconds / editedDurationSeconds) * 100
+    : 0;
+  const adTimelineSegments = (stats?.processing_stats?.edited_ad_markers || []).map((marker) => ({
+    startTime: marker.edited_start_time,
+    endTime: marker.edited_end_time,
+    kind: 'point' as const,
+    visualDurationSeconds: marker.removed_duration_seconds,
+    tooltipTitle: 'Removed Ad Block',
+    tooltipRows: [
+      {
+        label: 'Edited',
+        value: formatTimelineLabel(marker.edited_start_time),
+      },
+      {
+        label: 'Source Ad',
+        value: formatTimelineRange(marker.original_start_time, marker.original_end_time),
+      },
+      {
+        label: 'Removed',
+        value: formatTimelineLabel(marker.removed_duration_seconds),
+      },
+    ],
+    ariaLabel: [
+      'Removed ad block.',
+      `Edited splice ${formatTimelineLabel(marker.edited_start_time)}.`,
+      `Original range ${formatTimelineRange(marker.original_start_time, marker.original_end_time)}.`,
+      `Removed ${formatTimelineLabel(marker.removed_duration_seconds)}.`,
+    ].join(' '),
+  }));
+  const bleepTimelineSegments = (stats?.processing_stats?.edited_bleep_windows || []).map((window) => ({
+    startTime: (window.edited_start_time + window.edited_end_time) / 2,
+    endTime: (window.edited_start_time + window.edited_end_time) / 2,
+    kind: 'point' as const,
+    visualDurationSeconds: Math.max(0, window.edited_end_time - window.edited_start_time),
+    tooltipTitle: 'Bleeped Section',
+    tooltipRows: [
+      {
+        label: 'Edited',
+        value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
+      },
+      {
+        label: 'Source',
+        value: formatTimelineRange(window.original_start_time, window.original_end_time),
+      },
+    ],
+    ariaLabel: [
+      'Bleeped section.',
+      `Edited audio range ${formatTimelineRange(window.edited_start_time, window.edited_end_time)}.`,
+      `Source audio range ${formatTimelineRange(window.original_start_time, window.original_end_time)}.`,
+    ].join(' '),
+  }));
+  const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
+    ? bleepTimelineSegments.length > 0
+    : (stats?.processing_stats?.has_bleep_windows ?? false);
+  const getAudioLabelStyle = (label: string) => {
+    switch (label) {
+      case 'music':
+        return 'bg-rose-100 text-rose-800';
+      case 'noise':
+        return 'bg-amber-100 text-amber-800';
+      case 'noEnergy':
+        return 'bg-slate-100 text-slate-700';
+      default:
+        return 'bg-gray-100 text-gray-700';
+    }
+  };
+  const getAudioMarkerStyle = (label: string) => {
+    switch (label) {
+      case 'music':
+        return 'bg-rose-50 text-rose-700';
+      case 'noise':
+        return 'bg-amber-50 text-amber-700';
+      case 'noEnergy':
+        return 'bg-slate-100 text-slate-600';
+      default:
+        return 'bg-gray-50 text-gray-600';
+    }
+  };
+
+  useEffect(() => {
+    if (!showSpeakerTab && activeTab === 'speakers') {
+      setActiveTab('overview');
+    }
+    if (!hasAudioSegments && activeTab === 'audio') {
+      setActiveTab('overview');
+    }
+  }, [activeTab, hasAudioSegments, showSpeakerTab]);
 
   if (!hasProcessedAudio) {
     return null;
@@ -76,9 +275,11 @@ export default function LLMProcessingStats({
         Stats
       </button>
 
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-6xl w-full max-h-[90vh] overflow-hidden">
+      <ModalShell
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        panelClassName="bg-white rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
+      >
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-xl font-bold text-gray-900 text-left">Processing Statistics & Debug</h2>
               <button
@@ -91,13 +292,16 @@ export default function LLMProcessingStats({
               </button>
             </div>
 
-            <div className="border-b">
-              <nav className="flex space-x-8 px-6">
+            <div className="border-b overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+              <nav className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
+                  ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
+                  ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
                   { id: 'model-calls', label: 'Model Calls' },
                   { id: 'transcript', label: 'Transcript Segments' },
-                  { id: 'identifications', label: 'Identifications' }
+                  { id: 'identifications', label: 'Identifications' },
+                  { id: 'logs', label: 'Related Logs' }
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -106,25 +310,32 @@ export default function LLMProcessingStats({
                       activeTab === tab.id
                         ? 'border-blue-500 text-blue-600'
                         : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
+                    } shrink-0 whitespace-nowrap`}
                   >
                     {tab.label}
+                    {stats && tab.id === 'audio' && ` (${stats.audio_segments?.length || 0})`}
+                    {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
                     {stats && tab.id === 'model-calls' && stats.model_calls && ` (${stats.model_calls.length})`}
                     {stats && tab.id === 'transcript' && stats.transcript_segments && ` (${stats.transcript_segments.length})`}
                     {stats && tab.id === 'identifications' && stats.identifications && ` (${stats.identifications.length})`}
+                    {stats && tab.id === 'logs' && stats.related_logs && ` (${stats.related_logs.entries.length})`}
                   </button>
                 ))}
               </nav>
             </div>
 
-            <div className="p-6 overflow-y-auto max-h-[calc(90vh-200px)]">
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              <div
+                key={contentViewKey}
+                className="podly-tab-panel-enter min-h-full"
+              >
               {isLoading ? (
-                <div className="flex items-center justify-center py-12">
+                <div className="flex min-h-full items-center justify-center py-12">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
                   <span className="ml-3 text-gray-600">Loading stats...</span>
                 </div>
               ) : error ? (
-                <div className="text-center py-12">
+                <div className="flex min-h-full items-center justify-center text-center py-12">
                   <p className="text-red-600">Failed to load processing statistics</p>
                 </div>
               ) : stats ? (
@@ -156,141 +367,148 @@ export default function LLMProcessingStats({
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                          <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-4 text-center">
-                            <div className="text-2xl font-bold text-blue-600">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-blue-800/70 dark:from-blue-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold text-blue-600 dark:text-blue-200">
                               {stats.processing_stats?.total_segments || 0}
                             </div>
-                            <div className="text-sm text-blue-800">Transcript Segments</div>
+                            <div className="text-sm text-blue-800 dark:text-blue-100">Transcript Segments</div>
                           </div>
 
-                          <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-4 text-center">
-                            <div className="text-2xl font-bold text-green-600">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-green-800/70 dark:from-green-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold text-green-600 dark:text-green-200">
                               {stats.processing_stats?.content_segments || 0}
                             </div>
-                            <div className="text-sm text-green-800">Content Segments</div>
+                            <div className="text-sm text-green-800 dark:text-green-100">Content Segments</div>
                           </div>
 
-                          <div className="bg-gradient-to-br from-red-50 to-red-100 rounded-lg p-4 text-center">
-                            <div className="text-2xl font-bold text-red-600">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-red-800/70 dark:from-red-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold text-red-600 dark:text-red-200">
                               {stats.processing_stats?.ad_segments_count || 0}
                             </div>
-                            <div className="text-sm text-red-800">Ad Segments Removed</div>
+                            <div className="text-sm text-red-800 dark:text-red-100">Ad Segments Removed</div>
                           </div>
                         </div>
                       </div>
 
-                      {(() => {
-                        const durationSeconds = stats.post?.duration
-                          ?? (stats.transcript_segments?.length
-                            ? Math.max(...stats.transcript_segments.map((segment) => segment.end_time))
-                            : 0);
-                        const fallbackAdBlocks = (() => {
-                          const adSegments = (stats.transcript_segments || [])
-                            .filter((segment) => segment.primary_label === 'ad')
-                            .map((segment) => ({ start: segment.start_time, end: segment.end_time }))
-                            .sort((a, b) => a.start - b.start);
-
-                          if (!adSegments.length) return [];
-
-                          const merged: Array<{ start: number; end: number }> = [];
-                          let current = { ...adSegments[0] };
-                          const gapSeconds = 1;
-                          for (const segment of adSegments.slice(1)) {
-                            if (segment.start <= current.end + gapSeconds) {
-                              current.end = Math.max(current.end, segment.end);
-                            } else {
-                              merged.push(current);
-                              current = { ...segment };
-                            }
-                          }
-                          merged.push(current);
-                          return merged;
-                        })();
-
-                        const apiAdBlocks = (stats.processing_stats?.ad_blocks || []).map((block) => ({
-                          start: block.start_time,
-                          end: block.end_time,
-                        }));
-                        const adBlocks = apiAdBlocks.length ? apiAdBlocks : fallbackAdBlocks;
-                        const adTimeSeconds = stats.processing_stats?.estimated_ad_time_seconds
-                          ?? adBlocks.reduce((sum, block) => sum + Math.max(0, block.end - block.start), 0);
-                        const adPercent = durationSeconds > 0
-                          ? (adTimeSeconds / durationSeconds) * 100
-                          : 0;
-                        const cleanSeconds = Math.max(0, durationSeconds - adTimeSeconds);
-                        const timelineTicks = [0, 0.25, 0.5, 0.75, 1];
-
-                        return (
-                          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                            <h3 className="font-semibold text-gray-900 mb-4 text-left">Advertisement Removal Summary</h3>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
-                              <div>
-                                <div className="text-2xl font-bold text-blue-600">{adBlocks.length}</div>
-                                <div className="text-sm text-gray-600">Ad Blocks</div>
-                              </div>
-                              <div>
-                                <div className="text-2xl font-bold text-blue-600">{formatDuration(adTimeSeconds)}</div>
-                                <div className="text-sm text-gray-600">Time Removed</div>
-                              </div>
-                              <div>
-                                <div className="text-2xl font-bold text-rose-600">{adPercent.toFixed(1)}%</div>
-                                <div className="text-sm text-gray-600">Episode Reduced</div>
+                      {stats.debug_info && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                          <h3 className="font-semibold text-gray-900 mb-2 text-left">Debug Details</h3>
+                          <p className="text-xs text-amber-700 mb-4 text-left">
+                            Visible because <code>PODLY_STATS_DEBUG</code> is enabled.
+                          </p>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                            <div className="text-left">
+                              <span className="font-medium text-gray-700">GUID:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">{stats.debug_info.guid}</span>
+                            </div>
+                            <div className="text-left">
+                              <span className="font-medium text-gray-700">Post ID / Feed ID:</span>
+                              <span className="ml-2 text-gray-600">{stats.debug_info.post_id} / {stats.debug_info.feed_id}</span>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Download URL:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">{stats.debug_info.download_url}</span>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Processed Audio Path:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">
+                                {stats.debug_info.processed_audio.path || 'missing'}
+                              </span>
+                              <div className="text-xs text-gray-500 mt-1">
+                                {stats.debug_info.processed_audio.exists
+                                  ? `exists (${formatBytes(stats.debug_info.processed_audio.size_bytes)})`
+                                  : 'missing'}
                               </div>
                             </div>
-
-                            <div className="mt-5 space-y-3">
-                              <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-gray-600">
-                                <div className="flex items-center gap-2">
-                                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-gray-500 border border-gray-200">
-                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
-                                  </span>
-                                  Episode Timeline
-                                </div>
-                                <div className="text-gray-600">
-                                  {formatDuration(cleanSeconds)} clean
-                                  <span className="text-rose-600 ml-2">
-                                    {formatDuration(adTimeSeconds)} removed ({adPercent.toFixed(1)}%)
-                                  </span>
-                                </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Unprocessed Audio Path:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">
+                                {stats.debug_info.unprocessed_audio.path || 'missing'}
+                              </span>
+                              <div className="text-xs text-gray-500 mt-1">
+                                {stats.debug_info.unprocessed_audio.exists
+                                  ? `exists (${formatBytes(stats.debug_info.unprocessed_audio.size_bytes)})`
+                                  : 'missing'}
                               </div>
-
-                              <div className="relative h-3 w-full rounded-full bg-gray-200 overflow-hidden">
-                                <div className="absolute inset-0 bg-gradient-to-r from-blue-500/20 via-blue-400/15 to-blue-500/20" />
-                                {durationSeconds > 0 && adBlocks.map((block, index) => {
-                                  const left = Math.max(0, (block.start / durationSeconds) * 100);
-                                  const width = Math.max(0.5, ((block.end - block.start) / durationSeconds) * 100);
-                                  return (
-                                    <div
-                                      key={`${block.start}-${block.end}-${index}`}
-                                      className="absolute top-0 h-full rounded-full bg-rose-500/70"
-                                      style={{ left: `${left}%`, width: `${width}%` }}
-                                    />
-                                  );
-                                })}
-                              </div>
-
-                              <div className="flex justify-between text-xs text-gray-500">
-                                {timelineTicks.map((tick) => (
-                                  <span key={tick}>{formatTimelineLabel(durationSeconds * tick)}</span>
-                                ))}
-                              </div>
-
-                              <div className="flex items-center gap-4 text-xs text-gray-500">
-                                <span className="flex items-center gap-2">
-                                  <span className="h-2 w-2 rounded-full bg-blue-500" />
-                                  Content
-                                </span>
-                                <span className="flex items-center gap-2">
-                                  <span className="h-2 w-2 rounded-full bg-rose-500" />
-                                  Ads removed
-                                </span>
-                              </div>
+                            </div>
+                            <div className="text-left md:col-span-2">
+                              <span className="font-medium text-gray-700">Data Roots:</span>
+                              <span className="ml-2 text-gray-600 font-mono break-all">
+                                in: {stats.debug_info.processing_roots.in_root} | srv: {stats.debug_info.processing_roots.srv_root}
+                              </span>
+                            </div>
+                            <div className="text-left">
+                              <span className="font-medium text-gray-700">Record Counts:</span>
+                              <span className="ml-2 text-gray-600">
+                                segments {stats.debug_info.record_counts.transcript_segments}, calls {stats.debug_info.record_counts.model_calls}, ids {stats.debug_info.record_counts.identifications}
+                              </span>
                             </div>
                           </div>
-                        );
-                      })()}
+
+                          <div className="mt-4">
+                            <h4 className="font-medium text-gray-900 mb-2 text-left">Processed Audio Path Candidates</h4>
+                            {(stats.debug_info.processed_audio_path_candidates || []).length === 0 ? (
+                              <p className="text-xs text-gray-500 text-left">No candidates derived.</p>
+                            ) : (
+                              <div className="space-y-2">
+                                {(stats.debug_info.processed_audio_path_candidates || []).map((candidate, idx) => (
+                                  <div key={`${candidate.path}-${idx}`} className="bg-white border border-amber-100 rounded p-2">
+                                    <div className="font-mono text-xs text-gray-700 break-all text-left">{candidate.path}</div>
+                                    <div className="text-xs text-gray-500 mt-1 text-left">
+                                      {candidate.exists ? `exists (${formatBytes(candidate.size_bytes)})` : 'missing'}
+                                      {candidate.error ? ` - ${candidate.error}` : ''}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      <ProcessingTimelineSummaryCard
+                        title="Advertisement Removal Summary"
+                        itemCount={adBlocks.length}
+                        itemLabel="Ad Blocks"
+                        totalTimeSeconds={adTimeSeconds}
+                        totalTimeLabel="Time Removed"
+                        percentage={adPercent}
+                        percentageLabel="Episode Reduced"
+                        durationSeconds={originalDurationSeconds}
+                        timelineDurationSeconds={originalDurationSeconds}
+                        minimumSegmentWidthPx={4}
+                        minimumPointWidthPx={7}
+                        segments={adTimelineSegments}
+                        metricAccentClassName="text-blue-600 dark:text-blue-200"
+                        percentageAccentClassName="text-rose-600 dark:text-rose-300"
+                        tooltipAccentClassName="text-rose-700 dark:text-rose-300"
+                        segmentClassName="bg-rose-500 dark:bg-rose-400"
+                        legendBaseLabel="Content"
+                        legendSegmentLabel="Ad cuts"
+                      />
+
+                      {hasBleepWindows && (
+                        <ProcessingTimelineSummaryCard
+                          title="Bleeps Added"
+                          itemCount={bleepTimelineSegments.length}
+                          itemLabel="Bleeped Sections"
+                          totalTimeSeconds={bleepTimeSeconds}
+                          totalTimeLabel="Time Bleeped"
+                          percentage={editedBleepPercent}
+                          percentageLabel="Edited Audio Bleeped"
+                          durationSeconds={editedDurationSeconds}
+                          timelineDurationSeconds={originalDurationSeconds}
+                          minimumSegmentWidthPx={2}
+                          minimumPointWidthPx={6}
+                          segments={bleepTimelineSegments}
+                          metricAccentClassName="text-amber-600 dark:text-amber-200"
+                          percentageAccentClassName="text-amber-700 dark:text-amber-300"
+                          tooltipAccentClassName="text-amber-700 dark:text-amber-300"
+                          segmentClassName="bg-amber-500 dark:bg-amber-400"
+                          legendBaseLabel="Unbleeped audio"
+                          legendSegmentLabel="Bleep markers"
+                        />
+                      )}
 
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">AI Model Performance</h3>
@@ -365,7 +583,7 @@ export default function LLMProcessingStats({
                                       </span>
                                     </td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
-                                    <td className="px-4 py-3 text-sm text-gray-600">{call.retry_attempts}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
                                     <td className="px-4 py-3">
                                       <button
                                         onClick={() => toggleModelCallDetails(call.id)}
@@ -416,6 +634,50 @@ export default function LLMProcessingStats({
                     </div>
                   )}
 
+                  {activeTab === 'speakers' && showSpeakerTab && (
+                    <div>
+                      <SpeakerTimeBreakdown
+                        speakerBreakdown={stats.processing_stats?.speaker_breakdown}
+                      />
+                    </div>
+                  )}
+
+                  {activeTab === 'audio' && hasAudioSegments && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Audio Segments ({stats.audio_segments?.length || 0})</h3>
+                      <div className="bg-white border rounded-lg overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {(stats.audio_segments || []).map((segment) => (
+                                <tr key={segment.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {segment.start_time}s - {segment.end_time}s
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                    {formatDuration(Math.max(0, segment.end_time - segment.start_time))}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getAudioLabelStyle(segment.label)}`}>
+                                      {segment.label}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {activeTab === 'transcript' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Transcript Segments ({stats.transcript_segments?.length || 0})</h3>
@@ -426,37 +688,73 @@ export default function LLMProcessingStats({
                               <tr>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Seq #</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                {hasSpeakerLabels && (
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
+                                )}
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ad Confidence</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Text</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {(stats.transcript_segments || []).map((segment) => (
-                                <tr key={segment.id} className={`hover:bg-gray-50 ${
-                                  segment.primary_label === 'ad' ? 'bg-red-50' : ''
-                                }`}>
-                                  <td className="px-4 py-3 text-sm text-gray-900">{segment.sequence_num}</td>
-                                  <td className="px-4 py-3 text-sm text-gray-600">
-                                    {segment.start_time}s - {segment.end_time}s
-                                  </td>
-                                  <td className="px-4 py-3">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                      segment.primary_label === 'ad'
-                                        ? 'bg-red-100 text-red-800'
-                                        : 'bg-green-100 text-green-800'
-                                    }`}>
-                                      {segment.primary_label === 'ad'
-                                        ? (segment.mixed ? 'Ad (mixed)' : 'Ad')
-                                        : 'Content'}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3 text-sm text-gray-900 max-w-md">
-                                    <div className="truncate text-left" title={segment.text}>
-                                      {segment.text}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
+                              {mergedTranscriptRows.map((row) => {
+                                if (row.kind === 'audio') {
+                                  return (
+                                    <tr key={row.id} className={getAudioMarkerStyle(row.segment.label)}>
+                                      <td
+                                        colSpan={hasSpeakerLabels ? 6 : 5}
+                                        className="px-4 py-2 text-center text-xs font-medium uppercase tracking-wide"
+                                      >
+                                        [{row.segment.label}] {row.segment.start_time}s - {row.segment.end_time}s
+                                      </td>
+                                    </tr>
+                                  );
+                                }
+
+                                const segment = row.segment;
+                                const adConfidence = getAdConfidence(segment);
+
+                                return (
+                                  <tr key={row.id} className={`hover:bg-gray-50 ${
+                                    segment.primary_label === 'ad' ? 'bg-red-50' : ''
+                                  }`}>
+                                    <td className="px-4 py-3 text-sm text-gray-900">{segment.sequence_num}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                      {segment.start_time}s - {segment.end_time}s
+                                    </td>
+                                    {hasSpeakerLabels && (
+                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                        {segment.speaker_label ? (
+                                          <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-700">
+                                            {segment.speaker_label}
+                                          </span>
+                                        ) : (
+                                          <span className="text-gray-400">-</span>
+                                        )}
+                                      </td>
+                                    )}
+                                    <td className="px-4 py-3">
+                                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                        segment.primary_label === 'ad'
+                                          ? 'bg-red-100 text-red-800'
+                                          : 'bg-green-100 text-green-800'
+                                      }`}>
+                                        {segment.primary_label === 'ad'
+                                          ? (segment.mixed ? 'Ad (mixed)' : 'Ad')
+                                          : 'Content'}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                      {adConfidence !== null ? adConfidence.toFixed(2) : '-'}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900 min-w-[28rem] max-w-4xl">
+                                      <div className="whitespace-pre-wrap break-words text-left leading-6">
+                                        {segment.text}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -519,12 +817,18 @@ export default function LLMProcessingStats({
                       </div>
                     </div>
                   )}
+
+                  {activeTab === 'logs' && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Related Logs ({stats.related_logs?.entries.length || 0})</h3>
+                      <ProcessingStageLogs relatedLogs={stats.related_logs} />
+                    </div>
+                  )}
                 </>
               ) : null}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+      </ModalShell>
     </>
   );
 }

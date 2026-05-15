@@ -55,17 +55,100 @@ def count_primary_labels(
     return content_segments, ad_segments
 
 
-def parse_refined_windows(raw_refined: Any) -> list[tuple[float, float]]:
-    refined_windows: list[tuple[float, float]] = []
-    if not isinstance(raw_refined, list):
-        return refined_windows
+def build_speaker_breakdown(transcript_segments: Iterable[Any]) -> list[dict[str, Any]]:
+    speaker_totals: dict[str | None, dict[str, Any]] = {}
+    total_speaking_time_seconds = 0.0
 
-    for item in raw_refined:
+    for segment in transcript_segments:
+        start_raw = getattr(segment, "start_time", None)
+        end_raw = getattr(segment, "end_time", None)
+        if start_raw is None or end_raw is None:
+            continue
+
+        try:
+            start_time = float(start_raw)
+            end_time = float(end_raw)
+        except TypeError, ValueError:
+            continue
+
+        duration_seconds = end_time - start_time
+        if duration_seconds <= 0:
+            continue
+
+        speaker_label_raw = getattr(segment, "speaker_label", None)
+        speaker_label: str | None
+        if isinstance(speaker_label_raw, str):
+            speaker_label = speaker_label_raw.strip() or None
+        elif speaker_label_raw is None:
+            speaker_label = None
+        else:
+            speaker_label = str(speaker_label_raw)
+
+        speaker_entry = speaker_totals.setdefault(
+            speaker_label,
+            {
+                "speaker_label": speaker_label,
+                "speaking_time_seconds": 0.0,
+                "segment_count": 0,
+            },
+        )
+        speaker_entry["speaking_time_seconds"] += duration_seconds
+        speaker_entry["segment_count"] += 1
+        total_speaking_time_seconds += duration_seconds
+
+    speaker_breakdown = sorted(
+        speaker_totals.values(),
+        key=lambda entry: (
+            -float(entry["speaking_time_seconds"]),
+            entry["speaker_label"] is None,
+            entry["speaker_label"] or "",
+        ),
+    )
+
+    return [
+        {
+            "speaker_label": entry["speaker_label"],
+            "speaking_time_seconds": round(float(entry["speaking_time_seconds"]), 1),
+            "speaking_percentage": round(
+                (
+                    float(entry["speaking_time_seconds"])
+                    / total_speaking_time_seconds
+                    * 100
+                )
+                if total_speaking_time_seconds > 0
+                else 0.0,
+                1,
+            ),
+            "segment_count": int(entry["segment_count"]),
+        }
+        for entry in speaker_breakdown
+    ]
+
+
+def parse_refined_windows(raw_refined: Any) -> list[tuple[float, float]]:
+    return parse_time_windows(
+        raw_refined,
+        start_key="refined_start",
+        end_key="refined_end",
+    )
+
+
+def parse_time_windows(
+    raw_windows: Any,
+    *,
+    start_key: str = "start_time",
+    end_key: str = "end_time",
+) -> list[tuple[float, float]]:
+    parsed_windows: list[tuple[float, float]] = []
+    if not isinstance(raw_windows, list):
+        return parsed_windows
+
+    for item in raw_windows:
         if not isinstance(item, dict):
             continue
 
-        start_raw = item.get("refined_start")
-        end_raw = item.get("refined_end")
+        start_raw = item.get(start_key)
+        end_raw = item.get(end_key)
         if start_raw is None or end_raw is None:
             continue
 
@@ -76,9 +159,9 @@ def parse_refined_windows(raw_refined: Any) -> list[tuple[float, float]]:
             continue
 
         if end_v > start_v:
-            refined_windows.append((start_v, end_v))
+            parsed_windows.append((start_v, end_v))
 
-    return refined_windows
+    return parsed_windows
 
 
 def merge_time_windows(
@@ -115,3 +198,112 @@ def is_mixed_segment(
             return True
 
     return False
+
+
+def _map_time_to_edited_timeline(
+    time_seconds: float,
+    removed_windows: list[tuple[float, float]],
+) -> float:
+    removed_before = 0.0
+    for start, end in removed_windows:
+        if time_seconds >= end:
+            removed_before += end - start
+            continue
+
+        if time_seconds > start:
+            removed_before += time_seconds - start
+        break
+
+    return max(0.0, time_seconds - removed_before)
+
+
+def _subtract_removed_windows(
+    window: tuple[float, float],
+    removed_windows: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    remaining_windows = [window]
+
+    for removed_start, removed_end in sorted(removed_windows, key=lambda item: item[0]):
+        updated_windows: list[tuple[float, float]] = []
+        for segment_start, segment_end in remaining_windows:
+            if removed_end <= segment_start or removed_start >= segment_end:
+                updated_windows.append((segment_start, segment_end))
+                continue
+
+            if removed_start > segment_start:
+                updated_windows.append((segment_start, removed_start))
+            if removed_end < segment_end:
+                updated_windows.append((removed_end, segment_end))
+
+        remaining_windows = [
+            (segment_start, segment_end)
+            for segment_start, segment_end in updated_windows
+            if segment_end > segment_start
+        ]
+
+    return remaining_windows
+
+
+def build_edited_timeline_ad_markers(
+    ad_windows: list[tuple[float, float]],
+) -> list[dict[str, float]]:
+    sorted_windows = sorted(ad_windows, key=lambda item: item[0])
+    removed_before = 0.0
+    edited_markers: list[dict[str, float]] = []
+
+    for start_time, end_time in sorted_windows:
+        removed_duration_seconds = end_time - start_time
+        if removed_duration_seconds <= 0:
+            continue
+
+        edited_time = max(0.0, start_time - removed_before)
+        edited_markers.append(
+            {
+                "edited_start_time": round(edited_time, 3),
+                "edited_end_time": round(edited_time, 3),
+                "original_start_time": round(start_time, 3),
+                "original_end_time": round(end_time, 3),
+                "removed_duration_seconds": round(removed_duration_seconds, 3),
+            }
+        )
+        removed_before += removed_duration_seconds
+
+    return edited_markers
+
+
+def build_edited_timeline_bleep_windows(
+    bleep_windows: list[tuple[float, float]],
+    removed_windows: list[tuple[float, float]],
+) -> list[dict[str, float]]:
+    sorted_removed_windows = sorted(removed_windows, key=lambda item: item[0])
+    edited_windows: list[dict[str, float]] = []
+
+    for original_start_time, original_end_time in sorted(
+        bleep_windows, key=lambda item: item[0]
+    ):
+        retained_windows = _subtract_removed_windows(
+            (original_start_time, original_end_time),
+            sorted_removed_windows,
+        )
+        for retained_start_time, retained_end_time in retained_windows:
+            edited_start_time = _map_time_to_edited_timeline(
+                retained_start_time,
+                sorted_removed_windows,
+            )
+            edited_end_time = _map_time_to_edited_timeline(
+                retained_end_time,
+                sorted_removed_windows,
+            )
+            if edited_end_time <= edited_start_time:
+                continue
+
+            edited_windows.append(
+                {
+                    "edited_start_time": round(edited_start_time, 3),
+                    "edited_end_time": round(edited_end_time, 3),
+                    "original_start_time": round(retained_start_time, 3),
+                    "original_end_time": round(retained_end_time, 3),
+                }
+            )
+
+    return edited_windows

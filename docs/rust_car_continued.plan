@@ -1,0 +1,1294 @@
+# Rust Sidecar Continued Implementation Plan
+
+## Purpose
+
+Continue moving read-heavy, object-heavy, and file-heavy work out of the long-lived Python web and writer processes and into the short-lived Rust `podly_tools` binary. The goal is to reduce Python memory spikes, improve route latency for heavy endpoints, and eventually make it possible to slim the Python web/writer import graph.
+
+This plan is written for a less capable implementation agent. Follow the steps in order. Do not skip parity tests. Update the Progress section every time a task is completed.
+
+## Current Baseline
+
+- The Rust sidecar already exists at `rust/src/main.rs`.
+- Python wrappers already exist at `src/shared/rust_sidecar.py`.
+- Existing feature flags:
+  - `PODLY_RUST_TOOLS_BIN=/app/bin/podly_tools`
+  - `PODLY_RUST_AUDIO_ENABLED`
+  - `PODLY_RUST_FEED_XML_ENABLED`
+  - `PODLY_RUST_TRANSCRIPT_ENABLED`
+- Already implemented Rust commands:
+  - `audio probe`
+  - `audio cut`
+  - `audio bleep`
+  - `audio split`
+  - `chapters write`
+  - `feed render`
+  - `feed render-aggregate`
+  - `transcript normalize-word-timestamps`
+  - `transcript export-word-timestamps`
+- Live memory investigation showed the idle Python floor is mostly app startup/import overlap:
+  - web process around 100-110 MiB RSS after startup
+  - writer process around 90 MiB RSS after startup
+  - `import app` alone accounts for most of that baseline
+- Moving more work to Rust will primarily reduce spikes and route latency. Reducing the idle floor also requires lazy imports and role-specific Python startup cleanup.
+
+## Non-Negotiable Rules
+
+- Do not create Alembic migrations. If model/schema changes become necessary, stop and ask the user to generate a migration with `./scripts/create_migration.sh "<message>"`.
+- All database writes must go through the writer service. Do not add `db.session.commit()` in application code.
+- Rust may read SQLite directly only with read-only flags and `PRAGMA query_only=ON`.
+- Python must keep auth, access-control, token-validation, HTTP response headers, ETag/Last-Modified handling, and writer-service write boundaries.
+- Every Rust-backed feature must be behind an env flag at first and must have Python fallback.
+- The fallback must log the Rust failure and preserve current behavior.
+- Use `mise exec -- ./scripts/ci.sh` for backend verification. Do not run direct pytest/ruff/mypy commands as the final check.
+- Expect `./scripts/ci.sh` to modify files through formatting/fixes. Review `git status --short` afterward.
+- The repo has `.codegraph/`; use lightweight CodeGraph symbol lookups or an Explore agent for broad code exploration.
+
+## Progress
+
+- [x] Add measurement helpers and record before/after memory and latency baselines.
+- [x] Lazy-load migration tooling so web startup does not import Alembic/Flask-Migrate unnecessarily.
+- [x] Add `PODLY_RUST_STATS_ENABLED` config plumbing.
+- [x] Implement Rust `stats render`.
+- [x] Add Python wrapper for Rust stats rendering with fallback.
+- [x] Wire `/api/posts/<guid>/stats` through Rust when enabled.
+- [x] Add stats parity tests and update existing stats route tests as needed.
+- [x] Add Rust `chapters read`.
+- [x] Add Rust `chapters detect`.
+- [x] Add Python wrappers for chapter read/detect with fallback.
+- [x] Wire chapter reader/player endpoint through Rust when enabled.
+- [x] Wire chapter ad detection through Rust when enabled.
+- [x] Add chapter read/detect parity tests.
+- [x] Add `PODLY_RUST_JOBS_ENABLED` config plumbing.
+- [x] Implement Rust `jobs active` and `jobs all`.
+- [x] Wire job list routes through Rust when enabled.
+- [x] Add jobs route parity tests.
+- [x] Add `PODLY_RUST_FEED_REFRESH_ENABLED` config plumbing.
+- [x] Implement Rust `feed refresh-plan` using fixture-driven parity.
+- [x] Wire `refresh_feed` planning through Rust when enabled.
+- [x] Add feed refresh parity tests.
+- [x] Run full CI and record final before/after measurements.
+
+## Phase 0: Measurement And Startup Cleanup
+
+### Goal
+
+Create a reliable baseline and remove one obvious non-Rust memory cost before adding more sidecar work.
+
+### Step 0.1: Capture Live Runtime Memory
+
+Run these commands and paste the numbers into this plan under "Measurement Notes":
+
+```bash
+docker stats --no-stream podly-pure-podcasts
+docker top podly-pure-podcasts -eo pid,ppid,rss,vsz,comm,args
+docker exec podly-pure-podcasts sh -lc 'cat /sys/fs/cgroup/memory.current; grep -E "^(anon|file|kernel|slab|inactive_file|active_file) " /sys/fs/cgroup/memory.stat'
+```
+
+Expected output to record:
+
+- container memory
+- web process RSS
+- writer process RSS
+- cgroup `anon`, `file`, and `kernel`
+
+### Step 0.2: Capture Python Startup Baseline
+
+Run cold-start memory checks from the repo root:
+
+```bash
+mise exec -- uv run python - <<'PY'
+import resource, sys
+sys.path.insert(0, "src")
+def rss(): return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print("start_kb", rss())
+import app
+print("after_import_app_kb", rss())
+from app import create_web_app
+print("after_import_create_web_app_kb", rss())
+create_web_app()
+print("after_create_web_app_kb", rss())
+PY
+
+mise exec -- uv run python - <<'PY'
+import resource, sys
+sys.path.insert(0, "src")
+def rss(): return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print("start_kb", rss())
+import app.writer
+print("after_import_app_writer_kb", rss())
+from app import create_writer_app
+print("after_import_create_writer_app_kb", rss())
+create_writer_app()
+print("after_create_writer_app_kb", rss())
+PY
+```
+
+### Step 0.3: Lazy-Load Migration Tooling
+
+Current targets:
+
+- `src/app/__init__.py`
+- `src/app/extensions.py`
+
+Problem:
+
+- `src/app/__init__.py` imports `upgrade` from `flask_migrate` at module import time.
+- `src/app/extensions.py` imports `Migrate` at module import time.
+- Alembic/Flask-Migrate is needed for writer startup migration, not for normal web route reads.
+
+Implementation steps:
+
+1. Remove the top-level `from flask_migrate import upgrade` import from `src/app/__init__.py`.
+2. Import `upgrade` inside `_run_app_startup()` immediately before calling it.
+3. Keep `migrate.init_app(app, db)` behavior for now unless tests show it can be writer-only.
+4. If `Migrate` can be lazy-loaded without breaking migrations/tests:
+   - replace the top-level `migrate = Migrate(directory=migrations_dir)` with a tiny lazy wrapper or a `get_migrate()` helper;
+   - call it from `_initialize_extensions()`.
+5. Keep this change separate from Rust feature work so memory deltas are clear.
+
+Tests:
+
+- Run `mise exec -- ./scripts/ci.sh`.
+- Repeat Step 0.2 and record the new startup baseline.
+
+Stop condition:
+
+- If migrations or app startup break, revert only the lazy migration changes and continue with Rust work.
+
+## Phase 1: Rust Stats Rendering
+
+### Why This Is First
+
+`/api/posts/<guid>/stats` is the best next Rust target. It loads many ORM objects and shapes a large response:
+
+- `Post`
+- `Feed`
+- `ModelCall`
+- `ProcessingJob`
+- `TranscriptSegment`
+- `AudioSegment`
+- `Identification`
+- related app log lines
+- optional debug file metadata
+
+Moving this to Rust reduces Python object churn on one of the heaviest read-only routes.
+
+### Step 1.1: Add Feature Flag
+
+Update:
+
+- `src/shared/rust_sidecar.py`
+- `.env.local.example`
+- `.env.local`
+- `compose.yml`
+- `compose.local.yml`
+- `docs/rust_sidecar.plan` or this plan's Progress section
+
+Add:
+
+- `PODLY_RUST_STATS_ENABLED=false`
+
+In `src/shared/rust_sidecar.py`, add:
+
+- constant `RUST_STATS_ENABLED_ENV = "PODLY_RUST_STATS_ENABLED"`
+- function `rust_stats_enabled() -> bool`
+
+Do not default it to true.
+
+### Step 1.2: Define Rust CLI Contract
+
+Add a new top-level command group:
+
+```text
+podly_tools stats render \
+  --db <sqlite_path> \
+  --post-guid <guid> \
+  --min-confidence <float> \
+  --min-ad-segment-separation-seconds <float> \
+  --enable-boundary-refinement true|false \
+  --stats-debug true|false \
+  --log-path <path> \
+  --in-root <path> \
+  --srv-root <path>
+```
+
+Return JSON:
+
+```json
+{
+  "stats": {
+    "post": {},
+    "ad_detection_strategy": "llm",
+    "processing_stats": {},
+    "model_calls": [],
+    "transcript_segments": [],
+    "audio_segments": [],
+    "identifications": [],
+    "related_logs": {},
+    "chapters": null
+  }
+}
+```
+
+The nested `stats` object must match the current Flask response from `api_post_stats`.
+
+If the post does not exist, Rust should exit non-zero with a clear error. Python fallback should then run current behavior.
+
+### Step 1.3: Port Stats Data Queries
+
+In `rust/src/main.rs`, add structs and read-only SQLite queries for:
+
+- `post` by `guid`
+- `feed` by `post.feed_id`
+- `model_call` by `post_id`, ordered by `model_name`, `first_segment_sequence_num`
+- `processing_job` by `post_guid`, newest 3
+- `transcript_segment` by `post_id`, ordered by `sequence_num`
+- `audio_segment` by `post_id`, ordered by `start_time`
+- `identification` joined with `transcript_segment`, ordered by `transcript_segment.sequence_num`
+
+Use `open_readonly_sqlite()` already present in Rust. Do not open writable SQLite connections.
+
+### Step 1.4: Port Pure Stats Helpers
+
+Port these Python helpers from `src/app/routes/post_stats_utils.py` to Rust:
+
+- `count_model_calls`
+- `group_identifications_by_segment`
+- `count_primary_labels`
+- `build_speaker_breakdown`
+- `parse_refined_windows`
+- `parse_time_windows`
+- `is_mixed_segment`
+- `build_edited_timeline_ad_markers`
+- `build_edited_timeline_bleep_windows`
+
+Rust behavior must match Python rounding:
+
+- display times generally round to 1 decimal
+- bleep windows round to 3 decimals
+- confidence values round to 2 decimals
+- percentages round to 1 decimal
+
+### Step 1.5: Port Ad Window Calculation
+
+The Python route currently calls:
+
+- `AudioProcessor.get_ad_segments(post)`
+
+That calls:
+
+- `src/podcast_processor/ad_merger.py`
+- `src/shared/audio_segment_utils.py`
+- refined boundaries on `post.refined_ad_boundaries`
+- `audio_segment` bridge/edge expansion logic
+
+Implement this carefully in Rust:
+
+1. Query only successful `Identification.label == "ad"` rows with confidence >= `min-confidence`.
+2. Join their transcript segments.
+3. Port `AdMerger.merge()` from `src/podcast_processor/ad_merger.py`:
+   - group by proximity using `min_ad_segment_separation_seconds`
+   - extract URL/promo/phone/brand keywords
+   - merge nearby groups using the same confidence/keyword/gap rules
+   - filter weak groups using the same duration/confidence/keyword rules
+4. Port atomic ad block projection from `AudioProcessor`:
+   - `ATOMIC_AD_BLOCK_GAP_SECONDS = 10.0`
+   - boundary refinement only if `--enable-boundary-refinement true`
+   - use `refined_start`/`refined_end` fields from `post.refined_ad_boundaries`
+5. Port `extract_audio_windows`, `extract_edge_audio_windows`, `bridge_ad_windows_with_audio`, and `expand_episode_edge_ad_windows_with_audio` from `src/shared/audio_segment_utils.py`.
+6. Preserve the same sorting.
+
+Do not "simplify" this algorithm. Stats must stay aligned with the actual cutter.
+
+### Step 1.6: Related Logs
+
+Current route uses `_build_related_logs(post=post, recent_jobs=recent_jobs)`.
+
+Implement a Rust version that:
+
+- accepts `--log-path`
+- reads only enough of the log to find recent matching lines
+- returns the same `latest_job_id` and `entries` shape
+- treats missing/unreadable log file as empty entries, not fatal
+
+If this becomes too complex, initially return an explicit Rust error and keep Python fallback. Do not ship a partial response that silently omits logs.
+
+### Step 1.7: Chapters In Stats
+
+Stats currently calls `_get_chapter_stats(post, feed)` only for `chapter` and `chapter_insert` strategies.
+
+For the first Rust stats implementation:
+
+1. If `post.chapter_data` contains stored `chapters_kept`/`chapters_removed`, compute the same response from JSON.
+2. If stored chapter data is absent and processed audio must be read, either:
+   - call a shared Rust chapter-read helper after Phase 2 is implemented, or
+   - return a controlled Rust error so Python fallback handles it.
+
+Prefer fallback over an incomplete chapter payload.
+
+### Step 1.8: Python Wrapper
+
+In `src/shared/rust_sidecar.py`, add:
+
+```python
+def try_render_post_stats(
+    *,
+    db_path: Path,
+    post_guid: str,
+    min_confidence: float,
+    min_ad_segment_separation_seconds: float,
+    enable_boundary_refinement: bool,
+    stats_debug: bool,
+    log_path: Path,
+    in_root: Path,
+    srv_root: Path,
+) -> dict[str, Any] | None:
+    ...
+```
+
+Rules:
+
+- return `None` if `PODLY_RUST_STATS_ENABLED` is false
+- return `None` on any `RustSidecarError`
+- validate that returned JSON has a dict `stats`
+- do not raise from the route unless Python fallback also fails
+
+### Step 1.9: Route Wiring
+
+In `src/app/routes/post_routes.py`:
+
+1. Keep auth/404 behavior in Python.
+2. After the post exists, try the Rust wrapper.
+3. If Rust returns stats, `return flask.jsonify(stats)`.
+4. If Rust returns `None`, continue through the existing Python implementation.
+
+Important:
+
+- Do not remove the Python implementation.
+- Do not change response shape.
+- Do not change frontend types.
+
+### Step 1.10: Stats Tests
+
+Add or update tests in:
+
+- `src/tests/test_rust_sidecar.py`
+- `src/tests/test_post_routes.py`
+- `src/tests/test_post_stats_utils.py` if helper behavior is mirrored
+- Rust unit tests in `rust/src/main.rs`
+
+Minimum tests:
+
+- Rust disabled uses Python path.
+- Rust wrapper success returns Rust stats.
+- Rust wrapper malformed payload falls back.
+- Rust wrapper process failure falls back.
+- Slash-containing GUID works through stats route.
+- Seeded DB parity test:
+  - feed
+  - post
+  - transcript segments
+  - model calls
+  - identifications
+  - audio segments
+  - refined ad boundaries
+  - bleep windows
+  - processing jobs
+  - assert Python stats JSON equals Rust stats JSON after normalizing ordering where needed
+
+Run:
+
+```bash
+mise exec -- ./scripts/ci.sh
+```
+
+## Phase 2: Rust Chapter Read And Detect
+
+### Goal
+
+Move Mutagen-based chapter reads and chapter filtering out of long-lived Python paths.
+
+Current Python targets:
+
+- `src/podcast_processor/chapter_reader.py`
+- `src/podcast_processor/chapter_filter.py`
+- `src/podcast_processor/chapter_ad_detector.py`
+- `/api/posts/<guid>/chapters` in `src/app/routes/post_routes.py`
+- `_get_chapter_stats` fallback in `src/app/routes/post_routes.py`
+
+### Step 2.1: Rust CLI Contracts
+
+Add:
+
+```text
+podly_tools chapters read --audio <path>
+```
+
+Return:
+
+```json
+{
+  "chapters": [
+    {
+      "element_id": "chp0",
+      "title": "Intro",
+      "start_time_ms": 0,
+      "end_time_ms": 120000
+    }
+  ]
+}
+```
+
+Add:
+
+```text
+podly_tools chapters detect \
+  --audio <path> \
+  --filter-strings-csv "sponsor,advertisement,ad break"
+```
+
+Return:
+
+```json
+{
+  "ad_segments": [[10.0, 60.0]],
+  "chapters_to_keep": [],
+  "chapters_to_remove": []
+}
+```
+
+### Step 2.2: Rust Implementation
+
+Use the existing `id3` crate already used for `chapters write`.
+
+Implementation details:
+
+- Read ID3 tags from the MP3.
+- Iterate CHAP frames.
+- Extract `TIT2` title from chapter subframes.
+- If no title exists, use `element_id`.
+- Sort by `start_time_ms`.
+- Return empty list if there are no tags or no CHAP frames.
+- For `detect`, parse filter CSV like Python:
+  - split on comma
+  - trim whitespace
+  - drop empty terms
+  - compare lowercase filter term as substring of lowercase chapter title
+
+### Step 2.3: Python Wrappers
+
+In `src/shared/rust_sidecar.py`, add:
+
+- `try_read_chapters(audio_path: Path) -> list[dict[str, Any]] | None`
+- `try_detect_chapter_ads(audio_path: Path, filter_strings_csv: str) -> dict[str, Any] | None`
+
+Use `PODLY_RUST_AUDIO_ENABLED` or add `PODLY_RUST_CHAPTERS_ENABLED`.
+
+Recommendation:
+
+- Add `PODLY_RUST_CHAPTERS_ENABLED=false` to avoid coupling chapter reads to audio cutting rollout.
+
+### Step 2.4: Python Wiring
+
+In `src/podcast_processor/chapter_reader.py`:
+
+1. Try Rust first.
+2. Convert Rust dicts to existing `Chapter` dataclass.
+3. Fall back to current Mutagen implementation.
+
+In `src/podcast_processor/chapter_ad_detector.py`:
+
+1. Try Rust detect first.
+2. Convert returned chapter dicts to `Chapter`.
+3. Fall back to current Python detect path.
+
+In `src/app/routes/post_routes.py`:
+
+- No direct Rust call should be necessary if `read_chapters()` wrapper is updated.
+
+### Step 2.5: Tests
+
+Minimum tests:
+
+- `chapters read` returns empty for file without CHAP frames.
+- `chapters read` can read a file written by existing Rust `chapters write`.
+- `chapters detect` matches Python `filter_chapters_by_strings`.
+- Python wrapper success uses Rust.
+- Python wrapper malformed payload falls back.
+- `/api/posts/<guid>/chapters` response unchanged.
+
+Run:
+
+```bash
+mise exec -- ./scripts/ci.sh
+```
+
+## Phase 3: Rust Jobs List Reads
+
+### Goal
+
+Move high-frequency polling reads out of Python ORM object creation.
+
+Current targets:
+
+- `src/app/routes/jobs_routes.py`
+- `src/app/jobs_manager.py`
+- frontend polling in `frontend/src/services/api.ts` calls:
+  - `/api/jobs/active`
+  - `/api/jobs/all`
+
+### Step 3.1: Add Feature Flag
+
+Add:
+
+- `PODLY_RUST_JOBS_ENABLED=false`
+
+Update:
+
+- `src/shared/rust_sidecar.py`
+- `.env.local.example`
+- `.env.local`
+- `compose.yml`
+- `compose.local.yml`
+
+### Step 3.2: Rust CLI Contracts
+
+Add:
+
+```text
+podly_tools jobs active --db <sqlite_path> --limit <n>
+podly_tools jobs all --db <sqlite_path> --limit <n>
+```
+
+Both return a JSON object:
+
+```json
+{
+  "jobs": [
+    {
+      "job_id": "...",
+      "post_guid": "...",
+      "post_title": "...",
+      "feed_title": "...",
+      "status": "running",
+      "priority": 2,
+      "step": 2,
+      "step_name": "Transcribing audio",
+      "total_steps": 4,
+      "progress_percentage": 50.0,
+      "created_at": "2026-05-08T16:25:36.454801",
+      "started_at": "2026-05-08T16:25:37.624061",
+      "completed_at": null,
+      "error_message": null
+    }
+  ]
+}
+```
+
+Match `JobsManager.list_active_jobs()` and `JobsManager.list_all_jobs_detailed()` exactly:
+
+- active filters `status in ("pending", "running")`
+- priority: running = 2, pending = 1, else 0
+- order by priority descending, then `processing_job.created_at` descending
+- all jobs includes every status
+
+### Step 3.3: Python Wrapper
+
+In `src/shared/rust_sidecar.py`, add:
+
+- `try_list_active_jobs(db_path: Path, limit: int) -> list[dict[str, Any]] | None`
+- `try_list_all_jobs(db_path: Path, limit: int) -> list[dict[str, Any]] | None`
+
+Validate:
+
+- `jobs` is a list
+- each item is a dict
+
+### Step 3.4: Route Wiring
+
+In `src/app/routes/jobs_routes.py`:
+
+1. Parse `limit` in Python as now.
+2. Resolve SQLite path using an existing helper or a small local helper equivalent to `app.feeds._sqlite_db_path_from_app_config`.
+3. Try Rust when enabled.
+4. Return Rust jobs if available.
+5. Fall back to `get_jobs_manager().list_active_jobs()` or `.list_all_jobs_detailed()`.
+
+Do not move cancel/cleanup/write endpoints to Rust. Those are writer-service/write paths.
+
+### Step 3.5: Tests
+
+Minimum tests:
+
+- active jobs route uses Rust payload when enabled.
+- all jobs route uses Rust payload when enabled.
+- malformed Rust payload falls back.
+- seeded DB parity between Python jobs manager and Rust command.
+- limit parsing remains unchanged.
+
+Run:
+
+```bash
+mise exec -- ./scripts/ci.sh
+```
+
+## Phase 4: Rust Feed Refresh Planning
+
+### Why This Is Later
+
+Feed refresh is higher risk than stats/jobs because it involves external RSS/Atom parsing quirks and write planning. Keep Python writer actions as the write boundary.
+
+Current targets:
+
+- `src/app/feeds.py`
+  - `fetch_feed`
+  - `_build_refresh_feed_payload`
+  - `_new_post_refresh_payload`
+  - `_existing_post_refresh_payload`
+  - `refresh_feed`
+- `src/app/writer/actions/feeds.py`
+  - keep this writer action as-is
+
+### Step 4.1: Add Feature Flag
+
+Add:
+
+- `PODLY_RUST_FEED_REFRESH_ENABLED=false`
+
+Update:
+
+- `src/shared/rust_sidecar.py`
+- `.env.local.example`
+- `.env.local`
+- `compose.yml`
+- `compose.local.yml`
+
+### Step 4.2: Rust CLI Contract
+
+Prefer a fixture-friendly command first:
+
+```text
+podly_tools feed refresh-plan \
+  --db <sqlite_path> \
+  --feed-id <id> \
+  --feed-xml <path>
+```
+
+Return the exact payload shape accepted by writer action `refresh_feed`:
+
+```json
+{
+  "updates": {},
+  "new_posts": [],
+  "existing_post_updates": []
+}
+```
+
+Only after fixture parity is strong, optionally add:
+
+```text
+podly_tools feed fetch-refresh-plan --db <sqlite_path> --feed-id <id> --url <rss_url>
+```
+
+Do not start with network fetching in Rust. Start with parsing an XML file passed by Python.
+
+### Step 4.3: Python Wrapper And Wiring
+
+In Python `refresh_feed(feed)`:
+
+1. Keep existing `fetch_feed(feed.rss_url)` initially.
+2. Write the fetched raw feed XML to a temp artifact only if the existing feedparser path exposes raw content cleanly. If not, skip this phase and document why.
+3. Call Rust `feed refresh-plan`.
+4. Validate the returned payload:
+   - `updates` dict
+   - `new_posts` list of dicts
+   - `existing_post_updates` list of dicts
+5. Send the payload to `writer_client.action("refresh_feed", ..., wait=True)` exactly as Python currently does.
+6. Fall back to Python `_build_refresh_feed_payload()` on any Rust failure.
+
+Important:
+
+- Writer action remains Python.
+- Database writes remain writer-service writes.
+- Do not change auto-whitelist behavior.
+- Preserve legacy GUID repair by URL.
+
+### Step 4.4: Rust Parsing Behavior
+
+Rust must match Python helpers:
+
+- GUID from entry id, with fallback compatible with existing `get_guid`.
+- audio URL extraction compatible with `find_audio_link`.
+- title trimming.
+- description extraction.
+- episode image extraction.
+- duration parsing.
+- release date parsing.
+- archive auto-whitelist behavior:
+  - compare against oldest existing post release date
+  - old archive posts are not auto-whitelisted
+- existing post repair by audio URL when upstream GUID changes.
+
+If exact parity with Python/feedparser is not practical, stop after documenting the mismatch. Do not enable this flag.
+
+### Step 4.5: Tests
+
+Minimum tests:
+
+- fixture XML with new posts.
+- fixture XML with existing post title update.
+- fixture XML with description update.
+- fixture XML with duration backfill when no processed audio exists.
+- fixture XML with legacy GUID repair by audio URL.
+- archive episode auto-whitelist behavior.
+- writer action receives identical payload from Python and Rust planning.
+
+Run:
+
+```bash
+mise exec -- ./scripts/ci.sh
+```
+
+## Phase 5: Rollout And Defaults
+
+### Step 5.1: One Flag At A Time
+
+Enable in this order:
+
+1. `PODLY_RUST_JOBS_ENABLED=true`
+2. `PODLY_RUST_CHAPTERS_ENABLED=true`
+3. `PODLY_RUST_STATS_ENABLED=true`
+4. `PODLY_RUST_FEED_REFRESH_ENABLED=true` only after strong feed fixture parity
+
+Do not enable all at once.
+
+### Step 5.2: Live Checks After Each Flag
+
+After enabling a flag and restarting the container, record:
+
+```bash
+docker stats --no-stream podly-pure-podcasts
+docker top podly-pure-podcasts -eo pid,ppid,rss,vsz,comm,args
+docker logs --since 30m podly-pure-podcasts | rg -i "rust|sidecar|fallback|error"
+```
+
+For speed checks, use actual route/job timings:
+
+- stats route: browser devtools or `curl -w`
+- jobs routes: `curl -w`
+- feed render: `curl -w`
+- episode processing: `processing_job.started_at` to `completed_at`, plus log stage timestamps
+
+### Step 5.3: Remove Or Default Flags Later
+
+Only after several successful live runs:
+
+- consider defaulting stable read-only Rust paths to true
+- keep flags for high-risk feed refresh until it has been boring for a while
+- do not remove Python fallback until the user explicitly approves that cleanup
+
+## Measurement Notes
+
+Add dated measurements here as work progresses.
+
+### Baseline Before This Plan
+
+- Date: 2026-05-08
+- Live container after processing settled:
+  - container memory: about 171-205 MiB depending on Docker/cgroup view
+  - writer process: about 90 MiB RSS
+  - web process: about 108 MiB RSS
+- Cold startup:
+  - `import app`: about 86 MiB
+  - `create_writer_app()`: about 90 MiB
+  - `create_web_app()`: about 108 MiB
+
+### Phase 0 Runtime Snapshot
+
+- Date: 2026-05-08
+- Command context: live `podly-pure-podcasts` container.
+- Measurement helper: `scripts/measure_rust_sidecar_baseline.sh`.
+- Docker stats:
+  - container memory: 296.5 MiB / 15.54 GiB
+  - CPU: 1.08%
+  - PIDs: 14
+- `docker top` RSS:
+  - `./scripts/start_services.sh`: 2,920 KiB
+  - writer process (`python3 -u -m app.writer`): 116,708 KiB
+  - web process (`python3 -u src/main.py`): 216,488 KiB
+- cgroup memory:
+  - `memory.current`: 321,736,704 bytes
+  - `anon`: 300,756,992 bytes
+  - `file`: 13,320,192 bytes
+  - `kernel`: 6,574,080 bytes
+  - `slab`: 4,676,048 bytes
+  - `inactive_file`: 10,215,424 bytes
+  - `active_file`: 3,112,960 bytes
+- Stats route timing:
+  - route: `/api/posts/audioboom-019e05ae-d27d-7444-8129-b806d2a60051/stats`
+  - auth: logged in inside the container using existing container environment
+  - status: 200
+  - `time_total`: 3.476993 seconds
+  - response size: 893,540 bytes
+
+### Phase 0 Startup After Lazy Migration Imports
+
+- Date: 2026-05-08
+- Web cold-start check:
+  - `start_kb`: 33,772
+  - `after_import_app_kb`: 74,132
+  - `after_import_create_web_app_kb`: 74,132
+  - `after_create_web_app_kb`: 108,640
+- Writer cold-start check:
+  - `start_kb`: 33,772
+  - `after_import_app_writer_kb`: 74,172
+  - `after_import_create_writer_app_kb`: 74,172
+  - `after_create_writer_app_kb`: 90,308
+- Delta from earlier same-day cold startup:
+  - `import app` dropped from about 85.8 MiB to about 74.1 MiB.
+  - final `create_web_app()` and `create_writer_app()` RSS stayed roughly flat,
+    which means this cleanup helps import-time baseline more than fully-created
+    app memory.
+
+### Phase 1 Rust Stats Renderer Local Measurement
+
+- Date: 2026-05-08
+- Episode: `audioboom-019e05ae-d27d-7444-8129-b806d2a60051`
+- Baseline Python HTTP route from Phase 0:
+  - `time_total`: 3.476993 seconds
+  - response size: 893,540 bytes
+- Rust direct sidecar command, debug build before regex hoisting:
+  - wall time: 19.45 seconds
+  - max RSS: 23,556 KiB
+  - note: debug build was too slow; regex construction was moved behind `OnceLock`.
+- Rust direct sidecar command, release build after regex hoisting:
+  - wall time: 0.93 seconds
+  - max RSS: 19,756 KiB
+  - output file: `/tmp/rust_stats_release_timed.json`
+- Interpretation:
+  - Direct release sidecar timing is about 3.7x faster than the sampled Python
+    HTTP stats route.
+  - The sidecar peak is short-lived and about 19.3 MiB RSS.
+  - Final route-level improvement still needs a rebuilt/restarted container with
+    `PODLY_RUST_STATS_ENABLED=true`.
+
+### Phase 1 Live Stats Route With Rust Enabled
+
+- Date: 2026-05-08
+- Container image rebuilt from current checkout and restarted with
+  `PODLY_RUST_STATS_ENABLED=true`.
+- Episode: `audioboom-019e05ae-d27d-7444-8129-b806d2a60051`
+- Authenticated stats route:
+  - route: `/api/posts/audioboom-019e05ae-d27d-7444-8129-b806d2a60051/stats`
+  - status: 200
+  - `time_total`: 0.920486 seconds
+  - response size: 894,320 bytes
+- Docker stats after request:
+  - container memory: 178.3 MiB / 15.54 GiB
+  - CPU: 0.01%
+  - PIDs: 12
+- `docker top` RSS after request:
+  - `./scripts/start_services.sh`: 3,112 KiB
+  - writer process (`python3 -u -m app.writer`): 92,804 KiB
+  - web process (`python3 -u src/main.py`): 120,964 KiB
+- cgroup memory after request:
+  - `memory.current`: 219,856,896 bytes
+  - `anon`: 181,731,328 bytes
+  - `file`: 31,248,384 bytes
+  - `kernel`: 5,758,976 bytes
+  - `slab`: 4,267,160 bytes
+  - `inactive_file`: 29,618,176 bytes
+  - `active_file`: 1,634,304 bytes
+- Fallback/error logs:
+  - `docker logs --since 10m ... | rg -i "rust|sidecar|fallback|error"` returned
+    no matching Rust fallback/error lines.
+- Interpretation:
+  - Route latency improved from 3.476993 seconds to 0.920486 seconds for the
+    sampled episode.
+  - The web process remained near 121 MiB RSS after the heavy stats request,
+    instead of doing that response construction in the long-lived Python process.
+
+### Phase 5 Jobs Rollout Check With Rust Enabled
+
+- Date: 2026-05-08
+- Container image rebuilt from current checkout and restarted with
+  `PODLY_RUST_JOBS_ENABLED=true`.
+- Confirmed runtime flags:
+  - `PODLY_RUST_JOBS_ENABLED=true`
+  - `PODLY_RUST_CHAPTERS_ENABLED=false`
+  - `PODLY_RUST_STATS_ENABLED=false`
+  - `PODLY_RUST_FEED_REFRESH_ENABLED=false`
+- Authenticated jobs routes:
+  - route: `/api/jobs/active?limit=100`
+    - status: 200
+    - `time_total`: 0.008591 seconds
+    - response size: 3 bytes
+  - route: `/api/jobs/all?limit=200`
+    - status: 200
+    - `time_total`: 0.033997 seconds
+    - response size: 96,321 bytes
+- Docker stats after requests:
+  - container memory: 178.4 MiB / 15.54 GiB
+  - CPU: 2.45%
+  - PIDs: 12
+- `docker top` RSS after requests:
+  - `./scripts/start_services.sh`: 3,168 KiB
+  - writer process (`python3 -u -m app.writer`): 93,372 KiB
+  - web process (`python3 -u src/main.py`): 111,916 KiB
+- cgroup memory after requests:
+  - `memory.current`: 198,213,632 bytes
+  - `anon`: 170,192,896 bytes
+  - `file`: 20,488,192 bytes
+  - `kernel`: 5,988,352 bytes
+  - `slab`: 4,515,304 bytes
+  - `inactive_file`: 9,879,552 bytes
+  - `active_file`: 10,616,832 bytes
+- Fallback/error logs:
+  - `docker logs --since 10m podly-pure-podcasts` showed only normal startup
+    and migration messages, with no Rust fallback/error lines.
+- Interpretation:
+  - Jobs list rendering is comfortably sub-50 ms for the sampled live routes.
+  - The long-lived web process stayed near 112 MiB RSS after serving the larger
+    all-jobs response.
+
+### Phase 5 Chapters Rollout Check With Rust Enabled
+
+- Date: 2026-05-08
+- Container image rebuilt from current checkout and restarted with
+  `PODLY_RUST_CHAPTERS_ENABLED=true`.
+- Confirmed runtime flags:
+  - `PODLY_RUST_JOBS_ENABLED=false`
+  - `PODLY_RUST_CHAPTERS_ENABLED=true`
+  - `PODLY_RUST_STATS_ENABLED=false`
+  - `PODLY_RUST_FEED_REFRESH_ENABLED=false`
+- Episode: `157760309`
+- Processed audio path:
+  `/app/src/instance/data/srv/Nextlander_Membership_Feed/Monthly Planorama 060 May 2026.mp3`
+- Authenticated chapters route:
+  - route: `/api/posts/157760309/chapters`
+  - status: 200
+  - `time_total`: 0.049662 seconds
+  - response size: 4,690 bytes
+- Docker stats after request:
+  - container memory: 173.5 MiB / 15.54 GiB
+  - CPU: 2.24%
+  - PIDs: 12
+- `docker top` RSS after request:
+  - `./scripts/start_services.sh`: 3,228 KiB
+  - writer process (`python3 -u -m app.writer`): 93,812 KiB
+  - web process (`python3 -u src/main.py`): 116,836 KiB
+- cgroup memory after request:
+  - `memory.current`: 184,934,400 bytes
+  - `anon`: 177,188,864 bytes
+  - `file`: 749,568 bytes
+  - `kernel`: 5,623,808 bytes
+  - `slab`: 4,148,624 bytes
+  - `inactive_file`: 290,816 bytes
+  - `active_file`: 466,944 bytes
+- Fallback/error logs:
+  - `docker logs --since 10m podly-pure-podcasts` showed normal startup,
+    migration messages, and one `WARNING:waitress.queue:Task queue depth is 1`.
+  - No Rust fallback/error lines were observed.
+- Interpretation:
+  - Chapter reads are sub-100 ms for the sampled processed episode.
+  - The long-lived web process stayed near 117 MiB RSS after serving chapters.
+
+### Phase 5 Stats Rollout Check With Rust Enabled
+
+- Date: 2026-05-08
+- Container image rebuilt from current checkout and restarted with
+  `PODLY_RUST_STATS_ENABLED=true`.
+- Confirmed runtime flags:
+  - `PODLY_RUST_JOBS_ENABLED=false`
+  - `PODLY_RUST_CHAPTERS_ENABLED=false`
+  - `PODLY_RUST_STATS_ENABLED=true`
+  - `PODLY_RUST_FEED_REFRESH_ENABLED=false`
+- Episode: `audioboom-019e05ae-d27d-7444-8129-b806d2a60051`
+- Authenticated stats route:
+  - route: `/api/posts/audioboom-019e05ae-d27d-7444-8129-b806d2a60051/stats`
+  - status: 200
+  - `time_total`: 0.984905 seconds
+  - response size: 893,540 bytes
+- Docker stats after request:
+  - container memory: 179.1 MiB / 15.54 GiB
+  - CPU: 2.40%
+  - PIDs: 12
+- `docker top` RSS after request:
+  - `./scripts/start_services.sh`: 3,132 KiB
+  - writer process (`python3 -u -m app.writer`): 93,320 KiB
+  - web process (`python3 -u src/main.py`): 121,344 KiB
+- cgroup memory after request:
+  - `memory.current`: 208,830,464 bytes
+  - `anon`: 179,687,424 bytes
+  - `file`: 22,315,008 bytes
+  - `kernel`: 5,537,792 bytes
+  - `slab`: 4,100,976 bytes
+  - `inactive_file`: 20,500,480 bytes
+  - `active_file`: 1,818,624 bytes
+- Fallback/error logs:
+  - `docker logs --since 10m podly-pure-podcasts` showed only normal startup
+    and migration messages, with no Rust fallback/error lines.
+- Interpretation:
+  - Ordered stats rollout reproduced the earlier sub-second Rust stats route.
+  - The web process stayed near 121 MiB RSS after serving the large stats
+    response.
+
+### Phase 4 Feed Refresh Planning Check
+
+- Date: 2026-05-08
+- Step checked: whether the current `fetch_feed(feed.rss_url)` / `feedparser.parse`
+  path exposes raw XML cleanly enough to pass to `podly_tools feed refresh-plan`.
+- Probe URL: `https://feeds.simplecast.com/qKIEAGzn`
+- Observed `FeedParserDict` keys:
+  - `bozo`, `encoding`, `entries`, `etag`, `feed`, `headers`, `href`,
+    `namespaces`, `status`, `updated`, `updated_parsed`, `version`
+- Raw XML fields checked:
+  - `content`: absent
+  - `rawdata`: absent
+  - `data`: absent
+- Decision:
+  - Do not implement or enable Rust feed refresh planning from the current
+    `feedparser.parse(url)` object, because the plan requires using raw XML only
+    if the existing path exposes it cleanly.
+  - Adding a second fetch path could change refresh behavior, caching, redirects,
+    and parser quirks; that should be a separate explicit design decision.
+
+### Phase 4 Feed Refresh Planning Implementation
+
+- Date: 2026-05-08
+- Implemented `podly_tools feed refresh-plan`.
+- Contract:
+  - inputs: `--db`, `--feed-id`, `--feed-xml`,
+    `--auto-whitelist-new-posts`
+  - output: `updates`, `new_posts`, `existing_post_updates`
+- Python wrapper:
+  - `try_plan_feed_refresh(...)`
+  - validates payload shape before use
+  - falls back to Python behavior on command or payload failure
+- `refresh_feed(feed)` wiring:
+  - still calls existing `fetch_feed(feed.rss_url)` first
+  - only calls Rust planning when the existing feedparser result exposes raw XML
+    through `content`, `rawdata`, `data`, `podly_raw_xml`, or `_podly_raw_xml`
+  - otherwise logs a skip and uses `_build_refresh_feed_payload(...)`
+- Writer boundary:
+  - unchanged; Python still sends the final payload to
+    `writer_client.action("refresh_feed", ..., wait=True)`
+- Coverage:
+  - Rust fixture test covers new post planning, existing post title/description
+    update, duration backfill, archive auto-whitelist suppression, feed image
+    update, and legacy GUID repair by audio URL.
+  - Python wrapper tests cover valid payloads and invalid payload fallback.
+  - Python feed refresh tests cover Rust-plan use with raw XML and Python
+    fallback when raw XML is absent.
+- Live rollout note:
+  - `PODLY_RUST_FEED_REFRESH_ENABLED` remains default-off and should not be
+    enabled for normal live refreshes until the fetch/raw-XML design is
+    explicitly changed or the existing parser path exposes raw XML.
+
+### Stats Log-Parsing Regex Cache Follow-up
+
+- Date: 2026-05-09
+- After fixing feed refresh, found the same uncached-regex pattern in
+  `_build_related_logs` / `extract_log_field` / `extract_step_name` (Rust stats
+  path). These run inside a loop over tailed log lines.
+- Fix: cached `line_re`, `extract_step_name` regex behind `OnceLock`, and added
+  `log_field_regex` helper using `Mutex<HashMap>` to memoize per field name.
+- Stats route timing (live container, `PODLY_RUST_STATS_ENABLED=true`):
+  - Before: ~0.92s (recorded earlier in plan)
+  - After: 0.137s, 0.110s, 0.120s across three runs
+  - ~8x faster than the previous Rust path
+  - ~30x faster than the original Python implementation (3.48s baseline)
+- No fallback or error lines in docker logs.
+
+### Phase 5 Feed Refresh Rollout With Rust Enabled
+
+- Date: 2026-05-09
+- Changes needed to unblock `PODLY_RUST_FEED_REFRESH_ENABLED=true`:
+  - `fetch_feed` replaced `feedparser.parse(url)` with `requests.get(url)` +
+    `feedparser.parse(response.content)`, storing raw bytes in `podly_raw_xml`.
+    This gives the Rust planner the XML it needs without a second HTTP request.
+  - `_try_build_rust_refresh_feed_payload` switched from
+    `_sqlite_db_path_from_app_config` (returned a relative path with `?timeout=60`
+    embedded, breaking Rust's file open) to `get_instance_dir() / "sqlite3.db"`.
+  - Rust `get_duration_seconds`/`get_duration_f64` helpers added because SQLite
+    stores some `duration` values as `Real` in an `INTEGER` affinity column
+    (dynamic typing); rusqlite rejected the type mismatch without this.
+- Container image rebuilt and restarted with `PODLY_RUST_FEED_REFRESH_ENABLED=true`.
+- Confirmed runtime flags:
+  - `PODLY_RUST_JOBS_ENABLED=false`
+  - `PODLY_RUST_CHAPTERS_ENABLED=false`
+  - `PODLY_RUST_STATS_ENABLED=false`
+  - `PODLY_RUST_FEED_REFRESH_ENABLED=true`
+- Feed tested: feed 2 (99% Invisible, `https://feeds.simplecast.com/BqbsxVfO`)
+- Python-only baseline (flag false, same build, measured 2026-05-09):
+  - fetch start to refresh complete: ~1.757 seconds
+  - gc_collected: 54
+- Rust-enabled (flag true):
+  - fetch start to refresh complete: ~3.1–3.2 seconds across two runs
+  - gc_collected: 45–90
+- Initial result: Rust path was ~3.1s vs Python baseline ~1.76s (slower!).
+  Profiled and applied two optimizations:
+  1. **Rust regex caching** — `xml_text`, `xml_attr`, `extract_xml_blocks` were
+     recompiling regexes on every call, ~1000+ compilations per refresh of a
+     3.3MB feed. Added `block_regex` / `attr_regex` helpers using a static
+     `Mutex<HashMap>` cache. Direct sidecar timing dropped from 1.65s to 0.50s.
+  2. **Skip feedparser.parse on the Rust happy path** — feedparser parsing of
+     a 3.3MB feed XML takes ~1.3s (verified directly). Refactored
+     `refresh_feed` to fetch raw XML via `_fetch_raw_feed_bytes` and call Rust
+     directly without ever invoking `feedparser.parse`. Only fall back to
+     feedparser if Rust returns None (e.g. invalid payload).
+- Final timings (3 runs, Rust + both optimizations):
+  - 0.606s, 0.650s, 0.703s end-to-end
+  - ~5x faster than the unoptimized Rust path
+  - ~3x faster than the Python baseline (~1.76s)
+- Docker stats after requests:
+  - container memory: 239.7 MiB / 15.54 GiB
+  - CPU: 0.01%
+  - PIDs: 12
+- `docker top` RSS after requests:
+  - `./scripts/start_services.sh`: 3,208 KiB
+  - writer process: 99,068 KiB
+  - web process: 179,988 KiB
+- cgroup memory after requests:
+  - `memory.current`: 281,350,144 bytes
+  - `anon`: 244,514,816 bytes
+  - `file`: 29,704,192 bytes
+  - `kernel`: 5,967,872 bytes
+  - `slab`: 4,563,608 bytes
+  - `inactive_file`: 29,495,296 bytes
+  - `active_file`: 217,088 bytes
+
+### Final CI
+
+- Date: 2026-05-09 (updated after feed refresh unblock)
+- Command: `mise exec -- ./scripts/ci.sh`
+- Python checks:
+  - `uv sync --extra dev`: passed
+  - `uv run ruff format .`: passed
+  - `uv run ruff check --fix .`: passed
+  - `uv run ty check`: passed
+  - `uv run pytest --disable-warnings`: 456 passed, 2 skipped
+- Rust checks:
+  - `cargo fmt --check`: passed
+  - `cargo check`: passed
+  - `cargo test`: 14 passed
+
+## Phase 6: Post-Rollout Optimizations
+
+After the initial Rust rollout, profiling found additional wins. Each was
+verified end-to-end against the live container before being recorded here.
+
+### `/feeds` Endpoint SQL Aggregate Fix
+
+- Date: 2026-05-09
+- Problem: `/feeds` took 2.46s for 14 feeds. `_serialize_feed` called
+  `len(feed.posts)` and `_latest_episode_release_date(feed)`, each triggering
+  lazy loads of all post rows for that feed. With ~5,700 total posts, this was
+  a classic N+1: 14 feeds × 2 lazy-loaded relationships = 28 queries plus full
+  ORM materialization.
+- Fix (Python only — no Rust): added `_FeedAggregate` dataclass plus
+  `_build_feed_aggregates(feed_ids)` that batches two `GROUP BY` queries — one
+  for `(post_count, max(release_date))` per feed, one for member IDs per feed.
+  `_serialize_feed` accepts an optional aggregates map and uses precomputed
+  values when present.
+- Result: 2.456s → ~0.020s end-to-end (**~120x faster**). Response is
+  byte-identical to the previous implementation (verified with `diff`).
+- Lesson: not every slow path needs Rust. A sub-50ms SQL aggregation
+  outperforms anything that involves a subprocess + IPC.
+
+### Stats Log-Parsing Regex Cache
+
+- Date: 2026-05-09
+- Problem: After the feed refresh fix uncovered the uncached-regex pattern,
+  the same anti-pattern was found in `_build_related_logs` for the stats
+  route. `extract_log_field` and `extract_step_name` recompiled regexes per
+  log line, and `line_re` was rebuilt per request.
+- Fix: cached `line_re` and `STEP_NAME_RE` behind `OnceLock`. Added
+  `log_field_regex` helper using `Mutex<HashMap>` to memoize per field name.
+- Result: 0.92s → ~0.12s for the stats route. **~8x faster** than the
+  previous Rust path, **~30x faster** than the original Python (3.48s).
+
+### Rust `transcript ad-merge` Command
+
+- Date: 2026-05-09
+- Goal: eliminate the per-job Python ORM object construction and AdMerger
+  iteration for the runtime ad-cutting pipeline.
+- Implementation: new `transcript ad-merge` Rust subcommand reusing the
+  existing `build_stats_ad_blocks` algorithm (already ported as part of stats
+  render). CLI takes `--db --post-guid --min-confidence --max-gap
+  --enable-boundary-refinement` and returns
+  `{"ad_segments": [[start, end], ...]}`.
+- Python wrapper: `try_merge_ad_segments(...)` in `shared/rust_sidecar.py`,
+  guarded by `PODLY_RUST_AD_MERGE_ENABLED` (default off).
+- Wiring: `AudioProcessor.get_ad_segments` calls
+  `_try_rust_get_ad_segments` first; falls through to the Python AdMerger
+  pipeline on any failure or when an `identification_query` was injected
+  (test path).
+
+### Rust `transcript profanity-windows` Command
+
+- Date: 2026-05-09
+- Goal: move profanity-window extraction (regex + word loop + window merge)
+  out of the Python worker for feeds that opt into bleeping.
+- Implementation: new `transcript profanity-windows` Rust subcommand that
+  reads a JSON request file containing flat words list, profanity terms, and
+  padding/gap config, and returns merged `(start_ms, end_ms)` windows.
+  Mirrors Python `extract_profanity_windows` rounding (floor for start,
+  ceil for end) and merge logic exactly.
+- Python wrapper: `try_extract_profanity_windows(...)` in
+  `shared/rust_sidecar.py`, guarded by `PODLY_RUST_PROFANITY_ENABLED`
+  (default off).
+- Wiring: new `PodcastProcessor._extract_profanity_windows` flattens
+  segments into a word list (capturing `saw_word_timestamps` in Python so
+  the existing exception logic still works), then tries Rust before falling
+  back to Python.
+
+### Lazy-Load litellm/openai in Worker (Memory Win)
+
+- Date: 2026-05-09
+- Problem: importing `PodcastProcessor` cascaded into `litellm` (714
+  submodules) and `openai` (566 submodules) at module-top across 7 files.
+  This added **+117 MB RSS** to every worker process, even during the long
+  network-bound transcription phase that doesn't touch the LLM.
+- Fix: removed module-top `import litellm` / `from openai import OpenAI`
+  from `ad_classifier.py`, `chapter_fallback.py`, `transcribe.py`,
+  `podcast_processor.py`, `boundary_refiner.py`, `word_boundary_refiner.py`,
+  and `llm_error_classifier.py`. Imports moved inside the methods that
+  actually call `litellm.completion` / `OpenAI(...)`. Added `from __future__
+  import annotations` and `TYPE_CHECKING` guards for type annotations that
+  reference these libraries.
+- Test mocks updated: `mock.patch("module.litellm.completion")` →
+  `mock.patch("litellm.completion")` (the canonical module).
+- Result (cold-start measurement):
+  - Before: PodcastProcessor import → **197 MB RSS**, +1886 modules,
+    1326 LLM-related modules loaded
+  - After: PodcastProcessor import → **106 MB RSS**, +492 modules,
+    **0 LLM modules loaded**
+  - **−91 MB** worker baseline. litellm/openai now load only when an LLM
+    call is actually made (after transcription completes). For
+    chapter-strategy feeds that never invoke the LLM, they never load at all.
+
+### Final CI After Phase 6
+
+- Date: 2026-05-09
+- Command: `mise exec -- ./scripts/ci.sh`
+- Result: All checks passed (456 Python tests passed, 2 skipped; 14 Rust
+  tests passed; ruff + ty + fmt + cargo check all clean).
+
+## Final Acceptance Criteria
+
+- Every new Rust feature has:
+  - CLI command
+  - Python wrapper
+  - env flag
+  - Python fallback
+  - Rust unit tests
+  - Python route/wrapper tests
+  - full CI pass through `mise exec -- ./scripts/ci.sh`
+- Rust read-only SQLite commands use read-only connections and `query_only`.
+- No application writes bypass the writer service.
+- Live measurement notes show whether each Rust feature reduced:
+  - route latency
+  - Python process RSS after use
+  - container cgroup anon memory
+  - processing job stage time

@@ -35,6 +35,18 @@ echo "Running 'uv run pytest --disable-warnings'"
 echo '============================================================='
 uv run pytest --disable-warnings
 
+if [ -f rust/Cargo.toml ]; then
+    echo '============================================================='
+    echo "Running Rust checks"
+    echo '============================================================='
+    (
+        cd rust || exit 1
+        cargo fmt --check
+        cargo clippy -- -D warnings
+        cargo test
+    )
+fi
+
 # Run integration tests only if --int flag is provided
 if [ "$RUN_INTEGRATION" = true ]; then
     echo '============================================================='

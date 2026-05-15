@@ -25,6 +25,7 @@ from app.auth.discord_service import (
 )
 from app.auth.discord_settings import reload_discord_settings
 from app.auth.guards import require_admin
+from app.ui_features import show_discord_integration
 from app.writer.client import writer_client
 
 if TYPE_CHECKING:
@@ -61,9 +62,10 @@ def _has_env_override(env_var: str) -> bool:
 def discord_status() -> Response:
     """Return whether Discord SSO is enabled."""
     settings = _get_discord_settings()
+    integration_visible = show_discord_integration()
     return jsonify(
         {
-            "enabled": settings.enabled if settings else False,
+            "enabled": integration_visible and settings.enabled if settings else False,
         }
     )
 
@@ -195,7 +197,7 @@ def discord_config_put() -> Response | tuple[Response, int]:
 def discord_login() -> Response | tuple[Response, int]:
     """Start the Discord OAuth2 flow by returning the authorization URL."""
     settings = _get_discord_settings()
-    if not settings or not settings.enabled:
+    if not show_discord_integration() or not settings or not settings.enabled:
         return jsonify({"error": "Discord SSO is not configured."}), 404
 
     prompt = request.args.get("prompt", "none")
@@ -211,7 +213,7 @@ def discord_login() -> Response | tuple[Response, int]:
 def discord_callback() -> Response:
     """Handle the OAuth2 callback from Discord."""
     settings = _get_discord_settings()
-    if not settings or not settings.enabled:
+    if not show_discord_integration() or not settings or not settings.enabled:
         return Response(
             response="",
             status=302,

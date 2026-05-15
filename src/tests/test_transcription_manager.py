@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Generator
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,7 +8,8 @@ from flask import Flask
 
 from app.extensions import db
 from app.models import Feed, ModelCall, Post, TranscriptSegment
-from podcast_processor.transcribe import Segment, Transcriber
+from podcast_processor import transcription_manager as transcription_manager_module
+from podcast_processor.transcribe import Segment, Transcriber, WordTimestamp
 from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config, TestWhisperConfig
 from shared.test_utils import create_standard_test_config
@@ -25,16 +27,24 @@ class MockTranscriber(Transcriber):
         """Implementation of the abstract property"""
         return self._model_name
 
-    def transcribe(self, audio_file_path: str) -> list[Segment]:
+    def transcribe(
+        self,
+        audio_file_path: str,
+        *,
+        include_word_timestamps: bool = False,
+        progress_callback: Any = None,
+    ) -> list[Segment]:
         """Return mock segments or raise exception based on configuration."""
         del audio_file_path
+        del include_word_timestamps
+        del progress_callback
         if isinstance(self.mock_response, Exception):
             raise self.mock_response
         return self.mock_response
 
 
 @pytest.fixture
-def app() -> Generator[Flask, None, None]:
+def app() -> Generator[Flask]:
     """Create and configure a Flask app for testing."""
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
@@ -201,6 +211,62 @@ def test_transcribe_new(
         assert ModelCall.query.filter_by(post_id=post.id).first().status == "success"
 
 
+def test_transcribe_new_writes_transcript_in_chunks(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PODLY_WRITER_BATCH_SIZE", "1")
+    action_names: list[str] = []
+    original_action = transcription_manager_module.writer_client.action
+
+    def spy_action(action_name: str, params: dict, wait: bool = True):
+        action_names.append(action_name)
+        return original_action(action_name, params, wait=wait)
+
+    monkeypatch.setattr(
+        transcription_manager_module.writer_client, "action", spy_action
+    )
+
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-chunked.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-chunked",
+            download_url="http://example.com/audio-chunked.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=MockTranscriber(
+                [
+                    Segment(start=0.0, end=1.0, text="one"),
+                    Segment(start=1.0, end=2.0, text="two"),
+                    Segment(start=2.0, end=3.0, text="three"),
+                ]
+            ),
+        )
+
+        db_segments, _ = manager.transcribe_for_processing(post)
+
+        assert [segment.text for segment in db_segments] == ["one", "two", "three"]
+        assert action_names == [
+            "upsert_whisper_model_call",
+            "start_transcription_replace",
+            "insert_transcript_segments",
+            "insert_transcript_segments",
+            "insert_transcript_segments",
+            "finish_transcription_replace",
+        ]
+
+
 def test_transcribe_handles_error(
     test_config: Config,
     test_logger: logging.Logger,
@@ -293,3 +359,242 @@ def test_transcribe_reuses_placeholder_model_call(
         assert refreshed_call.id == existing_call.id
         assert refreshed_call.status == "success"
         assert refreshed_call.last_segment_sequence_num == 1
+
+
+def test_transcribe_persists_optional_speaker_labels(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+) -> None:
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-speaker.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-speaker",
+            download_url="http://example.com/audio-speaker.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        transcriber = MockTranscriber(
+            [
+                Segment(
+                    start=0.0,
+                    end=5.0,
+                    text="Host intro",
+                    speaker_label="SPEAKER_00",
+                ),
+                Segment(
+                    start=5.0,
+                    end=10.0,
+                    text="Promo read",
+                    speaker_label="SPEAKER_01",
+                ),
+            ]
+        )
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=transcriber,
+        )
+
+        segments = manager.transcribe(post)
+
+        assert len(segments) == 2
+        assert segments[0].speaker_label == "SPEAKER_00"
+        assert segments[1].speaker_label == "SPEAKER_01"
+
+
+def test_transcribe_for_processing_returns_rich_segments_when_requested(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PODLY_INSTANCE_DIR", str(tmp_path / "instance"))
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-rich.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-rich",
+            download_url="http://example.com/audio-rich.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        rich_segments = [
+            Segment(
+                start=0.0,
+                end=1.0,
+                text="Hello",
+                words=[WordTimestamp(word="Hello", start=0.0, end=1.0, score=0.98)],
+            ),
+            Segment(
+                start=1.0,
+                end=2.0,
+                text="world",
+                words=[WordTimestamp(word="world", start=1.0, end=2.0, score=0.97)],
+            ),
+        ]
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=MockTranscriber(rich_segments),
+        )
+
+        db_segments, returned_rich_segments = manager.transcribe_for_processing(
+            post,
+            include_word_timestamps=True,
+        )
+
+        assert len(db_segments) == 2
+        assert returned_rich_segments == rich_segments
+        db.session.refresh(post)
+        assert post.transcript_word_timestamps == [
+            {
+                "sequence_num": 0,
+                "words": [{"word": "Hello", "start": 0.0, "end": 1.0, "score": 0.98}],
+            },
+            {
+                "sequence_num": 1,
+                "words": [{"word": "world", "start": 1.0, "end": 2.0, "score": 0.97}],
+            },
+        ]
+
+
+def test_transcribe_for_processing_reuses_saved_word_timestamps(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+) -> None:
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-reuse.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-reuse",
+            download_url="http://example.com/audio-reuse.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+            transcript_word_timestamps=[
+                {
+                    "sequence_num": 0,
+                    "words": [
+                        {
+                            "word": "Hello",
+                            "start": 0.0,
+                            "end": 0.4,
+                            "score": 0.98,
+                        },
+                        {
+                            "word": "world",
+                            "start": 0.41,
+                            "end": 1.0,
+                            "score": 0.97,
+                        },
+                    ],
+                }
+            ],
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=0.0,
+                end_time=1.0,
+                text="Hello world",
+            )
+        )
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                model_name="mock_transcriber",
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=0,
+                prompt="Whisper transcription job",
+                status="success",
+            )
+        )
+        db.session.commit()
+
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=MockTranscriber(Exception("should not re-transcribe")),
+        )
+
+        db_segments, rich_segments = manager.transcribe_for_processing(
+            post,
+            include_word_timestamps=True,
+        )
+
+        assert len(db_segments) == 1
+        assert rich_segments is not None
+        assert [word.word for word in (rich_segments[0].words or [])] == [
+            "Hello",
+            "world",
+        ]
+
+
+def test_transcribe_for_processing_falls_back_when_existing_transcript_has_no_saved_words_and_transcriber_cannot_supply_them(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+) -> None:
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-fallback.xml")
+        post = Post(
+            feed=feed,
+            guid="guid-fallback",
+            download_url="http://example.com/audio-fallback.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=0.0,
+                end_time=1.0,
+                text="Hello world",
+            )
+        )
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                model_name="mock_transcriber",
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=0,
+                prompt="Whisper transcription job",
+                status="success",
+            )
+        )
+        db.session.commit()
+
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            db_session=db.session,
+            transcriber=MockTranscriber(Exception("should not re-transcribe")),
+        )
+
+        db_segments, rich_segments = manager.transcribe_for_processing(
+            post,
+            include_word_timestamps=True,
+        )
+
+        assert len(db_segments) == 1
+        assert rich_segments is None

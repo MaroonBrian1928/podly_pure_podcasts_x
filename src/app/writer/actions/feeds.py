@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func
 
 from app.extensions import db
+from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.models import (
     Feed,
@@ -20,14 +21,41 @@ from app.models import (
 )
 
 
+def _apply_existing_post_updates(
+    feed: Feed, existing_post_updates: list[dict[str, Any]]
+) -> int:
+    updated_posts_count = 0
+    for post_update in existing_post_updates:
+        post_id = post_update.get("post_id")
+        if not post_id:
+            continue
+        post = db.session.get(Post, int(post_id))
+        if not post or post.feed_id != feed.id:
+            continue
+
+        updated = False
+        for field_name in ("guid", "title", "description", "image_url", "duration"):
+            if field_name not in post_update:
+                continue
+            setattr(post, field_name, post_update[field_name])
+            updated = True
+
+        if updated:
+            updated_posts_count += 1
+    return updated_posts_count
+
+
 def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
     feed_id = params.get("feed_id")
     updates = params.get("updates", {})
     new_posts_data = params.get("new_posts", [])
+    existing_post_updates = params.get("existing_post_updates", [])
 
     feed = db.session.get(Feed, feed_id)
     if not feed:
         raise ValueError(f"Feed {feed_id} not found")
+
+    feed_changed = bool(updates) or bool(new_posts_data)
 
     for k, v in updates.items():
         setattr(feed, k, v)
@@ -48,6 +76,7 @@ def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
 
     for post in created_posts:
         if post.whitelisted:
+            created_at = datetime.now(UTC).replace(tzinfo=None)
             job = ProcessingJob(
                 id=str(uuid.uuid4()),
                 post_guid=post.guid,
@@ -55,13 +84,23 @@ def refresh_feed_action(params: dict[str, Any]) -> dict[str, Any]:
                 current_step=0,
                 total_steps=4,
                 progress_percentage=0.0,
-                created_at=datetime.now(UTC).replace(tzinfo=None),
+                created_at=created_at,
+                stage_history=initial_stage_history(at=created_at),
             )
             db.session.add(job)
 
+    updated_posts_count = _apply_existing_post_updates(feed, existing_post_updates)
+
+    if feed_changed or updated_posts_count > 0:
+        feed.last_changed_at = datetime.now(UTC).replace(tzinfo=None)
+
     recalculate_run_counts(db.session)
 
-    return {"feed_id": feed.id, "new_posts_count": len(created_posts)}
+    return {
+        "feed_id": feed.id,
+        "new_posts_count": len(created_posts),
+        "updated_posts_count": updated_posts_count,
+    }
 
 
 def add_feed_action(params: dict[str, Any]) -> dict[str, Any]:
@@ -90,6 +129,7 @@ def add_feed_action(params: dict[str, Any]) -> dict[str, Any]:
 
     for post in created_posts:
         if post.whitelisted:
+            created_at = datetime.now(UTC).replace(tzinfo=None)
             job = ProcessingJob(
                 id=str(uuid.uuid4()),
                 post_guid=post.guid,
@@ -97,7 +137,8 @@ def add_feed_action(params: dict[str, Any]) -> dict[str, Any]:
                 current_step=0,
                 total_steps=4,
                 progress_percentage=0.0,
-                created_at=datetime.now(UTC).replace(tzinfo=None),
+                created_at=created_at,
+                stage_history=initial_stage_history(at=created_at),
             )
             db.session.add(job)
 
@@ -259,6 +300,7 @@ def create_dev_test_feed_action(params: dict[str, Any]) -> dict[str, Any]:
             started_at=now,
             completed_at=now,
             step_name="completed",
+            stage_history=initial_stage_history(step=4, step_name="completed", at=now),
         )
         db.session.add(job)
 

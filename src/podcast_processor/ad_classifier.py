@@ -1,18 +1,27 @@
+from __future__ import annotations
+
 import logging
 import math
 import time
 from datetime import UTC, datetime
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
-import litellm
 from jinja2 import Template
-from litellm.exceptions import InternalServerError
-from litellm.types.utils import Choices
 from pydantic import ValidationError
+
+if TYPE_CHECKING:
+    from litellm.exceptions import InternalServerError
 from sqlalchemy import and_
 
 from app.extensions import db
-from app.models import Identification, ModelCall, Post, TranscriptSegment
+from app.memory_pressure import collect_incremental
+from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
+from app.writer.batching import (
+    batch_count_for,
+    get_writer_batch_size,
+    iter_writer_batches,
+)
 from app.writer.client import writer_client
 from podcast_processor.boundary_refiner import BoundaryRefiner
 from podcast_processor.cue_detector import CueDetector
@@ -25,12 +34,16 @@ from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
 )
-from podcast_processor.prompt import transcript_excerpt_for_prompt
+from podcast_processor.prompt import (
+    build_prompt_audio_markers,
+    build_speaker_context_for_prompt,
+    transcript_excerpt_for_prompt,
+)
 from podcast_processor.token_rate_limiter import (
     TokenRateLimiter,
     configure_rate_limiter_for_model,
 )
-from podcast_processor.transcribe import Segment
+from podcast_processor.transcribe import Segment, load_word_timestamps_by_sequence
 from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 from shared.config import Config, TestWhisperConfig
 from shared.llm_utils import model_uses_max_completion_tokens
@@ -106,6 +119,12 @@ class AdClassifier:
             self.concurrency_limiter = None
             self.logger.info("LLM concurrency limiting disabled")
 
+        # Set to True if any LLM response fails to parse during a single
+        # ``classify()`` run. Reset on each new call. The orchestrator reads
+        # this after classification finishes to decide whether to auto-retry
+        # zero-ad runs (see PodcastProcessor zero-ads guard).
+        self.had_parse_error = False
+
         # Initialize cue detector for neighbor expansion
         self.cue_detector = CueDetector()
 
@@ -138,6 +157,10 @@ class AdClassifier:
             user_prompt_template: User prompt template for the LLM
             post: Post containing the podcast to classify
         """
+        # Reset the parse-error signal at the top of every classification run
+        # so a flag from a prior post can't leak into this one's outcome.
+        self.had_parse_error = False
+
         self.logger.info(
             f"Starting ad classification for post {post.id} with {len(transcript_segments)} segments."
         )
@@ -375,6 +398,7 @@ class AdClassifier:
 
             user_prompt_str = self._generate_user_prompt(
                 current_chunk_db_segments=chunk_segments,
+                all_transcript_segments=total_segments,
                 post=post,
                 user_prompt_template=user_prompt_template,
                 includes_start=includes_start,
@@ -656,12 +680,15 @@ class AdClassifier:
             # For older models and non-OpenAI models, use max_tokens
             completion_args["max_tokens"] = self.config.openai_max_tokens
 
+        completion_args["response_format"] = {"type": "json_object"}
+
         return completion_args
 
     def _generate_user_prompt(
         self,
         *,
         current_chunk_db_segments: list[TranscriptSegment],
+        all_transcript_segments: list[TranscriptSegment],
         post: Post,
         user_prompt_template: Template,
         includes_start: bool,
@@ -669,19 +696,99 @@ class AdClassifier:
     ) -> str:
         """Generate the user prompt string for the LLM."""
         temp_pydantic_segments_for_prompt = [
-            Segment(start=db_seg.start_time, end=db_seg.end_time, text=db_seg.text)
+            Segment(
+                start=db_seg.start_time,
+                end=db_seg.end_time,
+                text=db_seg.text,
+                speaker_label=getattr(db_seg, "speaker_label", None),
+            )
             for db_seg in current_chunk_db_segments
         ]
+        all_prompt_segments = [
+            Segment(
+                start=db_seg.start_time,
+                end=db_seg.end_time,
+                text=db_seg.text,
+                speaker_label=getattr(db_seg, "speaker_label", None),
+            )
+            for db_seg in all_transcript_segments
+        ]
+        audio_markers = self._load_chunk_audio_markers(
+            post=post,
+            current_chunk_db_segments=current_chunk_db_segments,
+        )
 
         return user_prompt_template.render(
             podcast_title=post.title,
             podcast_topic=post.description if post.description else "",
+            speaker_context=build_speaker_context_for_prompt(all_prompt_segments),
             transcript=transcript_excerpt_for_prompt(
                 segments=temp_pydantic_segments_for_prompt,
                 includes_start=includes_start,
                 includes_end=includes_end,
+                audio_markers=audio_markers,
             ),
         )
+
+    def _load_chunk_audio_markers(
+        self,
+        *,
+        post: Post,
+        current_chunk_db_segments: list[TranscriptSegment],
+    ) -> list[Any]:
+        if not current_chunk_db_segments or getattr(post, "id", None) is None:
+            return []
+
+        chunk_start = float(current_chunk_db_segments[0].start_time)
+        chunk_end = float(current_chunk_db_segments[-1].end_time)
+
+        try:
+            audio_segments = (
+                self.db_session.query(AudioSegment)
+                .filter(
+                    AudioSegment.post_id == post.id,
+                    AudioSegment.end_time >= chunk_start,
+                    AudioSegment.start_time <= chunk_end,
+                )
+                .order_by(AudioSegment.start_time.asc())
+                .all()
+            )
+        except Exception:  # noqa: BLE001
+            self.logger.warning(
+                "Failed to load INA audio markers for prompt on post %s",
+                post.id,
+                exc_info=True,
+            )
+            return []
+
+        if not isinstance(audio_segments, list):
+            return []
+
+        clipped_segments: list[Any] = []
+        for audio_segment in audio_segments:
+            start_time = getattr(audio_segment, "start_time", None)
+            end_time = getattr(audio_segment, "end_time", None)
+            if start_time is None or end_time is None:
+                continue
+
+            try:
+                clipped_start = max(float(start_time), chunk_start)
+                clipped_end = min(float(end_time), chunk_end)
+            except TypeError, ValueError:
+                continue
+
+            if clipped_end <= clipped_start:
+                continue
+
+            clipped_segments.append(
+                SimpleNamespace(
+                    start_time=clipped_start,
+                    end_time=clipped_end,
+                    label=getattr(audio_segment, "label", None),
+                )
+            )
+
+        return build_prompt_audio_markers(clipped_segments)
 
     def _get_or_create_model_call(
         self,
@@ -788,6 +895,10 @@ class AdClassifier:
                 f"Error processing LLM response for ModelCall {model_call.id}: {e}",
                 exc_info=True,
             )
+            # Surface the parse failure to the orchestrator. Combined with a
+            # final ad-window count of 0 this drives the optional auto-retry
+            # path; on its own it's just diagnostic.
+            self.had_parse_error = True
         return []
 
     def _create_identifications(
@@ -862,17 +973,7 @@ class AdClassifier:
         if not to_insert:
             return 0, matched_segments
 
-        res = writer_client.action(
-            "insert_identifications",
-            {"identifications": to_insert},
-            wait=True,
-        )
-        if not res or not res.success:
-            raise RuntimeError(
-                getattr(res, "error", "Failed to insert identifications")
-            )
-
-        inserted = int((res.data or {}).get("inserted") or 0)
+        inserted = self._insert_identifications_batched(to_insert)
         return inserted, matched_segments
 
     def _adjust_confidence(
@@ -968,6 +1069,8 @@ class AdClassifier:
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """Determine if an error should be retried."""
+        from litellm.exceptions import InternalServerError
+
         if isinstance(error, InternalServerError):
             return True
 
@@ -1030,6 +1133,9 @@ class AdClassifier:
                 completion_args = self._prepare_api_call(model_call_obj, system_prompt)
                 if completion_args is None:
                     return None  # Token limit exceeded
+
+                import litellm
+                from litellm.types.utils import Choices
 
                 # Use concurrency limiter if available
                 if self.concurrency_limiter:
@@ -1223,18 +1329,58 @@ class AdClassifier:
         self, identifications: list[dict[str, Any]]
     ) -> int:
         """Bulk insert identifications"""
+        return self._insert_identifications_batched(identifications)
+
+    def _insert_identifications_batched(
+        self, identifications: list[dict[str, Any]]
+    ) -> int:
         if not identifications:
             return 0
+
+        batch_size = get_writer_batch_size()
+        total_batches = batch_count_for(len(identifications), batch_size=batch_size)
+        inserted = 0
+        self.logger.info(
+            "[IDENTIFICATION_WRITE] rows=%s batches=%s batch_size=%s",
+            len(identifications),
+            total_batches,
+            batch_size,
+        )
+        for batch_index, batch in enumerate(
+            iter_writer_batches(identifications, batch_size=batch_size), start=1
+        ):
+            res = writer_client.action(
+                "insert_identifications",
+                {"identifications": list(batch)},
+                wait=True,
+            )
+            if not res or not res.success:
+                raise RuntimeError(
+                    getattr(res, "error", "Failed to insert identifications")
+                )
+            inserted += int((res.data or {}).get("inserted") or 0)
+            collect_incremental(
+                f"ad classifier identification batch {batch_index}/{total_batches}",
+                self.logger,
+            )
+        return inserted
+
+    def _replace_identifications_batched(
+        self,
+        *,
+        delete_ids: list[int],
+        new_identifications: list[dict[str, Any]],
+    ) -> int:
         res = writer_client.action(
-            "insert_identifications",
-            {"identifications": identifications},
+            "replace_identifications",
+            {"delete_ids": delete_ids, "new_identifications": []},
             wait=True,
         )
         if not res or not res.success:
             raise RuntimeError(
-                getattr(res, "error", "Failed to insert identifications")
+                getattr(res, "error", "Failed to delete replaced identifications")
             )
-        return int((res.data or {}).get("inserted") or 0)
+        return self._insert_identifications_batched(new_identifications)
 
     def expand_neighbors_bulk(
         self,
@@ -1369,6 +1515,10 @@ class AdClassifier:
         # Latest refined boundaries for downstream audio cuts. Overwrites prior
         # values for the post ("latest successful" semantics).
         refined_boundaries: list[dict[str, Any]] = []
+        post_row = self._safe_get_post_row(post) or post
+        words_by_sequence = load_word_timestamps_by_sequence(
+            getattr(post_row, "transcript_word_timestamps", None)
+        )
 
         # Get ad identifications
         identifications = (
@@ -1398,12 +1548,10 @@ class AdClassifier:
                 ad_end=block["end"],
                 confidence=block["confidence"],
                 all_segments=[
-                    {
-                        "sequence_num": s.sequence_num,
-                        "start_time": s.start_time,
-                        "text": s.text,
-                        "end_time": s.end_time,
-                    }
+                    self._segment_payload_for_boundary_refinement(
+                        s,
+                        words_by_sequence.get(int(s.sequence_num)),
+                    )
                     for s in transcript_segments
                 ],
                 post_id=post.id,
@@ -1460,6 +1608,27 @@ class AdClassifier:
                 post.id,
                 exc,
             )
+
+    @staticmethod
+    def _segment_payload_for_boundary_refinement(
+        segment: TranscriptSegment,
+        words: list[Any] | None,
+    ) -> dict[str, Any]:
+        payload = {
+            "sequence_num": segment.sequence_num,
+            "start_time": segment.start_time,
+            "text": segment.text,
+            "end_time": segment.end_time,
+        }
+        if words:
+            payload["words"] = words
+        return payload
+
+    def _safe_get_post_row(self, post: Post) -> Post | None:
+        try:
+            return self.db_session.get(Post, post.id)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _group_into_blocks(
         self, identifications: list[Identification]
@@ -1533,12 +1702,7 @@ class AdClassifier:
                     }
                 )
 
-        res = writer_client.action(
-            "replace_identifications",
-            {"delete_ids": delete_ids, "new_identifications": new_identifications},
-            wait=True,
+        self._replace_identifications_batched(
+            delete_ids=delete_ids,
+            new_identifications=new_identifications,
         )
-        if not res or not res.success:
-            raise RuntimeError(
-                getattr(res, "error", "Failed to replace identifications")
-            )

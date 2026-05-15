@@ -16,12 +16,21 @@ const DEFAULT_ENV_HINTS: Record<string, EnvOverrideEntry> = {
   'llm.llm_api_key': { env_var: 'LLM_API_KEY' },
   'llm.llm_model': { env_var: 'LLM_MODEL' },
   'llm.openai_base_url': { env_var: 'OPENAI_BASE_URL' },
+  'llm.openai_timeout': { env_var: 'OPENAI_TIMEOUT' },
+  'llm.openai_max_tokens': { env_var: 'OPENAI_MAX_TOKENS' },
+  'llm.llm_max_concurrent_calls': { env_var: 'LLM_MAX_CONCURRENT_CALLS' },
+  'llm.llm_max_retry_attempts': { env_var: 'LLM_MAX_RETRY_ATTEMPTS' },
+  'llm.llm_enable_token_rate_limiting': { env_var: 'LLM_ENABLE_TOKEN_RATE_LIMITING' },
+  'llm.llm_max_input_tokens_per_call': { env_var: 'LLM_MAX_INPUT_TOKENS_PER_CALL' },
+  'llm.llm_max_input_tokens_per_minute': { env_var: 'LLM_MAX_INPUT_TOKENS_PER_MINUTE' },
   'whisper.whisper_type': { env_var: 'WHISPER_TYPE' },
   'whisper.api_key': { env_var: 'WHISPER_REMOTE_API_KEY' },
   'whisper.base_url': { env_var: 'WHISPER_REMOTE_BASE_URL' },
   'whisper.model': { env_var: 'WHISPER_REMOTE_MODEL' },
   'whisper.timeout_sec': { env_var: 'WHISPER_REMOTE_TIMEOUT_SEC' },
   'whisper.chunksize_mb': { env_var: 'WHISPER_REMOTE_CHUNKSIZE_MB' },
+  'whisper.diarize': { env_var: 'WHISPER_REMOTE_DIARIZE' },
+  'whisper.speaker_embeddings': { env_var: 'WHISPER_REMOTE_SPEAKER_EMBEDDINGS' },
   'whisper.max_retries': { env_var: 'GROQ_MAX_RETRIES' },
 };
 
@@ -66,7 +75,6 @@ export interface UseConfigStateReturn {
   llmStatus: ConnectionStatus;
   whisperStatus: ConnectionStatus;
   hasEdits: boolean;
-  localWhisperAvailable: boolean | null;
   isSaving: boolean;
 
   // Actions
@@ -83,6 +91,7 @@ export interface UseConfigStateReturn {
   // Helpers
   getEnvHint: (path: string, fallback?: EnvOverrideEntry) => EnvOverrideEntry | undefined;
   getWhisperApiKey: (w: WhisperConfig | undefined) => string;
+  isFieldReadOnly: (path: string) => boolean;
 
   // Recommended defaults
   groqRecommendedModel: string;
@@ -95,7 +104,7 @@ export interface UseConfigStateReturn {
   handleDismissEnvWarning: () => void;
 
   // Whisper type change handler
-  handleWhisperTypeChange: (nextType: 'local' | 'remote' | 'groq') => void;
+  handleWhisperTypeChange: (nextType: 'remote' | 'groq') => void;
 
   // Groq quick setup mutation
   applyGroqKey: (key: string) => Promise<void>;
@@ -120,9 +129,16 @@ export function useConfigState(): UseConfigStateReturn {
     [envOverrides]
   );
 
+  const isFieldReadOnly = useCallback(
+    (path: string) => {
+      const override = envOverrides[path];
+      return override?.read_only === true;
+    },
+    [envOverrides]
+  );
+
   const [pending, setPending] = useState<CombinedConfig | null>(null);
   const [hasEdits, setHasEdits] = useState(false);
-  const [localWhisperAvailable, setLocalWhisperAvailable] = useState<boolean | null>(null);
 
   // Connection statuses
   const [llmStatus, setLlmStatus] = useState<ConnectionStatus>({
@@ -301,31 +317,6 @@ export function useConfigState(): UseConfigStateReturn {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending]);
 
-  // Probe whisper capabilities
-  useEffect(() => {
-    let cancelled = false;
-    configApi
-      .getWhisperCapabilities()
-      .then((res) => {
-        if (!cancelled) setLocalWhisperAvailable(!!res.local_available);
-      })
-      .catch(() => {
-        if (!cancelled) setLocalWhisperAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // If local is unavailable but selected, switch to safe default
-  useEffect(() => {
-    if (!pending || localWhisperAvailable !== false) return;
-    const currentType = pending.whisper.whisper_type;
-    if (currentType === 'local') {
-      setField(['whisper', 'whisper_type'], 'remote');
-    }
-  }, [localWhisperAvailable, pending, setField]);
-
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -397,7 +388,7 @@ export function useConfigState(): UseConfigStateReturn {
   };
 
   // Whisper type change handler
-  const handleWhisperTypeChange = (nextType: 'local' | 'remote' | 'groq') => {
+  const handleWhisperTypeChange = (nextType: 'remote' | 'groq') => {
     updatePending((prevConfig) => {
       const prevWhisper = {
         ...(prevConfig.whisper as unknown as Record<string, unknown>),
@@ -405,8 +396,7 @@ export function useConfigState(): UseConfigStateReturn {
       const prevModelRaw = (prevWhisper?.model as string | undefined) ?? '';
       const prevModel = String(prevModelRaw).toLowerCase();
 
-      const isNonGroqDefault =
-        prevModel === 'base' || prevModel === 'base.en' || prevModel === 'whisper-1';
+      const isNonGroqDefault = !prevModel || prevModel === 'whisper-1';
       const isDeprecatedGroq = prevModel === 'distil-whisper-large-v3-en';
 
       let nextModel: string | undefined = prevWhisper?.model as string | undefined;
@@ -416,12 +406,8 @@ export function useConfigState(): UseConfigStateReturn {
           nextModel = 'whisper-large-v3-turbo';
         }
       } else if (nextType === 'remote') {
-        if (!nextModel || prevModel === 'base' || prevModel === 'base.en') {
+        if (!nextModel) {
           nextModel = 'whisper-1';
-        }
-      } else if (nextType === 'local') {
-        if (!nextModel || prevModel === 'whisper-1' || prevModel.startsWith('whisper-large')) {
-          nextModel = 'base.en';
         }
       }
 
@@ -439,12 +425,12 @@ export function useConfigState(): UseConfigStateReturn {
       } else if (nextType === 'remote') {
         nextWhisper.model = nextModel ?? 'whisper-1';
         nextWhisper.language = (prevWhisper.language as string | undefined) || 'en';
-      } else if (nextType === 'local') {
-        nextWhisper.model = nextModel ?? 'base.en';
-        delete nextWhisper.api_key;
-      } else if (nextType === 'test') {
-        delete nextWhisper.model;
-        delete nextWhisper.api_key;
+        nextWhisper.diarize =
+          typeof prevWhisper.diarize === 'boolean' ? prevWhisper.diarize : false;
+        nextWhisper.speaker_embeddings =
+          nextWhisper.diarize && typeof prevWhisper.speaker_embeddings === 'boolean'
+            ? prevWhisper.speaker_embeddings
+            : false;
       }
 
       return {
@@ -526,7 +512,6 @@ export function useConfigState(): UseConfigStateReturn {
     llmStatus,
     whisperStatus,
     hasEdits,
-    localWhisperAvailable,
     isSaving: saveMutation.isPending,
 
     // Actions
@@ -540,6 +525,7 @@ export function useConfigState(): UseConfigStateReturn {
     // Helpers
     getEnvHint,
     getWhisperApiKey,
+    isFieldReadOnly,
 
     // Recommended defaults
     groqRecommendedModel,

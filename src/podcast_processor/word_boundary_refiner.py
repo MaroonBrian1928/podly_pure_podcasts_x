@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import litellm
 from jinja2 import Template
 
 from podcast_processor.llm_model_call_utils import (
@@ -36,10 +35,11 @@ class WordBoundaryRefinement:
 
 
 class WordBoundaryRefiner:
-    """Refine ad start boundary by finding the first ad word and estimating its time.
+    """Refine ad boundaries within a segment.
 
-    This refiner is intentionally heuristic-timed because we only have segment-level
-    timestamps today.
+    When saved word timestamps are available, this refiner uses them for exact
+    intra-segment timing. Otherwise it falls back to the existing segment-level
+    heuristics.
     """
 
     def __init__(self, config: Config, logger: logging.Logger | None = None):
@@ -100,6 +100,8 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         raw_response: str | None = None
 
         try:
+            import litellm
+
             response = litellm.completion(
                 model=self.config.llm_model,
                 messages=[{"role": "user", "content": prompt}],
@@ -179,11 +181,37 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
 
             partial_errors = [e for e in [start_err, end_err] if e]
 
+            if refined_start >= float(ad_end):
+                refined_start = float(ad_start)
+                start_changed = False
+                start_reason = ""
+                partial_errors.append("start_out_of_window")
+
+            if refined_end <= float(ad_start):
+                refined_end = float(ad_end)
+                end_changed = False
+                end_reason = ""
+                partial_errors.append("end_out_of_window")
+
             # If caller didn't provide reasons, default to unchanged for untouched sides.
             start_reason = self._default_reason(start_reason, changed=start_changed)
             end_reason = self._default_reason(end_reason, changed=end_changed)
 
-            # Guardrail: never return an invalid window.
+            # Guardrail: never return an invalid window. If only one side caused
+            # the issue, keep the valid side and revert the other to the
+            # original detection instead of failing the whole refinement.
+            if refined_end <= refined_start:
+                if start_changed and not end_changed:
+                    refined_start = float(ad_start)
+                    start_changed = False
+                    start_reason = ""
+                    partial_errors.append("start_invalid_window")
+                elif end_changed and not start_changed:
+                    refined_end = float(ad_end)
+                    end_changed = False
+                    end_reason = ""
+                    partial_errors.append("end_invalid_window")
+
             if refined_end <= refined_start:
                 self._update_model_call(
                     model_call_id,
@@ -744,33 +772,66 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             candidates.append(seg)
 
         for seg in candidates:
-            start_time = float(seg.get("start_time", 0.0))
-            end_time = float(seg.get("end_time", start_time))
-            duration = max(0.0, end_time - start_time)
-            words = [w.lower() for w in self._split_words(str(seg.get("text", "")))]
-            if not words or duration <= 0.0:
-                continue
+            estimated_time = self._estimate_phrase_time_for_segment(
+                segment=seg,
+                phrase_tokens=phrase_tokens,
+                direction=direction,
+            )
+            if estimated_time is not None:
+                return estimated_time
 
+        return None
+
+    def _estimate_phrase_time_for_segment(
+        self,
+        *,
+        segment: dict[str, Any],
+        phrase_tokens: list[str],
+        direction: str,
+    ) -> float | None:
+        timed_words = self._segment_word_entries(segment)
+        if timed_words:
             match = self._find_phrase_match(
-                words=words,
+                words=[entry["token"] for entry in timed_words],
                 phrase_tokens=phrase_tokens,
                 direction=direction,
                 max_words=4,
             )
-            if match is None:
-                continue
+            if match is not None:
+                match_start_idx, match_end_idx = match
+                exact_time = self._exact_phrase_boundary_time(
+                    timed_words,
+                    match_start_idx=match_start_idx,
+                    match_end_idx=match_end_idx,
+                    direction=direction,
+                )
+                if exact_time is not None:
+                    return exact_time
 
-            match_start_idx, match_end_idx = match
-            seconds_per_word = duration / float(len(words))
-            if direction == "start":
-                estimated = start_time + (float(match_start_idx) * seconds_per_word)
-                return min(estimated, end_time)
+        start_time = float(segment.get("start_time", 0.0))
+        end_time = float(segment.get("end_time", start_time))
+        duration = max(0.0, end_time - start_time)
+        words = [w.lower() for w in self._split_words(str(segment.get("text", "")))]
+        if not words or duration <= 0.0:
+            return None
 
-            # direction == "end": end boundary at the end of the last matched word.
-            estimated = start_time + (float(match_end_idx + 1) * seconds_per_word)
+        match = self._find_phrase_match(
+            words=words,
+            phrase_tokens=phrase_tokens,
+            direction=direction,
+            max_words=4,
+        )
+        if match is None:
+            return None
+
+        match_start_idx, match_end_idx = match
+        seconds_per_word = duration / float(len(words))
+        if direction == "start":
+            estimated = start_time + (float(match_start_idx) * seconds_per_word)
             return min(estimated, end_time)
 
-        return None
+        estimated = start_time + (float(match_end_idx + 1) * seconds_per_word)
+        return min(estimated, end_time)
 
     def _find_phrase_match(
         self,
@@ -836,6 +897,18 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         end_time = float(seg.get("end_time", start_time))
         duration = max(0.0, end_time - start_time)
 
+        timed_words = self._segment_word_entries(seg)
+        if timed_words:
+            resolved_index = self._resolve_word_index(
+                [entry["token"] for entry in timed_words],
+                word=word,
+                occurrence=occurrence,
+                word_index=word_index,
+            )
+            exact_start = timed_words[resolved_index].get("start")
+            if exact_start is not None:
+                return min(float(exact_start), float(seg.get("end_time", end_time)))
+
         words = self._split_words(str(seg.get("text", "")))
         if not words or duration <= 0.0:
             return start_time
@@ -869,6 +942,54 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             if int(seg.get("sequence_num", -1)) == seq_int:
                 return seg
         return None
+
+    @staticmethod
+    def _word_field(word: Any, field_name: str) -> Any | None:
+        if isinstance(word, dict):
+            return word.get(field_name)
+        return getattr(word, field_name, None)
+
+    def _segment_word_entries(self, segment: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_words = segment.get("words")
+        if not isinstance(raw_words, list):
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for raw_word in raw_words:
+            token_raw = self._word_field(raw_word, "word")
+            if token_raw is None:
+                continue
+
+            token = self._normalize_token(str(token_raw)).lower()
+            if not token:
+                continue
+
+            start = self._word_field(raw_word, "start")
+            end = self._word_field(raw_word, "end")
+            entries.append(
+                {
+                    "token": token,
+                    "start": (float(start) if start is not None else None),
+                    "end": (float(end) if end is not None else None),
+                }
+            )
+
+        return entries
+
+    @staticmethod
+    def _exact_phrase_boundary_time(
+        timed_words: list[dict[str, Any]],
+        *,
+        match_start_idx: int,
+        match_end_idx: int,
+        direction: str,
+    ) -> float | None:
+        if direction == "start":
+            start = timed_words[match_start_idx].get("start")
+            return float(start) if start is not None else None
+
+        end = timed_words[match_end_idx].get("end")
+        return float(end) if end is not None else None
 
     def _split_words(self, text: str) -> list[str]:
         # Word count/indexing heuristic: split on whitespace, then normalize away

@@ -1,16 +1,13 @@
 import logging
 import os
+import sys
 from typing import Any
 
 import flask
-import litellm
 from flask import Blueprint, jsonify, request
-from groq import Groq
-from openai import OpenAI
 
 from app.auth.guards import require_admin
 from app.config_store import read_combined, to_pydantic_config
-from app.processor import ProcessorSingleton
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from shared.llm_utils import model_uses_max_completion_tokens
@@ -124,6 +121,21 @@ def _hydrate_llm_config(data: dict[str, Any]) -> None:
         "llm_max_input_tokens_per_minute",
         llm.get("llm_max_input_tokens_per_minute"),
     )
+    llm["enable_boundary_refinement"] = getattr(
+        runtime_config,
+        "enable_boundary_refinement",
+        llm.get("enable_boundary_refinement"),
+    )
+    llm["enable_word_level_boundary_refinder"] = getattr(
+        runtime_config,
+        "enable_word_level_boundary_refinder",
+        llm.get("enable_word_level_boundary_refinder"),
+    )
+    llm["enable_llm_chapter_fallback_tagging"] = getattr(
+        runtime_config,
+        "enable_llm_chapter_fallback_tagging",
+        llm.get("enable_llm_chapter_fallback_tagging"),
+    )
 
 
 def _hydrate_whisper_config(data: dict[str, Any]) -> None:
@@ -142,9 +154,7 @@ def _hydrate_whisper_config(data: dict[str, Any]) -> None:
 def _overlay_whisper_dict(target: dict[str, Any], source: dict[str, Any]) -> None:
     wtype = source.get("whisper_type")
     target["whisper_type"] = wtype or target.get("whisper_type")
-    if wtype == "local":
-        target["model"] = source.get("model", target.get("model"))
-    elif wtype == "remote":
+    if wtype == "remote":
         _overlay_remote_whisper_fields(target, source)
     elif wtype == "groq":
         _overlay_groq_whisper_fields(target, source)
@@ -153,9 +163,7 @@ def _overlay_whisper_dict(target: dict[str, Any], source: dict[str, Any]) -> Non
 def _overlay_whisper_object(target: dict[str, Any], source: Any) -> None:
     wtype = source.whisper_type
     target["whisper_type"] = wtype
-    if wtype == "local":
-        target["model"] = getattr(source, "model", target.get("model"))
-    elif wtype == "remote":
+    if wtype == "remote":
         _overlay_remote_whisper_fields(target, source)
     elif wtype == "groq":
         _overlay_groq_whisper_fields(target, source)
@@ -171,6 +179,10 @@ def _overlay_remote_whisper_fields(target: dict[str, Any], source: Any) -> None:
     )
     target["chunksize_mb"] = _get_attr_or_value(
         source, "chunksize_mb", target.get("chunksize_mb")
+    )
+    target["diarize"] = _get_attr_or_value(source, "diarize", target.get("diarize"))
+    target["speaker_embeddings"] = _get_attr_or_value(
+        source, "speaker_embeddings", target.get("speaker_embeddings")
     )
 
 
@@ -229,10 +241,14 @@ def _register_override(
     *,
     secret: bool = False,
 ) -> None:
-    """Register an environment override in the metadata dict."""
+    """Register an environment override in the metadata dict.
+
+    Fields with env overrides are marked as read_only since env vars are
+    authoritative and cannot be modified via the UI.
+    """
     if not env_var or value is None:
         return
-    entry: dict[str, Any] = {"env_var": env_var}
+    entry: dict[str, Any] = {"env_var": env_var, "read_only": True}
     if secret:
         entry["is_secret"] = True
         entry["value_preview"] = _mask_secret(value)
@@ -241,20 +257,30 @@ def _register_override(
     overrides[path] = entry
 
 
+# Simple 1:1 env var → field path mappings for LLM settings.
+# Shared across metadata registration, override detection, and field stripping.
+_SIMPLE_LLM_ENV_MAP: dict[str, str] = {
+    "OPENAI_BASE_URL": "llm.openai_base_url",
+    "LLM_MODEL": "llm.llm_model",
+    "OPENAI_TIMEOUT": "llm.openai_timeout",
+    "OPENAI_MAX_TOKENS": "llm.openai_max_tokens",
+    "LLM_MAX_CONCURRENT_CALLS": "llm.llm_max_concurrent_calls",
+    "LLM_MAX_RETRY_ATTEMPTS": "llm.llm_max_retry_attempts",
+    "LLM_ENABLE_TOKEN_RATE_LIMITING": "llm.llm_enable_token_rate_limiting",
+    "LLM_MAX_INPUT_TOKENS_PER_CALL": "llm.llm_max_input_tokens_per_call",
+    "LLM_MAX_INPUT_TOKENS_PER_MINUTE": "llm.llm_max_input_tokens_per_minute",
+}
+
+
 def _register_llm_overrides(overrides: dict[str, Any]) -> None:
     """Register LLM-related environment overrides."""
     env_var, env_value = _first_env(["LLM_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY"])
     _register_override(overrides, "llm.llm_api_key", env_var, env_value, secret=True)
 
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    if base_url:
-        _register_override(
-            overrides, "llm.openai_base_url", "OPENAI_BASE_URL", base_url
-        )
-
-    llm_model = os.environ.get("LLM_MODEL")
-    if llm_model:
-        _register_override(overrides, "llm.llm_model", "LLM_MODEL", llm_model)
+    for env_key, field_path in _SIMPLE_LLM_ENV_MAP.items():
+        val = os.environ.get(env_key)
+        if val:
+            _register_override(overrides, field_path, env_key, val)
 
 
 def _register_groq_shared_overrides(overrides: dict[str, Any]) -> None:
@@ -300,6 +326,24 @@ def _register_remote_whisper_overrides(overrides: dict[str, Any]) -> None:
             remote_chunksize,
         )
 
+    remote_diarize = os.environ.get("WHISPER_REMOTE_DIARIZE")
+    if remote_diarize:
+        _register_override(
+            overrides,
+            "whisper.diarize",
+            "WHISPER_REMOTE_DIARIZE",
+            remote_diarize,
+        )
+
+    remote_speaker_embeddings = os.environ.get("WHISPER_REMOTE_SPEAKER_EMBEDDINGS")
+    if remote_speaker_embeddings:
+        _register_override(
+            overrides,
+            "whisper.speaker_embeddings",
+            "WHISPER_REMOTE_SPEAKER_EMBEDDINGS",
+            remote_speaker_embeddings,
+        )
+
 
 def _register_groq_whisper_overrides(overrides: dict[str, Any]) -> None:
     """Register groq whisper environment overrides."""
@@ -318,15 +362,6 @@ def _register_groq_whisper_overrides(overrides: dict[str, Any]) -> None:
     if groq_retries:
         _register_override(
             overrides, "whisper.max_retries", "GROQ_MAX_RETRIES", groq_retries
-        )
-
-
-def _register_local_whisper_overrides(overrides: dict[str, Any]) -> None:
-    """Register local whisper environment overrides."""
-    local_model = os.environ.get("WHISPER_LOCAL_MODEL")
-    if local_model:
-        _register_override(
-            overrides, "whisper.model", "WHISPER_LOCAL_MODEL", local_model
         )
 
 
@@ -369,10 +404,116 @@ def _build_env_override_metadata(data: dict[str, Any]) -> dict[str, Any]:
         _register_remote_whisper_overrides(overrides)
     elif wtype == "groq":
         _register_groq_whisper_overrides(overrides)
-    elif wtype == "local":
-        _register_local_whisper_overrides(overrides)
 
     return overrides
+
+
+def _get_llm_overridden_fields() -> set[str]:
+    """Return set of LLM field paths overridden by environment variables.
+
+    Only considers env vars with non-empty values.
+    """
+    overridden: set[str] = set()
+
+    if (
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+    ):
+        overridden.add("llm.llm_api_key")
+
+    for env_key, field_path in _SIMPLE_LLM_ENV_MAP.items():
+        if os.environ.get(env_key):
+            overridden.add(field_path)
+
+    return overridden
+
+
+def _get_whisper_overridden_fields() -> set[str]:
+    """Return set of whisper field paths overridden by environment variables."""
+    overridden: set[str] = set()
+
+    if os.environ.get("WHISPER_TYPE"):
+        overridden.add("whisper.whisper_type")
+
+    # Remote whisper
+    if os.environ.get("WHISPER_REMOTE_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        overridden.add("whisper.api_key")
+    if os.environ.get("WHISPER_REMOTE_BASE_URL") or os.environ.get("OPENAI_BASE_URL"):
+        overridden.add("whisper.base_url")
+    if os.environ.get("WHISPER_REMOTE_MODEL"):
+        overridden.add("whisper.model")
+    if os.environ.get("WHISPER_REMOTE_TIMEOUT_SEC"):
+        overridden.add("whisper.timeout_sec")
+    if os.environ.get("WHISPER_REMOTE_CHUNKSIZE_MB"):
+        overridden.add("whisper.chunksize_mb")
+    if os.environ.get("WHISPER_REMOTE_DIARIZE"):
+        overridden.add("whisper.diarize")
+    if os.environ.get("WHISPER_REMOTE_SPEAKER_EMBEDDINGS"):
+        overridden.add("whisper.speaker_embeddings")
+
+    # Groq whisper
+    if os.environ.get("GROQ_API_KEY"):
+        overridden.add("whisper.api_key")
+    if os.environ.get("GROQ_WHISPER_MODEL") or os.environ.get("WHISPER_GROQ_MODEL"):
+        overridden.add("whisper.model")
+    if os.environ.get("GROQ_MAX_RETRIES"):
+        overridden.add("whisper.max_retries")
+
+    return overridden
+
+
+def _get_env_overridden_fields() -> set[str]:
+    """Return set of field paths that are overridden by environment variables.
+
+    These fields should not be modified via the API - env vars are authoritative.
+    """
+    return _get_llm_overridden_fields() | _get_whisper_overridden_fields()
+
+
+def _strip_env_overridden_fields(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Remove env-overridden fields from payload, return cleaned payload and list of stripped fields."""
+    overridden = _get_env_overridden_fields()
+    stripped: list[str] = []
+
+    cleaned = dict(payload)
+
+    llm = cleaned.get("llm")
+    if isinstance(llm, dict):
+        llm = dict(llm)
+        # llm_api_key has multi-env fallback, so it's not in _SIMPLE_LLM_ENV_MAP
+        llm_field_paths = ["llm.llm_api_key", *_SIMPLE_LLM_ENV_MAP.values()]
+        for field_path in llm_field_paths:
+            field_key = field_path.split(".", 1)[1]
+            if field_path in overridden and field_key in llm:
+                llm.pop(field_key)
+                stripped.append(field_path)
+        cleaned["llm"] = llm
+
+    whisper = cleaned.get("whisper")
+    if isinstance(whisper, dict):
+        whisper = dict(whisper)
+        whisper_field_paths = [
+            "whisper.whisper_type",
+            "whisper.api_key",
+            "whisper.base_url",
+            "whisper.model",
+            "whisper.timeout_sec",
+            "whisper.chunksize_mb",
+            "whisper.diarize",
+            "whisper.speaker_embeddings",
+            "whisper.max_retries",
+        ]
+        for field_path in whisper_field_paths:
+            field_key = field_path.split(".", 1)[1]
+            if field_path in overridden and field_key in whisper:
+                whisper.pop(field_key)
+                stripped.append(field_path)
+        cleaned["whisper"] = whisper
+
+    return cleaned, stripped
 
 
 @config_bp.route("/api/config", methods=["PUT"])
@@ -390,6 +531,14 @@ def api_put_config() -> flask.Response:
     whisper_payload = payload.get("whisper")
     if isinstance(whisper_payload, dict):
         whisper_payload.pop("api_key_preview", None)
+
+    # Strip env-overridden fields - env vars are authoritative and cannot be overwritten via API
+    payload, stripped_fields = _strip_env_overridden_fields(payload)
+    if stripped_fields:
+        logger.info(
+            "Stripped env-overridden fields from config update: %s",
+            ", ".join(stripped_fields),
+        )
 
     try:
         result = writer_client.action(
@@ -414,7 +563,7 @@ def api_put_config() -> flask.Response:
 
         for field_name in runtime_config.__class__.model_fields.keys():
             setattr(runtime_config, field_name, getattr(db_cfg, field_name))
-        ProcessorSingleton.reset_instance()
+        _reset_processor_if_loaded()
 
         return flask.jsonify(_sanitize_config_for_client(data))
     except Exception as e:  # noqa: BLE001
@@ -458,6 +607,8 @@ def api_test_llm() -> flask.Response:
         )
 
     try:
+        import litellm
+
         # Configure litellm for this probe
         litellm.api_key = api_key
         if base_url:
@@ -544,34 +695,6 @@ def _determine_whisper_type(whisper_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def _test_local_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
-    """Test local whisper configuration."""
-    model_name = _get_whisper_config_value(whisper_cfg, "model", "base.en")
-    try:
-        import whisper
-    except ImportError as e:
-        return _make_error_response(f"whisper not installed: {e}")
-
-    try:
-        available = whisper.available_models()
-    except Exception as e:  # pragma: no cover - library call  # noqa: BLE001
-        available = []
-        logger.warning(f"Failed to list local whisper models: {e}")
-
-    if model_name not in available:
-        return flask.make_response(
-            jsonify(
-                {
-                    "ok": False,
-                    "error": f"Model '{model_name}' not available. Install or adjust model.",
-                    "available_models": available,
-                }
-            ),
-            400,
-        )
-    return _make_success_response(f"Local whisper OK (model {model_name})")
-
-
 def _test_remote_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
     """Test remote whisper configuration."""
     api_key_any = _get_whisper_config_value(whisper_cfg, "api_key")
@@ -590,6 +713,8 @@ def _test_remote_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
     if not api_key:
         return _make_error_response("Missing whisper.api_key")
 
+    from openai import OpenAI
+
     _ = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout).models.list()
     return _make_success_response("Remote whisper connection OK", base_url=base_url)
 
@@ -606,6 +731,8 @@ def _test_groq_whisper(whisper_cfg: dict[str, Any]) -> flask.Response:
 
     if not groq_api_key:
         return _make_error_response("Missing whisper.api_key")
+
+    from groq import Groq
 
     _ = Groq(api_key=groq_api_key).models.list()
     return _make_success_response("Groq whisper connection OK")
@@ -627,7 +754,11 @@ def api_test_whisper() -> flask.Response:
 
     try:
         if wtype == "local":
-            return _test_local_whisper(whisper_cfg)
+            return _make_error_response(
+                "WHISPER_TYPE=local is no longer supported. Configure "
+                "WHISPER_TYPE=remote with WHISPER_REMOTE_BASE_URL for a dedicated "
+                "OpenAI-compatible transcription service."
+            )
         if wtype == "remote":
             return _test_remote_whisper(whisper_cfg)
         if wtype == "groq":
@@ -638,32 +769,13 @@ def api_test_whisper() -> flask.Response:
         return _make_error_response(str(e))
 
 
-@config_bp.route("/api/config/whisper-capabilities", methods=["GET"])
-def api_get_whisper_capabilities() -> flask.Response:
-    """Report Whisper capabilities for the current runtime.
-
-    Currently returns a boolean indicating whether local Whisper is importable.
-    This enables the frontend to hide the 'local' option when unavailable.
-    """
-    _, error_response = require_admin()
-    if error_response:
-        return error_response
-
-    local_available = False
-    try:  # pragma: no cover - simple import feature check
-        import whisper
-
-        # If import succeeds, we consider local whisper available.
-        # Optionally probe models list, but ignore failures here.
-        try:
-            _ = whisper.available_models()
-        except Exception:  # noqa: BLE001
-            pass
-        local_available = True
-    except Exception:  # noqa: BLE001
-        local_available = False
-
-    return flask.jsonify({"local_available": local_available})
+def _reset_processor_if_loaded() -> None:
+    processor_module = sys.modules.get("app.processor")
+    if processor_module is None:
+        return
+    processor_singleton = getattr(processor_module, "ProcessorSingleton", None)
+    if processor_singleton is not None:
+        processor_singleton.reset_instance()
 
 
 @config_bp.route("/api/config/api_configured_check", methods=["GET"])

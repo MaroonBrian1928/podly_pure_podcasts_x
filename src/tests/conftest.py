@@ -3,7 +3,6 @@ Fixtures for pytest tests in the tests directory.
 """
 
 import logging
-import sys
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -21,29 +20,9 @@ from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config
 from shared.test_utils import create_standard_test_config
 
-# Set up whisper and torch mocks
-whisper_mock = MagicMock()
-whisper_mock.available_models.return_value = [
-    "tiny",
-    "base",
-    "small",
-    "medium",
-    "large",
-]
-whisper_mock.load_model.return_value = MagicMock()
-whisper_mock.load_model.return_value.transcribe.return_value = {"segments": []}
-
-torch_mock = MagicMock()
-torch_mock.cuda = MagicMock()
-torch_mock.device = MagicMock()
-
-# Pre-mock the modules to avoid imports during test collection
-sys.modules["whisper"] = whisper_mock
-sys.modules["torch"] = torch_mock
-
 
 @pytest.fixture
-def app() -> Generator[Flask, None, None]:
+def app() -> Generator[Flask]:
     """Create a Flask app for testing."""
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"

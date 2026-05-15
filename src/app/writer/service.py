@@ -4,11 +4,52 @@ import time
 
 from app.ipc import get_queue, make_server_manager
 from app.logger import setup_logger
-from app.writer.protocol import WriteCommandType
+from app.memory_pressure import release_memory_to_os
+from app.writer.protocol import WriteCommand, WriteCommandType
 
 from .executor import CommandExecutor
 
 logger = setup_logger("writer", "src/instance/logs/app.log", level=logging.INFO)
+
+MEMORY_TRIM_ACTIONS = {
+    "insert_identifications",
+    "insert_transcript_segments",
+    "finish_transcription_replace",
+    "finish_transcription_replace_from_artifact",
+    "refresh_feed",
+    "replace_audio_segments",
+    "replace_identifications",
+    "replace_transcription",
+    "start_transcription_replace",
+    "upsert_model_call",
+}
+
+
+def _action_name(cmd: object) -> str | None:
+    data = getattr(cmd, "data", None)
+    if not isinstance(data, dict):
+        return None
+    action = data.get("action")
+    return action if isinstance(action, str) else None
+
+
+def _memory_trim_context_for_command(cmd: object) -> str | None:
+    if getattr(cmd, "type", None) != WriteCommandType.ACTION:
+        return None
+    action = _action_name(cmd)
+    if action == "dequeue_job":
+        return None
+    if action not in MEMORY_TRIM_ACTIONS:
+        return f"writer action {action or 'unknown'}"
+    return f"writer large action {action}"
+
+
+def _discard_processed_command_payload(cmd: WriteCommand) -> None:
+    try:
+        cmd.data = {}
+        cmd.reply_queue = None
+    except Exception:  # noqa: BLE001
+        return
 
 
 def run_writer_service() -> None:
@@ -36,8 +77,12 @@ def run_writer_service() -> None:
 
     # 4. Writer Loop
     while True:
+        cmd = None
+        result = None
+        trim_context = None
         try:
             cmd = queue.get()
+            trim_context = _memory_trim_context_for_command(cmd)
 
             # Check if this is a polling command (dequeue_job)
             is_polling = (
@@ -77,3 +122,10 @@ def run_writer_service() -> None:
         except Exception as e:
             logger.error("Error in writer loop: %s", e, exc_info=True)
             time.sleep(1)
+        finally:
+            if cmd is not None:
+                _discard_processed_command_payload(cmd)
+                cmd = None
+                result = None
+            if trim_context is not None:
+                release_memory_to_os(trim_context, logger)

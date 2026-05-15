@@ -18,11 +18,11 @@ If you don't have the repo downloaded:
 Help me install docker and run Podly https://github.com/podly-pure-podcasts/podly_pure_podcasts
 After the project is cloned, help me:
 - install docker & docker compose
-- run `./run_podly_docker.sh --build` then `./run_podly_docker.sh -d`
+- run `./run_podly_docker.sh --production -d`
 - configure the app via the web UI at http://localhost:5001/config
 Be sure to check if a dependency is already installed before downloading.
-We recommend Docker because installing ffmpeg & local whisper can be difficult.
-The Docker image has both ffmpeg & local whisper preconfigured.
+We recommend Docker because installing ffmpeg and the app runtime can be difficult.
+For transcription, configure Groq or an OpenAI-compatible remote transcription service in the web UI.
 Podly works with many different LLMs, it does not require an OpenAI key.
 Check your work by retrieving the index page from localhost:5001 at the end.
 ```
@@ -33,11 +33,11 @@ If you do have the repo pulled, open this file and prompt:
 Review this project, follow this guide and start Podly on my computer.
 Briefly, help me:
 - install docker & docker compose
-- run `./run_podly_docker.sh --build` and then `./run_podly_docker.sh -d`
+- run `./run_podly_docker.sh --production -d`
 - configure the app via the web UI at http://localhost:5001/config
 Be sure to check if a dependency is already installed before downloading.
-We recommend docker because installing ffmpeg & local whisper can be difficult.
-The docker image has both ffmpeg & local whisper preconfigured.
+We recommend docker because installing ffmpeg and the app runtime can be difficult.
+For transcription, configure Groq or an OpenAI-compatible remote transcription service in the web UI.
 Podly works with many different LLMs; it does not need to work with OpenAI.
 Check your work by retrieving the index page from localhost:5001 at the end.
 ```
@@ -113,9 +113,9 @@ cd podly_pure_podcasts
 
 ```bash
 chmod +x run_podly_docker.sh
-./run_podly_docker.sh --build
-./run_podly_docker.sh            # foreground
-./run_podly_docker.sh -d         # detached
+./run_podly_docker.sh --production      # foreground, published image
+./run_podly_docker.sh --production -d   # detached, published image
+./run_podly_docker.sh --dev --build     # build local image after code changes
 ```
 
 ### Optional: Enable Authentication
@@ -146,14 +146,8 @@ export PODLY_SECRET_KEY='replace-with-a-strong-64-char-secret'
 ## Advanced Options
 
 ```bash
-# Force CPU-only processing (if you have GPU issues)
-./run_podly_docker.sh --cpu
-
-# Force GPU processing
-./run_podly_docker.sh --gpu
-
 # Just build the container without running
-./run_podly_docker.sh --build
+./run_podly_docker.sh --dev --build
 
 # Test build from scratch (useful for troubleshooting)
 ./run_podly_docker.sh --test-build
@@ -200,14 +194,14 @@ export PODLY_SECRET_KEY='replace-with-a-strong-64-char-secret'
 ### Port 5001 already in use
 
 - Another application is using port 5001
-- **Docker users**: Either stop that application or modify the port in `compose.dev.cpu.yml` and `compose.yml`
+- **Docker users**: Either stop that application or modify the port in `compose.yml`
 - **Native users**: Change the port in the Config page under App settings
 - To kill processes on that port run `lsof -i :5001 | grep LISTEN | awk '{print $2}' | xargs kill -9`
 
 ### Out of memory errors
 
 - Close other applications to free up RAM
-- Consider using `--cpu` flag if you have limited memory
+- Use a remote transcription service instead of running transcription on the same machine
 
 ## Stopping Podly
 

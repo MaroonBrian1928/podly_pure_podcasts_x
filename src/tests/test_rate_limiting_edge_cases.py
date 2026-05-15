@@ -110,7 +110,7 @@ class TestRateLimitingEdgeCases:
                         "Service unavailable", llm_provider="test", model="test"
                     )
                 )
-            except (ImportError, TypeError):
+            except ImportError, TypeError:
                 # If litellm.exceptions not available or constructor changed, skip this specific test
                 pass
 
