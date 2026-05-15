@@ -91,3 +91,39 @@ class TestCleanAndParseModelOutput:
         text = '{"ad_segments": []}'
         result = clean_and_parse_model_output(text)
         assert len(result.ad_segments) == 0
+
+    def test_trailing_garbage_after_root_close_is_discarded(self):
+        """Regression: when the LLM appends junk after the root ``}`` (we've
+        seen e.g. ``…"confidence":0.98}98}0.98}``) the parser must trim back
+        to the *first* balanced close, not the rightmost ``}``. The old
+        rindex-based heuristic returned the whole malformed tail and every
+        ad in the batch was lost — observed on Endless Thread's
+        "Manifesting an online rom-com existence" episode where it produced
+        zero ad windows despite ~490 transcribed segments."""
+        text = (
+            '{"ad_segments": ['
+            '{"segment_offset": 30.0, "confidence": 0.95},'
+            '{"segment_offset": 120.0, "confidence": 0.98}'
+            "]}98}0.98}"
+        )
+        result = clean_and_parse_model_output(text)
+        assert isinstance(result, AdSegmentPredictionList)
+        assert len(result.ad_segments) == 2
+        assert result.ad_segments[1].segment_offset == 120.0
+
+    def test_brace_inside_string_value_does_not_confuse_truncator(self):
+        """A ``}`` inside a JSON string must not be treated as a close."""
+        text = (
+            '{"ad_segments": [{"segment_offset": 5.0, "confidence": 0.9,'
+            ' "label": "spurious } in label"}]}'
+        )
+        result = clean_and_parse_model_output(text)
+        assert len(result.ad_segments) == 1
+
+    def test_trailing_whitespace_and_text_after_root_is_discarded(self):
+        text = (
+            '{"ad_segments": [{"segment_offset": 1.0, "confidence": 0.9}]}'
+            "\n\n```\nsome chatter the model tacked on"
+        )
+        result = clean_and_parse_model_output(text)
+        assert len(result.ad_segments) == 1

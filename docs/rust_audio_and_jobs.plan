@@ -1,0 +1,666 @@
+# Rust Audio Streaming Server + Rust Jobs Manager Plan
+
+## Purpose
+
+Move two specific workloads out of long-lived Python processes and into Rust to
+reduce memory pressure and Python-side request churn:
+
+1. **Audio streaming.** Today every download of `processed_audio_path` /
+   `unprocessed_audio_path` flows through Flask/Waitress workers (see
+   `src/app/routes/post_routes.py`: `api_get_post_audio`, `api_download_post`,
+   `api_download_original_post`). Each multi-megabyte stream ties up a Python
+   worker thread for the entire transfer and adds memory churn.
+
+2. **Jobs manager polling loop.** Today `src/app/jobs_manager.py` runs a
+   long-lived Python thread that calls `dequeue_job` against the writer
+   service every poll interval. This was the direct cause of the writer
+   process ballooning to ~680 MB (each `wait=True` writer call allocated a
+   server-side reply queue; see the recent thread-local fix in
+   `src/app/writer/client.py`). Even with that fix, the polling traffic
+   itself, the long-lived Python thread, and the writer-side IPC overhead
+   remain the largest avoidable cost on the hot path.
+
+This plan is written for a less capable implementation agent. Follow steps
+in order. Do not skip parity tests. Update the Progress section every time a
+task is completed.
+
+## Current Baseline
+
+- Rust sidecar already exists at `rust/src/main.rs` and is a CLI that
+  short-lived subprocesses invoke via `src/shared/rust_sidecar.py`. It does
+  **not** currently host any long-running daemon.
+- Existing Rust feature flags live in `src/shared/rust_sidecar.py` and use
+  the `PODLY_RUST_*_ENABLED` naming convention.
+- Python writer IPC: `multiprocessing.managers` over `127.0.0.1:50001`,
+  defined in `src/app/ipc.py` and `src/app/writer/`. Reply queues are now
+  thread-local on the client side.
+- Audio routes: three `send_file(...)` callsites in
+  `src/app/routes/post_routes.py` — lines ~1422, ~1494, ~1532. All run
+  Python-side auth/whitelist via `ensure_whitelisted_for_download` and serve
+  via Waitress with `conditional=True` (range support).
+- Jobs manager: `src/app/jobs_manager.py` (~895 LOC). The hot loop is
+  `_worker_loop` calling `_dequeue_next_job` calling
+  `writer_client.action("dequeue_job", ..., wait=True)`. A separate `app.processing_worker`
+  is spawned per claimed job — that worker is **out of scope** for this plan;
+  we keep it Python.
+- Container entrypoint: `scripts/start_services.sh` starts the writer, waits
+  for IPC readiness on 50001, then starts `python3 -u src/main.py`.
+- `compose.yml` and `compose.local.yml` expose the Flask port directly to
+  the host. There is no nginx/Caddy fronting the container today.
+
+## Non-Negotiable Rules
+
+- Do not create Alembic migrations. If model/schema changes become necessary,
+  stop and ask the user to generate a migration with
+  `./scripts/create_migration.sh "<message>"`.
+- All database writes must continue to go through the writer service. The
+  Rust jobs runner in Phase 2 must call the writer over its existing IPC for
+  any DB mutation; it must not write SQLite directly.
+- Rust may read SQLite directly only with read-only flags and
+  `PRAGMA query_only=ON` (already wired via `open_readonly_sqlite()` in
+  `rust/src/main.rs`).
+- Python must keep auth, access-control, token-validation, whitelist
+  checks, ETag/Last-Modified response headers, and download-counter
+  bookkeeping. The Rust audio server is allowed to *re-emit* validated
+  headers but must not be the source of truth for auth.
+- Every Rust-backed feature must be behind an env flag and must have a
+  Python fallback. The fallback path must log the Rust failure and preserve
+  current behavior.
+- Use `mise exec -- ./scripts/ci.sh` for backend verification. Do not run
+  direct pytest/ruff/mypy commands as the final check. Expect
+  `./scripts/ci.sh` to modify files via formatting/fixes; review
+  `git status --short` afterwards.
+- The repo has `.codegraph/`. Use lightweight CodeGraph symbol lookups or an
+  Explore agent for broad code exploration; do not call
+  `codegraph_explore` / `codegraph_context` directly in the main session.
+
+## Progress
+
+### Phase 1 — Rust audio server
+
+- [ ] 1.0 Capture audio-route latency and memory baselines
+- [ ] 1.1 Add `PODLY_RUST_AUDIO_SERVER_ENABLED` and related env plumbing
+- [ ] 1.2 Add an internal Flask "audio handoff" endpoint
+- [ ] 1.3 Build the Rust `podly_audio_server` binary (axum + hyper)
+- [ ] 1.4 Wire the supervisor + container entrypoint
+- [ ] 1.5 Switch the public audio routes to delegate when flag is enabled
+- [ ] 1.6 Add parity tests (Range, ETag, 304, auth failure, missing file)
+- [ ] 1.7 Run full CI and record after-measurements
+
+### Phase 2 — Rust jobs manager
+
+- [ ] 2.0 Capture jobs-loop / writer-IPC baselines
+- [ ] 2.1 Add `PODLY_RUST_JOBS_RUNNER_ENABLED` env plumbing
+- [ ] 2.2 Define the Rust ↔ Python jobs control contract
+- [ ] 2.3 Implement `podly_jobs_runner` daemon (poll, claim, spawn, supervise)
+- [ ] 2.4 Reduce `JobsManager` to a thin client when flag is on
+- [ ] 2.5 Wire supervisor + container entrypoint
+- [ ] 2.6 Parity tests (claim, cancel, crash recovery, run-counter updates)
+- [ ] 2.7 Run full CI and record after-measurements
+
+## Architectural Choices
+
+### Why a tiny Rust HTTP server, not nginx
+
+The user explicitly wants a tiny Rust server. The audio server in this plan
+is single-purpose and stays under ~600 LOC of Rust. It uses `axum` over
+`hyper`, supports byte-range requests via `tokio::fs`, and reverse-proxies
+anything that isn't an audio path back to Flask. This means the Rust server
+becomes the public container entrypoint port, and Flask binds to a private
+loopback port.
+
+### Why Flask still owns audio auth
+
+Flask owns the user/session model, the Stripe billing checks, the whitelist
+logic, and the download-counter writer call. Reproducing all of that in
+Rust would balloon Phase 1 well past its budget. Instead we use the
+nginx-style **auth subrequest** pattern: Rust asks Flask "may I serve this
+file?" via an internal endpoint; Flask returns either a 4xx or a JSON blob
+with `file_path`, `mtime`, `size`, `etag`, `mimetype`,
+`content_disposition`, and `should_increment_download_count`. Rust then
+streams the file and, if the flag is set, asynchronously POSTs back to the
+counter increment endpoint after the stream completes.
+
+### Why the Rust jobs runner does not write SQLite directly
+
+We just spent effort centralizing all writes through the writer service.
+Bypassing it from Rust would re-introduce two-writer SQLite contention
+risks (database-is-locked errors, lost ordering, SQLAlchemy identity-map
+staleness, missed event listeners). The Rust runner instead **calls the
+existing writer IPC** for any mutation. The win is not "skip the writer" —
+it is "stop running the polling loop in a heavyweight Python process that
+holds an SQLAlchemy session, and stop allocating per-poll IPC queues."
+
+---
+
+# Phase 1 — Rust Audio Server
+
+## Goal
+
+Replace the byte-streaming portion of three Flask routes with a Rust HTTP
+server. Keep all auth and bookkeeping in Flask. Make the Rust path
+opt-in via env flag with full Python fallback.
+
+## Step 1.0 — Baselines
+
+Record before-numbers in this plan under "Measurement Notes". Run from the
+host:
+
+```bash
+docker stats --no-stream podly-pure-podcasts
+docker top podly-pure-podcasts -eo pid,ppid,rss,vsz,comm,args
+```
+
+For latency and memory under load, drive a representative MP3 with `curl`:
+
+```bash
+PODCAST_GUID="<a-real-processed-post-guid>"
+time curl -sS -o /dev/null \
+  -H "Cookie: <session>" \
+  "http://localhost:<port>/api/posts/${PODCAST_GUID}/audio"
+
+# Range-request smoke
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -H "Range: bytes=0-65535" \
+  "http://localhost:<port>/api/posts/${PODCAST_GUID}/audio"
+```
+
+Record:
+
+- container memory at idle vs during 4 concurrent streams
+- web-process RSS during 4 concurrent streams
+- wall-clock time to fully transfer a ~50 MB MP3
+- worker-thread saturation behavior (any 503s under N concurrent streams?)
+
+## Step 1.1 — Feature Flag and Config
+
+Update:
+
+- `src/shared/rust_sidecar.py`
+- `.env.local.example`
+- `.env.local` (locally only — do not commit)
+- `compose.yml`
+- `compose.local.yml`
+
+Add:
+
+- `PODLY_RUST_AUDIO_SERVER_ENABLED=false`
+- `PODLY_RUST_AUDIO_SERVER_BIND=0.0.0.0:8024`  (the public-facing port the
+  Rust server binds; replaces the Flask port mapping when enabled)
+- `PODLY_FLASK_INTERNAL_BIND=127.0.0.1:8025`  (Flask binds here when the
+  Rust server is in front)
+- `PODLY_AUDIO_HANDOFF_SECRET=<random>`         (HMAC key shared between
+  Flask and Rust for the handoff endpoint)
+
+In `src/shared/rust_sidecar.py`, add:
+
+- constant `RUST_AUDIO_SERVER_ENABLED_ENV = "PODLY_RUST_AUDIO_SERVER_ENABLED"`
+- function `rust_audio_server_enabled() -> bool`
+
+Do not default the flag to true.
+
+## Step 1.2 — Flask Internal Handoff Endpoint
+
+Add a new internal blueprint, e.g. `src/app/routes/internal_audio_routes.py`,
+mounted under `/_internal/audio`. The endpoint must:
+
+- Accept `GET /_internal/audio/<path:p_guid>` with query params:
+  `kind=processed|original|download` and `nonce=<value>`.
+- Require an `X-Podly-Audio-Handoff` header containing
+  `hmac_sha256(PODLY_AUDIO_HANDOFF_SECRET, f"{p_guid}|{kind}|{nonce}")`.
+  Reject with 403 on mismatch. The Rust server computes the same HMAC.
+- Forward original cookies/headers from the user request via the Rust
+  server (Rust sets `X-Forwarded-Cookie`, etc.). Flask uses these to run
+  the same auth/whitelist logic that the public route runs today
+  (`ensure_whitelisted_for_download`, billing/active checks).
+- On success, return JSON:
+
+```json
+{
+  "file_path": "/abs/path/to/file.mp3",
+  "size": 51234567,
+  "mtime": 1715600000,
+  "etag": "\"…\"",
+  "mimetype": "audio/mpeg",
+  "content_disposition": "attachment; filename=\"Title.mp3\"",
+  "should_increment_download_count": true,
+  "post_id": 42
+}
+```
+
+- On failure, return the same status code + body the public route would
+  return (404, 403, etc.) so Rust can pass it through verbatim.
+
+This endpoint is the only new Flask code in Phase 1 that Rust depends on.
+Keep auth logic in shared helpers so the public routes still work in the
+fallback case (flag off).
+
+## Step 1.3 — Rust `podly_audio_server` Binary
+
+Add a second Rust binary in the existing crate. Update
+`rust/Cargo.toml`:
+
+```toml
+[[bin]]
+name = "podly_tools"
+path = "src/main.rs"
+
+[[bin]]
+name = "podly_audio_server"
+path = "src/audio_server.rs"
+```
+
+Add dependencies (pin minor versions):
+
+- `tokio` with `rt-multi-thread`, `macros`, `signal`, `fs`, `io-util`
+- `axum` (HTTP framework)
+- `hyper` and `hyper-util` (already transitively included by axum)
+- `reqwest` with `stream` (for the auth subrequest + Flask reverse proxy)
+- `hmac` + `sha2` (handoff HMAC)
+- `tower-http` (`CompressionLayer` is **not** to be used for audio; use
+  `TraceLayer` only)
+
+`rust/src/audio_server.rs` responsibilities:
+
+1. Bind on `PODLY_RUST_AUDIO_SERVER_BIND`.
+2. Define route handlers for the three audio paths today:
+   - `GET /api/posts/{p_guid}/audio`
+   - `GET /api/posts/{p_guid}/download`
+   - `GET /api/posts/{p_guid}/download/original`
+3. For an audio request:
+   a. Compute HMAC and call Flask at
+      `http://${PODLY_FLASK_INTERNAL_BIND}/_internal/audio/{guid}?kind={kind}&nonce={nonce}`
+      forwarding the user's cookies/auth headers.
+   b. If Flask returns non-200, mirror the status, headers, and body to the
+      client.
+   c. If 200, parse JSON. Open `file_path` with `tokio::fs::File`.
+   d. Honor `Range:` requests. Implement single-range `bytes=start-end` and
+      `bytes=start-` and `bytes=-suffix`. Return 206 with
+      `Content-Range`, `Accept-Ranges: bytes`, correct `Content-Length`.
+      Multi-range can return 416 (we don't need it).
+   e. Honor `If-None-Match`: if equal to returned ETag, return 304.
+   f. Honor `If-Modified-Since`: compare against `mtime`, return 304 on hit.
+   g. Set `Content-Type` from `mimetype`. Set `Content-Disposition` from
+      handoff payload (already includes attachment vs inline).
+   h. Stream the file with `ReaderStream` in 64 KB chunks.
+4. After successful full transfer (status 200/206 with no abort), if
+   `should_increment_download_count` was true, fire-and-forget
+   `POST /_internal/audio/{guid}/downloaded` to Flask. Do not block the
+   response on this. Use a bounded `tokio::task::JoinSet` so we don't leak
+   tasks under load.
+5. For all other paths (`*`), reverse-proxy to
+   `http://${PODLY_FLASK_INTERNAL_BIND}` using `reqwest`. Stream both
+   request body and response body. Forward headers minus hop-by-hop ones
+   (`connection`, `keep-alive`, `proxy-*`, `te`, `trailer`,
+   `transfer-encoding`, `upgrade`). Add `X-Forwarded-For` / `X-Real-IP`.
+6. Handle SIGTERM cleanly: stop accepting, wait up to 30 s for in-flight
+   streams, then exit.
+
+Logging: structured (JSON or key=value) to stdout, including `guid`,
+`kind`, `range`, `bytes_sent`, `status`, `duration_ms`. Do not log cookies.
+
+## Step 1.4 — Supervisor + Container Entrypoint
+
+Update `scripts/start_services.sh`:
+
+- Read `PODLY_RUST_AUDIO_SERVER_ENABLED`.
+- If enabled:
+  - Start writer (unchanged).
+  - Start Flask bound to `${PODLY_FLASK_INTERNAL_BIND}` (default
+    `127.0.0.1:8025`). Use `WAITRESS_LISTEN` or pass through `src/main.py`
+    args; do not break the existing CLI path.
+  - Wait for Flask `/healthz` (or `/api/health` — confirm in current code)
+    on the internal port to return 200.
+  - Start `${PODLY_RUST_AUDIO_SERVER_BIN:-/app/bin/podly_audio_server}` with
+    its env. Wait for Rust `/healthz` on the public port.
+  - Use `wait -n` so any of the three dying restarts the container.
+- If disabled: existing behavior.
+
+Update Dockerfile (or build pipeline) to compile both bins
+(`podly_tools` and `podly_audio_server`) and copy into `/app/bin/`. Confirm
+both are stripped and built `--release`.
+
+Update `compose.yml` / `compose.local.yml`:
+
+- Map host port → `PODLY_RUST_AUDIO_SERVER_BIND` when flag is on, else map
+  to Flask port as today. Document both modes in comments. Default in
+  committed compose files: flag off, no port-mapping change.
+
+## Step 1.5 — Public-Route Delegation
+
+Two options depending on how we want fallback to work:
+
+- **Option A (recommended):** when the flag is on, the Rust server is the
+  only thing bound to the public port. The three Flask routes still exist
+  but are unreachable from outside the container. Internally they continue
+  to work for tests and local fallback. No changes to the public route
+  bodies are required.
+- **Option B:** keep Flask publicly reachable. Have each public audio route
+  check `rust_audio_server_enabled()` and, if true, return 307 to a signed
+  internal Rust URL. Rejected: doubles round-trips and complicates Range.
+
+Pick Option A. Add docstrings on the three public routes pointing to the
+Rust server design.
+
+## Step 1.6 — Parity Tests
+
+Add `src/tests/test_audio_streaming_parity.py`. For each scenario, run
+under both Python-only and Rust-server modes and assert identical user-
+visible behavior:
+
+- Full file GET — body bytes equal, `Content-Length` matches, status 200.
+- `Range: bytes=0-1023` — status 206, `Content-Range`, body length 1024.
+- `Range: bytes=1000-` — open-ended range, body equals tail.
+- `Range: bytes=-512` — suffix range.
+- Invalid `Range` (`bytes=abc`) — status 416 with empty body.
+- `If-None-Match` matching prior ETag — status 304, no body.
+- Missing file (path on disk gone) — status 404 with the same JSON shape.
+- Not-whitelisted post — status 403 with the same JSON shape.
+- Download-counter increment — exactly one increment per fully-served
+  request, zero on aborted/Range requests (match current Flask behavior in
+  `should_increment_download_count_for_request`).
+
+Use a small fixture MP3 (a few hundred KB is enough; do not commit large
+files). The Rust-mode tests should spin up `podly_audio_server` against a
+loopback Flask in a `pytest` fixture, or — preferred — exercise it via
+`docker compose -f compose.local.yml`.
+
+## Step 1.7 — Final CI + Measurement
+
+Run `mise exec -- ./scripts/ci.sh`. Capture the same numbers as Step 1.0
+under "Measurement Notes (after Phase 1)". Expect:
+
+- Web-process RSS during concurrent streams: significantly lower (Python no
+  longer touches audio bytes).
+- Worker-thread saturation: should disappear under modest concurrency.
+- Wall-clock per stream: comparable, possibly faster on Range/304 paths.
+
+---
+
+# Phase 2 — Rust Jobs Manager
+
+## Goal
+
+Move the polling loop in `src/app/jobs_manager.py` into a small Rust
+daemon. Keep DB mutations on the Python writer (over the existing IPC).
+The Python `JobsManager` becomes a thin client. The per-job
+`app.processing_worker` subprocess remains Python and unchanged.
+
+## Step 2.0 — Baselines
+
+Record before-numbers under "Measurement Notes":
+
+```bash
+docker stats --no-stream podly-pure-podcasts
+docker top podly-pure-podcasts -eo pid,ppid,rss,vsz,comm,args
+```
+
+Capture under sustained idle (no jobs) and during a small batch of jobs
+(3-5 short ones):
+
+- writer-process RSS at idle and at end of batch
+- web-process RSS at idle and at end of batch
+- writer log volume per minute (proxy for IPC traffic):
+  `wc -l src/instance/logs/app.log` deltas
+- count of `dequeue_job` log lines per minute
+
+## Step 2.1 — Feature Flag
+
+Update `src/shared/rust_sidecar.py`, env files, compose files:
+
+- `PODLY_RUST_JOBS_RUNNER_ENABLED=false`
+- `PODLY_RUST_JOBS_RUNNER_BIN=/app/bin/podly_jobs_runner`
+- `PODLY_RUST_JOBS_CONTROL_BIND=127.0.0.1:50003`
+- `PODLY_JOBS_POLL_SEC=2.0` (read by both Python and Rust paths so behavior
+  matches)
+- `PODLY_JOBS_RUNNER_HEALTH_TIMEOUT_SEC=30`
+
+In `src/shared/rust_sidecar.py`:
+
+- `RUST_JOBS_RUNNER_ENABLED_ENV = "PODLY_RUST_JOBS_RUNNER_ENABLED"`
+- `rust_jobs_runner_enabled() -> bool`
+
+Do not default the flag to true.
+
+## Step 2.2 — Define the Rust ↔ Python Jobs Control Contract
+
+The Rust runner is a long-lived daemon. It owns:
+
+- the singleton run id (`jobs-manager-singleton`), refreshed via writer
+  `ensure_active_run` action
+- the polling loop that asks the writer for `dequeue_job`
+- spawning of the Python `app.processing_worker` subprocess for each
+  claimed job
+- watching the spawned worker, handling cancellation, and on exit
+  reporting result back via writer actions
+- an HTTP control surface for the Flask side (the rest of the Python app)
+
+Control endpoints exposed by the Rust runner on
+`PODLY_RUST_JOBS_CONTROL_BIND`:
+
+- `POST /jobs/refresh-feeds` — request a refresh-all-feeds tick
+  (corresponds to `start_refresh_all_feeds` today)
+- `POST /jobs/cancel/{job_id}` — request cancellation of a job; runner
+  signals the in-flight worker if running
+- `POST /jobs/wake` — kick the poll loop early (corresponds to setting
+  `_work_event`)
+- `GET /jobs/status` — return current run id, queue depth, in-flight job
+  id, last-claim timestamp
+- `GET /healthz` — liveness
+
+All endpoints are localhost-only and protected by an HMAC header
+(`X-Podly-Jobs-Auth: hmac_sha256(secret, body)`) using
+`PODLY_AUDIO_HANDOFF_SECRET` reused, or a separate
+`PODLY_JOBS_CONTROL_SECRET`. Do not require auth for `/healthz`.
+
+## Step 2.3 — Implement `podly_jobs_runner`
+
+Add `rust/src/jobs_runner.rs` and a third bin entry in `rust/Cargo.toml`.
+Reuse `axum` + `tokio` from Phase 1 deps. Add:
+
+- `serde_json` (already present)
+- `reqwest` (already added in Phase 1)
+
+The runner needs to talk to the writer. The writer's existing transport is
+Python `multiprocessing.managers`. **Do not** try to speak that protocol
+from Rust. Instead, expose a small **HTTP shim inside the Python writer
+process** that forwards a narrow set of writer actions:
+
+- `dequeue_job`
+- `ensure_active_run`
+- `update_job_status`
+- `mark_cancelled`
+- `cleanup_stale_jobs`
+- `reassign_pending_jobs`
+- `recalculate_run_counts` (via a new `recalculate` action if not present)
+
+Add this shim as a tiny `flask`-free HTTP server inside `src/app/writer/`,
+bound to `127.0.0.1:50004`, reusing the existing `WriterClient` to dispatch.
+The shim is the only new Python code Rust talks to. This avoids reproducing
+multiprocessing.managers in Rust and keeps the writer as the only DB
+writer.
+
+Loop logic in Rust (mirrors `_worker_loop` in `src/app/jobs_manager.py`):
+
+1. On startup: call writer `ensure_active_run` with
+   `{trigger: "startup"}`. Cache run id.
+2. Loop:
+   - Call writer `dequeue_job {run_id}`.
+   - If a job is returned: spawn `python3 -m app.processing_worker --job-id <id> --post-guid <guid>` with the same env as
+     `_processing_worker_env()`. Track child PID and start time.
+   - Wait for child to exit. While waiting, every `PODLY_PROCESS_WORKER_POLL_SEC`
+     check writer for a cancellation signal on this job_id. If cancelled,
+     send SIGTERM, wait grace, then SIGKILL (mirrors
+     `_wait_for_processing_worker`).
+   - On child exit: if non-zero and job not already terminal, call writer
+     `update_job_status` with `failed`.
+   - Loop back.
+   - If no job returned: sleep `PODLY_JOBS_POLL_SEC`, or wake early if
+     `/jobs/wake` was called.
+3. On SIGTERM: refuse new claims, let current child finish (bounded), then
+   exit.
+
+The runner must NOT open a SQLite connection. All DB reads/writes go
+through the writer HTTP shim.
+
+## Step 2.4 — Reduce Python `JobsManager` to a Thin Client
+
+When `rust_jobs_runner_enabled()` is true:
+
+- `src/app/jobs_manager.py:JobsManager.__init__` must not start the
+  `_worker_thread`.
+- `start_refresh_all_feeds` becomes a small `requests.post` to
+  `http://${PODLY_RUST_JOBS_CONTROL_BIND}/jobs/refresh-feeds`.
+- Cancellation calls become `requests.post(.../jobs/cancel/{job_id})`.
+- `_wait_for_work` and `_dequeue_next_job` are skipped (the daemon owns
+  these).
+- Public methods that other code calls (`ensure_active_run`,
+  status/listing methods) keep working — listings are reads and can keep
+  using SQLAlchemy directly.
+
+When the flag is false: existing behavior unchanged (no risk to current
+deployments).
+
+The goal is: the long-lived Python jobs thread is gone, the polling
+traffic to the writer is gone (replaced by Rust's polling, which calls a
+narrower writer HTTP shim instead of the multiprocessing manager IPC), and
+the writer process no longer allocates per-poll reply queues.
+
+## Step 2.5 — Supervisor + Container Entrypoint
+
+Update `scripts/start_services.sh`:
+
+- If `PODLY_RUST_JOBS_RUNNER_ENABLED` is true:
+  - Start writer (unchanged).
+  - Start the writer's HTTP shim (or have the writer start it as a side
+    thread inside `run_writer_service`).
+  - Wait for shim `/healthz` on `127.0.0.1:50004`.
+  - Start `podly_jobs_runner`. Wait for `/healthz` on
+    `PODLY_RUST_JOBS_CONTROL_BIND`.
+  - Start Flask.
+  - `wait -n` for any of {writer, runner, flask}.
+- If false: existing behavior.
+
+Dockerfile updates: build `podly_jobs_runner` alongside the others, copy
+into `/app/bin/`.
+
+Compose updates: do not expose port 50003 or 50004 to the host. Keep them
+bound to localhost.
+
+## Step 2.6 — Parity Tests
+
+Add `src/tests/test_jobs_runner_parity.py`. Run each scenario under both
+Python-only and Rust-runner modes:
+
+- Single job lifecycle: pending → claimed → running → completed, asserting
+  the same final `ProcessingJob` row state and the same
+  `JobsManagerRun` counter values.
+- Cancellation while running: status ends as `cancelled`, child process is
+  reaped within the grace period.
+- Crash mid-run: kill the worker subprocess externally; runner should
+  re-fail the job (same behavior as Python today).
+- Stale-claim recovery: simulate runner restart with a job in `running`;
+  startup should call `cleanup_stale_jobs` / `reassign_pending_jobs` and
+  arrive at the same state as the Python loop does today.
+- Concurrent dequeue protection: the `_global_processing_lock` semantics
+  in `src/app/jobs_manager.py` (only one job at a time) must be preserved
+  by the Rust runner.
+- Counter parity: after a 3-job batch, `JobsManagerRun.completed_jobs` and
+  friends match exactly between modes.
+
+## Step 2.7 — Final CI + Measurement
+
+Run `mise exec -- ./scripts/ci.sh`. Capture after-numbers (mirror Step
+2.0). Expect:
+
+- writer-process RSS at idle: meaningfully lower (no per-poll Manager
+  Queue churn; the shim path is single-connection HTTP).
+- web-process RSS at idle: lower (no jobs-manager thread holding
+  SQLAlchemy session and processor imports).
+- `dequeue_job` log volume: comparable, but the cost-per-call drops since
+  it no longer allocates an IPC reply queue.
+
+---
+
+# Cross-Phase Notes
+
+## Sequencing
+
+Do Phase 1 first. Reasons:
+
+- Phase 1 has no interaction with the writer or with database semantics.
+  Risk of regressing data is essentially zero.
+- Phase 1 builds the Rust HTTP server skeleton (`axum` + `reqwest` reverse
+  proxy + handoff HMAC), which Phase 2 reuses for the runner's control
+  endpoints and for the writer HTTP shim.
+- Phase 1 is the user's biggest pain point right now (audio streaming
+  tying up Python workers).
+
+Do not attempt both phases in a single PR. Land Phase 1, observe in
+production for at least one full normal-load day with the flag on, then
+start Phase 2.
+
+## Rollback
+
+Both phases are flag-gated. To roll back, set the flag false and restart.
+The Python paths remain compiled and tested in CI in both modes.
+
+## Dependency Hygiene
+
+Two new long-lived processes plus an HTTP shim adds operational surface.
+Keep things minimal:
+
+- One Rust crate, three binaries, shared dep tree.
+- The writer HTTP shim is internal and unauthenticated only because it
+  binds to loopback inside the container. Document this in
+  `src/app/writer/README.md` or similar.
+- Do not introduce gRPC, protobuf, or message-queue dependencies. JSON
+  over HTTP is sufficient and matches the existing pattern.
+
+## Out of Scope (Explicit)
+
+- Replacing the per-job Python `app.processing_worker` (the actual
+  transcribe + classify + cut + bleep pipeline). That is the next
+  natural Rust target after Phases 1 and 2 land, but it is much larger
+  and is tracked separately.
+- Replacing Flask itself.
+- Moving any writer action to Rust. Writes still flow through the Python
+  writer process.
+
+---
+
+# Measurement Notes
+
+(Filled in by the implementing agent.)
+
+## Phase 1 — Before
+
+- container memory at idle:
+- container memory under 4 concurrent streams:
+- web-process RSS under 4 concurrent streams:
+- single-stream wall clock (50 MB MP3):
+- 503s observed under N concurrent streams:
+
+## Phase 1 — After
+
+- container memory at idle:
+- container memory under 4 concurrent streams:
+- web-process RSS under 4 concurrent streams:
+- single-stream wall clock (50 MB MP3):
+- 503s observed under N concurrent streams:
+
+## Phase 2 — Before
+
+- writer-process RSS at idle:
+- writer-process RSS after a 3-job batch:
+- web-process RSS at idle:
+- `dequeue_job` log lines per minute (idle):
+- writer log lines per minute (idle):
+
+## Phase 2 — After
+
+- writer-process RSS at idle:
+- writer-process RSS after a 3-job batch:
+- web-process RSS at idle:
+- `dequeue_job` log lines per minute (idle):
+- writer log lines per minute (idle):

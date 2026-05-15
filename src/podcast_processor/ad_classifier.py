@@ -119,6 +119,12 @@ class AdClassifier:
             self.concurrency_limiter = None
             self.logger.info("LLM concurrency limiting disabled")
 
+        # Set to True if any LLM response fails to parse during a single
+        # ``classify()`` run. Reset on each new call. The orchestrator reads
+        # this after classification finishes to decide whether to auto-retry
+        # zero-ad runs (see PodcastProcessor zero-ads guard).
+        self.had_parse_error = False
+
         # Initialize cue detector for neighbor expansion
         self.cue_detector = CueDetector()
 
@@ -151,6 +157,10 @@ class AdClassifier:
             user_prompt_template: User prompt template for the LLM
             post: Post containing the podcast to classify
         """
+        # Reset the parse-error signal at the top of every classification run
+        # so a flag from a prior post can't leak into this one's outcome.
+        self.had_parse_error = False
+
         self.logger.info(
             f"Starting ad classification for post {post.id} with {len(transcript_segments)} segments."
         )
@@ -885,6 +895,10 @@ class AdClassifier:
                 f"Error processing LLM response for ModelCall {model_call.id}: {e}",
                 exc_info=True,
             )
+            # Surface the parse failure to the orchestrator. Combined with a
+            # final ad-window count of 0 this drives the optional auto-retry
+            # path; on its own it's just diagnostic.
+            self.had_parse_error = True
         return []
 
     def _create_identifications(

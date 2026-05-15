@@ -38,6 +38,15 @@ class OutputConfig(BaseModel):
     min_ad_segement_separation_seconds: int
     min_ad_segment_length_seconds: int
     min_confidence: float
+    auto_retry_zero_ads_on_parse_error: bool = Field(
+        default=DEFAULTS.OUTPUT_AUTO_RETRY_ZERO_ADS_ON_PARSE_ERROR,
+        description=(
+            "Auto-requeue an LLM-strategy run once when it finishes with "
+            "zero ad windows AND at least one classification batch parse "
+            "failed. Off by default; only fires for posts where "
+            "auto_retry_attempted is not already set."
+        ),
+    )
 
     @property
     def min_ad_segment_separation_seconds(self) -> int:

@@ -190,6 +190,21 @@ export default function LLMSection() {
               }
             />
           </Field>
+          <Field
+            label="Auto-Retry Zero-Ad Runs After Parse Errors"
+            hint="When an LLM-strategy run completes with zero ad windows AND at least one classification batch failed to parse (malformed JSON from the model), automatically requeue the episode once. Off by default. Lives in Output settings; surfaced here so it's findable alongside the other LLM controls."
+          >
+            <input
+              type="checkbox"
+              checked={!!pending?.output?.auto_retry_zero_ads_on_parse_error}
+              onChange={(e) =>
+                setField(
+                  ['output', 'auto_retry_zero_ads_on_parse_error'],
+                  e.target.checked,
+                )
+              }
+            />
+          </Field>
           <Field label="Max Input Tokens Per Call (optional)" envMeta={getEnvHint('llm.llm_max_input_tokens_per_call')}>
             <input
               className={inputClass(maxInputPerCallReadOnly)}

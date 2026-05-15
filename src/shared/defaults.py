@@ -41,6 +41,10 @@ OUTPUT_BLEEP_PADDING_END_MS = 150
 OUTPUT_MIN_AD_SEGMENT_SEPARATION_SECONDS = 60
 OUTPUT_MIN_AD_SEGMENT_LENGTH_SECONDS = 14
 OUTPUT_MIN_CONFIDENCE = 0.8
+# When True, an LLM-strategy run that finishes with zero ad windows *and*
+# encountered at least one classification-response parse error is
+# auto-requeued exactly once. Off by default so the behavior change is opt-in.
+OUTPUT_AUTO_RETRY_ZERO_ADS_ON_PARSE_ERROR = False
 
 # App defaults
 APP_BACKGROUND_UPDATE_INTERVAL_MINUTE = 30

@@ -164,6 +164,18 @@ class PodcastProcessor:
         else:
             self.audio_processor = audio_processor
 
+        # In-memory marker: when the zero-ads guard triggers an auto-retry,
+        # the current (failed) job is still mid-flight. Its finalization
+        # would otherwise delete the unprocessed audio file via
+        # ``_remove_unprocessed_audio``, which would force the retry to
+        # re-download — dangerous for dynamic-ad-insertion feeds where
+        # different bytes arrive each request and the saved transcripts
+        # would no longer line up. Holding the post guid here tells
+        # ``_remove_unprocessed_audio`` to skip cleanup so the retry can
+        # reuse the exact file the transcripts were made from. Cleared
+        # after the next ``process()`` call.
+        self._suppress_unprocessed_cleanup_for_guid: str | None = None
+
     def process(  # noqa: PLR0912
         self,
         post: Post,
@@ -226,6 +238,34 @@ class PodcastProcessor:
                 raise ProcessorException(
                     f"Post with GUID {cached_post_guid} not whitelisted"
                 )
+
+            # Zero-ads guard auto-retry: when the worker dequeues a job
+            # carrying ``auto_retry_attempted=True`` it's a fresh retry for a
+            # post whose prior run produced 0 ads + a classifier parse error.
+            # Without this cleanup, _check_existing_processed_audio (below)
+            # would find the prior run's processed mp3 on disk and exit
+            # immediately, no-oping the retry. Cleanup wipes the bad
+            # processed file + classifier outputs while preserving the
+            # transcripts so Whisper isn't re-billed.
+            if getattr(job, "auto_retry_attempted", False):
+                self.logger.info(
+                    "[ZERO_ADS_GUARD] Job %s is an auto-retry; clearing "
+                    "prior classification artifacts before reprocessing.",
+                    job.id,
+                )
+                try:
+                    writer_client.action(
+                        "prepare_post_for_auto_retry",
+                        {"post_id": post.id},
+                        wait=True,
+                    )
+                    self.db_session.refresh(post)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to prepare post %s for auto-retry; "
+                        "continuing anyway (early-exit may fire).",
+                        post.id,
+                    )
 
             # Check if processed audio already exists (database or disk)
             if self._check_existing_processed_audio(post):
@@ -843,6 +883,146 @@ class PodcastProcessor:
                 exc_info=True,
             )
 
+    def _evaluate_zero_ads_guard(
+        self,
+        post: Post,
+        job: ProcessingJob,
+        *,
+        ad_windows_count: int,
+        had_classification_parse_error: bool,
+    ) -> None:
+        """Record the run's final ad-window count and react to a zero-ads
+        outcome.
+
+        Always:
+          - persists ``ad_windows_count`` on the job (visible to the UI)
+          - persists ``had_classification_parse_error`` on the job when set
+          - logs a WARNING when the LLM run produced zero ad windows
+
+        Conditional (LLM run, zero ads, parse error, setting enabled, no
+        prior retry): marks ``auto_retry_attempted`` on the current job and
+        enqueues a fresh pending job for the same post. The worker picks it
+        up on the next tick; the prior job stays in place (with the badge)
+        so the operator can see the failure context.
+        """
+        try:
+            writer_client.action(
+                "record_ad_windows_count",
+                {"job_id": job.id, "count": ad_windows_count},
+                wait=True,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to record ad_windows_count=%s for job %s",
+                ad_windows_count,
+                getattr(job, "id", None),
+            )
+
+        if had_classification_parse_error:
+            try:
+                writer_client.action(
+                    "mark_classification_parse_error",
+                    {"job_id": job.id},
+                    wait=True,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to mark had_classification_parse_error for job %s",
+                    getattr(job, "id", None),
+                )
+
+        if ad_windows_count > 0:
+            return
+
+        feed = getattr(post, "feed", None)
+        strategy = getattr(feed, "ad_detection_strategy", "llm") or "llm"
+        # The chapter strategies legitimately produce zero windows for
+        # episodes that have no advertisement chapters tagged. The guard is
+        # only meaningful for the LLM strategy where zero usually means the
+        # model fumbled.
+        if strategy != "llm":
+            return
+
+        self.logger.warning(
+            "[ZERO_ADS_GUARD] Post %s (job %s) completed with 0 ad windows "
+            "(had_parse_error=%s, auto_retry_attempted=%s). Review whether "
+            "this is a genuine ad-free episode or a classification miss.",
+            getattr(post, "id", None),
+            getattr(job, "id", None),
+            had_classification_parse_error,
+            getattr(job, "auto_retry_attempted", False),
+        )
+
+        if not had_classification_parse_error:
+            return
+
+        if getattr(job, "auto_retry_attempted", False):
+            self.logger.info(
+                "[ZERO_ADS_GUARD] Skipping auto-retry for post %s: a prior "
+                "retry has already been attempted.",
+                getattr(post, "id", None),
+            )
+            return
+
+        output_cfg = getattr(self.config, "output", None)
+        auto_retry_enabled = bool(
+            getattr(output_cfg, "auto_retry_zero_ads_on_parse_error", False)
+        )
+        if not auto_retry_enabled:
+            self.logger.info(
+                "[ZERO_ADS_GUARD] Auto-retry disabled in settings; leaving "
+                "post %s as-is (set output.auto_retry_zero_ads_on_parse_error "
+                "to true to enable).",
+                getattr(post, "id", None),
+            )
+            return
+
+        self.logger.warning(
+            "[ZERO_ADS_GUARD] Auto-requeuing post %s once due to "
+            "classification parse error + zero ad windows.",
+            getattr(post, "id", None),
+        )
+        # Hold the post guid so this run's finalization doesn't delete the
+        # unprocessed audio file before the retry job can reuse it. Vital
+        # for DAI feeds (Megaphone et al.) where re-downloading would yield
+        # different bytes and break transcript alignment.
+        self._suppress_unprocessed_cleanup_for_guid = post.guid
+        try:
+            writer_client.action(
+                "mark_auto_retry_attempted",
+                {"job_id": job.id},
+                wait=True,
+            )
+            writer_client.action(
+                "create_job",
+                {
+                    "job_data": {
+                        "post_guid": post.guid,
+                        "status": "pending",
+                        "current_step": 0,
+                        "total_steps": 4,
+                        "progress_percentage": 0.0,
+                        "step_name": "Queued (auto-retry)",
+                        "jobs_manager_run_id": getattr(
+                            job, "jobs_manager_run_id", None
+                        ),
+                        # Propagate the guard onto the *retry* job too. If
+                        # the retry also produces zero ads + parse error,
+                        # its own evaluation sees this flag and skips
+                        # enqueueing yet another retry. Without this, the
+                        # flag only lives on the failed job we just marked
+                        # and a malformed retry could loop indefinitely.
+                        "auto_retry_attempted": True,
+                    }
+                },
+                wait=True,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to enqueue zero-ads auto-retry for post %s",
+                getattr(post, "id", None),
+            )
+
     def _make_transcribe_progress_callback(
         self,
         job: ProcessingJob,
@@ -1024,6 +1204,21 @@ class PodcastProcessor:
             (start_ms / 1000.0, end_ms / 1000.0)
             for start_ms, end_ms in removed_segments_ms
         ]
+
+        # Zero-ads guard: the LLM strategy occasionally yields zero ad
+        # windows because the model returned malformed JSON for a batch
+        # (parse error swallowed in ad_classifier) rather than because the
+        # episode is genuinely ad-free. Record the count + parse-error flag
+        # so the UI can badge the run, and optionally requeue once.
+        ad_classifier = getattr(self, "ad_classifier", None)
+        self._evaluate_zero_ads_guard(
+            post,
+            job,
+            ad_windows_count=len(removed_segments_ms),
+            had_classification_parse_error=bool(
+                getattr(ad_classifier, "had_parse_error", False)
+            ),
+        )
 
         chapters_for_output = []
         chapter_source = "none"
@@ -1491,13 +1686,28 @@ class PodcastProcessor:
         """
         Finalize processing: update database and mark job complete.
         """
+        # Capture this BEFORE _remove_unprocessed_audio clears the flag, so
+        # we can match the DB update to the on-disk preservation decision.
+        suppress_for_retry = (
+            self._suppress_unprocessed_cleanup_for_guid is not None
+            and post.guid == self._suppress_unprocessed_cleanup_for_guid
+        )
+        original_unprocessed_path = post.unprocessed_audio_path
+
         # Update the database with the processed audio path
         self._remove_unprocessed_audio(post)
-        update_data = {
+        update_data: dict[str, Any] = {
             "processed_audio_path": processed_audio_path,
-            "unprocessed_audio_path": None,
             "bleep_windows": bleep_windows,
         }
+        # For the auto-retry handoff we keep the unprocessed path pointed at
+        # the original download. Setting it to None here would force the
+        # retry to re-download — see _remove_unprocessed_audio for the
+        # full DAI rationale.
+        if suppress_for_retry and original_unprocessed_path:
+            update_data["unprocessed_audio_path"] = original_unprocessed_path
+        else:
+            update_data["unprocessed_audio_path"] = None
         if chapter_data is not None:
             update_data["chapter_data"] = chapter_data
         result = writer_client.update(
@@ -1778,6 +1988,26 @@ class PodcastProcessor:
         Used after we have a finalized processed file so stale downloads do not
         accumulate on disk.
         """
+        # DAI-safety: if this run just triggered a zero-ads-guard auto-retry
+        # for this post, keep the downloaded bytes so the retry can reuse
+        # them. Re-downloading on a dynamic-ad-insertion feed would yield
+        # different audio than the transcripts describe, which would silently
+        # poison the retry's classifier output. Clear the flag once consumed
+        # so subsequent post finalizations (including the retry's own) clean
+        # up normally.
+        if (
+            self._suppress_unprocessed_cleanup_for_guid is not None
+            and post.guid == self._suppress_unprocessed_cleanup_for_guid
+        ):
+            self.logger.info(
+                "[ZERO_ADS_GUARD] Preserving unprocessed audio for post %s "
+                "so the auto-retry job can reuse the exact bytes the "
+                "retained transcripts were made from.",
+                post.guid,
+            )
+            self._suppress_unprocessed_cleanup_for_guid = None
+            return
+
         path = post.unprocessed_audio_path
         if not path:
             return

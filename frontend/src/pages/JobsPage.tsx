@@ -567,11 +567,39 @@ export default function JobsPage() {
 
           return (
             <div key={job.job_id} className="bg-white border rounded shadow-sm p-4 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <div className="text-sm font-medium text-gray-900 truncate">
                   {job.post_title || 'Untitled episode'}
                 </div>
-                <StatusBadge status={job.status} />
+                <div className="flex items-center gap-1.5">
+                  {/* Zero-ads guard badge: surfaces when a terminal job
+                      yielded no ad windows. Amber if the run was clean
+                      (probably ad-free episode), red if a parse error
+                      contributed (likely classifier miss). The Retried
+                      variant signals an auto-retry was already used. */}
+                  {(job.status === 'completed' || job.status === 'skipped') &&
+                  job.ad_windows_count === 0 ? (
+                    <span
+                      title={
+                        job.had_classification_parse_error
+                          ? 'No ads removed and at least one LLM batch failed to parse — likely classifier miss.'
+                          : 'No ads removed for this episode.'
+                      }
+                      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        job.had_classification_parse_error
+                          ? 'bg-red-100 text-red-800'
+                          : 'bg-amber-100 text-amber-800'
+                      }`}
+                    >
+                      {job.had_classification_parse_error
+                        ? job.auto_retry_attempted
+                          ? '0 ads · retried'
+                          : '0 ads · parse error'
+                        : '0 ads'}
+                    </span>
+                  ) : null}
+                  <StatusBadge status={job.status} />
+                </div>
               </div>
               <div className="text-xs text-gray-600 truncate">{job.feed_title || 'Unknown feed'}</div>
 

@@ -4,7 +4,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use id3::frame::{Chapter as Id3Chapter, Content, Frame, TableOfContents};
 use id3::{Encoding as Id3Encoding, Tag, TagLike, Version};
 use regex::Regex;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -936,7 +936,10 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             processing_job.started_at,
             processing_job.completed_at,
             processing_job.error_message,
-            processing_job.stage_history
+            processing_job.stage_history,
+            processing_job.ad_windows_count,
+            processing_job.had_classification_parse_error,
+            processing_job.auto_retry_attempted
          FROM processing_job
          LEFT JOIN post ON processing_job.post_guid = post.guid
          LEFT JOIN feed ON post.feed_id = feed.id
@@ -971,6 +974,9 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             "completed_at": row.get::<_, Option<String>>(12)?.map(|value| sqlite_datetime_to_iso(&value)),
             "error_message": row.get::<_, Option<String>>(13)?,
             "stage_history": stage_history,
+            "ad_windows_count": row.get::<_, Option<i64>>(15)?,
+            "had_classification_parse_error": row.get::<_, bool>(16)?,
+            "auto_retry_attempted": row.get::<_, bool>(17)?,
         }))
     })?;
     let jobs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -3076,7 +3082,7 @@ fn filter_chapters_by_strings(
 fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
     let conn = open_readonly_sqlite(&args.db)?;
     let feed_ids: Vec<i64> = if args.require_auth {
-        let mut stmt = conn.prepare("SELECT feed_id FROM user_feed WHERE user_id = ?1")?;
+        let mut stmt = conn.prepare("SELECT feed_id FROM feed_supporter WHERE user_id = ?1")?;
         let rows = stmt.query_map([args.user_id], |row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<i64>, _>>()?
     } else {
@@ -3102,7 +3108,7 @@ fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
 
     let last_changed_at: Option<String> = if args.require_auth {
         conn.query_row(
-            "SELECT max(feed.last_changed_at) FROM feed JOIN user_feed ON user_feed.feed_id = feed.id WHERE user_feed.user_id = ?1",
+            "SELECT max(feed.last_changed_at) FROM feed JOIN feed_supporter ON feed_supporter.feed_id = feed.id WHERE feed_supporter.user_id = ?1",
             [args.user_id],
             |row| row.get(0),
         )?
@@ -3121,18 +3127,18 @@ fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
         args.feed_token.as_deref(),
         args.feed_secret.as_deref(),
     );
-    let title = "Podly Podcasts";
+    let (title, description) = aggregate_feed_metadata(&conn, args.require_auth, args.user_id)?;
     let image_url = format!(
         "{}/static/images/logos/manifest-icon-512.maskable.png",
         args.base_url.trim_end_matches('/')
     );
     let last_build_date = format_rfc2822(last_changed_at.as_deref());
     let xml = build_rss_xml(RssBuildArgs {
-        title,
+        title: &title,
         link: &link,
-        description: "Aggregate feed - Last 3 processed episodes from each subscribed feed.",
+        description: &description,
         image_url: Some(&image_url),
-        image_title: title,
+        image_title: &title,
         last_build_date: &last_build_date,
         base_url: &args.base_url,
         feed_token: args.feed_token.as_deref(),
@@ -3141,6 +3147,35 @@ fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
         prepend_feed_title: true,
     });
     Ok(XmlResponse { xml })
+}
+
+fn aggregate_feed_metadata(
+    conn: &Connection,
+    require_auth: bool,
+    user_id: i64,
+) -> Result<(String, String)> {
+    if require_auth {
+        let username = conn
+            .query_row(
+                "SELECT username FROM users WHERE id = ?1",
+                [user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(username) = username {
+            return Ok((
+                format!("Podly Podcasts - {username}"),
+                format!(
+                    "Aggregate feed for {username} - Last 3 processed episodes from each subscribed feed."
+                ),
+            ));
+        }
+    }
+
+    Ok((
+        "Podly Podcasts".to_string(),
+        "Aggregate feed - Last 3 processed episodes from each subscribed feed.".to_string(),
+    ))
 }
 
 #[derive(Serialize)]
@@ -4324,6 +4359,81 @@ mod tests {
     }
 
     #[test]
+    fn render_aggregate_feed_uses_feed_supporter_memberships() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                last_changed_at TEXT
+            );
+            CREATE TABLE post (
+                id INTEGER PRIMARY KEY,
+                feed_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                guid TEXT NOT NULL,
+                processed_audio_path TEXT,
+                description TEXT,
+                release_date TEXT,
+                duration INTEGER,
+                image_url TEXT,
+                chapter_data TEXT,
+                whitelisted INTEGER NOT NULL
+            );
+            CREATE TABLE feed_supporter (
+                id INTEGER PRIMARY KEY,
+                feed_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at TEXT
+            );
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL
+            );
+            INSERT INTO feed VALUES
+                (1, 'Subscribed Feed', '2026-05-08 12:00:00'),
+                (2, 'Other Feed', '2026-05-09 12:00:00');
+            INSERT INTO post VALUES
+                (1, 1, 'Subscribed Episode', 'sub-guid', '/tmp/sub.mp3', 'sub desc',
+                    '2026-05-08 12:00:00', 60, NULL, NULL, 1),
+                (2, 2, 'Other Episode', 'other-guid', '/tmp/other.mp3', 'other desc',
+                    '2026-05-09 12:00:00', 60, NULL, NULL, 1);
+            INSERT INTO feed_supporter VALUES
+                (1, 1, 42, '2026-05-08 12:00:00');
+            INSERT INTO users VALUES
+                (42, 'listener');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let response = render_aggregate_feed(FeedRenderAggregateArgs {
+            db: db_path,
+            user_id: 42,
+            base_url: "https://podly.test".to_string(),
+            require_auth: true,
+            limit_per_feed: 3,
+            feed_token: None,
+            feed_secret: None,
+        })
+        .unwrap();
+
+        assert!(response
+            .xml
+            .contains("[Subscribed Feed] Subscribed Episode"));
+        assert!(response
+            .xml
+            .contains("<title>Podly Podcasts - listener</title>"));
+        assert!(response.xml.contains(
+            "<description>Aggregate feed for listener - Last 3 processed episodes from each subscribed feed.</description>"
+        ));
+        assert!(response.xml.contains("sub-guid"));
+        assert!(!response.xml.contains("Other Episode"));
+        assert!(!response.xml.contains("other-guid"));
+    }
+
+    #[test]
     fn jobs_render_matches_python_route_shape_and_ordering() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("podly.sqlite");
@@ -4337,19 +4447,22 @@ mod tests {
                 id TEXT PRIMARY KEY, post_guid TEXT NOT NULL, status TEXT NOT NULL,
                 current_step INTEGER, step_name TEXT, total_steps INTEGER,
                 progress_percentage REAL, started_at TEXT, completed_at TEXT,
-                error_message TEXT, created_at TEXT, stage_history TEXT
+                error_message TEXT, created_at TEXT, stage_history TEXT,
+                ad_windows_count INTEGER, had_classification_parse_error INTEGER NOT NULL DEFAULT 0,
+                auto_retry_attempted INTEGER NOT NULL DEFAULT 0
             );
             INSERT INTO feed VALUES (1, 'Feed');
             INSERT INTO post VALUES (1, 1, 'guid-1', 'Episode 1');
             INSERT INTO processing_job VALUES
                 ('job-complete', 'guid-1', 'completed', 4, 'Done', 4, 100.0, NULL,
                     '2026-05-08 12:02:00', NULL, '2026-05-08 12:02:00',
-                    'this is not valid json'),
+                    'this is not valid json', 0, 1, 0),
                 ('job-pending', 'guid-1', 'pending', 0, 'Queued', 4, 0.0, NULL, NULL, NULL,
-                    '2026-05-08 12:01:00', NULL),
+                    '2026-05-08 12:01:00', NULL, NULL, 0, 0),
                 ('job-running', 'missing-guid', 'running', 2, 'Work', 4, 50.0,
                     '2026-05-08 12:00:00', NULL, NULL, '2026-05-08 12:00:00',
-                    '[{\"step\":0,\"step_name\":\"Queued\",\"started_at\":\"2026-05-08T12:00:00\"},{\"step\":2,\"step_name\":\"Work\",\"started_at\":\"2026-05-08T12:00:30\"}]');",
+                    '[{\"step\":0,\"step_name\":\"Queued\",\"started_at\":\"2026-05-08T12:00:00\"},{\"step\":2,\"step_name\":\"Work\",\"started_at\":\"2026-05-08T12:00:30\"}]',
+                    NULL, 0, 0);",
         )
         .unwrap();
         drop(conn);
@@ -4397,6 +4510,15 @@ mod tests {
         // job-complete has garbage in the column; falling back to [] keeps the
         // listing healthy even if a row was written with malformed JSON.
         assert_eq!(all_jobs[2]["stage_history"], Value::Array(Vec::new()));
+
+        // Zero-ads guard fields surface alongside the rest of the row.
+        // job-complete: 0 ads + parse error flag set; auto-retry not attempted.
+        assert_eq!(all_jobs[2]["ad_windows_count"], 0);
+        assert_eq!(all_jobs[2]["had_classification_parse_error"], true);
+        assert_eq!(all_jobs[2]["auto_retry_attempted"], false);
+        // job-running: NULL ad_windows_count surfaces as JSON null, not 0.
+        assert_eq!(active_jobs[0]["ad_windows_count"], Value::Null);
+        assert_eq!(active_jobs[0]["had_classification_parse_error"], false);
     }
 
     #[test]

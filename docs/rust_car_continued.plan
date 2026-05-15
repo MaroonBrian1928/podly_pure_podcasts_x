@@ -1173,6 +1173,108 @@ Add dated measurements here as work progresses.
   - `cargo check`: passed
   - `cargo test`: 14 passed
 
+## Phase 6: Post-Rollout Optimizations
+
+After the initial Rust rollout, profiling found additional wins. Each was
+verified end-to-end against the live container before being recorded here.
+
+### `/feeds` Endpoint SQL Aggregate Fix
+
+- Date: 2026-05-09
+- Problem: `/feeds` took 2.46s for 14 feeds. `_serialize_feed` called
+  `len(feed.posts)` and `_latest_episode_release_date(feed)`, each triggering
+  lazy loads of all post rows for that feed. With ~5,700 total posts, this was
+  a classic N+1: 14 feeds × 2 lazy-loaded relationships = 28 queries plus full
+  ORM materialization.
+- Fix (Python only — no Rust): added `_FeedAggregate` dataclass plus
+  `_build_feed_aggregates(feed_ids)` that batches two `GROUP BY` queries — one
+  for `(post_count, max(release_date))` per feed, one for member IDs per feed.
+  `_serialize_feed` accepts an optional aggregates map and uses precomputed
+  values when present.
+- Result: 2.456s → ~0.020s end-to-end (**~120x faster**). Response is
+  byte-identical to the previous implementation (verified with `diff`).
+- Lesson: not every slow path needs Rust. A sub-50ms SQL aggregation
+  outperforms anything that involves a subprocess + IPC.
+
+### Stats Log-Parsing Regex Cache
+
+- Date: 2026-05-09
+- Problem: After the feed refresh fix uncovered the uncached-regex pattern,
+  the same anti-pattern was found in `_build_related_logs` for the stats
+  route. `extract_log_field` and `extract_step_name` recompiled regexes per
+  log line, and `line_re` was rebuilt per request.
+- Fix: cached `line_re` and `STEP_NAME_RE` behind `OnceLock`. Added
+  `log_field_regex` helper using `Mutex<HashMap>` to memoize per field name.
+- Result: 0.92s → ~0.12s for the stats route. **~8x faster** than the
+  previous Rust path, **~30x faster** than the original Python (3.48s).
+
+### Rust `transcript ad-merge` Command
+
+- Date: 2026-05-09
+- Goal: eliminate the per-job Python ORM object construction and AdMerger
+  iteration for the runtime ad-cutting pipeline.
+- Implementation: new `transcript ad-merge` Rust subcommand reusing the
+  existing `build_stats_ad_blocks` algorithm (already ported as part of stats
+  render). CLI takes `--db --post-guid --min-confidence --max-gap
+  --enable-boundary-refinement` and returns
+  `{"ad_segments": [[start, end], ...]}`.
+- Python wrapper: `try_merge_ad_segments(...)` in `shared/rust_sidecar.py`,
+  guarded by `PODLY_RUST_AD_MERGE_ENABLED` (default off).
+- Wiring: `AudioProcessor.get_ad_segments` calls
+  `_try_rust_get_ad_segments` first; falls through to the Python AdMerger
+  pipeline on any failure or when an `identification_query` was injected
+  (test path).
+
+### Rust `transcript profanity-windows` Command
+
+- Date: 2026-05-09
+- Goal: move profanity-window extraction (regex + word loop + window merge)
+  out of the Python worker for feeds that opt into bleeping.
+- Implementation: new `transcript profanity-windows` Rust subcommand that
+  reads a JSON request file containing flat words list, profanity terms, and
+  padding/gap config, and returns merged `(start_ms, end_ms)` windows.
+  Mirrors Python `extract_profanity_windows` rounding (floor for start,
+  ceil for end) and merge logic exactly.
+- Python wrapper: `try_extract_profanity_windows(...)` in
+  `shared/rust_sidecar.py`, guarded by `PODLY_RUST_PROFANITY_ENABLED`
+  (default off).
+- Wiring: new `PodcastProcessor._extract_profanity_windows` flattens
+  segments into a word list (capturing `saw_word_timestamps` in Python so
+  the existing exception logic still works), then tries Rust before falling
+  back to Python.
+
+### Lazy-Load litellm/openai in Worker (Memory Win)
+
+- Date: 2026-05-09
+- Problem: importing `PodcastProcessor` cascaded into `litellm` (714
+  submodules) and `openai` (566 submodules) at module-top across 7 files.
+  This added **+117 MB RSS** to every worker process, even during the long
+  network-bound transcription phase that doesn't touch the LLM.
+- Fix: removed module-top `import litellm` / `from openai import OpenAI`
+  from `ad_classifier.py`, `chapter_fallback.py`, `transcribe.py`,
+  `podcast_processor.py`, `boundary_refiner.py`, `word_boundary_refiner.py`,
+  and `llm_error_classifier.py`. Imports moved inside the methods that
+  actually call `litellm.completion` / `OpenAI(...)`. Added `from __future__
+  import annotations` and `TYPE_CHECKING` guards for type annotations that
+  reference these libraries.
+- Test mocks updated: `mock.patch("module.litellm.completion")` →
+  `mock.patch("litellm.completion")` (the canonical module).
+- Result (cold-start measurement):
+  - Before: PodcastProcessor import → **197 MB RSS**, +1886 modules,
+    1326 LLM-related modules loaded
+  - After: PodcastProcessor import → **106 MB RSS**, +492 modules,
+    **0 LLM modules loaded**
+  - **−91 MB** worker baseline. litellm/openai now load only when an LLM
+    call is actually made (after transcription completes). For
+    chapter-strategy feeds that never invoke the LLM, they never load at all.
+
+### Final CI After Phase 6
+
+- Date: 2026-05-09
+- Command: `mise exec -- ./scripts/ci.sh`
+- Result: All checks passed (456 Python tests passed, 2 skipped; 14 Rust
+  tests passed; ruff + ty + fmt + cargo check all clean).
+
 ## Final Acceptance Criteria
 
 - Every new Rust feature has:

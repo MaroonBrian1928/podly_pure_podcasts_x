@@ -125,8 +125,42 @@ def _merge_duplicate_ad_segments(text: str) -> str:
         return text
 
 
+def _truncate_after_balanced_root(text: str) -> str:
+    """Return ``text`` truncated to the end of the first balanced top-level
+    ``{...}`` object. Trailing non-JSON garbage (which LLMs occasionally
+    append, e.g. duplicate ``}0.98}`` tails) is discarded.
+
+    String literals are respected so braces inside string values don't
+    perturb the depth counter. If the input never reaches depth zero (likely
+    a truncated response), the original string is returned untouched so the
+    repair pass can take its own crack at it.
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    for index, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[: index + 1]
+    return text
+
+
 def clean_and_parse_model_output(model_output: str) -> AdSegmentPredictionList:
-    start_marker, end_marker = "{", "}"
+    start_marker = "{"
 
     assert model_output.count(start_marker) >= 1, (
         f"No opening brace found in: {model_output[:200]}"
@@ -135,13 +169,13 @@ def clean_and_parse_model_output(model_output: str) -> AdSegmentPredictionList:
     start_idx = model_output.index(start_marker)
     model_output = model_output[start_idx:]
 
-    # If we have at least as many closing braces as opening braces, trim to the last
-    # closing brace to drop any trailing non-JSON content. Otherwise, keep the
-    # content as-is so we can attempt repair on truncated JSON.
-    open_braces = model_output.count(start_marker)
-    close_braces = model_output.count(end_marker)
-    if close_braces >= open_braces and close_braces > 0:
-        model_output = model_output[: 1 + model_output.rindex(end_marker)]
+    # Truncate after the first balanced root object. Previously this used
+    # ``rindex('}')`` which picks the *rightmost* close brace — wrong when
+    # the LLM emits garbage like ``…"confidence":0.98}98}0.98}`` after the
+    # real close, since the rightmost ``}`` belongs to that garbage and the
+    # resulting string still fails to parse. Walking the brace depth (with
+    # string awareness) finds the real end of the root JSON object.
+    model_output = _truncate_after_balanced_root(model_output)
 
     model_output = model_output.replace("'", '"')
     model_output = model_output.replace("\n", "")

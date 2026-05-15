@@ -142,6 +142,7 @@ def ensure_defaults() -> None:
             "min_ad_segement_separation_seconds": DEFAULTS.OUTPUT_MIN_AD_SEGMENT_SEPARATION_SECONDS,
             "min_ad_segment_length_seconds": DEFAULTS.OUTPUT_MIN_AD_SEGMENT_LENGTH_SECONDS,
             "min_confidence": DEFAULTS.OUTPUT_MIN_CONFIDENCE,
+            "auto_retry_zero_ads_on_parse_error": DEFAULTS.OUTPUT_AUTO_RETRY_ZERO_ADS_ON_PARSE_ERROR,
         },
     )
 
@@ -230,6 +231,7 @@ def read_combined() -> dict[str, Any]:
             "min_ad_segement_separation_seconds": output.min_ad_segement_separation_seconds,
             "min_ad_segment_length_seconds": output.min_ad_segment_length_seconds,
             "min_confidence": output.min_confidence,
+            "auto_retry_zero_ads_on_parse_error": output.auto_retry_zero_ads_on_parse_error,
         },
         "app": {
             "background_update_interval_minute": app_s.background_update_interval_minute,
@@ -351,6 +353,7 @@ def _update_section_output(data: dict[str, Any]) -> None:
         "min_ad_segement_separation_seconds",
         "min_ad_segment_length_seconds",
         "min_confidence",
+        "auto_retry_zero_ads_on_parse_error",
     ]:
         if key in data:
             setattr(row, key, data[key])

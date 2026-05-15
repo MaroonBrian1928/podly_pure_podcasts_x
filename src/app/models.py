@@ -371,6 +371,21 @@ class ProcessingJob(db.Model):  # type: ignore[name-defined, misc]
     # last one). Stored as naive UTC ISO strings to match the rest of the
     # codebase's timestamp convention.
     stage_history = db.Column(db.JSON, nullable=True)
+    # Final ad-window count for this run. ``None`` while the run is in
+    # progress or when ad detection wasn't run; ``0`` is meaningful and
+    # different from ``None``. The frontend uses this to badge episodes
+    # that completed but yielded nothing for the user to review.
+    ad_windows_count = db.Column(db.Integer, nullable=True)
+    # True if at least one LLM classification response failed to parse
+    # during the run. Set by the ad classifier; cleared on requeue. Pairs
+    # with ``ad_windows_count == 0`` to drive the auto-retry decision.
+    had_classification_parse_error = db.Column(
+        db.Boolean, nullable=False, default=False
+    )
+    # Idempotency guard: once an auto-retry has been kicked off for this
+    # post in response to a zero-ads + parse-error outcome, we never do it
+    # again, even if the retry also hits a parse error.
+    auto_retry_attempted = db.Column(db.Boolean, nullable=False, default=False)
 
     # Relationships
     post = db.relationship(
@@ -555,6 +570,15 @@ class OutputSettings(db.Model):  # type: ignore[name-defined, misc]
     )
     min_confidence = db.Column(
         db.Float, nullable=False, default=DEFAULTS.OUTPUT_MIN_CONFIDENCE
+    )
+    # Opt-in guard: when an LLM-strategy run finishes with zero ad windows
+    # and at least one batch parse-failed, automatically requeue the job
+    # once. The classifier-parse signal usually means the model returned
+    # malformed JSON for a batch that very likely contained ads.
+    auto_retry_zero_ads_on_parse_error = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.OUTPUT_AUTO_RETRY_ZERO_ADS_ON_PARSE_ERROR,
     )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

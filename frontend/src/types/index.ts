@@ -74,6 +74,17 @@ export interface Job {
   completed_at: string | null;
   error_message: string | null;
   stage_history?: JobStageEvent[];
+  // Zero-ads guard signals (added when the backend finishes processing):
+  //   - ad_windows_count: final number of ad windows for the run. ``null``
+  //     means "not yet recorded"; ``0`` means "no ads found / removed".
+  //   - had_classification_parse_error: at least one LLM batch failed to
+  //     parse during the run. Pairs with ad_windows_count===0 to flag a
+  //     likely classification miss rather than a genuinely ad-free episode.
+  //   - auto_retry_attempted: the worker already kicked off a one-shot
+  //     auto-retry for this post. Idempotency guard for the UI.
+  ad_windows_count?: number | null;
+  had_classification_parse_error?: boolean;
+  auto_retry_attempted?: boolean;
 }
 
 export interface JobManagerRun {
@@ -167,6 +178,8 @@ export interface OutputConfigUI {
   min_ad_segement_separation_seconds: number;
   min_ad_segment_length_seconds: number;
   min_confidence: number;
+  // Off by default; surfaced in the LLM advanced subtab in the UI.
+  auto_retry_zero_ads_on_parse_error?: boolean;
 }
 
 export interface AppConfigUI {

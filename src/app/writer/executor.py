@@ -61,6 +61,18 @@ class CommandExecutor:
         )
         self.register_action("mark_cancelled", writer_actions.mark_cancelled_action)
         self.register_action(
+            "mark_classification_parse_error",
+            writer_actions.mark_classification_parse_error_action,
+        )
+        self.register_action(
+            "record_ad_windows_count",
+            writer_actions.record_ad_windows_count_action,
+        )
+        self.register_action(
+            "mark_auto_retry_attempted",
+            writer_actions.mark_auto_retry_attempted_action,
+        )
+        self.register_action(
             "reassign_pending_jobs", writer_actions.reassign_pending_jobs_action
         )
         self.register_action("refresh_feed", writer_actions.refresh_feed_action)
@@ -82,6 +94,10 @@ class CommandExecutor:
         self.register_action(
             "cleanup_processed_post_files_only",
             writer_actions.cleanup_processed_post_files_only_action,
+        )
+        self.register_action(
+            "prepare_post_for_auto_retry",
+            writer_actions.prepare_post_for_auto_retry_action,
         )
         self.register_action(
             "increment_download_count", writer_actions.increment_download_count_action

@@ -209,6 +209,53 @@ def mark_cancelled_action(params: dict[str, Any]) -> dict[str, Any]:
     return {"job_id": job.id, "status": "cancelled"}
 
 
+def mark_classification_parse_error_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Flag a job's run as having hit at least one LLM-response parse error.
+
+    Pairs with ``ad_windows_count == 0`` in the zero-ads-guard logic to drive
+    the optional auto-retry. Idempotent: subsequent batches that also fail to
+    parse just leave the flag at True.
+    """
+    job_id = params.get("job_id")
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    job.had_classification_parse_error = True
+    return {"job_id": job.id}
+
+
+def record_ad_windows_count_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Record the final ad-window count for a run.
+
+    Set after ad detection has produced its segments-to-remove list. ``0``
+    is meaningful (no ads found) and different from ``None`` (not yet
+    recorded / wasn't an LLM run).
+    """
+    job_id = params.get("job_id")
+    count = params.get("count")
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    if count is not None:
+        job.ad_windows_count = int(count)
+    return {"job_id": job.id}
+
+
+def mark_auto_retry_attempted_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Idempotency guard for the zero-ads auto-retry.
+
+    Set just before enqueueing a retry job; the worker checks this flag
+    before deciding to retry, so we can never retry twice for the same
+    post even if the retry itself also produces zero ads with parse errors.
+    """
+    job_id = params.get("job_id")
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    job.auto_retry_attempted = True
+    return {"job_id": job.id}
+
+
 def reassign_pending_jobs_action(params: dict[str, Any]) -> int:
     run_id = params.get("run_id")
     if not run_id:

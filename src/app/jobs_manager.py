@@ -355,6 +355,11 @@ class JobsManager:
                         ),
                         "error_message": job.error_message,
                         "stage_history": job.stage_history or [],
+                        "ad_windows_count": job.ad_windows_count,
+                        "had_classification_parse_error": bool(
+                            job.had_classification_parse_error
+                        ),
+                        "auto_retry_attempted": bool(job.auto_retry_attempted),
                     }
                 )
 
@@ -402,6 +407,11 @@ class JobsManager:
                         ),
                         "error_message": job.error_message,
                         "stage_history": job.stage_history or [],
+                        "ad_windows_count": job.ad_windows_count,
+                        "had_classification_parse_error": bool(
+                            job.had_classification_parse_error
+                        ),
+                        "auto_retry_attempted": bool(job.auto_retry_attempted),
                     }
                 )
 
