@@ -108,6 +108,7 @@ def test_update_job_status_appends_on_step_change(app) -> None:
         db.session.commit()
 
         job = db.session.get(ProcessingJob, job_id)
+        assert job is not None
         history = job.stage_history or []
         # Seed (0) + downloading (1) + transcribing (2). The duplicate step==1
         # update should NOT create a new entry.
