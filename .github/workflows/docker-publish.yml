@@ -25,7 +25,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/podly-pure-podcasts
 
 jobs:
   changes:
@@ -130,8 +129,9 @@ jobs:
         id: tags
         run: |
           ref_name="${GITHUB_REF_NAME//\//-}"
+          image_name="$(echo "${{ github.repository_owner }}/podly-pure-podcasts" | tr '[:upper:]' '[:lower:]')"
           echo "tag_prefix=$ref_name" >> "$GITHUB_OUTPUT"
-          echo "arch_tag=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${ref_name}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+          echo "arch_tag=${{ env.REGISTRY }}/${image_name}:${ref_name}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Set up Docker Buildx
@@ -174,7 +174,8 @@ jobs:
       - name: Publish multi-arch manifest
         run: |
           ref_name="${GITHUB_REF_NAME//\//-}"
-          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          image_name="$(echo "${{ github.repository_owner }}/podly-pure-podcasts" | tr '[:upper:]' '[:lower:]')"
+          image="${{ env.REGISTRY }}/${image_name}"
           manifest_tag="${image}:${ref_name}-latest"
           sources=()
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.build_amd64 }}" = "true" ]; then

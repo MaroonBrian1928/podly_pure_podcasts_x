@@ -84,6 +84,8 @@ def _set_sqlite_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
         cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms};")
         # Limit WAL file size to prevent checkpoint starvation
         cursor.execute("PRAGMA wal_autocheckpoint=1000;")
+        # Cap WAL file size so reader-pinned growth gets truncated on checkpoint
+        cursor.execute("PRAGMA journal_size_limit=67108864;")
     finally:
         cursor.close()
 
