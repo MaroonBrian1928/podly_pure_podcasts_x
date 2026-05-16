@@ -428,6 +428,10 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     setPage(1);
   }, [feed.id, whitelistedOnly]);
 
+  useEffect(() => {
+    scrollContainerRef.current?.scrollTo({ top: 0 });
+  }, [feed.id]);
+
   // Handle scroll to show/hide sticky header
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
