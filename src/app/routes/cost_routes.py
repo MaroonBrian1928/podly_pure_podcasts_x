@@ -110,10 +110,12 @@ def api_admin_costs() -> flask.Response:
     # Batch-query ad time per post so we can reconstruct original duration.
     # post.duration is the cut (ad-removed) length; original = cut + ad_time.
     post_ids = [p.id for p in posts_in_month]
+    # Use scalar_subquery() (a SELECT construct) so SQLAlchemy doesn't coerce
+    # a Subquery into a select() at IN()-time and emit a SAWarning.
     ad_segment_subq = (
         db.session.query(Identification.transcript_segment_id)
         .filter(Identification.label == "ad")
-        .subquery()
+        .scalar_subquery()
     )
     ad_time_rows = (
         db.session.query(
