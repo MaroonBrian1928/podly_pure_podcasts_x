@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# Opt-in jemalloc preload. The Dockerfile records the resolved path so we
+# don't have to hard-code an arch-specific location. Users can disable by
+# setting PODLY_JEMALLOC_PRELOAD=0.
+if [ "${PODLY_JEMALLOC_PRELOAD:-1}" != "0" ] && [ -r /etc/podly-jemalloc-path ]; then
+    JEMALLOC_LIB="$(cat /etc/podly-jemalloc-path)"
+    if [ -n "$JEMALLOC_LIB" ] && [ -e "$JEMALLOC_LIB" ]; then
+        if [ -n "$LD_PRELOAD" ]; then
+            export LD_PRELOAD="$JEMALLOC_LIB:$LD_PRELOAD"
+        else
+            export LD_PRELOAD="$JEMALLOC_LIB"
+        fi
+    fi
+fi
+
 # Check if PUID/PGID env variables are set
 if [ -n "${PUID}" ] && [ -n "${PGID}" ] && [ "$(id -u)" = "0" ]; then
     echo "Using custom UID:GID = ${PUID}:${PGID}"

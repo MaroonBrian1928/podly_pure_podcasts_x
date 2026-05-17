@@ -523,7 +523,11 @@ def _reset_processor_if_loaded() -> None:
 
 
 def _start_scheduler_and_jobs(app: Flask) -> None:
-    from app.background import add_background_job, schedule_cleanup_job
+    from app.background import (
+        add_background_job,
+        schedule_cleanup_job,
+        schedule_memory_trim_job,
+    )
     from app.jobs_manager import get_jobs_manager
 
     _clear_scheduler_jobstore()
@@ -542,3 +546,4 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
         else int(config.background_update_interval_minute)
     )
     schedule_cleanup_job(getattr(config, "post_cleanup_retention_days", None))
+    schedule_memory_trim_job()

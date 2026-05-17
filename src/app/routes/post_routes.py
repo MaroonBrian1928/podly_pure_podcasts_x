@@ -13,7 +13,7 @@ from flask.typing import ResponseReturnValue
 from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
 from app.extensions import db
-from app.feeds import build_post_feed_description_html
+from app.feeds import build_post_feed_description_html, post_feed_render_defers
 from app.jobs_manager import get_jobs_manager
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
@@ -271,11 +271,14 @@ def _build_related_logs(
 @post_bp.route("/api/feeds/<int:feed_id>/posts", methods=["GET"])
 def api_feed_posts(feed_id: int) -> flask.Response:
     """Return a paginated JSON list of posts for a specific feed."""
+    from shared.rust_sidecar import (
+        FEED_POSTS_NOT_FOUND,
+        rust_feed_posts_enabled,
+        try_render_feed_posts,
+    )
 
     # Ensure we have fresh data
     db.session.expire_all()
-
-    feed = Feed.query.get_or_404(feed_id)
 
     # Pagination and filtering
     try:
@@ -297,8 +300,37 @@ def api_feed_posts(feed_id: int) -> flask.Response:
         "on",
     }
 
-    # Query posts directly to avoid stale relationship cache
-    base_query = Post.query.filter_by(feed_id=feed.id)
+    # Rust sidecar path: a short-lived subprocess reads the rows, builds the
+    # envelope, and exits. We pass its raw stdout bytes straight to the HTTP
+    # response — going through json.loads + flask.jsonify would re-allocate
+    # the entire ~290 KB envelope in the long-lived Python heap, defeating
+    # the memory win the port is supposed to deliver. Falls through to the
+    # Python query if the flag is off or the sidecar fails for any reason.
+    if rust_feed_posts_enabled():
+        from shared.processing_paths import get_instance_dir
+
+        rust_bytes = try_render_feed_posts(
+            db_path=get_instance_dir() / "sqlite3.db",
+            feed_id=feed_id,
+            page=page,
+            page_size=page_size,
+            whitelisted_only=whitelisted_only,
+        )
+        if rust_bytes is FEED_POSTS_NOT_FOUND:
+            flask.abort(404)
+        if isinstance(rust_bytes, bytes):
+            return flask.Response(rust_bytes, mimetype="application/json")
+
+    feed = Feed.query.get_or_404(feed_id)
+
+    # Query posts directly to avoid stale relationship cache. Defer the
+    # heavyweight JSON columns that this endpoint never serializes — each
+    # transcript_word_timestamps blob can be 1-3 MB for an hour-long episode,
+    # so loading a 25-row page without defers can spike RSS by 50+ MB per call.
+    # chapter_data stays loaded because build_post_feed_description_html reads it.
+    base_query = Post.query.filter_by(feed_id=feed.id).options(
+        *post_feed_render_defers()
+    )
     if whitelisted_only:
         base_query = base_query.filter_by(whitelisted=True)
 

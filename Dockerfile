@@ -35,11 +35,21 @@ RUN apt-get update && \
     ca-certificates \
     ffmpeg \
     gosu \
+    libjemalloc2 \
     libsqlite3-dev \
     sqlite3 && \
     apt-get remove -y python3-blinker 2>/dev/null || true && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Preload jemalloc to replace glibc's ptmalloc allocator. jemalloc has much
+# better fragmentation behavior for long-running multi-threaded Python servers,
+# typically cutting steady-state RSS roughly in half. Resolve the actual file
+# at build time because the path varies across architectures.
+RUN JEMALLOC_PATH="$(dpkg -L libjemalloc2 | grep -E 'libjemalloc\.so\.2$' | head -n1)" && \
+    test -n "$JEMALLOC_PATH" && \
+    printf '%s\n' "$JEMALLOC_PATH" > /etc/podly-jemalloc-path
+ENV PODLY_JEMALLOC_PRELOAD=1
 
 COPY pyproject.toml uv.lock ./
 

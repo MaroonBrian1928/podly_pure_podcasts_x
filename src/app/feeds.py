@@ -14,6 +14,7 @@ import feedparser
 import PyRSS2Gen
 import requests
 from flask import current_app, g, request
+from sqlalchemy.orm import defer
 
 from app.extensions import db
 from app.memory_pressure import release_memory_to_os, request_memory_trim_after_context
@@ -28,6 +29,20 @@ from shared.rust_sidecar import (
 )
 
 logger = logging.getLogger("global_logger")
+
+
+def post_feed_render_defers() -> tuple[Any, ...]:
+    """Defer load of large JSON columns that feed rendering never reads.
+
+    transcript_word_timestamps in particular can be megabytes per row; loading
+    it for every post on a feed render spikes RSS dramatically.
+    """
+    return (
+        defer(Post.transcript_word_timestamps),
+        defer(Post.bleep_windows),
+        defer(Post.refined_ad_boundaries),
+    )
+
 
 _FORWARDED_PROTO_RE = re.compile(
     r"(?:^|[;,])\s*proto=(\"?)(https?|[A-Za-z]+)\1", re.IGNORECASE
@@ -831,7 +846,15 @@ def generate_feed_xml(feed: Feed) -> Any:
         return rust_xml
 
     if include_unprocessed:
-        posts = list(cast(Iterable[Post], feed.posts))
+        # Hit Post directly with defers rather than walking feed.posts: the
+        # relationship loads every column including the megabyte-class
+        # transcript_word_timestamps JSON that feed_item never reads.
+        posts = (
+            Post.query.filter(Post.feed_id == feed.id)
+            .options(*post_feed_render_defers())
+            .order_by(Post.release_date.desc().nullslast(), Post.id.desc())
+            .all()
+        )
     else:
         posts = (
             Post.query.filter(
@@ -839,6 +862,7 @@ def generate_feed_xml(feed: Feed) -> Any:
                 Post.whitelisted.is_(True),
                 Post.processed_audio_path.isnot(None),
             )
+            .options(*post_feed_render_defers())
             .order_by(Post.release_date.desc().nullslast(), Post.id.desc())
             .all()
         )
@@ -1012,6 +1036,7 @@ def get_user_aggregate_posts(user_id: int, limit_per_feed: int = 3) -> list[Post
                 Post.whitelisted.is_(True),
                 Post.processed_audio_path.isnot(None),
             )
+            .options(*post_feed_render_defers())
             .order_by(Post.release_date.desc().nullslast(), Post.id.desc())
             .limit(limit_per_feed)
             .all()

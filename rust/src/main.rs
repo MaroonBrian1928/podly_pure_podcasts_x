@@ -4,7 +4,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use id3::frame::{Chapter as Id3Chapter, Content, Frame, TableOfContents};
 use id3::{Encoding as Id3Encoding, Tag, TagLike, Version};
 use regex::Regex;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -27,6 +27,7 @@ enum Commands {
     Audio(AudioCommand),
     Feed(FeedCommand),
     Jobs(JobsCommand),
+    Posts(PostsCommand),
     Stats(StatsCommand),
     Transcript(TranscriptCommand),
     Chapters(ChaptersCommand),
@@ -240,6 +241,31 @@ struct FeedRenderAggregateArgs {
     feed_token: Option<String>,
     #[arg(long = "feed-secret")]
     feed_secret: Option<String>,
+}
+
+#[derive(Args)]
+struct PostsCommand {
+    #[command(subcommand)]
+    command: PostsSubcommand,
+}
+
+#[derive(Subcommand)]
+enum PostsSubcommand {
+    FeedList(PostsFeedListArgs),
+}
+
+#[derive(Args)]
+struct PostsFeedListArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "feed-id")]
+    feed_id: i64,
+    #[arg(long, default_value_t = 1)]
+    page: i64,
+    #[arg(long = "page-size", default_value_t = 25)]
+    page_size: i64,
+    #[arg(long = "whitelisted-only", action = ArgAction::Set)]
+    whitelisted_only: bool,
 }
 
 #[derive(Args)]
@@ -595,6 +621,9 @@ fn run() -> Result<()> {
             JobsSubcommand::Active(args) => print_json(&render_jobs(args, true)?),
             JobsSubcommand::All(args) => print_json(&render_jobs(args, false)?),
             JobsSubcommand::Status(args) => print_json(&render_jobs_status(args)?),
+        },
+        Commands::Posts(posts) => match posts.command {
+            PostsSubcommand::FeedList(args) => print_json(&render_feed_posts(args)?),
         },
         Commands::Stats(stats) => match stats.command {
             StatsSubcommand::Render(args) => print_json(&render_stats(args)?),
@@ -1267,6 +1296,32 @@ fn get_duration_f64(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Opt
 
 fn get_duration_seconds(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<i64>> {
     Ok(get_duration_f64(row, idx)?.map(|v| v as i64))
+}
+
+fn get_numeric_json_value(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Value> {
+    Ok(match row.get_ref(idx)? {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(value) => json!(value),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ValueRef::Text(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            let text = text.trim();
+            if text.is_empty() {
+                Value::Null
+            } else if let Ok(value) = text.parse::<i64>() {
+                json!(value)
+            } else if let Ok(value) = text.parse::<f64>() {
+                serde_json::Number::from_f64(value)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        }
+        ValueRef::Blob(_) => Value::Null,
+    })
 }
 
 fn round_to(value: f64, places: i32) -> f64 {
@@ -2916,6 +2971,169 @@ fn render_feed(args: FeedRenderArgs) -> Result<XmlResponse> {
     Ok(XmlResponse { xml })
 }
 
+struct PostListRow {
+    id: i64,
+    guid: String,
+    title: String,
+    description: Option<String>,
+    release_date: Option<String>,
+    duration: Value,
+    whitelisted: bool,
+    processed_audio_path: Option<String>,
+    unprocessed_audio_path: Option<String>,
+    download_url: String,
+    image_url: Option<String>,
+    download_count: Option<i64>,
+    chapter_data: Option<String>,
+}
+
+fn render_feed_posts(args: PostsFeedListArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+
+    // Mirror Flask's Feed.query.get_or_404: signal "not found" via a
+    // distinct envelope rather than an error so the Python wrapper can
+    // surface a 404 without parsing stderr.
+    let feed_exists: Option<i64> = conn
+        .query_row("SELECT id FROM feed WHERE id = ?1", [args.feed_id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if feed_exists.is_none() {
+        return Ok(json!({ "not_found": true }));
+    }
+
+    let page = args.page.max(1);
+    let page_size = args.page_size.clamp(1, 200);
+    let offset = (page - 1) * page_size;
+
+    let where_clause = if args.whitelisted_only {
+        "WHERE feed_id = ?1 AND whitelisted = 1"
+    } else {
+        "WHERE feed_id = ?1"
+    };
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM post {where_clause}"),
+        [args.feed_id],
+        |row| row.get(0),
+    )?;
+
+    let whitelisted_total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM post WHERE feed_id = ?1 AND whitelisted = 1",
+        [args.feed_id],
+        |row| row.get(0),
+    )?;
+
+    // Explicit column list — never SELECT *. transcript_word_timestamps,
+    // bleep_windows, and refined_ad_boundaries are NOT in this list, which
+    // is the whole point of porting the endpoint: we never page those huge
+    // JSON blobs into the Python long-lived heap.
+    let sql = format!(
+        "SELECT id, guid, title, description, release_date, duration, whitelisted, \
+                processed_audio_path, unprocessed_audio_path, download_url, image_url, \
+                download_count, chapter_data \
+         FROM post {where_clause} \
+         ORDER BY (release_date IS NULL), release_date DESC, id DESC \
+         LIMIT ?2 OFFSET ?3"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params![args.feed_id, page_size, offset], |row| {
+        let whitelisted_int: i64 = row.get(6)?;
+        Ok(PostListRow {
+            id: row.get(0)?,
+            guid: row.get(1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            release_date: row.get(4)?,
+            duration: get_numeric_json_value(row, 5)?,
+            whitelisted: whitelisted_int != 0,
+            processed_audio_path: row.get(7)?,
+            unprocessed_audio_path: row.get(8)?,
+            download_url: row.get(9)?,
+            image_url: row.get(10)?,
+            download_count: row.get(11)?,
+            chapter_data: row.get(12)?,
+        })
+    })?;
+    let rows: Vec<PostListRow> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|post| {
+            let podly_html = build_post_list_description_html(
+                post.description.as_deref(),
+                post.chapter_data.as_deref(),
+            );
+            json!({
+                "id": post.id,
+                "guid": post.guid,
+                "title": post.title,
+                "description": post.description,
+                "podly_description_html": podly_html,
+                "release_date": post.release_date.as_deref().map(format_release_date_iso8601),
+                "duration": post.duration,
+                "whitelisted": post.whitelisted,
+                "has_processed_audio": post.processed_audio_path.is_some(),
+                "has_unprocessed_audio": post.unprocessed_audio_path.is_some(),
+                "download_url": post.download_url,
+                "image_url": post.image_url,
+                "download_count": post.download_count,
+            })
+        })
+        .collect();
+
+    let total_pages = if total > 0 {
+        (total + page_size - 1) / page_size
+    } else {
+        0
+    };
+
+    Ok(json!({
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "whitelisted_total": whitelisted_total,
+    }))
+}
+
+fn build_post_list_description_html(
+    description: Option<&str>,
+    chapter_data: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(desc) = description {
+        if !desc.is_empty() {
+            parts.push(normalize_feed_text(desc));
+        }
+    }
+    let chapters = render_chapters(chapter_data);
+    if !chapters.is_empty() {
+        parts.push(chapters);
+    }
+    parts.join("\n")
+}
+
+fn format_release_date_iso8601(raw: &str) -> String {
+    // SQLAlchemy DateTime(timezone=True) on SQLite stores as
+    // 'YYYY-MM-DD HH:MM:SS[.ffffff]'. Python's datetime.isoformat() emits
+    // 'YYYY-MM-DDTHH:MM:SS[.ffffff]'. Mirror that shape; if parsing fails
+    // we pass the raw string through so the response stays consistent
+    // with whatever Python would have produced.
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return dt.to_rfc3339();
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f") {
+        return naive.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S") {
+        return naive.format("%Y-%m-%dT%H:%M:%S").to_string();
+    }
+    raw.to_string()
+}
+
 fn write_chapters(args: ChaptersWriteArgs) -> Result<OkResponse> {
     let data =
         fs::read_to_string(&args.chapters_json).with_context(|| "failed to read chapters JSON")?;
@@ -3757,18 +3975,22 @@ fn render_chapters(raw: Option<&str>) -> String {
         };
         let title = chapter
             .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim();
+            .and_then(value_to_string)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if title.is_empty() {
             continue;
         }
-        let start = chapter
-            .get("start_time")
-            .and_then(value_to_f64)
-            .unwrap_or(0.0)
-            .max(0.0);
-        parsed.push((start, title.to_string()));
+        let start = match chapter.get("start_time") {
+            Some(value) => match value_to_f64(value) {
+                Some(start) => start,
+                None => continue,
+            },
+            None => 0.0,
+        }
+        .max(0.0);
+        parsed.push((start, title));
     }
     parsed.sort_by(|a, b| a.0.total_cmp(&b.0));
     if parsed.is_empty() {
@@ -3860,6 +4082,8 @@ fn html_escape(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 fn urlencoding_simple(value: &str) -> String {
@@ -3952,13 +4176,15 @@ mod tests {
             "chapters_kept": [{"title": "ignored", "start_time": 0}],
             "chapters_for_output": [
                 {"title": "B < C", "start_time": 65},
-                {"title": "Intro", "start_time": 0}
+                {"title": "Intro", "start_time": 0},
+                {"title": "\"Quoted\"", "start_time": 130},
+                {"title": "skip invalid", "start_time": {"bad": true}}
             ]
         }"#;
 
         assert_eq!(
             render_chapters(Some(raw)),
-            "<p><strong>Podly Chapters</strong></p><ul><li>00:00 Intro</li><li>01:05 B &lt; C</li></ul>"
+            "<p><strong>Podly Chapters</strong></p><ul><li>00:00 Intro</li><li>01:05 B &lt; C</li><li>02:10 &quot;Quoted&quot;</li></ul>"
         );
     }
 
@@ -4061,6 +4287,179 @@ mod tests {
         assert!(xml.contains("<itunes:duration>01:05</itunes:duration>"));
         assert!(xml.contains("<p><strong>Podly Chapters</strong></p><ul><li>00:00 Intro</li></ul>"));
         assert!(xml.contains("length=\"11\""));
+    }
+
+    fn seed_posts_listing_db(db_path: &Path) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL
+            );
+            CREATE TABLE post (
+                id INTEGER PRIMARY KEY,
+                feed_id INTEGER NOT NULL,
+                guid TEXT NOT NULL,
+                download_url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                unprocessed_audio_path TEXT,
+                processed_audio_path TEXT,
+                description TEXT,
+                release_date TEXT,
+                duration INTEGER,
+                whitelisted BOOLEAN NOT NULL DEFAULT 0,
+                image_url TEXT,
+                download_count INTEGER,
+                chapter_data TEXT,
+                transcript_word_timestamps TEXT,
+                bleep_windows TEXT,
+                refined_ad_boundaries TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO feed (id, title) VALUES (1, 'Feed')", [])
+            .unwrap();
+        // 3 posts: two whitelisted with newer release_dates, one not whitelisted older.
+        // Heavy JSON columns are stuffed with dummy payloads to confirm the
+        // implementation never touches them.
+        let heavy = "x".repeat(200_000);
+        conn.execute(
+            "INSERT INTO post (feed_id, guid, download_url, title, description, release_date,
+                duration, whitelisted, processed_audio_path, image_url, download_count,
+                chapter_data, transcript_word_timestamps)
+             VALUES (1, 'g-3', 'https://e.test/3.mp3', 'Episode 3', '<p>three</p>',
+	                '2024-03-03 00:00:00', 1800.5, 1, '/srv/3.mp3', 'https://i/3.png', 12,
+	                ?1, ?2)",
+            params![
+                r#"{"chapters_for_output":[{"title":"Hello","start_time":0}]}"#,
+                heavy
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO post (feed_id, guid, download_url, title, description, release_date,
+                duration, whitelisted, image_url, download_count)
+             VALUES (1, 'g-2', 'https://e.test/2.mp3', 'Episode 2', '<p>two</p>',
+                '2024-02-02 00:00:00', 1700, 1, 'https://i/2.png', 5)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO post (feed_id, guid, download_url, title, release_date, whitelisted)
+             VALUES (1, 'g-1', 'https://e.test/1.mp3', 'Episode 1', '2024-01-01 00:00:00', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn posts_feed_list_returns_paged_envelope_matching_python_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_posts_listing_db(&db_path);
+
+        let payload = render_feed_posts(PostsFeedListArgs {
+            db: db_path,
+            feed_id: 1,
+            page: 1,
+            page_size: 25,
+            whitelisted_only: false,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total"], 3);
+        assert_eq!(payload["whitelisted_total"], 2);
+        assert_eq!(payload["page"], 1);
+        assert_eq!(payload["page_size"], 25);
+        assert_eq!(payload["total_pages"], 1);
+
+        let items = payload["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        // Newest first by release_date desc, then id desc — g-3 → g-2 → g-1
+        assert_eq!(items[0]["guid"], "g-3");
+        assert_eq!(items[1]["guid"], "g-2");
+        assert_eq!(items[2]["guid"], "g-1");
+
+        let first = &items[0];
+        assert_eq!(first["title"], "Episode 3");
+        assert_eq!(first["whitelisted"], true);
+        assert_eq!(first["has_processed_audio"], true);
+        assert_eq!(first["has_unprocessed_audio"], false);
+        assert_eq!(first["download_count"], 12);
+        assert_eq!(first["duration"], json!(1800.5));
+        assert_eq!(items[1]["duration"], json!(1700));
+        assert_eq!(first["release_date"], "2024-03-03T00:00:00");
+        assert!(first["podly_description_html"]
+            .as_str()
+            .unwrap()
+            .contains("Podly Chapters"));
+        // The heavy transcript_word_timestamps column must not appear in
+        // the response at all.
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains("transcript_word_timestamps"));
+        assert!(!serialized.contains("xxxxxxxxxx"));
+    }
+
+    #[test]
+    fn posts_feed_list_respects_pagination_and_whitelist_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_posts_listing_db(&db_path);
+
+        let page_one = render_feed_posts(PostsFeedListArgs {
+            db: db_path.clone(),
+            feed_id: 1,
+            page: 1,
+            page_size: 2,
+            whitelisted_only: false,
+        })
+        .unwrap();
+        assert_eq!(page_one["total"], 3);
+        assert_eq!(page_one["total_pages"], 2);
+        assert_eq!(page_one["items"].as_array().unwrap().len(), 2);
+
+        let page_two = render_feed_posts(PostsFeedListArgs {
+            db: db_path.clone(),
+            feed_id: 1,
+            page: 2,
+            page_size: 2,
+            whitelisted_only: false,
+        })
+        .unwrap();
+        assert_eq!(page_two["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page_two["items"][0]["guid"], "g-1");
+
+        let whitelisted = render_feed_posts(PostsFeedListArgs {
+            db: db_path,
+            feed_id: 1,
+            page: 1,
+            page_size: 25,
+            whitelisted_only: true,
+        })
+        .unwrap();
+        assert_eq!(whitelisted["total"], 2);
+        assert!(whitelisted["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["whitelisted"] == true));
+    }
+
+    #[test]
+    fn posts_feed_list_signals_missing_feed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_posts_listing_db(&db_path);
+
+        let payload = render_feed_posts(PostsFeedListArgs {
+            db: db_path,
+            feed_id: 999,
+            page: 1,
+            page_size: 25,
+            whitelisted_only: false,
+        })
+        .unwrap();
+        assert_eq!(payload["not_found"], true);
     }
 
     #[test]

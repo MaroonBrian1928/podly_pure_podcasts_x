@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from app.writer import executor, service
 from app.writer.protocol import WriteCommand, WriteCommandType
 
@@ -80,3 +82,44 @@ def test_discard_processed_command_payload_releases_payload_refs() -> None:
 
     assert cmd.data == {}
     assert cmd.reply_queue is None
+
+
+def test_idle_trim_thread_skips_when_no_activity(monkeypatch) -> None:
+    """If activity_counter never moves, the watchdog must not trim — otherwise
+    a fully idle writer burns syscalls trimming an empty heap forever.
+    """
+    monkeypatch.setenv("PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC", "1")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "release_memory_to_os",
+        lambda ctx, _log: calls.append(ctx),
+    )
+
+    counter = [0]
+    thread = service._start_idle_trim_thread(counter)
+    assert thread is not None
+    time.sleep(2.5)
+    assert calls == []
+
+
+def test_idle_trim_thread_trims_after_activity(monkeypatch) -> None:
+    monkeypatch.setenv("PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC", "1")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "release_memory_to_os",
+        lambda ctx, _log: calls.append(ctx),
+    )
+
+    counter = [0]
+    thread = service._start_idle_trim_thread(counter)
+    assert thread is not None
+    counter[0] += 1
+    time.sleep(2.5)
+    assert any("writer idle tick" in c for c in calls)
+
+
+def test_idle_trim_thread_disabled_when_interval_non_positive(monkeypatch) -> None:
+    monkeypatch.setenv("PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC", "0")
+    assert service._start_idle_trim_thread([0]) is None

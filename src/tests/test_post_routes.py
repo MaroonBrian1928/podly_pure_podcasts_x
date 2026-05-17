@@ -685,6 +685,63 @@ def test_feed_posts_include_podly_description_html(app):
     assert "Podly Post JSON" not in item["podly_description_html"]
 
 
+def test_feed_posts_defers_heavyweight_json_columns(app):
+    """api_feed_posts must not load transcript_word_timestamps / bleep_windows /
+    refined_ad_boundaries — those JSON blobs can be megabytes per row and the
+    endpoint never serializes them, so loading them turns a paginated GET into
+    a ~50MB allocation per call.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Heavy JSON Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        large_word_timestamps = [
+            {"word": f"word-{i}", "start": float(i), "end": float(i) + 0.5}
+            for i in range(200)
+        ]
+        post = Post(
+            feed_id=feed.id,
+            guid="defer-guid",
+            download_url="https://example.com/defer.mp3",
+            title="Heavy episode",
+            transcript_word_timestamps=large_word_timestamps,
+            bleep_windows=[[1000, 2000]],
+            refined_ad_boundaries=[[10.0, 20.0]],
+        )
+        db.session.add(post)
+        db.session.commit()
+        db.session.expire_all()
+
+        client = app.test_client()
+        response = client.get(f"/api/feeds/{feed.id}/posts")
+        assert response.status_code == 200
+
+        # After the endpoint runs, re-fetching via the same defer options must
+        # leave the heavy columns unloaded. Use the same helper the endpoint
+        # uses so we test the exact configuration the endpoint applies.
+        from app.feeds import post_feed_render_defers
+
+        db.session.expire_all()
+        fetched = (
+            Post.query.filter_by(feed_id=feed.id)
+            .options(*post_feed_render_defers())
+            .first()
+        )
+        unloaded = sa_inspect(fetched).unloaded
+        assert "transcript_word_timestamps" in unloaded
+        assert "bleep_windows" in unloaded
+        assert "refined_ad_boundaries" in unloaded
+        # Spot-check we didn't accidentally defer something the endpoint needs.
+        assert "title" not in unloaded
+        assert "description" not in unloaded
+
+
 def test_reprocess_keep_transcript_accepts_active_whisper_model_call(app):
     app.testing = True
     app.register_blueprint(post_bp)

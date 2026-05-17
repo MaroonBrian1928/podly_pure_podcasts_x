@@ -22,6 +22,7 @@ RUST_STATS_ENABLED_ENV = "PODLY_RUST_STATS_ENABLED"
 RUST_TRANSCRIPT_ENABLED_ENV = "PODLY_RUST_TRANSCRIPT_ENABLED"
 RUST_AD_MERGE_ENABLED_ENV = "PODLY_RUST_AD_MERGE_ENABLED"
 RUST_PROFANITY_ENABLED_ENV = "PODLY_RUST_PROFANITY_ENABLED"
+RUST_FEED_POSTS_ENABLED_ENV = "PODLY_RUST_FEED_POSTS_ENABLED"
 
 
 class RustSidecarError(RuntimeError):
@@ -70,6 +71,10 @@ def rust_ad_merge_enabled() -> bool:
 
 def rust_profanity_enabled() -> bool:
     return env_flag_enabled(RUST_PROFANITY_ENABLED_ENV)
+
+
+def rust_feed_posts_enabled() -> bool:
+    return env_flag_enabled(RUST_FEED_POSTS_ENABLED_ENV)
 
 
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
@@ -748,6 +753,95 @@ def try_merge_ad_segments(
             return None
         result.append((float(item[0]), float(item[1])))
     return result
+
+
+class FeedPostsNotFound:
+    """Sentinel signaling the feed doesn't exist (Flask should return 404)."""
+
+
+FEED_POSTS_NOT_FOUND = FeedPostsNotFound()
+
+
+def try_render_feed_posts(
+    *,
+    db_path: Path,
+    feed_id: int,
+    page: int,
+    page_size: int,
+    whitelisted_only: bool,
+) -> bytes | FeedPostsNotFound | None:
+    """Render the /api/feeds/<id>/posts envelope via the Rust sidecar.
+
+    Returns the raw JSON bytes the sidecar emitted on stdout — these are
+    passed straight through to the HTTP response without a Python json.loads
+    / flask.jsonify round-trip. Bypassing that round-trip is the whole point
+    of this port: parsing a ~290 KB envelope into a Python dict graph just
+    to re-serialize it would allocate the same heap the original endpoint
+    did, defeating the memory win.
+
+    Returns FEED_POSTS_NOT_FOUND when the feed is missing (mirroring
+    Flask's get_or_404), or None when the Rust path is disabled / failed
+    so the caller falls back to the Python query.
+    """
+    if not rust_feed_posts_enabled():
+        return None
+
+    command = [
+        str(rust_tools_bin()),
+        "posts",
+        "feed-list",
+        "--db",
+        str(db_path),
+        "--feed-id",
+        str(feed_id),
+        "--page",
+        str(page),
+        "--page-size",
+        str(page_size),
+        "--whitelisted-only",
+        "true" if whitelisted_only else "false",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            timeout=300,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        LOGGER.exception(
+            "Rust feed-posts subprocess failed; falling back to Python implementation"
+        )
+        return None
+
+    if result.returncode != 0:
+        LOGGER.error(
+            "Rust feed-posts exited with %s: %s",
+            result.returncode,
+            result.stderr.decode("utf-8", errors="replace").strip() or "<no stderr>",
+        )
+        return None
+
+    stripped = result.stdout.strip()
+
+    # Rust's print_json uses compact serde_json::to_string, so the
+    # missing-feed sentinel is exactly this byte sequence — match without
+    # parsing to keep Python heap allocations to a minimum.
+    if stripped == b'{"not_found":true}':
+        return FEED_POSTS_NOT_FOUND
+
+    # Cheap sanity check that the payload looks like our envelope.
+    # render_feed_posts orders keys with "items" first, so a valid response
+    # always starts with this prefix. If it doesn't, fall back rather than
+    # forward garbage to the HTTP client.
+    if not stripped.startswith(b'{"items":'):
+        LOGGER.error(
+            "Rust feed-posts returned unexpected payload prefix: %r",
+            stripped[:80],
+        )
+        return None
+
+    return stripped
 
 
 def try_extract_profanity_windows(
