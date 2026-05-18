@@ -530,6 +530,15 @@ def refresh_feed(feed: Feed) -> None:
             existing_post_updates = cast(
                 list[dict[str, Any]], rust_plan["existing_post_updates"]
             )
+            # Positive confirmation log so operators can verify the Rust
+            # path is actually hot for this feed (the wrapper only logs
+            # the negative "falling back" case). Grep for "rust_path=feed_refresh".
+            logger.info(
+                "rust_path=feed_refresh feed_id=%s new=%d updated=%d",
+                feed_id,
+                len(new_posts),
+                len(existing_post_updates),
+            )
         else:
             # Either Rust disabled, raw fetch failed, or Rust planner returned None.
             # Run the standard feedparser-based path (parses raw_xml if we have it,

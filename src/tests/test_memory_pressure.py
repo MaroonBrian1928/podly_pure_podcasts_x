@@ -18,12 +18,18 @@ def test_memory_trim_after_context_round_trips(app) -> None:
 
 
 def test_release_memory_to_os_runs_gc_and_malloc_trim(monkeypatch) -> None:
+    """On glibc (no jemalloc), release_memory_to_os falls back to malloc_trim."""
     calls: list[str] = []
 
     monkeypatch.setattr(
         memory_pressure.gc,
         "collect",
         lambda: calls.append("gc") or 3,
+    )
+    monkeypatch.setattr(
+        memory_pressure,
+        "_jemalloc_purge_all_arenas",
+        lambda _logger: False,  # jemalloc not loaded
     )
     monkeypatch.setattr(
         memory_pressure,
@@ -34,6 +40,36 @@ def test_release_memory_to_os_runs_gc_and_malloc_trim(monkeypatch) -> None:
     memory_pressure.release_memory_to_os("test", logging.getLogger("test"))
 
     assert calls == ["gc", "trim"]
+
+
+def test_release_memory_to_os_prefers_jemalloc_when_available(monkeypatch) -> None:
+    """When jemalloc is preloaded, we must NOT call glibc malloc_trim — it's a
+    no-op stub under jemalloc and pollutes logs with false negatives.
+    """
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        memory_pressure.gc,
+        "collect",
+        lambda: calls.append("gc") or 3,
+    )
+    monkeypatch.setattr(
+        memory_pressure,
+        "_jemalloc_purge_all_arenas",
+        lambda _logger: calls.append("jemalloc_purge") or True,
+    )
+    # If the fallback path runs by mistake, this raises and the test fails.
+    monkeypatch.setattr(
+        memory_pressure,
+        "_malloc_trim",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("malloc_trim must not run under jemalloc")
+        ),
+    )
+
+    memory_pressure.release_memory_to_os("test", logging.getLogger("test"))
+
+    assert calls == ["gc", "jemalloc_purge"]
 
 
 def test_release_memory_to_os_can_be_disabled(monkeypatch) -> None:

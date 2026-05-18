@@ -19,8 +19,18 @@ def scheduled_memory_trim() -> None:
     specific work units. When the web process is idle (no feed refreshes,
     no large XML renders), nothing reclaims fragmented arenas, so RSS
     drifts upward. This periodic trim catches that slow drift.
+
+    Logs at INFO so operators can confirm the job is actually firing —
+    APScheduler swallows exceptions to its own logger which is usually
+    silenced, so without an INFO breadcrumb this fire was invisible.
     """
-    release_memory_to_os("scheduled idle trim", _memory_trim_logger)
+    _memory_trim_logger.info("scheduled idle trim: starting")
+    try:
+        release_memory_to_os("scheduled idle trim", _memory_trim_logger)
+    except Exception:
+        _memory_trim_logger.exception("scheduled idle trim: failed")
+        return
+    _memory_trim_logger.info("scheduled idle trim: done")
 
 
 def add_background_job(minutes: int) -> None:

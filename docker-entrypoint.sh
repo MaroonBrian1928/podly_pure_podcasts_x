@@ -1,18 +1,12 @@
 #!/bin/bash
 set -e
 
-# Opt-in jemalloc preload. The Dockerfile records the resolved path so we
-# don't have to hard-code an arch-specific location. Users can disable by
-# setting PODLY_JEMALLOC_PRELOAD=0.
-if [ "${PODLY_JEMALLOC_PRELOAD:-1}" != "0" ] && [ -r /etc/podly-jemalloc-path ]; then
-    JEMALLOC_LIB="$(cat /etc/podly-jemalloc-path)"
-    if [ -n "$JEMALLOC_LIB" ] && [ -e "$JEMALLOC_LIB" ]; then
-        if [ -n "$LD_PRELOAD" ]; then
-            export LD_PRELOAD="$JEMALLOC_LIB:$LD_PRELOAD"
-        else
-            export LD_PRELOAD="$JEMALLOC_LIB"
-        fi
-    fi
+# jemalloc preload is configured via /etc/ld.so.preload by the Dockerfile,
+# so it survives the gosu UID transition below (glibc strips LD_PRELOAD on
+# setresuid). To opt out at runtime, set PODLY_JEMALLOC_PRELOAD=0 and we
+# remove the preload file before exec'ing the app.
+if [ "${PODLY_JEMALLOC_PRELOAD:-1}" = "0" ] && [ -f /etc/ld.so.preload ]; then
+    rm -f /etc/ld.so.preload
 fi
 
 # Check if PUID/PGID env variables are set

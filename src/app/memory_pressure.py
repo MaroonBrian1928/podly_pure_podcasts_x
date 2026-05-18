@@ -35,32 +35,111 @@ def _malloc_trim() -> Any | None:
         return None
 
 
+# jemalloc's `arena.<i>.purge` mallctl key takes the arena index. The
+# special value MALLCTL_ARENAS_ALL == 4096 targets every arena in one
+# call, which is what we want for periodic / post-burst trimming.
+_JEMALLOC_ARENAS_ALL = 4096
+
+
+@lru_cache(maxsize=1)
+def _jemalloc_mallctl() -> Any | None:
+    """Resolve jemalloc's mallctl symbol when jemalloc is preloaded.
+
+    Returns None when running on glibc — the only signal we have is whether
+    the symbol resolves in the process-wide symbol table (RTLD_DEFAULT via
+    ctypes.CDLL(None)). glibc has no `mallctl`, so resolving it implies
+    jemalloc replaced the allocator.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        proc = ctypes.CDLL(None)
+    except OSError:
+        return None
+    try:
+        mallctl = proc.mallctl
+    except AttributeError:
+        return None
+
+    mallctl.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    mallctl.restype = ctypes.c_int
+
+    # Sanity-probe via "epoch": a write-only u64 that refreshes jemalloc's
+    # cached stats. rc==0 confirms jemalloc is the active allocator and our
+    # mallctl pointer is callable. We use epoch (not "version") because
+    # "version" returns a `const char **` and demands the caller pass a
+    # `char **` output buffer; getting the buffer shape wrong silently
+    # returns EINVAL and the symbol looks broken even when jemalloc is
+    # fine. epoch only takes a write side, no output buffer needed.
+    epoch = ctypes.c_uint64(1)
+    try:
+        rc = mallctl(b"epoch", None, None, ctypes.byref(epoch), ctypes.sizeof(epoch))
+    except Exception:  # noqa: BLE001
+        return None
+    if rc != 0:
+        return None
+    return mallctl
+
+
+def _jemalloc_purge_all_arenas(active_logger: logging.Logger) -> bool:
+    mallctl = _jemalloc_mallctl()
+    if mallctl is None:
+        return False
+    key = f"arena.{_JEMALLOC_ARENAS_ALL}.purge".encode("ascii")
+    try:
+        rc = mallctl(key, None, None, None, 0)
+    except Exception as exc:  # noqa: BLE001
+        active_logger.debug("jemalloc purge raised: %s", exc, exc_info=True)
+        return False
+    if rc != 0:
+        active_logger.debug("jemalloc purge returned non-zero: %s", rc)
+        return False
+    return True
+
+
 def release_memory_to_os(
     context: str,
     log: logging.Logger | None = None,
 ) -> None:
-    """Ask Python and glibc to return freed arenas after large transient work."""
+    """Ask Python and the allocator to return freed memory to the OS.
+
+    Under glibc/ptmalloc we call malloc_trim(0). Under jemalloc (preloaded
+    via /etc/ld.so.preload) malloc_trim is a no-op stub, so we call
+    jemalloc's mallctl arena-purge instead. Both branches are best-effort;
+    the goal is to nudge the allocator after a known burst of allocations.
+    """
     if not _env_bool("PODLY_MEMORY_TRIM_ENABLED", default=True):
         return
 
     active_logger = log or logger
     collected = gc.collect()
-    trimmed = False
 
-    trim = _malloc_trim()
-    if trim is not None:
-        try:
-            trimmed = bool(trim(0))
-        except Exception as exc:  # noqa: BLE001
-            active_logger.debug(
-                "Memory trim failed after %s: %s", context, exc, exc_info=True
-            )
+    purged_jemalloc = _jemalloc_purge_all_arenas(active_logger)
+    trimmed_glibc = False
+    if not purged_jemalloc:
+        # Only fall back to glibc malloc_trim if jemalloc isn't loaded —
+        # otherwise calling it returns False and pollutes logs.
+        trim = _malloc_trim()
+        if trim is not None:
+            try:
+                trimmed_glibc = bool(trim(0))
+            except Exception as exc:  # noqa: BLE001
+                active_logger.debug(
+                    "Memory trim failed after %s: %s", context, exc, exc_info=True
+                )
 
     active_logger.debug(
-        "Memory cleanup after %s: gc_collected=%s malloc_trim=%s",
+        "Memory cleanup after %s: gc_collected=%s jemalloc_purge=%s malloc_trim=%s",
         context,
         collected,
-        trimmed,
+        purged_jemalloc,
+        trimmed_glibc,
     )
 
 
