@@ -86,6 +86,11 @@ def schedule_memory_trim_job() -> None:
             pass
         return
 
+    # misfire_grace_time=None: a memory trim that's "late" is still useful;
+    # the default 1s makes the job get skipped whenever the scheduler is
+    # busy (e.g. mid refresh-all batch), which is exactly when we'd want
+    # the trim to run. coalesce=True merges any backed-up runs into one
+    # fire so we don't trim multiple times in a row after a long pause.
     scheduler.add_job(
         id=job_id,
         func=scheduled_memory_trim,
@@ -94,4 +99,6 @@ def schedule_memory_trim_job() -> None:
         next_run_time=datetime.now(UTC).replace(tzinfo=None)
         + timedelta(minutes=interval_min),
         replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
     )

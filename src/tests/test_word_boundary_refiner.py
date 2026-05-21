@@ -323,3 +323,448 @@ def test_refine_reverts_invalid_start_only_partial_response() -> None:
     assert update_calls[1].kwargs["status"] == "success_heuristic"
     assert update_calls[1].kwargs["error_message"] == "start_out_of_window"
     assert update_calls[2].kwargs["status"] == "success"
+
+
+def test_get_context_uses_rust_when_flag_enabled_and_post_guid_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Rust path is enabled and a post_guid is threaded through, the
+    rust sidecar wrapper is invoked and its sequence_nums are re-hydrated with
+    the original in-memory `words` arrays so downstream phrase resolution still
+    sees the same shape it would have built locally."""
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    all_segments = [
+        {
+            "sequence_num": 100,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text": "a",
+            "words": [{"word": "a", "start": 0.0, "end": 1.0}],
+        },
+        {
+            "sequence_num": 101,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text": "b",
+            "words": [{"word": "b", "start": 1.0, "end": 2.0}],
+        },
+    ]
+
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+
+    captured: dict[str, object] = {}
+
+    def fake_wb_context(**kwargs: object) -> list[dict[str, object]]:
+        captured.update(kwargs)
+        return [{"sequence_num": 101, "start_time": 1.0, "end_time": 2.0, "text": "b"}]
+
+    with patch("shared.rust_sidecar.try_wb_context", side_effect=fake_wb_context):
+        selected = refiner._get_context(
+            ad_start=1.0,
+            ad_end=2.0,
+            all_segments=all_segments,
+            first_seq_num=101,
+            last_seq_num=101,
+            post_guid="post-abc",
+        )
+
+    assert captured["post_guid"] == "post-abc"
+    assert captured["first_seq"] == 101
+    assert captured["last_seq"] == 101
+    assert len(selected) == 1
+    assert selected[0] is all_segments[1]
+    assert "words" in selected[0]
+
+
+def test_get_context_skips_rust_when_flag_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    monkeypatch.delenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", raising=False)
+
+    all_segments = [
+        {"sequence_num": 1, "start_time": 0.0, "end_time": 1.0, "text": "x"}
+    ]
+
+    def boom(**_kwargs: object) -> None:
+        raise AssertionError("Rust wrapper invoked while flag disabled")
+
+    with patch("shared.rust_sidecar.try_wb_context", side_effect=boom):
+        selected = refiner._get_context(
+            ad_start=0.0,
+            ad_end=1.0,
+            all_segments=all_segments,
+            first_seq_num=1,
+            last_seq_num=1,
+            post_guid="post-abc",
+        )
+
+    assert selected == all_segments
+
+
+def test_get_context_skips_rust_without_post_guid() -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    all_segments = [
+        {"sequence_num": 1, "start_time": 0.0, "end_time": 1.0, "text": "x"}
+    ]
+
+    def boom(**_kwargs: object) -> None:
+        raise AssertionError("Rust wrapper invoked without post_guid")
+
+    with patch("shared.rust_sidecar.try_wb_context", side_effect=boom):
+        selected = refiner._get_context(
+            ad_start=0.0,
+            ad_end=1.0,
+            all_segments=all_segments,
+            first_seq_num=1,
+            last_seq_num=1,
+            post_guid=None,
+        )
+
+    assert selected == all_segments
+
+
+def test_get_context_falls_back_when_rust_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+
+    all_segments = [
+        {"sequence_num": 5, "start_time": 50.0, "end_time": 51.0, "text": "x"}
+    ]
+
+    with patch("shared.rust_sidecar.try_wb_context", return_value=None):
+        selected = refiner._get_context(
+            ad_start=50.0,
+            ad_end=51.0,
+            all_segments=all_segments,
+            first_seq_num=5,
+            last_seq_num=5,
+            post_guid="post-abc",
+        )
+
+    assert selected == all_segments
+
+
+def _llm_response_with_phrases() -> MagicMock:
+    return _build_response(
+        content="""
+{
+  "refined_start_segment_seq": 100,
+  "refined_start_phrase": "brought to you by",
+  "refined_end_segment_seq": 101,
+  "refined_end_phrase": "thanks for listening",
+  "start_adjustment_reason": "sponsor lead-in",
+  "end_adjustment_reason": "sign-off"
+}
+""",
+        finish_reason="stop",
+    )
+
+
+def test_refine_uses_rust_refine_from_llm_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the flag is on and a post_guid is threaded through, refine()
+    short-circuits the Python `_refine_start` / `_refine_end` pair, using
+    whatever Rust returns. Python keeps applying its cross-window guards and
+    reason defaulting."""
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    refiner._update_model_call = MagicMock()  # type: ignore[method-assign]
+    refiner._refine_start = MagicMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("python _refine_start must not be called")
+    )
+    refiner._refine_end = MagicMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("python _refine_end must not be called")
+    )
+
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+    response = _llm_response_with_phrases()
+    all_segments = [
+        {
+            "sequence_num": 100,
+            "start_time": 95.0,
+            "end_time": 100.0,
+            "text": "brought to you by",
+        },
+        {
+            "sequence_num": 101,
+            "start_time": 100.0,
+            "end_time": 110.0,
+            "text": "thanks for listening",
+        },
+    ]
+    rust_payload = {
+        "parse_status": "ok",
+        "refined_start": 96.5,
+        "refined_end": 108.25,
+        "start_changed": True,
+        "end_changed": True,
+        "start_error": None,
+        "end_error": None,
+        "start_reason": "sponsor lead-in",
+        "end_reason": "sign-off",
+    }
+
+    with (
+        patch(
+            "podcast_processor.word_boundary_refiner.render_prompt_and_upsert_model_call",
+            return_value=("prompt", 42),
+        ),
+        patch("litellm.completion", return_value=response),
+        patch(
+            "shared.rust_sidecar.try_wb_refine_from_llm",
+            return_value=rust_payload,
+        ),
+        patch("shared.rust_sidecar.try_wb_context", return_value=None),
+    ):
+        result = refiner.refine(
+            ad_start=100.0,
+            ad_end=110.0,
+            confidence=0.9,
+            all_segments=all_segments,
+            post_id=42,
+            post_guid="post-abc",
+            first_seq_num=100,
+            last_seq_num=101,
+        )
+
+    assert result.refined_start == 96.5
+    assert result.refined_end == 108.25
+    assert result.start_adjustment_reason == "sponsor lead-in"
+    assert result.end_adjustment_reason == "sign-off"
+
+
+def test_refine_falls_back_when_rust_refine_from_llm_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the flag is on but Rust returns None (sidecar failed / bad payload),
+    refine() must fall back to the Python `_parse_json` + `_refine_start` +
+    `_refine_end` path instead of raising."""
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    refiner._update_model_call = MagicMock()  # type: ignore[method-assign]
+
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+    response = _llm_response_with_phrases()
+    all_segments = [
+        {
+            "sequence_num": 100,
+            "start_time": 95.0,
+            "end_time": 100.0,
+            "text": "brought to you by a sponsor",
+        },
+        {
+            "sequence_num": 101,
+            "start_time": 100.0,
+            "end_time": 110.0,
+            "text": "thanks for listening folks",
+        },
+    ]
+
+    with (
+        patch(
+            "podcast_processor.word_boundary_refiner.render_prompt_and_upsert_model_call",
+            return_value=("prompt", 42),
+        ),
+        patch("litellm.completion", return_value=response),
+        patch("shared.rust_sidecar.try_wb_refine_from_llm", return_value=None),
+        patch("shared.rust_sidecar.try_wb_context", return_value=None),
+    ):
+        result = refiner.refine(
+            ad_start=100.0,
+            ad_end=110.0,
+            confidence=0.9,
+            all_segments=all_segments,
+            post_id=42,
+            post_guid="post-abc",
+            first_seq_num=100,
+            last_seq_num=101,
+        )
+
+    # The Python path resolves "brought to you by" inside segment 100 (heuristic
+    # word-time interpolation) and "thanks for listening" inside 101. The exact
+    # numbers don't matter for the assertion — what matters is that refine()
+    # produced a valid window without raising.
+    assert result.refined_end > result.refined_start
+    assert result.start_adjustment_reason
+    assert result.end_adjustment_reason
+
+
+def test_refine_falls_back_when_rust_refine_from_llm_reports_parse_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`parse_status: failed` from Rust mirrors today's `parse_failed` heuristic
+    path: refine() must short-circuit to `_fallback(ad_start, ad_end)` and
+    mark the model_call as `success_heuristic` with the parse_failed code."""
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    refiner._update_model_call = MagicMock()  # type: ignore[method-assign]
+    refiner._refine_start = MagicMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("python _refine_start must not be called")
+    )
+    refiner._refine_end = MagicMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("python _refine_end must not be called")
+    )
+
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+    response = _build_response(content="garbage", finish_reason="stop")
+    all_segments = [
+        {
+            "sequence_num": 100,
+            "start_time": 95.0,
+            "end_time": 100.0,
+            "text": "brought to you by",
+        }
+    ]
+    rust_payload = {
+        "parse_status": "failed",
+        "refined_start": 100.0,
+        "refined_end": 110.0,
+        "start_changed": False,
+        "end_changed": False,
+        "start_error": None,
+        "end_error": None,
+        "start_reason": "",
+        "end_reason": "",
+    }
+
+    with (
+        patch(
+            "podcast_processor.word_boundary_refiner.render_prompt_and_upsert_model_call",
+            return_value=("prompt", 42),
+        ),
+        patch("litellm.completion", return_value=response),
+        patch(
+            "shared.rust_sidecar.try_wb_refine_from_llm",
+            return_value=rust_payload,
+        ),
+        patch("shared.rust_sidecar.try_wb_context", return_value=None),
+    ):
+        result = refiner.refine(
+            ad_start=100.0,
+            ad_end=110.0,
+            confidence=0.9,
+            all_segments=all_segments,
+            post_id=42,
+            post_guid="post-abc",
+            first_seq_num=100,
+            last_seq_num=100,
+        )
+
+    assert result.refined_start == 100.0
+    assert result.refined_end == 110.0
+    assert result.start_adjustment_reason == "heuristic_fallback"
+
+    update_calls = cast(MagicMock, refiner._update_model_call).call_args_list
+    assert update_calls[-1].kwargs["status"] == "success_heuristic"
+    assert update_calls[-1].kwargs["error_message"] == "parse_failed:format"
+
+
+def test_refine_logs_warning_when_rust_reports_salvaged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When Rust falls back to the partial-fields salvage path, Python must
+    surface a WARN so log-based observability doesn't regress when the
+    bundled subcommand absorbs the parser."""
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    refiner._update_model_call = MagicMock()  # type: ignore[method-assign]
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+
+    response = _llm_response_with_phrases()
+    all_segments = [
+        {
+            "sequence_num": 100,
+            "start_time": 95.0,
+            "end_time": 100.0,
+            "text": "brought to you by",
+        }
+    ]
+    rust_payload = {
+        "parse_status": "salvaged",
+        "refined_start": 96.0,
+        "refined_end": 109.0,
+        "start_changed": True,
+        "end_changed": True,
+        "start_error": None,
+        "end_error": None,
+        "start_reason": "x",
+        "end_reason": "y",
+    }
+
+    with (
+        patch(
+            "podcast_processor.word_boundary_refiner.render_prompt_and_upsert_model_call",
+            return_value=("prompt", 42),
+        ),
+        patch("litellm.completion", return_value=response),
+        patch(
+            "shared.rust_sidecar.try_wb_refine_from_llm",
+            return_value=rust_payload,
+        ),
+        patch("shared.rust_sidecar.try_wb_context", return_value=None),
+        caplog.at_level("WARNING"),
+    ):
+        refiner.refine(
+            ad_start=100.0,
+            ad_end=110.0,
+            confidence=0.9,
+            all_segments=all_segments,
+            post_id=42,
+            post_guid="post-abc",
+            first_seq_num=100,
+            last_seq_num=100,
+        )
+
+    assert "recovered partial fields via Rust salvage" in caplog.text.lower() or any(
+        "salvage" in r.message.lower() for r in caplog.records
+    )
+
+
+def test_refine_skips_rust_refine_from_llm_without_post_guid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refiner = WordBoundaryRefiner(config=create_standard_test_config())
+    refiner._update_model_call = MagicMock()  # type: ignore[method-assign]
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "true")
+
+    response = _llm_response_with_phrases()
+    all_segments = [
+        {
+            "sequence_num": 100,
+            "start_time": 95.0,
+            "end_time": 100.0,
+            "text": "brought to you by",
+        },
+        {
+            "sequence_num": 101,
+            "start_time": 100.0,
+            "end_time": 110.0,
+            "text": "thanks for listening",
+        },
+    ]
+
+    def boom(**_kwargs: object) -> None:
+        raise AssertionError("try_wb_refine_from_llm invoked without post_guid")
+
+    with (
+        patch(
+            "podcast_processor.word_boundary_refiner.render_prompt_and_upsert_model_call",
+            return_value=("prompt", 42),
+        ),
+        patch("litellm.completion", return_value=response),
+        patch("shared.rust_sidecar.try_wb_refine_from_llm", side_effect=boom),
+        patch("shared.rust_sidecar.try_wb_context", return_value=None),
+    ):
+        result = refiner.refine(
+            ad_start=100.0,
+            ad_end=110.0,
+            confidence=0.9,
+            all_segments=all_segments,
+            post_id=42,
+            post_guid=None,
+            first_seq_num=100,
+            last_seq_num=101,
+        )
+
+    assert result.refined_end > result.refined_start

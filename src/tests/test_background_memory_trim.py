@@ -65,6 +65,11 @@ def test_schedule_memory_trim_job_adds_job_with_env_interval(monkeypatch) -> Non
     assert kwargs["minutes"] == 7
     assert kwargs["func"] is background.scheduled_memory_trim
     assert kwargs["replace_existing"] is True
+    # A late trim is still useful — must not inherit APScheduler's 1s default
+    # misfire_grace_time, which caused the job to silently skip whenever the
+    # scheduler was busy (e.g. mid refresh-all batch).
+    assert kwargs["misfire_grace_time"] is None
+    assert kwargs["coalesce"] is True
 
 
 def test_schedule_memory_trim_job_removes_job_when_disabled(monkeypatch) -> None:

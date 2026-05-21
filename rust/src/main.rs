@@ -292,6 +292,82 @@ enum TranscriptSubcommand {
     ExportWordTimestamps(TranscriptExportArgs),
     AdMerge(TranscriptAdMergeArgs),
     ProfanityWindows(TranscriptProfanityWindowsArgs),
+    WbContext(TranscriptWbContextArgs),
+    WbResolve(TranscriptWbResolveArgs),
+    WbJsonParse(TranscriptWbJsonParseArgs),
+    WbRefineFromLlm(TranscriptWbRefineFromLlmArgs),
+}
+
+#[derive(Args)]
+struct TranscriptWbRefineFromLlmArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "orig-ad-start")]
+    orig_ad_start: f64,
+    #[arg(long = "orig-ad-end")]
+    orig_ad_end: f64,
+    #[arg(long = "first-seq")]
+    first_seq: Option<i64>,
+    #[arg(long = "last-seq")]
+    last_seq: Option<i64>,
+    /// Path to a UTF-8 text file containing the raw LLM completion.
+    #[arg(long = "raw-content-file")]
+    raw_content_file: PathBuf,
+}
+
+#[derive(Args)]
+struct TranscriptWbJsonParseArgs {
+    /// Path to a UTF-8 text file containing the raw LLM completion.
+    #[arg(long)]
+    input: PathBuf,
+}
+
+#[derive(Args)]
+struct TranscriptWbContextArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "ad-start")]
+    ad_start: f64,
+    #[arg(long = "ad-end")]
+    ad_end: f64,
+    #[arg(long = "first-seq")]
+    first_seq: Option<i64>,
+    #[arg(long = "last-seq")]
+    last_seq: Option<i64>,
+}
+
+#[derive(Args)]
+struct TranscriptWbResolveArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "orig-ad-start")]
+    orig_ad_start: f64,
+    #[arg(long = "orig-ad-end")]
+    orig_ad_end: f64,
+    #[arg(long = "first-seq")]
+    first_seq: Option<i64>,
+    #[arg(long = "last-seq")]
+    last_seq: Option<i64>,
+    #[arg(long = "start-segment-seq")]
+    start_segment_seq: Option<i64>,
+    #[arg(long = "start-phrase")]
+    start_phrase: Option<String>,
+    #[arg(long = "start-word")]
+    start_word: Option<String>,
+    #[arg(long = "start-occurrence")]
+    start_occurrence: Option<String>,
+    #[arg(long = "start-word-index")]
+    start_word_index: Option<i64>,
+    #[arg(long = "end-segment-seq")]
+    end_segment_seq: Option<i64>,
+    #[arg(long = "end-phrase")]
+    end_phrase: Option<String>,
 }
 
 #[derive(Args)]
@@ -341,6 +417,49 @@ enum ChaptersSubcommand {
     Read(ChaptersReadArgs),
     Detect(ChaptersDetectArgs),
     Write(ChaptersWriteArgs),
+    TopicBlocks(ChaptersTopicBlocksArgs),
+    TopicPlanParse(ChaptersTopicPlanParseArgs),
+    TopicPlanApply(ChaptersTopicPlanApplyArgs),
+}
+
+#[derive(Args)]
+struct ChaptersTopicPlanParseArgs {
+    /// Path to a UTF-8 text file containing the raw LLM completion.
+    #[arg(long)]
+    input: PathBuf,
+}
+
+#[derive(Args)]
+struct ChaptersTopicPlanApplyArgs {
+    /// Path to a JSON file with `{plan, blocks, total_duration_ms, min_chapter_gap_ms}`.
+    #[arg(long)]
+    input: PathBuf,
+}
+
+#[derive(Args)]
+struct ChaptersTopicBlocksArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "target-block-count", default_value_t = 60)]
+    target_block_count: i64,
+    #[arg(long = "min-block-seconds", default_value_t = 60)]
+    min_block_seconds: i64,
+    #[arg(long = "max-block-seconds", default_value_t = 120)]
+    max_block_seconds: i64,
+    #[arg(long = "max-chars-per-block", default_value_t = 220)]
+    max_chars_per_block: i64,
+    /// Optional override; otherwise Rust computes from max(end_time) over segments.
+    #[arg(long = "total-duration-ms")]
+    total_duration_ms: Option<i64>,
+    /// Optional JSON file: array of `{start_ms, end_ms}` windows whose
+    /// overlapping transcript segments should be removed before block-building.
+    /// Mirrors `_filter_transcript_segments_for_chapters` in Python. If the
+    /// filter would empty the segment list, the unfiltered set is used
+    /// instead (parity with Python).
+    #[arg(long = "removed-windows-json")]
+    removed_windows_json: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -639,11 +758,26 @@ fn run() -> Result<()> {
             TranscriptSubcommand::ProfanityWindows(args) => {
                 print_json(&run_transcript_profanity_windows(args)?)
             }
+            TranscriptSubcommand::WbContext(args) => print_json(&run_transcript_wb_context(args)?),
+            TranscriptSubcommand::WbResolve(args) => print_json(&run_transcript_wb_resolve(args)?),
+            TranscriptSubcommand::WbJsonParse(args) => {
+                print_json(&run_transcript_wb_json_parse(args)?)
+            }
+            TranscriptSubcommand::WbRefineFromLlm(args) => {
+                print_json(&run_transcript_wb_refine_from_llm(args)?)
+            }
         },
         Commands::Chapters(chapters) => match chapters.command {
             ChaptersSubcommand::Read(args) => print_json(&read_chapters(args)?),
             ChaptersSubcommand::Detect(args) => print_json(&detect_chapter_ads(args)?),
             ChaptersSubcommand::Write(args) => print_json(&write_chapters(args)?),
+            ChaptersSubcommand::TopicBlocks(args) => print_json(&run_chapters_topic_blocks(args)?),
+            ChaptersSubcommand::TopicPlanParse(args) => {
+                print_json(&run_chapters_topic_plan_parse(args)?)
+            }
+            ChaptersSubcommand::TopicPlanApply(args) => {
+                print_json(&run_chapters_topic_plan_apply(args)?)
+            }
         },
     }
 }
@@ -708,6 +842,1994 @@ fn run_transcript_profanity_windows(args: TranscriptProfanityWindowsArgs) -> Res
 
     let windows: Vec<Value> = merged.into_iter().map(|(s, e)| json!([s, e])).collect();
     Ok(json!({ "windows_ms": windows }))
+}
+
+fn run_transcript_wb_context(args: TranscriptWbContextArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let segments = query_stats_transcript_segments(&conn, post.id)?;
+    let selected = select_wb_context_segments(
+        &segments,
+        args.ad_start,
+        args.ad_end,
+        args.first_seq,
+        args.last_seq,
+    );
+    let context_segments: Vec<Value> = selected
+        .iter()
+        .map(|seg| {
+            json!({
+                "sequence_num": seg.sequence_num,
+                "start_time": seg.start_time,
+                "end_time": seg.end_time,
+                "text": seg.text,
+            })
+        })
+        .collect();
+    Ok(json!({ "context_segments": context_segments }))
+}
+
+/// Mirror of `WordBoundaryRefiner._get_context` in
+/// `src/podcast_processor/word_boundary_refiner.py`. Prefer the explicit
+/// seq-window when both first/last_seq are provided; otherwise fall back to
+/// time-overlap selection with ±2 / +3 padding around the overlapping run.
+fn select_wb_context_segments(
+    segments: &[StatsTranscriptSegmentRow],
+    ad_start: f64,
+    ad_end: f64,
+    first_seq: Option<i64>,
+    last_seq: Option<i64>,
+) -> Vec<&StatsTranscriptSegmentRow> {
+    if let (Some(first), Some(last)) = (first_seq, last_seq) {
+        let by_seq = wb_context_by_seq_window(segments, first, last);
+        if !by_seq.is_empty() {
+            return by_seq;
+        }
+    }
+    wb_context_by_time_overlap(segments, ad_start, ad_end)
+}
+
+fn wb_context_by_seq_window(
+    segments: &[StatsTranscriptSegmentRow],
+    first_seq: i64,
+    last_seq: i64,
+) -> Vec<&StatsTranscriptSegmentRow> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let min_seq = segments.iter().map(|s| s.sequence_num).min().unwrap();
+    let max_seq = segments.iter().map(|s| s.sequence_num).max().unwrap();
+    let start_seq = min_seq.max(first_seq - 2);
+    let end_seq = max_seq.min(last_seq + 2);
+    segments
+        .iter()
+        .filter(|s| s.sequence_num >= start_seq && s.sequence_num <= end_seq)
+        .collect()
+}
+
+fn wb_context_by_time_overlap(
+    segments: &[StatsTranscriptSegmentRow],
+    ad_start: f64,
+    ad_end: f64,
+) -> Vec<&StatsTranscriptSegmentRow> {
+    let overlap_idxs: Vec<usize> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.start_time <= ad_end && s.end_time >= ad_start)
+        .map(|(idx, _)| idx)
+        .collect();
+    if overlap_idxs.is_empty() {
+        return Vec::new();
+    }
+    let first_idx = *overlap_idxs.first().unwrap();
+    let last_idx = *overlap_idxs.last().unwrap();
+    let start_idx = first_idx.saturating_sub(2);
+    let end_idx = (last_idx + 3).min(segments.len());
+    segments[start_idx..end_idx].iter().collect()
+}
+
+// === Word-boundary refiner: deterministic helpers ported from
+// `src/podcast_processor/word_boundary_refiner.py`. The LLM call itself stays
+// in Python; this is just the data-plumbing portion. Parity matters — these
+// outputs drive audio cuts, so any divergence shows up as audible glitches.
+
+const WB_MAX_START_EXTENSION_SECONDS: f64 = 30.0;
+const WB_MAX_END_EXTENSION_SECONDS: f64 = 15.0;
+const WB_PHRASE_MAX_WORDS: usize = 4;
+
+#[derive(Clone)]
+struct WbTimedWord {
+    token: String,
+    start: Option<f64>,
+    end: Option<f64>,
+}
+
+fn wb_normalize_token(token: &str) -> String {
+    // Mirror `_normalize_token`: strip leading/trailing chars that are not
+    // alphanumeric or apostrophe; keep internal apostrophes.
+    let is_keep = |c: char| c.is_ascii_alphanumeric() || c == '\'';
+    let start = token.find(is_keep);
+    if start.is_none() {
+        return String::new();
+    }
+    let start = start.unwrap();
+    // rfind returns byte index of the start of the matching char.
+    let end_byte = token.rfind(is_keep).map(|i| {
+        // Advance past the last kept char.
+        let c = token[i..].chars().next().unwrap();
+        i + c.len_utf8()
+    });
+    let end_byte = end_byte.unwrap_or(token.len());
+    token[start..end_byte].to_string()
+}
+
+fn wb_split_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(wb_normalize_token)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+fn wb_split_words_lower(text: &str) -> Vec<String> {
+    wb_split_words(text)
+        .into_iter()
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+fn wb_find_subsequence(
+    words: &[String],
+    target: &[String],
+    choose_last: bool,
+) -> Option<(usize, usize)> {
+    if target.is_empty() || target.len() > words.len() {
+        return None;
+    }
+    let k = target.len();
+    let mut matches: Vec<(usize, usize)> = Vec::new();
+    for i in 0..=(words.len() - k) {
+        if &words[i..i + k] == target {
+            matches.push((i, i + k - 1));
+        }
+    }
+    if matches.is_empty() {
+        None
+    } else if choose_last {
+        matches.last().copied()
+    } else {
+        matches.first().copied()
+    }
+}
+
+/// Mirror of `_find_phrase_match`. For direction="start", search the first
+/// `max_words` of the phrase, shrinking from the right; for direction="end",
+/// search the last `max_words`, shrinking from the left.
+fn wb_find_phrase_match(
+    words: &[String],
+    phrase_tokens: &[String],
+    direction_end: bool,
+    max_words: usize,
+) -> Option<(usize, usize)> {
+    if words.is_empty() || phrase_tokens.is_empty() {
+        return None;
+    }
+    if !direction_end {
+        let base_len = phrase_tokens.len().min(max_words);
+        let base = &phrase_tokens[..base_len];
+        for k in (1..=base_len).rev() {
+            if let Some(m) = wb_find_subsequence(words, &base[..k], false) {
+                return Some(m);
+            }
+        }
+        None
+    } else {
+        let phrase_len = phrase_tokens.len();
+        let base_start = phrase_len.saturating_sub(max_words);
+        let base = &phrase_tokens[base_start..];
+        for k in (1..=base.len()).rev() {
+            let target = &base[base.len() - k..];
+            if let Some(m) = wb_find_subsequence(words, target, true) {
+                return Some(m);
+            }
+        }
+        None
+    }
+}
+
+fn wb_segment_word_entries(words_json: Option<&Value>) -> Vec<WbTimedWord> {
+    let arr = match words_json {
+        Some(Value::Array(items)) => items,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let raw_token = item.get("word").and_then(|v| v.as_str()).unwrap_or("");
+        let token = wb_normalize_token(raw_token).to_lowercase();
+        if token.is_empty() {
+            continue;
+        }
+        let start = item.get("start").and_then(|v| v.as_f64());
+        let end = item.get("end").and_then(|v| v.as_f64());
+        out.push(WbTimedWord { token, start, end });
+    }
+    out
+}
+
+fn wb_exact_phrase_boundary_time(
+    timed_words: &[WbTimedWord],
+    match_start_idx: usize,
+    match_end_idx: usize,
+    direction_end: bool,
+) -> Option<f64> {
+    if direction_end {
+        timed_words.get(match_end_idx).and_then(|w| w.end)
+    } else {
+        timed_words.get(match_start_idx).and_then(|w| w.start)
+    }
+}
+
+fn wb_resolve_word_index(
+    words: &[String],
+    word: Option<&str>,
+    occurrence: Option<&str>,
+    word_index: Option<i64>,
+) -> usize {
+    if let Some(raw) = word {
+        let target = wb_normalize_token(raw.trim()).to_lowercase();
+        if !target.is_empty() {
+            let matches: Vec<usize> = words
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, w)| {
+                    if w.to_lowercase() == target {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !matches.is_empty() {
+                let occ = occurrence.unwrap_or("").trim().to_lowercase();
+                return if occ == "last" {
+                    *matches.last().unwrap()
+                } else {
+                    matches[0]
+                };
+            }
+        }
+    }
+    let idx = word_index.unwrap_or(0);
+    let clamped = idx.max(0).min((words.len() as i64).saturating_sub(1));
+    clamped.max(0) as usize
+}
+
+#[derive(Clone)]
+struct WbSegment {
+    sequence_num: i64,
+    start_time: f64,
+    end_time: f64,
+    text: String,
+    /// Word-timestamp entries (may be empty if not provided by Whisper).
+    words: Vec<Value>,
+}
+
+fn wb_find_segment(segments: &[WbSegment], seq: Option<i64>) -> Option<&WbSegment> {
+    let seq = seq?;
+    segments.iter().find(|s| s.sequence_num == seq)
+}
+
+fn wb_estimate_phrase_time_for_segment(
+    segment: &WbSegment,
+    phrase_tokens: &[String],
+    direction_end: bool,
+) -> Option<f64> {
+    let timed_words = wb_segment_word_entries(Some(&Value::Array(segment.words.clone())));
+    if !timed_words.is_empty() {
+        let words: Vec<String> = timed_words.iter().map(|w| w.token.clone()).collect();
+        if let Some((s_idx, e_idx)) =
+            wb_find_phrase_match(&words, phrase_tokens, direction_end, WB_PHRASE_MAX_WORDS)
+        {
+            if let Some(t) =
+                wb_exact_phrase_boundary_time(&timed_words, s_idx, e_idx, direction_end)
+            {
+                return Some(t);
+            }
+        }
+    }
+
+    let start_time = segment.start_time;
+    let end_time = segment.end_time.max(start_time);
+    let duration = (end_time - start_time).max(0.0);
+    let words = wb_split_words_lower(&segment.text);
+    if words.is_empty() || duration <= 0.0 {
+        return None;
+    }
+    let (s_idx, e_idx) =
+        wb_find_phrase_match(&words, phrase_tokens, direction_end, WB_PHRASE_MAX_WORDS)?;
+    let seconds_per_word = duration / words.len() as f64;
+    let estimated = if !direction_end {
+        start_time + (s_idx as f64) * seconds_per_word
+    } else {
+        start_time + ((e_idx + 1) as f64) * seconds_per_word
+    };
+    Some(estimated.min(end_time))
+}
+
+fn wb_estimate_phrase_time(
+    segments: &[WbSegment],
+    context: &[&WbSegment],
+    preferred_seq: Option<i64>,
+    phrase: Option<&str>,
+    direction_end: bool,
+) -> Option<f64> {
+    let phrase_text = phrase?;
+    let tokens: Vec<String> = wb_split_words_lower(phrase_text);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut candidates: Vec<&WbSegment> = Vec::new();
+    if let Some(preferred) = wb_find_segment(segments, preferred_seq) {
+        candidates.push(preferred);
+    }
+    let mut ordered: Vec<&WbSegment> = context.to_vec();
+    ordered.sort_by_key(|s| s.sequence_num);
+    if direction_end {
+        ordered.reverse();
+    }
+    for seg in ordered {
+        if Some(seg.sequence_num) == preferred_seq {
+            continue;
+        }
+        candidates.push(seg);
+    }
+
+    for seg in candidates {
+        if let Some(t) = wb_estimate_phrase_time_for_segment(seg, &tokens, direction_end) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+fn wb_estimate_word_time(
+    segments: &[WbSegment],
+    segment_seq: Option<i64>,
+    word: Option<&str>,
+    occurrence: Option<&str>,
+    word_index: Option<i64>,
+) -> f64 {
+    let seg = match wb_find_segment(segments, segment_seq) {
+        Some(s) => s,
+        None => return segments.first().map(|s| s.start_time).unwrap_or(0.0),
+    };
+    let start_time = seg.start_time;
+    let end_time = seg.end_time.max(start_time);
+    let duration = (end_time - start_time).max(0.0);
+
+    let timed_words = wb_segment_word_entries(Some(&Value::Array(seg.words.clone())));
+    if !timed_words.is_empty() {
+        let words: Vec<String> = timed_words.iter().map(|w| w.token.clone()).collect();
+        let idx = wb_resolve_word_index(&words, word, occurrence, word_index);
+        if let Some(exact) = timed_words[idx].start {
+            return exact.min(end_time);
+        }
+    }
+    let words = wb_split_words(&seg.text);
+    if words.is_empty() || duration <= 0.0 {
+        return start_time;
+    }
+    let idx = wb_resolve_word_index(&words, word, occurrence, word_index);
+    let seconds_per_word = duration / words.len() as f64;
+    (start_time + (idx as f64) * seconds_per_word).min(end_time)
+}
+
+fn wb_estimate_segment_boundary_time(
+    segments: &[WbSegment],
+    segment_seq: Option<i64>,
+    boundary_end: bool,
+) -> Option<f64> {
+    let seg = wb_find_segment(segments, segment_seq)?;
+    Some(if boundary_end {
+        seg.end_time
+    } else {
+        seg.start_time
+    })
+}
+
+fn wb_constrain_start(estimated: f64, orig: f64) -> f64 {
+    estimated.max(orig - WB_MAX_START_EXTENSION_SECONDS)
+}
+
+fn wb_constrain_end(estimated: f64, orig: f64) -> f64 {
+    estimated.min(orig + WB_MAX_END_EXTENSION_SECONDS)
+}
+
+fn wb_has_text(s: Option<&str>) -> bool {
+    s.map(|t| !t.trim().is_empty()).unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wb_refine_start(
+    segments: &[WbSegment],
+    context: &[&WbSegment],
+    ad_start: f64,
+    start_segment_seq: Option<i64>,
+    start_phrase: Option<&str>,
+    start_word: Option<&str>,
+    start_occurrence: Option<&str>,
+    start_word_index: Option<i64>,
+) -> (f64, bool, Option<String>) {
+    if wb_has_text(start_phrase) {
+        match wb_estimate_phrase_time(segments, context, start_segment_seq, start_phrase, false) {
+            Some(est) => (wb_constrain_start(est, ad_start), true, None),
+            None => (ad_start, false, Some("start_phrase_not_found".to_string())),
+        }
+    } else if let Some(seg_start) =
+        wb_estimate_segment_boundary_time(segments, start_segment_seq, false)
+    {
+        let constrained = wb_constrain_start(seg_start, ad_start);
+        (constrained, constrained != ad_start, None)
+    } else if wb_has_text(start_word) || start_word_index.is_some() {
+        let est = wb_estimate_word_time(
+            segments,
+            start_segment_seq,
+            start_word,
+            start_occurrence,
+            start_word_index,
+        );
+        (wb_constrain_start(est, ad_start), true, None)
+    } else {
+        (ad_start, false, None)
+    }
+}
+
+fn wb_refine_end(
+    segments: &[WbSegment],
+    context: &[&WbSegment],
+    ad_end: f64,
+    end_segment_seq: Option<i64>,
+    end_phrase: Option<&str>,
+) -> (f64, bool, Option<String>) {
+    if !wb_has_text(end_phrase) {
+        if let Some(seg_end) = wb_estimate_segment_boundary_time(segments, end_segment_seq, true) {
+            let constrained = wb_constrain_end(seg_end, ad_end);
+            return (constrained, constrained != ad_end, None);
+        }
+        return (ad_end, false, None);
+    }
+    match wb_estimate_phrase_time(segments, context, end_segment_seq, end_phrase, true) {
+        Some(est) => (wb_constrain_end(est, ad_end), true, None),
+        None => (ad_end, false, Some("end_phrase_not_found".to_string())),
+    }
+}
+
+fn run_transcript_wb_resolve(args: TranscriptWbResolveArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let segment_rows = query_stats_transcript_segments(&conn, post.id)?;
+    let words_by_seq = query_wb_word_timestamps_by_seq(&conn, post.id)?;
+
+    let segments: Vec<WbSegment> = segment_rows
+        .into_iter()
+        .map(|row| {
+            let words = words_by_seq
+                .get(&row.sequence_num)
+                .cloned()
+                .unwrap_or_default();
+            WbSegment {
+                sequence_num: row.sequence_num,
+                start_time: row.start_time,
+                end_time: row.end_time,
+                text: row.text,
+                words,
+            }
+        })
+        .collect();
+
+    let context_refs = select_wb_context_segments_wb(
+        &segments,
+        args.orig_ad_start,
+        args.orig_ad_end,
+        args.first_seq,
+        args.last_seq,
+    );
+
+    let (refined_start, start_changed, start_error) = wb_refine_start(
+        &segments,
+        &context_refs,
+        args.orig_ad_start,
+        args.start_segment_seq,
+        args.start_phrase.as_deref(),
+        args.start_word.as_deref(),
+        args.start_occurrence.as_deref(),
+        args.start_word_index,
+    );
+
+    let (refined_end, end_changed, end_error) = wb_refine_end(
+        &segments,
+        &context_refs,
+        args.orig_ad_end,
+        args.end_segment_seq,
+        args.end_phrase.as_deref(),
+    );
+
+    Ok(json!({
+        "refined_start": refined_start,
+        "refined_end": refined_end,
+        "start_changed": start_changed,
+        "end_changed": end_changed,
+        "start_error": start_error,
+        "end_error": end_error,
+    }))
+}
+
+// `select_wb_context_segments_wb` (defined below) is the `WbSegment` variant
+// of `select_wb_context_segments`, used by callers that already loaded the
+// word-timestamp arrays and don't want to re-shape rows.
+//
+// === Word-boundary JSON-repair helpers ported from
+// `_parse_json` / `_parse_json_candidate` / `_repair_truncated_json` /
+// `_parse_partial_json_fields` / `_json_parse_candidates` /
+// `_extract_json_objects` in `word_boundary_refiner.py`. The port replicates
+// the same best-effort recovery chain so a single Rust subprocess call can
+// fully replace the Python `_parse_json` method on the LLM response.
+
+fn wb_strip_code_fences(text: &str) -> String {
+    // Mirrors `re.sub(r"```(?:json)?|```", "", text, flags=re.IGNORECASE)`.
+    let pat = regex::Regex::new(r"(?i)```(?:json)?|```").unwrap();
+    pat.replace_all(text, "").into_owned()
+}
+
+fn wb_dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(values.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for value in values {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() || !seen.insert(trimmed.clone()) {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    out
+}
+
+/// Mirror of `_extract_json_objects`: walks `text` byte-by-byte, tracking
+/// brace depth and string state, and emits each top-level `{...}` substring.
+fn wb_extract_json_objects(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut objects: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start_idx: Option<usize> = None;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let c = bytes[idx];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+
+        if c == b'"' {
+            in_string = true;
+            idx += 1;
+            continue;
+        }
+
+        if c == b'{' {
+            if depth == 0 {
+                start_idx = Some(idx);
+            }
+            depth += 1;
+            idx += 1;
+            continue;
+        }
+
+        if c == b'}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                if let Some(s) = start_idx {
+                    // Safe because we only ever indexed at ASCII brace/quote
+                    // boundaries; the slice between is a valid UTF-8 substring.
+                    if let Some(slice) = text.get(s..=idx) {
+                        objects.push(slice.to_string());
+                    }
+                    start_idx = None;
+                }
+            }
+        }
+        idx += 1;
+    }
+    objects
+}
+
+fn wb_json_parse_candidates(content: &str) -> Vec<String> {
+    let text = content.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates: Vec<String> = vec![text.to_string()];
+
+    // Extract everything between ```json ... ``` (or plain ``` ... ```).
+    let fence_pat = regex::Regex::new(r"(?is)```(?:json)?\s*(.*?)```").unwrap();
+    for caps in fence_pat.captures_iter(text) {
+        if let Some(m) = caps.get(1) {
+            let block = m.as_str().trim();
+            if !block.is_empty() {
+                candidates.push(block.to_string());
+            }
+        }
+    }
+
+    let unfenced = wb_strip_code_fences(text);
+    let unfenced = unfenced.trim();
+    if !unfenced.is_empty() {
+        candidates.push(unfenced.to_string());
+    }
+
+    let mut expanded: Vec<String> = Vec::with_capacity(candidates.len() * 2);
+    for candidate in candidates {
+        expanded.push(candidate.clone());
+        expanded.extend(wb_extract_json_objects(&candidate));
+    }
+    wb_dedupe_preserve_order(expanded)
+}
+
+/// Mirror of `_repair_truncated_json`. Returns the repaired candidate or
+/// `None` when the input has no usable structure to recover.
+fn wb_repair_truncated_json(candidate: &str) -> Option<String> {
+    let text = candidate.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let start_idx = text.find('{')?;
+    let mut repaired = text[start_idx..].to_string();
+
+    repaired = wb_strip_code_fences(&repaired).trim().to_string();
+    // Strip trailing commas (matches Python `repaired.rstrip(",")`).
+    repaired = repaired.trim_end_matches(',').to_string();
+
+    // Drop an obviously incomplete trailing key/value pair if present.
+    for pat_str in [
+        r#",\s*"[^"]*$"#,
+        r#",\s*"[^"]*"$"#,
+        r#",\s*"[^"]*"\s*:\s*$"#,
+        r#",\s*"[^"]*"\s*:\s*"[^"]*$"#,
+    ] {
+        let pat = regex::Regex::new(pat_str).unwrap();
+        repaired = pat.replace(&repaired, "").into_owned();
+    }
+
+    let open_brackets = repaired.matches('[').count();
+    let close_brackets = repaired.matches(']').count();
+    if close_brackets < open_brackets {
+        repaired.push_str(&"]".repeat(open_brackets - close_brackets));
+    }
+    let open_braces = repaired.matches('{').count();
+    let close_braces = repaired.matches('}').count();
+    if close_braces < open_braces {
+        repaired.push_str(&"}".repeat(open_braces - close_braces));
+    }
+
+    if repaired.is_empty() {
+        None
+    } else {
+        Some(repaired)
+    }
+}
+
+fn wb_parse_json_candidate(candidate: &str) -> Option<Value> {
+    let mut attempts: Vec<String> = vec![candidate.to_string()];
+    if let Some(repaired) = wb_repair_truncated_json(candidate) {
+        if repaired != candidate {
+            attempts.push(repaired);
+        }
+    }
+    for attempt in attempts {
+        match serde_json::from_str::<Value>(&attempt) {
+            Ok(v) if v.is_object() => return Some(v),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Mirror of `_parse_partial_json_fields`. Returns the partial object that
+/// could be regex-extracted from a malformed LLM response.
+fn wb_parse_partial_json_fields(content: &str) -> Value {
+    let mut out = serde_json::Map::new();
+
+    let extract_int_or_null = |key: &str| -> (Option<Option<i64>>, bool) {
+        // Returns:
+        //   (Some(Some(N)), _) — saw a numeric value
+        //   (Some(None), true) — saw an explicit `"key": null`
+        //   (None, _) — not present
+        let escaped = regex::escape(key);
+        let pat = regex::Regex::new(&format!(r#"(?i)"{escaped}"\s*:\s*(null|-?\d+)"#)).unwrap();
+        let null_pat = regex::Regex::new(&format!(r#"(?i)"{escaped}"\s*:\s*null"#)).unwrap();
+        let null_present = null_pat.is_match(content);
+        if let Some(caps) = pat.captures(content) {
+            let raw = caps.get(1).unwrap().as_str();
+            if raw.eq_ignore_ascii_case("null") {
+                (Some(None), null_present)
+            } else {
+                match raw.parse::<i64>() {
+                    Ok(n) => (Some(Some(n)), null_present),
+                    Err(_) => (None, null_present),
+                }
+            }
+        } else {
+            (None, null_present)
+        }
+    };
+
+    let extract_string = |key: &str| -> Option<String> {
+        let escaped = regex::escape(key);
+        let pat = regex::Regex::new(&format!(r#"(?is)"{escaped}"\s*:\s*"([^"]*)""#)).unwrap();
+        let caps = pat.captures(content)?;
+        let raw = caps.get(1).unwrap().as_str().trim();
+        if raw.is_empty() {
+            None
+        } else {
+            Some(raw.to_string())
+        }
+    };
+
+    // Note: Python emits keys for both int matches *and* explicit null, so the
+    // downstream `_extract_payload` sees `None` instead of falling through.
+    let (start_seq, start_seq_null) = extract_int_or_null("refined_start_segment_seq");
+    let (end_seq, end_seq_null) = extract_int_or_null("refined_end_segment_seq");
+    if let Some(value) = start_seq {
+        out.insert(
+            "refined_start_segment_seq".into(),
+            match value {
+                Some(n) => Value::from(n),
+                None => Value::Null,
+            },
+        );
+    } else if start_seq_null {
+        out.insert("refined_start_segment_seq".into(), Value::Null);
+    }
+    if let Some(value) = end_seq {
+        out.insert(
+            "refined_end_segment_seq".into(),
+            match value {
+                Some(n) => Value::from(n),
+                None => Value::Null,
+            },
+        );
+    } else if end_seq_null {
+        out.insert("refined_end_segment_seq".into(), Value::Null);
+    }
+    if let Some(s) = extract_string("refined_start_phrase") {
+        out.insert("refined_start_phrase".into(), Value::String(s));
+    }
+    if let Some(s) = extract_string("refined_end_phrase") {
+        out.insert("refined_end_phrase".into(), Value::String(s));
+    }
+    if let Some(s) = extract_string("start_adjustment_reason") {
+        out.insert("start_adjustment_reason".into(), Value::String(s));
+    }
+    if let Some(s) = extract_string("end_adjustment_reason") {
+        out.insert("end_adjustment_reason".into(), Value::String(s));
+    }
+
+    Value::Object(out)
+}
+
+/// End-to-end mirror of `WordBoundaryRefiner._parse_json`. Returns
+/// `(parsed_object, salvaged_from_partial_fields)`.
+fn wb_parse_json_full(content: &str) -> (Option<Value>, bool) {
+    for candidate in wb_json_parse_candidates(content) {
+        if let Some(parsed) = wb_parse_json_candidate(&candidate) {
+            return (Some(parsed), false);
+        }
+    }
+    let partial = wb_parse_partial_json_fields(content);
+    if let Value::Object(ref map) = partial {
+        if !map.is_empty() {
+            return (Some(partial), true);
+        }
+    }
+    (None, false)
+}
+
+fn run_transcript_wb_json_parse(args: TranscriptWbJsonParseArgs) -> Result<Value> {
+    let content = std::fs::read_to_string(&args.input).with_context(|| {
+        format!(
+            "failed to read wb-json-parse input {}",
+            args.input.display()
+        )
+    })?;
+    let (parsed, salvaged) = wb_parse_json_full(&content);
+    Ok(json!({
+        "parsed": parsed,
+        "salvaged": salvaged,
+    }))
+}
+
+/// In-memory mirror of `WordBoundaryRefiner._extract_payload`. Extracted as a
+/// struct so the bundled `wb-refine-from-llm` flow can pass the fields straight
+/// into the existing `wb_refine_start` / `wb_refine_end` helpers without
+/// stringifying through CLI arguments.
+struct WbExtractedPayload {
+    start_segment_seq: Option<i64>,
+    start_phrase: Option<String>,
+    end_segment_seq: Option<i64>,
+    end_phrase: Option<String>,
+    start_word: Option<String>,
+    start_occurrence: Option<String>,
+    start_word_index: Option<i64>,
+    start_reason: String,
+    end_reason: String,
+}
+
+fn wb_coerce_int(value: Option<&Value>) -> Option<i64> {
+    let v = value?;
+    if v.is_null() {
+        return None;
+    }
+    if let Some(n) = v.as_i64() {
+        return Some(n);
+    }
+    if let Some(f) = v.as_f64() {
+        if f.is_finite() {
+            return Some(f as i64);
+        }
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(n) = s.trim().parse::<i64>() {
+            return Some(n);
+        }
+        if let Ok(f) = s.trim().parse::<f64>() {
+            if f.is_finite() {
+                return Some(f as i64);
+            }
+        }
+    }
+    None
+}
+
+fn wb_coerce_optional_str(value: Option<&Value>) -> Option<String> {
+    let v = value?;
+    let s = v.as_str()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn wb_coerce_reason_str(value: Option<&Value>) -> String {
+    match value {
+        Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+fn wb_extract_payload(parsed: &Value) -> WbExtractedPayload {
+    let occurrence = parsed.get("occurrence").or_else(|| parsed.get("occurance"));
+    WbExtractedPayload {
+        start_segment_seq: wb_coerce_int(parsed.get("refined_start_segment_seq")),
+        start_phrase: wb_coerce_optional_str(parsed.get("refined_start_phrase")),
+        end_segment_seq: wb_coerce_int(parsed.get("refined_end_segment_seq")),
+        end_phrase: wb_coerce_optional_str(parsed.get("refined_end_phrase")),
+        start_word: wb_coerce_optional_str(parsed.get("refined_start_word")),
+        start_occurrence: wb_coerce_optional_str(occurrence),
+        start_word_index: wb_coerce_int(parsed.get("refined_start_word_index")),
+        start_reason: wb_coerce_reason_str(parsed.get("start_adjustment_reason")),
+        end_reason: wb_coerce_reason_str(parsed.get("end_adjustment_reason")),
+    }
+}
+
+// Bundled `parse → context → resolve` core, factored out so unit tests can
+// drive it without seeding SQLite. The production DB-backed subcommand
+// re-implements the same flow inline so it can prune the `transcript_word_timestamps`
+// JSON load down to just the segments that matter; this helper accepts a
+// pre-built `&[WbSegment]` list (words already attached, if any) and is
+// retained for the in-memory unit tests below.
+#[cfg(test)]
+fn wb_refine_from_llm_inner(
+    segments: &[WbSegment],
+    content: &str,
+    orig_ad_start: f64,
+    orig_ad_end: f64,
+    first_seq: Option<i64>,
+    last_seq: Option<i64>,
+) -> Value {
+    let (parsed_opt, salvaged) = wb_parse_json_full(content);
+    let parsed = match parsed_opt {
+        Some(p) => p,
+        None => {
+            return json!({
+                "parse_status": "failed",
+                "refined_start": orig_ad_start,
+                "refined_end": orig_ad_end,
+                "start_changed": false,
+                "end_changed": false,
+                "start_error": Value::Null,
+                "end_error": Value::Null,
+                "start_reason": "",
+                "end_reason": "",
+            });
+        }
+    };
+    let payload = wb_extract_payload(&parsed);
+    let context_refs =
+        select_wb_context_segments_wb(segments, orig_ad_start, orig_ad_end, first_seq, last_seq);
+    let (refined_start, start_changed, start_error) = wb_refine_start(
+        segments,
+        &context_refs,
+        orig_ad_start,
+        payload.start_segment_seq,
+        payload.start_phrase.as_deref(),
+        payload.start_word.as_deref(),
+        payload.start_occurrence.as_deref(),
+        payload.start_word_index,
+    );
+    let (refined_end, end_changed, end_error) = wb_refine_end(
+        segments,
+        &context_refs,
+        orig_ad_end,
+        payload.end_segment_seq,
+        payload.end_phrase.as_deref(),
+    );
+    json!({
+        "parse_status": if salvaged { "salvaged" } else { "ok" },
+        "refined_start": refined_start,
+        "refined_end": refined_end,
+        "start_changed": start_changed,
+        "end_changed": end_changed,
+        "start_error": start_error,
+        "end_error": end_error,
+        "start_reason": payload.start_reason,
+        "end_reason": payload.end_reason,
+    })
+}
+
+fn run_transcript_wb_refine_from_llm(args: TranscriptWbRefineFromLlmArgs) -> Result<Value> {
+    let content = std::fs::read_to_string(&args.raw_content_file).with_context(|| {
+        format!(
+            "failed to read wb-refine-from-llm input {}",
+            args.raw_content_file.display()
+        )
+    })?;
+
+    // Parse the LLM JSON first. If it fails entirely there is no payload, no
+    // need to touch SQLite or the megabyte `transcript_word_timestamps` blob.
+    let (parsed_opt, salvaged) = wb_parse_json_full(&content);
+    let parsed = match parsed_opt {
+        Some(p) => p,
+        None => {
+            return Ok(json!({
+                "parse_status": "failed",
+                "refined_start": args.orig_ad_start,
+                "refined_end": args.orig_ad_end,
+                "start_changed": false,
+                "end_changed": false,
+                "start_error": Value::Null,
+                "end_error": Value::Null,
+                "start_reason": "",
+                "end_reason": "",
+            }));
+        }
+    };
+    let payload = wb_extract_payload(&parsed);
+
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    // Range-filter the segment query when we have a seq window. Loading 20
+    // rows instead of 2000+ saves several ms on long episodes; production
+    // always supplies first_seq/last_seq from the detected ad block, so this
+    // is the hot path. Fall back to the full fetch only when the caller
+    // didn't supply a window (matches the time-overlap context fallback).
+    let segment_rows = match (args.first_seq, args.last_seq) {
+        (Some(f), Some(l)) => {
+            let lo = f.min(l);
+            let hi = f.max(l);
+            // ±2 mirrors `select_wb_context_segments_wb`; the extra ±2 buffer
+            // on top of that handles LLM payloads whose `refined_*_segment_seq`
+            // lands just outside the detected window.
+            let mut lo_pad = lo - 4;
+            let mut hi_pad = hi + 4;
+            if let Some(s) = payload.start_segment_seq {
+                lo_pad = lo_pad.min(s);
+                hi_pad = hi_pad.max(s);
+            }
+            if let Some(s) = payload.end_segment_seq {
+                lo_pad = lo_pad.min(s);
+                hi_pad = hi_pad.max(s);
+            }
+            query_stats_transcript_segments_in_seq_range(&conn, post.id, lo_pad, hi_pad)?
+        }
+        _ => query_stats_transcript_segments(&conn, post.id)?,
+    };
+
+    // Build segments without word arrays first so the context selector can
+    // run on bare seq/start/end metadata. We only attach the parsed `words`
+    // vectors below for the small set of segments that the resolver actually
+    // looks at — preferred start/end + the ±2 seq context window. On posts
+    // with a multi-MB `transcript_word_timestamps` blob this turns the
+    // per-call cost from "parse the whole JSON" into "parse a handful of
+    // word arrays".
+    let mut segments: Vec<WbSegment> = segment_rows
+        .into_iter()
+        .map(|row| WbSegment {
+            sequence_num: row.sequence_num,
+            start_time: row.start_time,
+            end_time: row.end_time,
+            text: row.text,
+            words: Vec::new(),
+        })
+        .collect();
+
+    let context_refs = select_wb_context_segments_wb(
+        &segments,
+        args.orig_ad_start,
+        args.orig_ad_end,
+        args.first_seq,
+        args.last_seq,
+    );
+    let mut wanted: std::collections::HashSet<i64> =
+        context_refs.iter().map(|s| s.sequence_num).collect();
+    if let Some(seq) = payload.start_segment_seq {
+        wanted.insert(seq);
+    }
+    if let Some(seq) = payload.end_segment_seq {
+        wanted.insert(seq);
+    }
+    drop(context_refs);
+
+    // Skip the multi-MB JSON column entirely when the LLM didn't ask for
+    // phrase/word resolution. `wb_refine_start`/`wb_refine_end` fall back to
+    // pure segment-boundary times in that case, which don't need
+    // `transcript_word_timestamps` at all.
+    let needs_words = wb_has_text(payload.start_phrase.as_deref())
+        || wb_has_text(payload.end_phrase.as_deref())
+        || wb_has_text(payload.start_word.as_deref())
+        || payload.start_word_index.is_some();
+    let words_by_seq = if needs_words {
+        query_wb_word_timestamps_for_seqs(&conn, post.id, &wanted)?
+    } else {
+        HashMap::new()
+    };
+    for seg in &mut segments {
+        if let Some(words) = words_by_seq.get(&seg.sequence_num) {
+            seg.words = words.clone();
+        }
+    }
+
+    let context_refs = select_wb_context_segments_wb(
+        &segments,
+        args.orig_ad_start,
+        args.orig_ad_end,
+        args.first_seq,
+        args.last_seq,
+    );
+
+    let (refined_start, start_changed, start_error) = wb_refine_start(
+        &segments,
+        &context_refs,
+        args.orig_ad_start,
+        payload.start_segment_seq,
+        payload.start_phrase.as_deref(),
+        payload.start_word.as_deref(),
+        payload.start_occurrence.as_deref(),
+        payload.start_word_index,
+    );
+    let (refined_end, end_changed, end_error) = wb_refine_end(
+        &segments,
+        &context_refs,
+        args.orig_ad_end,
+        payload.end_segment_seq,
+        payload.end_phrase.as_deref(),
+    );
+
+    Ok(json!({
+        "parse_status": if salvaged { "salvaged" } else { "ok" },
+        "refined_start": refined_start,
+        "refined_end": refined_end,
+        "start_changed": start_changed,
+        "end_changed": end_changed,
+        "start_error": start_error,
+        "end_error": end_error,
+        "start_reason": payload.start_reason,
+        "end_reason": payload.end_reason,
+    }))
+}
+
+fn select_wb_context_segments_wb(
+    segments: &[WbSegment],
+    ad_start: f64,
+    ad_end: f64,
+    first_seq: Option<i64>,
+    last_seq: Option<i64>,
+) -> Vec<&WbSegment> {
+    if let (Some(first), Some(last)) = (first_seq, last_seq) {
+        if !segments.is_empty() {
+            let min_seq = segments.iter().map(|s| s.sequence_num).min().unwrap();
+            let max_seq = segments.iter().map(|s| s.sequence_num).max().unwrap();
+            let start_seq = min_seq.max(first - 2);
+            let end_seq = max_seq.min(last + 2);
+            let selected: Vec<&WbSegment> = segments
+                .iter()
+                .filter(|s| s.sequence_num >= start_seq && s.sequence_num <= end_seq)
+                .collect();
+            if !selected.is_empty() {
+                return selected;
+            }
+        }
+    }
+    let overlap_idxs: Vec<usize> = segments
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.start_time <= ad_end && s.end_time >= ad_start)
+        .map(|(idx, _)| idx)
+        .collect();
+    if overlap_idxs.is_empty() {
+        return Vec::new();
+    }
+    let first_idx = *overlap_idxs.first().unwrap();
+    let last_idx = *overlap_idxs.last().unwrap();
+    let start_idx = first_idx.saturating_sub(2);
+    let end_idx = (last_idx + 3).min(segments.len());
+    segments[start_idx..end_idx].iter().collect()
+}
+
+/// Read `post.transcript_word_timestamps` (TEXT JSON) and return a per-segment
+/// map keyed by sequence_num. The column is a JSON array of
+/// `{"sequence_num": N, "words": [{"word": ..., "start": ..., "end": ..., "score": ...}, ...]}`.
+fn query_wb_word_timestamps_by_seq(
+    conn: &Connection,
+    post_id: i64,
+) -> Result<HashMap<i64, Vec<Value>>> {
+    let mut stmt =
+        conn.prepare("SELECT transcript_word_timestamps FROM post WHERE id = ?1 LIMIT 1")?;
+    let raw: Option<String> = stmt
+        .query_row([post_id], |row| row.get::<_, Option<String>>(0))
+        .unwrap_or(None);
+    let Some(raw) = raw else {
+        return Ok(HashMap::new());
+    };
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let Some(arr) = parsed.as_array() else {
+        return Ok(HashMap::new());
+    };
+    let mut map: HashMap<i64, Vec<Value>> = HashMap::new();
+    for entry in arr {
+        let seq = match entry.get("sequence_num").and_then(|v| v.as_i64()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let words = match entry.get("words") {
+            Some(Value::Array(items)) => items.clone(),
+            _ => continue,
+        };
+        if !words.is_empty() {
+            map.insert(seq, words);
+        }
+    }
+    Ok(map)
+}
+
+/// Lazy variant of `query_wb_word_timestamps_by_seq`: only materializes the
+/// `Vec<Value>` for the seq numbers in `wanted`. The outer JSON array is
+/// scanned to find each entry's byte boundaries via
+/// `serde_json::value::RawValue`, but the word array itself is only parsed
+/// for entries we actually intend to use. This is the hot path for the
+/// bundled `wb-refine-from-llm` subcommand on posts with multi-megabyte
+/// `transcript_word_timestamps` blobs.
+#[derive(serde::Deserialize)]
+struct WbRawWtEntry {
+    sequence_num: i64,
+    #[serde(default)]
+    words: Option<Box<serde_json::value::RawValue>>,
+}
+
+fn query_wb_word_timestamps_for_seqs(
+    conn: &Connection,
+    post_id: i64,
+    wanted: &std::collections::HashSet<i64>,
+) -> Result<HashMap<i64, Vec<Value>>> {
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut stmt =
+        conn.prepare("SELECT transcript_word_timestamps FROM post WHERE id = ?1 LIMIT 1")?;
+    let raw: Option<String> = stmt
+        .query_row([post_id], |row| row.get::<_, Option<String>>(0))
+        .unwrap_or(None);
+    let Some(raw) = raw else {
+        return Ok(HashMap::new());
+    };
+    let entries: Vec<WbRawWtEntry> = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let mut map: HashMap<i64, Vec<Value>> = HashMap::new();
+    for entry in entries {
+        if !wanted.contains(&entry.sequence_num) {
+            continue;
+        }
+        let Some(raw_words) = entry.words else {
+            continue;
+        };
+        match serde_json::from_str::<Vec<Value>>(raw_words.get()) {
+            Ok(words) if !words.is_empty() => {
+                map.insert(entry.sequence_num, words);
+            }
+            _ => continue,
+        }
+    }
+    Ok(map)
+}
+
+// === Chapter fallback: topic-block builder ported from
+// `src/podcast_processor/chapter_fallback.py:_build_topic_blocks`. Goal is
+// byte-for-byte parity with the Python implementation so retry block counts
+// match. The LLM call itself stays in Python.
+
+fn chapter_seg_start_ms(start_time: f64) -> i64 {
+    (start_time * 1000.0) as i64
+}
+
+fn chapter_seg_end_ms(end_time: f64) -> i64 {
+    (end_time * 1000.0) as i64
+}
+
+fn chapter_transcript_duration_ms(segments: &[StatsTranscriptSegmentRow]) -> Option<i64> {
+    if segments.is_empty() {
+        return None;
+    }
+    let max_end_ms = segments
+        .iter()
+        .map(|s| chapter_seg_end_ms(s.end_time))
+        .max()?;
+    if max_end_ms > 0 {
+        Some(max_end_ms)
+    } else {
+        None
+    }
+}
+
+fn chapter_format_timestamp(ms: i64) -> String {
+    let total_seconds = ms.max(0) / 1000;
+    let hours = total_seconds / 3600;
+    let rem = total_seconds % 3600;
+    let minutes = rem / 60;
+    let seconds = rem % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Collapse runs of whitespace to a single space and trim. Mirrors
+/// `re.sub(r"\s+", " ", text).strip()` for ASCII-and-newlines inputs.
+fn chapter_normalize_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_was_space = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+#[derive(Clone)]
+struct ChapterTopicBlock {
+    start_ms: i64,
+    end_ms: i64,
+    text_parts: Vec<String>,
+    char_count: usize,
+}
+
+fn chapter_build_topic_blocks(
+    segments: &[StatsTranscriptSegmentRow],
+    total_duration_ms: i64,
+    target_block_count: i64,
+    min_block_seconds: i64,
+    max_block_seconds: i64,
+    max_chars_per_block: i64,
+) -> Vec<Value> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let raw_window_ms = (total_duration_ms.max(1)) / target_block_count.max(1);
+    let raw_window_ms = raw_window_ms.max(1);
+    let min_block_ms = (min_block_seconds * 1000).max(1);
+    let max_block_ms = (max_block_seconds * 1000).max(min_block_ms);
+    let mut block_window_ms = max_block_ms.min(min_block_ms.max(raw_window_ms));
+    // Round up to the nearest 30s for cleaner boundaries.
+    let round_ms: i64 = 30_000;
+    block_window_ms = round_ms.max(((block_window_ms + round_ms - 1) / round_ms) * round_ms);
+    block_window_ms = max_block_ms.min(block_window_ms);
+
+    let max_chars = max_chars_per_block.max(0) as usize;
+
+    let mut blocks: Vec<ChapterTopicBlock> = Vec::new();
+    let mut current: Option<ChapterTopicBlock> = None;
+
+    let flush = |current: &mut Option<ChapterTopicBlock>, blocks: &mut Vec<ChapterTopicBlock>| {
+        if let Some(b) = current.take() {
+            blocks.push(b);
+        }
+    };
+
+    for seg in segments {
+        let seg_start_ms = chapter_seg_start_ms(seg.start_time);
+        let seg_end_ms = chapter_seg_end_ms(seg.end_time).max(seg_start_ms);
+        let seg_text = chapter_normalize_whitespace(&seg.text);
+
+        if let Some(ref mut block) = current {
+            if seg_start_ms - block.start_ms >= block_window_ms {
+                flush(&mut current, &mut blocks);
+                current = Some(ChapterTopicBlock {
+                    start_ms: seg_start_ms,
+                    end_ms: seg_end_ms,
+                    text_parts: Vec::new(),
+                    char_count: 0,
+                });
+            } else {
+                block.end_ms = block.end_ms.max(seg_end_ms);
+            }
+        } else {
+            current = Some(ChapterTopicBlock {
+                start_ms: seg_start_ms,
+                end_ms: seg_end_ms,
+                text_parts: Vec::new(),
+                char_count: 0,
+            });
+        }
+
+        if seg_text.is_empty() {
+            continue;
+        }
+        let block = current.as_mut().unwrap();
+        let remaining = max_chars.saturating_sub(block.char_count);
+        if remaining == 0 {
+            continue;
+        }
+        // Char-cap clipping uses Python `str` slicing, which on the actual
+        // workload is plain ASCII transcript text. Clip on char boundaries to
+        // avoid panicking on multi-byte UTF-8.
+        let mut clipped: String = seg_text.chars().take(remaining).collect();
+        clipped = clipped.trim().to_string();
+        if clipped.is_empty() {
+            continue;
+        }
+        block.char_count += clipped.chars().count() + 1;
+        block.text_parts.push(clipped);
+    }
+
+    flush(&mut current, &mut blocks);
+
+    // Mirror Python's "remove empty blocks when possible; keep at least one".
+    let mut out: Vec<Value> = Vec::with_capacity(blocks.len());
+    let mut nonempty_indices: Vec<usize> = Vec::with_capacity(blocks.len());
+    for (idx, b) in blocks.iter().enumerate() {
+        let text = b.text_parts.join(" ").trim().to_string();
+        if !text.is_empty() {
+            nonempty_indices.push(idx);
+        }
+    }
+    let keep_indices: Vec<usize> = if nonempty_indices.is_empty() {
+        if blocks.is_empty() {
+            Vec::new()
+        } else {
+            vec![0]
+        }
+    } else {
+        nonempty_indices
+    };
+
+    for (new_idx, &orig_idx) in keep_indices.iter().enumerate() {
+        let b = &blocks[orig_idx];
+        let text = b.text_parts.join(" ").trim().to_string();
+        out.push(json!({
+            "block_index": new_idx as i64,
+            "start_ms": b.start_ms,
+            "end_ms": b.end_ms.max(b.start_ms),
+            "timestamp": chapter_format_timestamp(b.start_ms),
+            "text": text,
+        }));
+    }
+    out
+}
+
+/// Decode the JSON list of removed audio windows produced by Python's
+/// `_filter_transcript_segments_for_chapters` caller. Accepted shapes:
+///   `[[start_ms, end_ms], ...]`  (preferred — matches the existing
+///   `_windows_json_file` writer used by the audio sidecar paths)
+///   `[{"start_ms": N, "end_ms": M}, ...]`
+fn read_chapter_removed_windows(path: &Path) -> Result<Vec<(i64, i64)>> {
+    let raw = std::fs::read_to_string(path)?;
+    let parsed: Value = serde_json::from_str(&raw)?;
+    let arr = match parsed.as_array() {
+        Some(arr) => arr,
+        None => return Ok(Vec::new()),
+    };
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        if let Some(pair) = entry.as_array() {
+            if pair.len() >= 2 {
+                let start = pair[0]
+                    .as_i64()
+                    .or_else(|| pair[0].as_f64().map(|v| v as i64));
+                let end = pair[1]
+                    .as_i64()
+                    .or_else(|| pair[1].as_f64().map(|v| v as i64));
+                if let (Some(s), Some(e)) = (start, end) {
+                    out.push((s, e));
+                }
+            }
+        } else if let Some(obj) = entry.as_object() {
+            let start = obj.get("start_ms").and_then(|v| v.as_i64());
+            let end = obj.get("end_ms").and_then(|v| v.as_i64());
+            if let (Some(s), Some(e)) = (start, end) {
+                out.push((s, e));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn filter_segments_by_removed_windows(
+    segments: &[StatsTranscriptSegmentRow],
+    removed_windows: &[(i64, i64)],
+) -> Vec<StatsTranscriptSegmentRow> {
+    let mut sorted_windows = removed_windows.to_vec();
+    sorted_windows.sort_by_key(|w| w.0);
+    let mut kept: Vec<StatsTranscriptSegmentRow> = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let seg_start_ms = chapter_seg_start_ms(seg.start_time);
+        let seg_end_ms = chapter_seg_end_ms(seg.end_time).max(seg_start_ms);
+        if segment_overlaps_removed_windows(seg_start_ms, seg_end_ms, &sorted_windows) {
+            continue;
+        }
+        kept.push(seg.clone());
+    }
+    kept
+}
+
+/// Mirror of `_segment_overlaps_removed_audio`: walks windows in sorted order
+/// and returns true on the first window that overlaps the segment.
+fn segment_overlaps_removed_windows(
+    seg_start_ms: i64,
+    seg_end_ms: i64,
+    sorted_windows: &[(i64, i64)],
+) -> bool {
+    for (removed_start, removed_end) in sorted_windows {
+        if *removed_end <= seg_start_ms {
+            continue;
+        }
+        if *removed_start >= seg_end_ms {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+fn run_chapters_topic_blocks(args: ChaptersTopicBlocksArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let mut segments = query_stats_transcript_segments(&conn, post.id)?;
+    // Python sorts by start_time before block-building; sequence_num order is
+    // usually identical but not guaranteed (e.g. after a re-transcription).
+    segments.sort_by(|a, b| {
+        a.start_time
+            .partial_cmp(&b.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if let Some(path) = args.removed_windows_json.as_ref() {
+        let removed_windows = read_chapter_removed_windows(path)
+            .with_context(|| format!("failed to read removed windows {}", path.display()))?;
+        if !removed_windows.is_empty() {
+            let filtered = filter_segments_by_removed_windows(&segments, &removed_windows);
+            // Parity with Python: if the filter would empty the set, keep the
+            // original unfiltered segments.
+            if !filtered.is_empty() {
+                segments = filtered;
+            }
+        }
+    }
+
+    let total_duration_ms = args
+        .total_duration_ms
+        .or_else(|| chapter_transcript_duration_ms(&segments));
+    let Some(total_duration_ms) = total_duration_ms else {
+        return Ok(json!({"blocks": []}));
+    };
+    if total_duration_ms <= 0 {
+        return Ok(json!({"blocks": []}));
+    }
+    let blocks = chapter_build_topic_blocks(
+        &segments,
+        total_duration_ms,
+        args.target_block_count,
+        args.min_block_seconds,
+        args.max_block_seconds,
+        args.max_chars_per_block,
+    );
+    Ok(json!({"blocks": blocks}))
+}
+
+// === Chapter fallback: topic-plan response parser. Mirrors
+// `_parse_topic_chapter_response` and its salvage helpers in
+// `src/podcast_processor/chapter_fallback.py`. All operations are on small
+// (<10 KB) LLM responses; the win here is keeping that small allocation off
+// the Python heap.
+
+fn topic_plan_extract_count_from_text(content: &str) -> Option<i64> {
+    let pattern = regex::Regex::new(r#""chapter_count"\s*:\s*(-?\d+)"#).ok()?;
+    let captures = pattern.captures(content)?;
+    let raw = captures.get(1)?.as_str();
+    let parsed: i64 = raw.parse().ok()?;
+    if parsed < 0 {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+fn topic_plan_coerce_count(value: &Value) -> Option<i64> {
+    let parsed = if let Some(n) = value.as_i64() {
+        n
+    } else if let Some(s) = value.as_str() {
+        s.parse::<i64>().ok()?
+    } else if let Some(f) = value.as_f64() {
+        // Match Python's int(value) coercion for floats: truncate toward zero.
+        f as i64
+    } else {
+        return None;
+    };
+    if parsed < 0 {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+fn topic_plan_strip_code_fences(text: &str) -> String {
+    let leading = regex::Regex::new(r"(?i)^```(?:json)?\s*").unwrap();
+    let trailing = regex::Regex::new(r"\s*```$").unwrap();
+    let trimmed = text.trim();
+    let after_leading = leading.replace(trimmed, "");
+    let after_trailing = trailing.replace(&after_leading, "");
+    after_trailing.to_string()
+}
+
+fn topic_plan_salvage(content: &str) -> Vec<(i64, String)> {
+    let text = content.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    // Same regex as Python `_salvage_topic_chapter_response` — match a
+    // `block_index` + `title` pair, tolerating JSON-style backslash escapes
+    // inside the title.
+    let pattern =
+        regex::Regex::new(r#""block_index"\s*:\s*(-?\d+)\s*,\s*"title"\s*:\s*"((?:[^"\\]|\\.)*)""#)
+            .expect("static regex compiles");
+
+    let mut out: Vec<(i64, String)> = Vec::new();
+    for caps in pattern.captures_iter(text) {
+        let Some(idx_match) = caps.get(1) else {
+            continue;
+        };
+        let Some(title_match) = caps.get(2) else {
+            continue;
+        };
+        let Ok(block_index) = idx_match.as_str().parse::<i64>() else {
+            continue;
+        };
+        let raw_title = title_match.as_str();
+        // Run the title through JSON string decoding so escape sequences
+        // (\n, \", \uXXXX, etc.) match Python's `json.loads(f'"{raw}"')`.
+        let title = match serde_json::from_str::<String>(&format!("\"{raw_title}\"")) {
+            Ok(decoded) => decoded,
+            Err(_) => raw_title.to_string(),
+        };
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        out.push((block_index, title));
+    }
+
+    let mut deduped: Vec<(i64, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (idx, title) in out {
+        if !seen.insert(idx) {
+            continue;
+        }
+        deduped.push((idx, title));
+    }
+    deduped
+}
+
+#[derive(Clone)]
+struct TopicPlanParseResult {
+    entries: Vec<(i64, String)>,
+    expected_count: Option<i64>,
+    /// True when the response only parsed after salvage, signalling a
+    /// truncation/repair path the Python wrapper logs at WARN.
+    salvaged: bool,
+    /// True when `chapter_count` from the parsed JSON disagreed with the
+    /// number of `chapters[]` entries the model returned.
+    count_mismatch: bool,
+}
+
+fn parse_topic_chapter_plan(content: &str) -> TopicPlanParseResult {
+    let text = content.trim();
+    if text.is_empty() {
+        return TopicPlanParseResult {
+            entries: Vec::new(),
+            expected_count: None,
+            salvaged: false,
+            count_mismatch: false,
+        };
+    }
+
+    let unfenced = topic_plan_strip_code_fences(text);
+    let mut expected_count = topic_plan_extract_count_from_text(&unfenced);
+
+    let parsed: serde_json::Result<Value> = serde_json::from_str(&unfenced);
+    let data = match parsed {
+        Ok(v) => v,
+        Err(_) => {
+            let salvaged = topic_plan_salvage(&unfenced);
+            return TopicPlanParseResult {
+                entries: salvaged,
+                expected_count,
+                salvaged: true,
+                count_mismatch: false,
+            };
+        }
+    };
+
+    let items = match data
+        .as_object()
+        .and_then(|obj| obj.get("chapters"))
+        .and_then(|v| v.as_array())
+    {
+        Some(items) => items,
+        None => {
+            return TopicPlanParseResult {
+                entries: Vec::new(),
+                expected_count,
+                salvaged: false,
+                count_mismatch: false,
+            };
+        }
+    };
+
+    // Prefer the top-level `chapter_count` once we have parsed JSON; the
+    // regex-from-text version was only a fallback for un-parseable payloads.
+    if let Some(count_value) = data.as_object().and_then(|obj| obj.get("chapter_count")) {
+        let coerced = topic_plan_coerce_count(count_value);
+        if coerced.is_some() {
+            expected_count = coerced;
+        } else {
+            expected_count = None;
+        }
+    }
+
+    let mut entries: Vec<(i64, String)> = Vec::with_capacity(items.len());
+    for item in items {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let block_index_value = match obj.get("block_index") {
+            Some(v) => v,
+            None => continue,
+        };
+        let block_index = if let Some(n) = block_index_value.as_i64() {
+            n
+        } else if let Some(s) = block_index_value.as_str() {
+            match s.parse::<i64>() {
+                Ok(n) => n,
+                Err(_) => continue,
+            }
+        } else if let Some(f) = block_index_value.as_f64() {
+            f as i64
+        } else {
+            continue;
+        };
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        entries.push((block_index, title));
+    }
+
+    let count_mismatch =
+        expected_count.is_some() && expected_count.unwrap() != (entries.len() as i64);
+
+    TopicPlanParseResult {
+        entries,
+        expected_count,
+        salvaged: false,
+        count_mismatch,
+    }
+}
+
+fn run_chapters_topic_plan_parse(args: ChaptersTopicPlanParseArgs) -> Result<Value> {
+    let content = std::fs::read_to_string(&args.input)
+        .with_context(|| format!("failed to read topic-plan input {}", args.input.display()))?;
+    let result = parse_topic_chapter_plan(&content);
+    let entries: Vec<Value> = result
+        .entries
+        .iter()
+        .map(|(idx, title)| json!([idx, title]))
+        .collect();
+    Ok(json!({
+        "entries": entries,
+        "expected_count": result.expected_count,
+        "salvaged": result.salvaged,
+        "count_mismatch": result.count_mismatch,
+    }))
+}
+
+// === Chapter fallback: topic-plan-apply. Mirrors
+// `_chapters_from_topic_plan` + `_normalize_topic_plan_entries` +
+// `_filter_topic_plan_entries` + `_build_chapters_from_filtered_topic_plan`
+// + `_chapter_title_from_text` in `chapter_fallback.py`.
+
+#[derive(Clone)]
+struct TopicPlanApplyBlock {
+    block_index: i64,
+    start_ms: i64,
+    text: String,
+}
+
+fn chapter_title_from_text(text: &str, index: i64) -> String {
+    let normalized = chapter_normalize_whitespace(text);
+    // Strip leading non-word characters; matches Python `re.sub(r"^[^\w]+", "", ...)`.
+    let leading = regex::Regex::new(r"^[^\w]+").unwrap();
+    let normalized = leading.replace(&normalized, "").to_string();
+    if normalized.is_empty() {
+        return format!("Chapter {index}");
+    }
+    let words: Vec<&str> = normalized.split(' ').collect();
+    let take = words.len().min(8);
+    let joined = words[..take].join(" ");
+    let title = joined
+        .trim_matches(|c: char| " -:,.".contains(c))
+        .to_string();
+    if title.is_empty() {
+        return format!("Chapter {index}");
+    }
+    if words.len() > 8 {
+        format!("{title}...")
+    } else {
+        title
+    }
+}
+
+fn normalize_topic_plan_entries(
+    plan: &[(i64, String)],
+    block_map: &std::collections::HashMap<i64, TopicPlanApplyBlock>,
+) -> Vec<(i64, String)> {
+    let mut sorted = plan.to_vec();
+    sorted.sort_by_key(|entry| entry.0);
+
+    let mut normalized: Vec<(i64, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (block_index, title) in sorted {
+        if !block_map.contains_key(&block_index) {
+            continue;
+        }
+        if !seen.insert(block_index) {
+            continue;
+        }
+        normalized.push((block_index, title));
+    }
+
+    if normalized.is_empty() {
+        return normalized;
+    }
+
+    if normalized[0].0 != 0 {
+        if let Some(block_zero) = block_map.get(&0) {
+            let first_text = &block_zero.text;
+            normalized.insert(0, (0, chapter_title_from_text(first_text, 1)));
+        }
+    }
+    normalized
+}
+
+fn filter_topic_plan_entries(
+    normalized: &[(i64, String)],
+    block_map: &std::collections::HashMap<i64, TopicPlanApplyBlock>,
+    min_chapter_gap_ms: i64,
+) -> Vec<(i64, String)> {
+    let mut filtered: Vec<(i64, String)> = Vec::new();
+    let mut last_start_ms: Option<i64> = None;
+    let last_candidate_block_index = match normalized.last() {
+        Some(entry) => entry.0,
+        None => return filtered,
+    };
+
+    for (block_index, title) in normalized {
+        let block = match block_map.get(block_index) {
+            Some(b) => b,
+            None => continue,
+        };
+        let start_ms = block.start_ms;
+        if !filtered.is_empty() {
+            if let Some(last) = last_start_ms {
+                let gap_ms = start_ms - last;
+                let is_last_candidate = *block_index == last_candidate_block_index;
+                if gap_ms < min_chapter_gap_ms && !is_last_candidate {
+                    continue;
+                }
+            }
+        }
+        filtered.push((*block_index, title.clone()));
+        last_start_ms = Some(start_ms);
+    }
+    filtered
+}
+
+fn build_chapters_from_filtered_topic_plan(
+    filtered: &[(i64, String)],
+    block_map: &std::collections::HashMap<i64, TopicPlanApplyBlock>,
+    total_duration_ms: i64,
+) -> Vec<Value> {
+    let mut chapters: Vec<Value> = Vec::with_capacity(filtered.len());
+    for (idx, (block_index, title)) in filtered.iter().enumerate() {
+        let block = match block_map.get(block_index) {
+            Some(b) => b,
+            None => continue,
+        };
+        let start_ms = block.start_ms;
+        let next_start_ms = if idx + 1 < filtered.len() {
+            block_map
+                .get(&filtered[idx + 1].0)
+                .map(|b| b.start_ms)
+                .unwrap_or(total_duration_ms)
+        } else {
+            total_duration_ms
+        };
+        let trimmed = title.trim().to_string();
+        let title_value = if !trimmed.is_empty() {
+            trimmed
+        } else {
+            chapter_title_from_text(&block.text, (idx + 1) as i64)
+        };
+        chapters.push(json!({
+            "element_id": format!("tgen{idx}"),
+            "title": title_value,
+            "start_time_ms": start_ms.max(0),
+            "end_time_ms": start_ms.max(next_start_ms),
+        }));
+    }
+    chapters
+}
+
+fn chapters_from_topic_plan(
+    plan: &[(i64, String)],
+    blocks: &[TopicPlanApplyBlock],
+    total_duration_ms: i64,
+    min_chapter_gap_ms: i64,
+) -> Vec<Value> {
+    if plan.is_empty() || blocks.is_empty() {
+        return Vec::new();
+    }
+    let mut block_map: std::collections::HashMap<i64, TopicPlanApplyBlock> =
+        std::collections::HashMap::with_capacity(blocks.len());
+    for block in blocks {
+        block_map.insert(block.block_index, block.clone());
+    }
+
+    let normalized = normalize_topic_plan_entries(plan, &block_map);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let filtered = filter_topic_plan_entries(&normalized, &block_map, min_chapter_gap_ms);
+    if filtered.is_empty() {
+        return Vec::new();
+    }
+    // Mirror Python: a single chapter for a long episode is treated as a
+    // failure so the caller can fall back to the heuristic split.
+    if filtered.len() == 1 && total_duration_ms >= 20 * 60 * 1000 {
+        return Vec::new();
+    }
+    build_chapters_from_filtered_topic_plan(&filtered, &block_map, total_duration_ms)
+}
+
+fn run_chapters_topic_plan_apply(args: ChaptersTopicPlanApplyArgs) -> Result<Value> {
+    let raw = std::fs::read_to_string(&args.input).with_context(|| {
+        format!(
+            "failed to read topic-plan-apply input {}",
+            args.input.display()
+        )
+    })?;
+    let payload: Value =
+        serde_json::from_str(&raw).with_context(|| "topic-plan-apply input was not valid JSON")?;
+
+    let plan: Vec<(i64, String)> = payload
+        .get("plan")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let pair = entry.as_array()?;
+                    if pair.len() < 2 {
+                        return None;
+                    }
+                    let idx = pair[0].as_i64()?;
+                    let title = pair[1].as_str().unwrap_or("").to_string();
+                    Some((idx, title))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let blocks: Vec<TopicPlanApplyBlock> = payload
+        .get("blocks")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let obj = entry.as_object()?;
+                    Some(TopicPlanApplyBlock {
+                        block_index: obj.get("block_index")?.as_i64()?,
+                        start_ms: obj.get("start_ms")?.as_i64()?,
+                        text: obj
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let total_duration_ms = payload
+        .get("total_duration_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let min_chapter_gap_ms = payload
+        .get("min_chapter_gap_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let chapters = chapters_from_topic_plan(&plan, &blocks, total_duration_ms, min_chapter_gap_ms);
+    Ok(json!({"chapters": chapters}))
 }
 
 fn run_transcript_ad_merge(args: TranscriptAdMergeArgs) -> Result<Value> {
@@ -1224,6 +3346,37 @@ fn query_stats_transcript_segments(
          FROM transcript_segment WHERE post_id = ?1 ORDER BY sequence_num",
     )?;
     let rows = stmt.query_map([post_id], |row| {
+        Ok(StatsTranscriptSegmentRow {
+            id: row.get(0)?,
+            sequence_num: row.get(1)?,
+            start_time: row.get(2)?,
+            end_time: row.get(3)?,
+            text: row.get(4)?,
+            speaker_label: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Range-filtered variant used by the bundled `wb-refine-from-llm` path.
+/// Production always supplies `first_seq` / `last_seq` from the detected ad
+/// block, so we can skip loading the thousands of out-of-window rows. The
+/// ±2 padding matches `select_wb_context_segments_wb`; the extra
+/// `preferred_*` slots accommodate LLM payloads whose `refined_*_segment_seq`
+/// lands one or two seqs outside the window.
+fn query_stats_transcript_segments_in_seq_range(
+    conn: &Connection,
+    post_id: i64,
+    low: i64,
+    high: i64,
+) -> Result<Vec<StatsTranscriptSegmentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, sequence_num, start_time, end_time, text, speaker_label
+         FROM transcript_segment
+         WHERE post_id = ?1 AND sequence_num BETWEEN ?2 AND ?3
+         ORDER BY sequence_num",
+    )?;
+    let rows = stmt.query_map([post_id, low, high], |row| {
         Ok(StatsTranscriptSegmentRow {
             id: row.get(0)?,
             sequence_num: row.get(1)?,
@@ -5084,5 +7237,908 @@ mod tests {
         assert_eq!(run["running_jobs"], 0);
         // 1/1 * 100 = 100.0
         assert!((run["progress_percentage"].as_f64().unwrap() - 100.0).abs() < 0.01);
+    }
+
+    fn seg(seq: i64, start: f64, end: f64) -> StatsTranscriptSegmentRow {
+        StatsTranscriptSegmentRow {
+            id: seq,
+            sequence_num: seq,
+            start_time: start,
+            end_time: end,
+            text: format!("seg{seq}"),
+            speaker_label: None,
+        }
+    }
+
+    #[test]
+    fn wb_context_uses_seq_window_when_provided() {
+        let segments: Vec<_> = (0..10)
+            .map(|i| seg(i, i as f64 * 10.0, i as f64 * 10.0 + 9.0))
+            .collect();
+        let selected = select_wb_context_segments(&segments, 100.0, 110.0, Some(5), Some(6));
+        let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
+        // start_seq = max(0, 5-2)=3, end_seq = min(9, 6+2)=8 → [3..=8]
+        assert_eq!(seq_nums, vec![3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn wb_context_clamps_seq_window_to_available_range() {
+        let segments: Vec<_> = (5..10)
+            .map(|i| seg(i, i as f64 * 10.0, i as f64 * 10.0 + 9.0))
+            .collect();
+        // first_seq-2 = 3 < min_seq(5), last_seq+2 = 102 > max_seq(9)
+        let selected = select_wb_context_segments(&segments, 0.0, 0.0, Some(5), Some(100));
+        let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
+        assert_eq!(seq_nums, vec![5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn wb_context_falls_back_to_time_overlap_without_seq_window() {
+        let segments = vec![
+            seg(0, 0.0, 10.0),
+            seg(1, 10.0, 20.0),
+            seg(2, 20.0, 30.0),
+            seg(3, 30.0, 40.0),
+            seg(4, 40.0, 50.0),
+            seg(5, 50.0, 60.0),
+            seg(6, 60.0, 70.0),
+            seg(7, 70.0, 80.0),
+        ];
+        // ad 32-37 overlaps only seg 3 → window [max(0,3-2)..min(8,3+3)] = [1..6]
+        let selected = select_wb_context_segments(&segments, 32.0, 37.0, None, None);
+        let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
+        assert_eq!(seq_nums, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn wb_context_time_overlap_spans_multiple_segments() {
+        let segments = vec![
+            seg(0, 0.0, 10.0),
+            seg(1, 10.0, 20.0),
+            seg(2, 20.0, 30.0),
+            seg(3, 30.0, 40.0),
+            seg(4, 40.0, 50.0),
+        ];
+        // ad 15-35 overlaps segs 1,2,3 → first=1,last=3 → [max(0,-1)..min(5,6)] = [0..5]
+        let selected = select_wb_context_segments(&segments, 15.0, 35.0, None, None);
+        let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
+        assert_eq!(seq_nums, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn wb_context_returns_empty_when_no_overlap_and_no_seq_window() {
+        let segments = vec![seg(0, 0.0, 10.0), seg(1, 10.0, 20.0)];
+        let selected = select_wb_context_segments(&segments, 100.0, 110.0, None, None);
+        assert!(selected.is_empty());
+    }
+
+    fn wb_word_value(word: &str, start: f64, end: f64) -> Value {
+        json!({"word": word, "start": start, "end": end})
+    }
+
+    fn wb_seg_with_words(
+        seq: i64,
+        start: f64,
+        end: f64,
+        text: &str,
+        words: Vec<Value>,
+    ) -> WbSegment {
+        WbSegment {
+            sequence_num: seq,
+            start_time: start,
+            end_time: end,
+            text: text.to_string(),
+            words,
+        }
+    }
+
+    #[test]
+    fn wb_normalize_token_strips_edge_punctuation_and_keeps_internal_apostrophe() {
+        assert_eq!(wb_normalize_token("(brought"), "brought");
+        assert_eq!(wb_normalize_token("you..."), "you");
+        assert_eq!(wb_normalize_token("don't"), "don't");
+        assert_eq!(wb_normalize_token(",,,"), "");
+    }
+
+    #[test]
+    fn wb_split_words_normalizes_each_token() {
+        assert_eq!(
+            wb_split_words_lower("(brought to you, by a Sponsor!"),
+            vec!["brought", "to", "you", "by", "a", "sponsor"]
+        );
+    }
+
+    #[test]
+    fn wb_find_phrase_match_returns_first_for_start_and_last_for_end() {
+        let words: Vec<String> = ["alpha", "beta", "gamma", "beta", "delta"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let phrase: Vec<String> = ["beta"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            wb_find_phrase_match(&words, &phrase, false, 4),
+            Some((1, 1))
+        );
+        assert_eq!(wb_find_phrase_match(&words, &phrase, true, 4), Some((3, 3)));
+    }
+
+    #[test]
+    fn wb_find_phrase_match_shrinks_to_partial_when_full_not_found() {
+        let words: Vec<String> = ["the", "quick", "brown", "fox"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Full phrase "quick fast brown" doesn't fit, but "quick" should match.
+        let phrase: Vec<String> = ["quick", "fast", "brown"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            wb_find_phrase_match(&words, &phrase, false, 4),
+            Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn wb_estimate_phrase_time_prefers_exact_word_timestamps() {
+        let words = vec![
+            wb_word_value("this", 100.0, 100.4),
+            wb_word_value("is", 100.4, 100.8),
+            wb_word_value("brought", 100.8, 101.3),
+            wb_word_value("to", 101.3, 101.5),
+            wb_word_value("you", 101.5, 101.9),
+            wb_word_value("by", 101.9, 102.1),
+            wb_word_value("a", 102.1, 102.2),
+            wb_word_value("sponsor", 104.75, 105.4),
+            wb_word_value("today", 105.4, 106.0),
+        ];
+        let seg = wb_seg_with_words(
+            12,
+            100.0,
+            110.0,
+            "this is brought to you by a sponsor today",
+            words,
+        );
+        let segments = [seg];
+        let phrase_tokens = wb_split_words_lower("sponsor today");
+        let est = wb_estimate_phrase_time_for_segment(&segments[0], &phrase_tokens, false);
+        assert_eq!(est, Some(104.75));
+    }
+
+    #[test]
+    fn wb_estimate_phrase_time_returns_none_when_phrase_missing() {
+        let seg = wb_seg_with_words(12, 100.0, 110.0, "hello world", Vec::new());
+        let segments = vec![seg];
+        let est =
+            wb_estimate_phrase_time(&segments, &[], Some(12), Some("not in the segment"), false);
+        assert!(est.is_none());
+    }
+
+    #[test]
+    fn wb_refine_start_clamps_to_max_extension_floor() {
+        // Phrase exists but resolves way earlier than orig_ad_start - 30.
+        // Without clamp the estimated start would be 0.0; clamp must keep
+        // refined_start within 30s of orig.
+        let words = vec![
+            wb_word_value("sponsor", 0.0, 0.5),
+            wb_word_value("today", 0.5, 1.0),
+        ];
+        let seg = wb_seg_with_words(5, 0.0, 1.0, "sponsor today", words);
+        let segments = vec![seg];
+        let (refined, changed, err) = wb_refine_start(
+            &segments,
+            &[],
+            100.0,
+            Some(5),
+            Some("sponsor"),
+            None,
+            None,
+            None,
+        );
+        assert!(err.is_none());
+        assert!(changed);
+        // 100 - 30 = 70 is the floor.
+        assert!((refined - 70.0).abs() < 1e-9, "got {refined}");
+    }
+
+    #[test]
+    fn wb_refine_end_clamps_to_max_extension_ceiling() {
+        // Phrase resolves well beyond orig + 15; clamp must cap it.
+        let words = vec![
+            wb_word_value("thanks", 200.0, 200.5),
+            wb_word_value("for", 200.5, 201.0),
+            wb_word_value("listening", 201.0, 201.5),
+        ];
+        let seg = wb_seg_with_words(7, 200.0, 201.5, "thanks for listening", words);
+        let segments = vec![seg];
+        let (refined, changed, err) =
+            wb_refine_end(&segments, &[], 100.0, Some(7), Some("listening"));
+        assert!(err.is_none());
+        assert!(changed);
+        // 100 + 15 = 115 is the ceiling.
+        assert!((refined - 115.0).abs() < 1e-9, "got {refined}");
+    }
+
+    #[test]
+    fn wb_refine_from_llm_returns_refined_window_for_well_formed_response() {
+        let words_start = vec![
+            wb_word_value("this", 100.0, 100.5),
+            wb_word_value("episode", 100.5, 101.0),
+            wb_word_value("is", 101.0, 101.2),
+            wb_word_value("brought", 101.2, 101.6),
+            wb_word_value("to", 101.6, 101.8),
+            wb_word_value("you", 101.8, 102.0),
+            wb_word_value("by", 102.0, 102.3),
+        ];
+        let words_end = vec![
+            wb_word_value("thanks", 130.0, 130.4),
+            wb_word_value("for", 130.4, 130.7),
+            wb_word_value("listening", 130.7, 131.5),
+            wb_word_value("folks", 131.5, 132.0),
+        ];
+        let segments = vec![
+            wb_seg_with_words(
+                100,
+                100.0,
+                110.0,
+                "this episode is brought to you by",
+                words_start,
+            ),
+            wb_seg_with_words(101, 125.0, 132.0, "thanks for listening folks", words_end),
+        ];
+        let content = r#"{
+            "refined_start_segment_seq": 100,
+            "refined_start_phrase": "brought to you by",
+            "refined_end_segment_seq": 101,
+            "refined_end_phrase": "thanks for listening",
+            "start_adjustment_reason": "sponsor lead-in",
+            "end_adjustment_reason": "sign-off"
+        }"#;
+
+        let result =
+            wb_refine_from_llm_inner(&segments, content, 105.0, 128.0, Some(100), Some(101));
+
+        assert_eq!(result["parse_status"], "ok");
+        assert_eq!(result["start_changed"], true);
+        assert_eq!(result["end_changed"], true);
+        assert!(result["start_error"].is_null());
+        assert!(result["end_error"].is_null());
+        assert_eq!(result["start_reason"], "sponsor lead-in");
+        assert_eq!(result["end_reason"], "sign-off");
+        let refined_start = result["refined_start"].as_f64().unwrap();
+        let refined_end = result["refined_end"].as_f64().unwrap();
+        assert!((refined_start - 101.2).abs() < 1e-6, "got {refined_start}");
+        assert!((refined_end - 131.5).abs() < 1e-6, "got {refined_end}");
+    }
+
+    #[test]
+    fn wb_refine_from_llm_falls_back_when_llm_json_unparseable() {
+        let segments = vec![wb_seg_with_words(5, 0.0, 1.0, "x", Vec::new())];
+        let result =
+            wb_refine_from_llm_inner(&segments, "this is not json at all", 7.0, 12.0, None, None);
+        assert_eq!(result["parse_status"], "failed");
+        assert_eq!(result["refined_start"].as_f64().unwrap(), 7.0);
+        assert_eq!(result["refined_end"].as_f64().unwrap(), 12.0);
+        assert_eq!(result["start_changed"], false);
+        assert_eq!(result["end_changed"], false);
+    }
+
+    #[test]
+    fn wb_refine_from_llm_flags_salvaged_partial_fields() {
+        // Truncated mid-key: only the start segment seq + phrase survive the
+        // regex salvage. Force the salvage path and assert the wrapper marks
+        // it accordingly.
+        let words = vec![
+            wb_word_value("we", 12.0, 12.5),
+            wb_word_value("got", 12.5, 12.8),
+            wb_word_value("to", 12.8, 13.0),
+            wb_word_value("take", 13.0, 13.4),
+        ];
+        let segments = vec![wb_seg_with_words(
+            1356,
+            12.0,
+            15.0,
+            "we got to take a quick pause",
+            words,
+        )];
+        let truncated = r#"garbage prefix "refined_start_segment_seq": 1356, "refined_start_phrase": "we got to take", more garbage"#;
+        let result =
+            wb_refine_from_llm_inner(&segments, truncated, 14.0, 18.0, Some(1356), Some(1356));
+        assert_eq!(result["parse_status"], "salvaged");
+        // Start refines to the "we" word time, clamped to orig - 30.
+        let refined_start = result["refined_start"].as_f64().unwrap();
+        assert!((refined_start - 12.0).abs() < 1e-6, "got {refined_start}");
+        assert_eq!(result["start_changed"], true);
+    }
+
+    #[test]
+    fn wb_refine_from_llm_clamps_to_max_extension() {
+        // Phrase resolves way before orig - 30; clamp must hold.
+        let words = vec![
+            wb_word_value("sponsor", 0.0, 0.5),
+            wb_word_value("today", 0.5, 1.0),
+        ];
+        let segments = vec![wb_seg_with_words(5, 0.0, 1.0, "sponsor today", words)];
+        let content = r#"{
+            "refined_start_segment_seq": 5,
+            "refined_start_phrase": "sponsor",
+            "refined_end_segment_seq": 5,
+            "refined_end_phrase": null,
+            "start_adjustment_reason": "x",
+            "end_adjustment_reason": "y"
+        }"#;
+        let result = wb_refine_from_llm_inner(&segments, content, 100.0, 110.0, Some(5), Some(5));
+        assert_eq!(result["parse_status"], "ok");
+        let refined_start = result["refined_start"].as_f64().unwrap();
+        assert!((refined_start - 70.0).abs() < 1e-9, "got {refined_start}");
+    }
+
+    #[test]
+    fn wb_refine_start_reports_phrase_not_found() {
+        let seg = wb_seg_with_words(5, 100.0, 110.0, "hello there", Vec::new());
+        let segments = vec![seg];
+        let (refined, changed, err) = wb_refine_start(
+            &segments,
+            &[],
+            100.0,
+            Some(5),
+            Some("absent phrase"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(refined, 100.0);
+        assert!(!changed);
+        assert_eq!(err.as_deref(), Some("start_phrase_not_found"));
+    }
+
+    fn chapter_seg(seq: i64, start_s: f64, end_s: f64, text: &str) -> StatsTranscriptSegmentRow {
+        StatsTranscriptSegmentRow {
+            id: seq,
+            sequence_num: seq,
+            start_time: start_s,
+            end_time: end_s,
+            text: text.to_string(),
+            speaker_label: None,
+        }
+    }
+
+    #[test]
+    fn chapter_format_timestamp_matches_python_shape() {
+        assert_eq!(chapter_format_timestamp(0), "00:00");
+        assert_eq!(chapter_format_timestamp(65_000), "01:05");
+        assert_eq!(chapter_format_timestamp(3_665_000), "1:01:05");
+    }
+
+    #[test]
+    fn chapter_topic_blocks_groups_segments_into_target_size_windows() {
+        // 10-minute episode, 5 segments at 2-minute spacing, target ~5 blocks.
+        // Window math: total=600_000ms / 5 = 120_000 → max(min=60_000, raw)=120_000 → round-up to 120_000.
+        // So each 2-minute segment becomes its own block (next seg crosses window).
+        let segments = vec![
+            chapter_seg(0, 0.0, 110.0, "alpha block"),
+            chapter_seg(1, 120.0, 230.0, "beta block"),
+            chapter_seg(2, 240.0, 350.0, "gamma block"),
+            chapter_seg(3, 360.0, 470.0, "delta block"),
+            chapter_seg(4, 480.0, 590.0, "epsilon block"),
+        ];
+        let blocks = chapter_build_topic_blocks(&segments, 600_000, 5, 60, 120, 220);
+        let block_indices: Vec<i64> = blocks
+            .iter()
+            .map(|b| b["block_index"].as_i64().unwrap())
+            .collect();
+        assert_eq!(block_indices, vec![0, 1, 2, 3, 4]);
+        let first_text = blocks[0]["text"].as_str().unwrap();
+        assert_eq!(first_text, "alpha block");
+        let first_start = blocks[0]["start_ms"].as_i64().unwrap();
+        assert_eq!(first_start, 0);
+    }
+
+    #[test]
+    fn chapter_topic_blocks_respects_min_block_seconds_floor() {
+        // 5 segments inside a 30-second window; raw=30s ≈ below the 60s floor.
+        // Window must clamp up to 60s, then rounded up to nearest 30s → 60s.
+        let segments = vec![
+            chapter_seg(0, 0.0, 5.0, "first"),
+            chapter_seg(1, 10.0, 15.0, "second"),
+            chapter_seg(2, 20.0, 25.0, "third"),
+            chapter_seg(3, 30.0, 35.0, "fourth"),
+            chapter_seg(4, 40.0, 50.0, "fifth"),
+        ];
+        let blocks = chapter_build_topic_blocks(&segments, 50_000, 60, 60, 120, 220);
+        // All segments fit within the 60s floor → one block.
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0]["text"].as_str().unwrap(),
+            "first second third fourth fifth"
+        );
+    }
+
+    #[test]
+    fn chapter_topic_blocks_caps_at_max_block_seconds() {
+        // Pretend the episode is 6 hours but target_block_count = 1 to force the
+        // raw window beyond max_block_seconds (default 120s).
+        let segments: Vec<StatsTranscriptSegmentRow> = (0..10)
+            .map(|i| chapter_seg(i, (i as f64) * 60.0, (i as f64) * 60.0 + 50.0, "x"))
+            .collect();
+        let blocks = chapter_build_topic_blocks(&segments, 6 * 3600 * 1000, 1, 60, 120, 220);
+        // With block_window clamped to 120s and segments spaced 60s, we should
+        // end up grouping 2 segments per block roughly. The key assertion: more
+        // than one block (cap took effect) and < total segments.
+        assert!(
+            blocks.len() > 1 && blocks.len() < segments.len(),
+            "got {}",
+            blocks.len()
+        );
+    }
+
+    #[test]
+    fn chapter_topic_blocks_clip_text_at_max_chars_per_block() {
+        let segments = vec![
+            chapter_seg(0, 0.0, 1.0, &"a".repeat(500)),
+            chapter_seg(1, 1.0, 2.0, &"b".repeat(500)),
+        ];
+        let blocks = chapter_build_topic_blocks(&segments, 2_000, 60, 60, 120, 220);
+        assert_eq!(blocks.len(), 1);
+        let text = blocks[0]["text"].as_str().unwrap();
+        // First clip is 220 chars of 'a'; remaining capacity (220 - 221 = 0) blocks 'b'.
+        assert!(text.starts_with(&"a".repeat(220)));
+        assert!(!text.contains('b'));
+    }
+
+    #[test]
+    fn chapter_topic_blocks_normalizes_internal_whitespace() {
+        let segments = vec![chapter_seg(0, 0.0, 10.0, "hello    world\n\nthere")];
+        let blocks = chapter_build_topic_blocks(&segments, 10_000, 60, 60, 120, 220);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["text"].as_str().unwrap(), "hello world there");
+    }
+
+    #[test]
+    fn chapter_topic_blocks_returns_empty_on_empty_segments() {
+        assert!(chapter_build_topic_blocks(&[], 60_000, 60, 60, 120, 220).is_empty());
+    }
+
+    #[test]
+    fn chapter_segment_filter_drops_segments_overlapping_removed_windows() {
+        let segments = vec![
+            chapter_seg(0, 0.0, 5.0, "keep"),
+            chapter_seg(1, 10.0, 20.0, "drop"),
+            chapter_seg(2, 25.0, 30.0, "keep"),
+            chapter_seg(3, 40.0, 50.0, "drop"),
+            chapter_seg(4, 60.0, 70.0, "keep"),
+        ];
+        // Two removed windows: 9.5-21s and 39-51s.
+        let kept =
+            filter_segments_by_removed_windows(&segments, &[(9_500, 21_000), (39_000, 51_000)]);
+        let kept_text: Vec<&str> = kept.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(kept_text, vec!["keep", "keep", "keep"]);
+    }
+
+    #[test]
+    fn chapter_segment_filter_is_robust_to_unsorted_input_windows() {
+        let segments = vec![
+            chapter_seg(0, 0.0, 5.0, "keep"),
+            chapter_seg(1, 10.0, 20.0, "drop"),
+            chapter_seg(2, 30.0, 40.0, "drop"),
+        ];
+        // Same windows as above but reversed — filter must sort internally.
+        let kept =
+            filter_segments_by_removed_windows(&segments, &[(29_000, 41_000), (9_000, 21_000)]);
+        let kept_text: Vec<&str> = kept.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(kept_text, vec!["keep"]);
+    }
+
+    #[test]
+    fn topic_plan_parse_handles_well_formed_json() {
+        let content = r#"{
+  "chapter_count": 3,
+  "chapters": [
+    {"block_index": 0, "title": "Intro"},
+    {"block_index": 5, "title": "Middle"},
+    {"block_index": 12, "title": "Outro"}
+  ]
+}"#;
+        let result = parse_topic_chapter_plan(content);
+        assert!(!result.salvaged);
+        assert_eq!(result.expected_count, Some(3));
+        assert!(!result.count_mismatch);
+        assert_eq!(
+            result.entries,
+            vec![
+                (0, "Intro".to_string()),
+                (5, "Middle".to_string()),
+                (12, "Outro".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn topic_plan_parse_strips_json_code_fences() {
+        let content = "```json\n{\"chapter_count\": 1, \"chapters\": [{\"block_index\": 0, \"title\": \"Hello\"}]}\n```";
+        let result = parse_topic_chapter_plan(content);
+        assert!(!result.salvaged);
+        assert_eq!(result.entries, vec![(0, "Hello".to_string())]);
+    }
+
+    #[test]
+    fn topic_plan_parse_salvages_truncated_response() {
+        // Truncated: missing closing `]}` so json.loads fails. Two complete
+        // {block_index, title} pairs should still be salvaged.
+        let content = r#"{
+  "chapter_count": 5,
+  "chapters": [
+    {"block_index": 0, "title": "Opening"},
+    {"block_index": 2, "title": "Topic A"},
+    {"block_index": 4, "title": "Topi"#;
+        let result = parse_topic_chapter_plan(content);
+        assert!(result.salvaged);
+        assert_eq!(result.expected_count, Some(5));
+        assert_eq!(
+            result.entries,
+            vec![(0, "Opening".to_string()), (2, "Topic A".to_string()),]
+        );
+    }
+
+    #[test]
+    fn topic_plan_parse_dedupes_duplicate_block_index_during_salvage() {
+        let content = r#"
+{"block_index": 0, "title": "first"}
+{"block_index": 0, "title": "duplicate"}
+{"block_index": 1, "title": "second"}
+"#;
+        let result = parse_topic_chapter_plan(content);
+        assert!(result.salvaged);
+        assert_eq!(
+            result.entries,
+            vec![(0, "first".to_string()), (1, "second".to_string())],
+        );
+    }
+
+    #[test]
+    fn topic_plan_parse_reports_count_mismatch_when_chapter_count_disagrees() {
+        let content = r#"{
+  "chapter_count": 5,
+  "chapters": [
+    {"block_index": 0, "title": "x"},
+    {"block_index": 1, "title": "y"}
+  ]
+}"#;
+        let result = parse_topic_chapter_plan(content);
+        assert!(!result.salvaged);
+        assert!(result.count_mismatch);
+        assert_eq!(result.expected_count, Some(5));
+        assert_eq!(result.entries.len(), 2);
+    }
+
+    #[test]
+    fn topic_plan_parse_returns_empty_on_missing_chapters_key() {
+        let content = r#"{"chapter_count": 0, "foo": []}"#;
+        let result = parse_topic_chapter_plan(content);
+        assert!(!result.salvaged);
+        assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn topic_plan_parse_skips_invalid_block_index_entries() {
+        let content = r#"{"chapters": [
+            {"block_index": 0, "title": "ok"},
+            {"block_index": "bad", "title": "skip"},
+            {"title": "no-index"},
+            {"block_index": 2, "title": "  trimmed  "}
+        ]}"#;
+        let result = parse_topic_chapter_plan(content);
+        assert!(!result.salvaged);
+        // The "bad" string DOES parse as i64::FromStr (returns Err) so it skips;
+        // missing index skips; trim happens on whitespace-only titles.
+        assert_eq!(
+            result.entries,
+            vec![(0, "ok".to_string()), (2, "trimmed".to_string())]
+        );
+    }
+
+    fn plan_block(idx: i64, start_ms: i64, text: &str) -> TopicPlanApplyBlock {
+        TopicPlanApplyBlock {
+            block_index: idx,
+            start_ms,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn topic_plan_apply_assigns_contiguous_end_times_from_next_start() {
+        let blocks = vec![
+            plan_block(0, 0, "Intro"),
+            plan_block(5, 300_000, "Middle"),
+            plan_block(12, 720_000, "Outro"),
+        ];
+        let plan = vec![
+            (0, "Opening".to_string()),
+            (5, "Middle topic".to_string()),
+            (12, "Closing".to_string()),
+        ];
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 900_000, 0);
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0]["start_time_ms"], 0);
+        assert_eq!(chapters[0]["end_time_ms"], 300_000);
+        assert_eq!(chapters[1]["start_time_ms"], 300_000);
+        assert_eq!(chapters[1]["end_time_ms"], 720_000);
+        assert_eq!(chapters[2]["start_time_ms"], 720_000);
+        assert_eq!(chapters[2]["end_time_ms"], 900_000);
+        assert_eq!(chapters[0]["element_id"], "tgen0");
+        assert_eq!(chapters[2]["element_id"], "tgen2");
+    }
+
+    #[test]
+    fn topic_plan_apply_inserts_missing_block_zero_with_derived_title() {
+        let blocks = vec![
+            plan_block(0, 0, "Welcome to the show, today we discuss things"),
+            plan_block(3, 120_000, "Now back to it"),
+        ];
+        // Plan omits block 0; normalize must insert it with a title derived
+        // from block 0's text.
+        let plan = vec![(3, "Main topic".to_string())];
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 240_000, 0);
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0]["start_time_ms"], 0);
+        // First 8 words, leading non-word chars stripped, no trailing punct.
+        // "Welcome to the show, today we discuss things" → 8 words → "Welcome to the show, today we discuss things"
+        let title = chapters[0]["title"].as_str().unwrap();
+        assert!(title.starts_with("Welcome to the show"));
+    }
+
+    #[test]
+    fn topic_plan_apply_filters_chapters_below_min_gap_except_last() {
+        let blocks = vec![
+            plan_block(0, 0, "a"),
+            plan_block(1, 30_000, "b"), // too close to 0 → dropped
+            plan_block(5, 300_000, "c"),
+            plan_block(10, 600_000, "d"),
+        ];
+        let plan = vec![
+            (0, "first".to_string()),
+            (1, "filtered".to_string()),
+            (5, "kept".to_string()),
+            (10, "last".to_string()),
+        ];
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 900_000, 120_000);
+        let starts: Vec<i64> = chapters
+            .iter()
+            .map(|c| c["start_time_ms"].as_i64().unwrap())
+            .collect();
+        // block 1 (gap=30s) filtered; block 5 (gap=300s) kept; block 10 last → kept.
+        assert_eq!(starts, vec![0, 300_000, 600_000]);
+    }
+
+    #[test]
+    fn topic_plan_apply_rejects_single_chapter_for_long_episode() {
+        let blocks = vec![plan_block(0, 0, "intro")];
+        let plan = vec![(0, "only".to_string())];
+        // 20+ minute episode with only one resulting chapter → reject.
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 30 * 60 * 1000, 0);
+        assert!(chapters.is_empty());
+    }
+
+    #[test]
+    fn topic_plan_apply_allows_single_chapter_for_short_episode() {
+        let blocks = vec![plan_block(0, 0, "intro")];
+        let plan = vec![(0, "only".to_string())];
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 5 * 60 * 1000, 0);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0]["end_time_ms"], 5 * 60 * 1000);
+    }
+
+    #[test]
+    fn topic_plan_apply_drops_invalid_block_indexes() {
+        let blocks = vec![plan_block(0, 0, "intro"), plan_block(5, 300_000, "mid")];
+        let plan = vec![
+            (0, "x".to_string()),
+            (99, "invalid".to_string()),
+            (5, "y".to_string()),
+        ];
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 600_000, 0);
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0]["title"], "x");
+        assert_eq!(chapters[1]["title"], "y");
+    }
+
+    #[test]
+    fn topic_plan_apply_falls_back_to_derived_title_when_llm_title_empty() {
+        let blocks = vec![
+            plan_block(0, 0, "alpha beta gamma delta epsilon zeta eta theta iota"),
+            plan_block(5, 300_000, "next chapter content here"),
+        ];
+        let plan = vec![
+            (0, "  ".to_string()), // whitespace-only title
+            (5, "real".to_string()),
+        ];
+        let chapters = chapters_from_topic_plan(&plan, &blocks, 600_000, 0);
+        let first_title = chapters[0]["title"].as_str().unwrap();
+        // Derived from block 0 text — first 8 words plus "..." since there are 9.
+        assert!(first_title.starts_with("alpha beta gamma delta"));
+        assert!(first_title.ends_with("..."));
+    }
+
+    #[test]
+    fn chapter_title_from_text_handles_empty_and_punctuation_only() {
+        assert_eq!(chapter_title_from_text("", 3), "Chapter 3");
+        assert_eq!(chapter_title_from_text("   ...   ", 7), "Chapter 7");
+    }
+
+    #[test]
+    fn chapter_segment_filter_returns_empty_when_all_overlap() {
+        let segments = vec![
+            chapter_seg(0, 0.0, 5.0, "a"),
+            chapter_seg(1, 10.0, 20.0, "b"),
+        ];
+        let kept = filter_segments_by_removed_windows(&segments, &[(0, 25_000)]);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn wb_json_parse_handles_well_formed_response() {
+        let content = r#"{
+  "refined_start_segment_seq": 1,
+  "refined_start_phrase": "brought to you by",
+  "refined_end_segment_seq": 3,
+  "refined_end_phrase": "thanks for listening",
+  "start_adjustment_reason": "sponsor lead-in",
+  "end_adjustment_reason": "sign-off"
+}"#;
+        let (parsed, salvaged) = wb_parse_json_full(content);
+        assert!(!salvaged);
+        let obj = parsed.expect("parse failed").as_object().unwrap().clone();
+        assert_eq!(
+            obj.get("refined_start_segment_seq")
+                .and_then(|v| v.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            obj.get("refined_end_segment_seq").and_then(|v| v.as_i64()),
+            Some(3)
+        );
+        assert_eq!(
+            obj.get("refined_end_phrase").and_then(|v| v.as_str()),
+            Some("thanks for listening")
+        );
+    }
+
+    #[test]
+    fn wb_json_parse_strips_code_fences() {
+        let content =
+            "```json\n{\"refined_start_segment_seq\": 7, \"refined_end_segment_seq\": 9}\n```";
+        let (parsed, salvaged) = wb_parse_json_full(content);
+        assert!(!salvaged);
+        let obj = parsed.unwrap().as_object().unwrap().clone();
+        assert_eq!(
+            obj.get("refined_start_segment_seq")
+                .and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert_eq!(
+            obj.get("refined_end_segment_seq").and_then(|v| v.as_i64()),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn wb_json_parse_repairs_truncated_fenced_payload() {
+        // Mirrors `test_parse_json_recovers_truncated_fenced_payload`.
+        let content = "```json\n{\n  \"refined_start_segment_seq\": 2096,\n  \"refined_start_phrase\": \"if you're the purchasing\",\n  \"refined_end_segment_seq\": 2115,\n  \"refined_end_phrase\": \"thank you\",\n  \"start_adjustment_reason\": \"start moved to sponsor lead in\",\n  \"end_adjustment_reason\": \"end kept near return cue\"\n";
+        let (parsed, _salvaged) = wb_parse_json_full(content);
+        let obj = parsed.expect("repair failed").as_object().unwrap().clone();
+        assert_eq!(
+            obj.get("refined_start_segment_seq")
+                .and_then(|v| v.as_i64()),
+            Some(2096)
+        );
+        assert_eq!(
+            obj.get("refined_end_segment_seq").and_then(|v| v.as_i64()),
+            Some(2115)
+        );
+        assert_eq!(
+            obj.get("refined_end_phrase").and_then(|v| v.as_str()),
+            Some("thank you")
+        );
+    }
+
+    #[test]
+    fn wb_json_parse_recovers_partial_fields_when_value_truncated_mid_key() {
+        // Mirrors `test_parse_json_recovers_truncated_mid_key_prefix`.
+        let content = "{\n  \"refined_start_segment_seq\": 288,\n  \"refined_start_phrase";
+        let (parsed, _salvaged) = wb_parse_json_full(content);
+        let obj = parsed.unwrap().as_object().unwrap().clone();
+        assert_eq!(
+            obj.get("refined_start_segment_seq")
+                .and_then(|v| v.as_i64()),
+            Some(288)
+        );
+        // The truncated `refined_start_phrase` key should not appear.
+        assert!(!obj.contains_key("refined_start_phrase"));
+    }
+
+    #[test]
+    fn wb_json_parse_returns_partial_fields_when_full_parse_fails() {
+        // Garbage JSON but with a recognisable refined_start_segment_seq pair —
+        // the partial-fields regex must still emit it. salvaged=true.
+        let content = r#"garbage prefix "refined_start_segment_seq": 17, more garbage "refined_end_phrase": "end here""#;
+        let (parsed, salvaged) = wb_parse_json_full(content);
+        assert!(
+            salvaged,
+            "expected salvage to be flagged for partial fields"
+        );
+        let obj = parsed.unwrap().as_object().unwrap().clone();
+        assert_eq!(
+            obj.get("refined_start_segment_seq")
+                .and_then(|v| v.as_i64()),
+            Some(17)
+        );
+        assert_eq!(
+            obj.get("refined_end_phrase").and_then(|v| v.as_str()),
+            Some("end here")
+        );
+    }
+
+    #[test]
+    fn wb_json_parse_emits_null_when_refined_seq_is_explicit_null() {
+        let content = r#"{"refined_start_segment_seq": null, "refined_end_segment_seq": 5}"#;
+        let (parsed, salvaged) = wb_parse_json_full(content);
+        assert!(!salvaged);
+        let obj = parsed.unwrap().as_object().unwrap().clone();
+        assert!(obj.get("refined_start_segment_seq").unwrap().is_null());
+        assert_eq!(
+            obj.get("refined_end_segment_seq").and_then(|v| v.as_i64()),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn wb_json_parse_returns_none_for_empty_input() {
+        let (parsed, salvaged) = wb_parse_json_full("");
+        assert!(parsed.is_none());
+        assert!(!salvaged);
+    }
+
+    #[test]
+    fn wb_extract_json_objects_returns_each_top_level_object() {
+        let text = r#"prefix {"a": 1} mid {"b": {"c": 2}} suffix"#;
+        let out = wb_extract_json_objects(text);
+        assert_eq!(out, vec![r#"{"a": 1}"#, r#"{"b": {"c": 2}}"#]);
+    }
+
+    #[test]
+    fn wb_repair_truncated_json_drops_dangling_pair_and_balances_braces() {
+        let input = r#"{"a": 1, "b": "incomplete"#;
+        let repaired = wb_repair_truncated_json(input).expect("should repair");
+        // After repair, json.loads should succeed.
+        let parsed: serde_json::Result<Value> = serde_json::from_str(&repaired);
+        assert!(
+            parsed.is_ok(),
+            "repaired output should be valid JSON: {repaired}"
+        );
+        let obj = parsed.unwrap().as_object().unwrap().clone();
+        assert_eq!(obj.get("a").and_then(|v| v.as_i64()), Some(1));
+        assert!(!obj.contains_key("b"));
+    }
+
+    #[test]
+    fn wb_refine_end_uses_segment_boundary_when_phrase_absent() {
+        let seg = wb_seg_with_words(345, 200.0, 205.0, "text", Vec::new());
+        let segments = vec![seg];
+        let (refined, changed, err) = wb_refine_end(&segments, &[], 204.0, Some(345), None);
+        assert!(err.is_none());
+        assert!(changed);
+        assert_eq!(refined, 205.0);
+    }
+
+    #[test]
+    fn wb_context_falls_through_to_time_overlap_when_seq_window_empty() {
+        // Provide a seq window that picks nothing (segments are seq 0-2,
+        // window asks for 100..200 → empty → fall through to time overlap).
+        let segments = vec![seg(0, 0.0, 10.0), seg(1, 10.0, 20.0), seg(2, 20.0, 30.0)];
+        let selected = select_wb_context_segments(&segments, 5.0, 8.0, Some(100), Some(200));
+        // Time overlap: seg 0 overlaps → window [max(0,-2)..min(3,3)] = [0..3]
+        let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
+        assert_eq!(seq_nums, vec![0, 1, 2]);
     }
 }

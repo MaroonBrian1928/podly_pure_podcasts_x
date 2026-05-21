@@ -116,3 +116,122 @@ def test_load_and_validate_post_does_not_skip_when_db_path_is_stale(
     assert early_result is None
     skip_mock.assert_not_called()
     mock_update.assert_not_called()
+
+
+def test_ensure_job_routes_attribution_update_through_writer_client(app) -> None:
+    """Regression: `ensure_job()` used to mutate the ORM row directly and call
+    `db.session.flush()`, which the read-only session guard rejects. The fix
+    routes the update through `writer_client.action("update_job_attribution",
+    ...)` so the web/processing session never writes directly."""
+    from app.models import ProcessingJob
+
+    feed = _create_feed("Attribution Feed")
+    post = _create_post(
+        feed_id=feed.id,
+        guid="attribution-guid",
+        title="Attribution",
+        download_url="https://example.com/attribution.mp3",
+    )
+    existing_job = ProcessingJob(
+        id="job-123",
+        post_guid=post.guid,
+        status="pending",
+        current_step=0,
+        progress_percentage=0.0,
+        step_name="Queued",
+    )
+    db.session.add(existing_job)
+    db.session.commit()
+
+    status_manager = mock.MagicMock()
+    status_manager.db_session = db.session
+
+    manager = JobManager(
+        post.guid,
+        status_manager=status_manager,
+        logger_obj=mock.MagicMock(),
+        run_id="run-abc",
+        requested_by_user_id=7,
+        billing_user_id=9,
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_action(name: str, params: dict[str, object], *, wait: bool = False):
+        captured["name"] = name
+        captured["params"] = dict(params)
+        captured["wait"] = wait
+        # Apply the writer's intended mutation so the refresh below sees it.
+        job = db.session.get(ProcessingJob, params["job_id"])
+        if "run_id" in params:
+            job.jobs_manager_run_id = params["run_id"]
+        if "requested_by_user_id" in params:
+            job.requested_by_user_id = params["requested_by_user_id"]
+        if "billing_user_id" in params:
+            job.billing_user_id = params["billing_user_id"]
+        db.session.commit()
+        return mock.MagicMock(success=True, data={"job_id": params["job_id"]})
+
+    with mock.patch(
+        "app.job_manager.writer_client.action", side_effect=fake_action
+    ) as action_mock:
+        job = manager.ensure_job()
+
+    assert action_mock.called
+    assert captured["name"] == "update_job_attribution"
+    assert captured["wait"] is True
+    params = captured["params"]
+    assert params["job_id"] == "job-123"
+    assert params["run_id"] == "run-abc"
+    assert params["requested_by_user_id"] == 7
+    assert params["billing_user_id"] == 9
+    # The refresh after the writer call must update the in-memory row.
+    assert job.jobs_manager_run_id == "run-abc"
+    assert job.requested_by_user_id == 7
+    assert job.billing_user_id == 9
+
+
+def test_ensure_job_skips_writer_when_attribution_already_matches(app) -> None:
+    """No-op fast path: if nothing actually needs to change on the active job,
+    `ensure_job()` should not invoke the writer at all."""
+    from app.models import ProcessingJob
+
+    feed = _create_feed("Idempotent Feed")
+    post = _create_post(
+        feed_id=feed.id,
+        guid="idempotent-guid",
+        title="Idempotent",
+        download_url="https://example.com/idempotent.mp3",
+    )
+    db.session.add(
+        ProcessingJob(
+            id="job-noop",
+            post_guid=post.guid,
+            status="running",
+            current_step=1,
+            progress_percentage=10.0,
+            step_name="Running",
+            jobs_manager_run_id="run-x",
+            requested_by_user_id=4,
+            billing_user_id=4,
+        )
+    )
+    db.session.commit()
+
+    status_manager = mock.MagicMock()
+    status_manager.db_session = db.session
+
+    manager = JobManager(
+        post.guid,
+        status_manager=status_manager,
+        logger_obj=mock.MagicMock(),
+        run_id="run-x",
+        requested_by_user_id=4,
+        billing_user_id=4,
+    )
+
+    with mock.patch("app.job_manager.writer_client.action") as action_mock:
+        job = manager.ensure_job()
+
+    action_mock.assert_not_called()
+    assert job.id == "job-noop"

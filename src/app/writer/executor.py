@@ -59,6 +59,10 @@ class CommandExecutor:
         self.register_action(
             "update_job_status", writer_actions.update_job_status_action
         )
+        self.register_action(
+            "update_job_attribution",
+            writer_actions.update_job_attribution_action,
+        )
         self.register_action("mark_cancelled", writer_actions.mark_cancelled_action)
         self.register_action(
             "mark_classification_parse_error",

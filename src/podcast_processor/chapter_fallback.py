@@ -494,6 +494,8 @@ def generate_topic_chapters_from_transcript_with_llm(
     target_chapter_seconds: int = 8 * 60,
     min_chapter_seconds: int = 2 * 60,
     logger_override: logging.Logger | None = None,
+    post_guid: str | None = None,
+    removed_windows_ms: list[tuple[int, int]] | None = None,
 ) -> list[Chapter]:
     """
     Generate transcript chapters with topic-based boundaries via an LLM call.
@@ -515,13 +517,20 @@ def generate_topic_chapters_from_transcript_with_llm(
     if total_duration_ms is None or total_duration_ms <= 0:
         return []
 
-    blocks = _build_topic_blocks(
-        segments,
+    blocks = _try_rust_topic_blocks(
+        post_guid=post_guid,
         total_duration_ms=total_duration_ms,
-        target_block_count=TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
-        min_block_seconds=TOPIC_CHAPTER_MIN_BLOCK_SECONDS,
-        max_chars_per_block=TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
+        logger=log,
+        removed_windows_ms=removed_windows_ms,
     )
+    if blocks is None:
+        blocks = _build_topic_blocks(
+            segments,
+            total_duration_ms=total_duration_ms,
+            target_block_count=TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
+            min_block_seconds=TOPIC_CHAPTER_MIN_BLOCK_SECONDS,
+            max_chars_per_block=TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
+        )
     if not blocks:
         log.warning(
             "LLM topic chapter generation skipped: no transcript blocks built "
@@ -613,6 +622,196 @@ def generate_topic_chapters_from_transcript_with_llm(
             exc,
         )
         return []
+
+
+def _try_rust_topic_blocks(
+    *,
+    post_guid: str | None,
+    total_duration_ms: int,
+    logger: logging.Logger,
+    removed_windows_ms: list[tuple[int, int]] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust chapter topic-block builder.
+
+    Returns None when the Rust path is disabled, no post_guid was threaded
+    through, or the sidecar fails — letting the caller fall back to the
+    Python `_build_topic_blocks` implementation.
+    """
+    if not post_guid:
+        return None
+
+    try:
+        from shared.processing_paths import get_instance_dir
+        from shared.rust_sidecar import (
+            rust_chapter_fallback_enabled,
+            try_chapter_topic_blocks,
+        )
+
+        if not rust_chapter_fallback_enabled():
+            return None
+
+        db_path = get_instance_dir() / "sqlite3.db"
+        blocks = try_chapter_topic_blocks(
+            db_path=db_path,
+            post_guid=post_guid,
+            total_duration_ms=total_duration_ms,
+            target_block_count=TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
+            min_block_seconds=TOPIC_CHAPTER_MIN_BLOCK_SECONDS,
+            max_block_seconds=TOPIC_CHAPTER_MAX_BLOCK_SECONDS,
+            max_chars_per_block=TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
+            removed_windows_ms=removed_windows_ms,
+        )
+    except Exception:
+        logger.exception(
+            "Rust chapter topic-blocks bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if blocks is None:
+        return None
+
+    logger.info(
+        "Chapter topic-blocks built via Rust sidecar",
+        extra={
+            "rust_path": "chapter_topic_blocks",
+            "block_count": len(blocks),
+        },
+    )
+    return blocks
+
+
+def _try_rust_topic_plan_parse(content: str) -> list[tuple[int, str]] | None:
+    """Mirror of `_parse_topic_chapter_response` via the Rust sidecar.
+
+    Returns a list of `(block_index, title)` tuples on success or None to fall
+    back to the Python implementation (flag off, sidecar failed, or unexpected
+    payload). The Rust parser produces the same shape as Python including the
+    salvage path; on success we still emit Python's WARN logs so log-based
+    observability stays consistent.
+    """
+    text = (content or "").strip()
+    if not text:
+        # Empty input is a Python-only WARN — let the Python path handle it
+        # uniformly rather than swallowing the log inside the Rust wrapper.
+        return None
+
+    try:
+        from shared.rust_sidecar import (
+            rust_chapter_fallback_enabled,
+            try_chapter_topic_plan_parse,
+        )
+
+        if not rust_chapter_fallback_enabled():
+            return None
+        result = try_chapter_topic_plan_parse(raw_content=content)
+    except Exception:
+        logger.exception(
+            "Rust chapter topic-plan-parse bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if result is None:
+        return None
+
+    entries: list[tuple[int, str]] = list(result["entries"])
+    expected = result.get("expected_count")
+    if result.get("salvaged"):
+        if expected is not None and len(entries) < expected:
+            logger.warning(
+                "Recovered partial topic chapter plan is incomplete: "
+                "expected %d chapters, recovered %d",
+                expected,
+                len(entries),
+            )
+        logger.warning(
+            "Failed to parse full LLM topic chapter JSON response; recovered "
+            "%d chapters from partial response (via Rust sidecar).",
+            len(entries),
+        )
+    elif expected is None:
+        logger.warning(
+            "LLM topic chapter response missing valid 'chapter_count'; "
+            "continuing with parsed chapters_count=%d",
+            len(entries),
+        )
+    elif result.get("count_mismatch"):
+        logger.warning(
+            "LLM topic chapter response chapter_count mismatch: "
+            "expected %d, parsed %d chapter entries",
+            expected,
+            len(entries),
+        )
+    logger.info(
+        "Topic chapter plan parsed via Rust sidecar",
+        extra={
+            "rust_path": "chapter_topic_plan_parse",
+            "entry_count": len(entries),
+            "salvaged": bool(result.get("salvaged")),
+        },
+    )
+    return entries
+
+
+def _try_rust_chapters_from_topic_plan(
+    *,
+    plan: list[tuple[int, str]],
+    blocks: list[dict[str, Any]],
+    total_duration_ms: int,
+    min_chapter_gap_ms: int,
+) -> list[Chapter] | None:
+    """Mirror of `_chapters_from_topic_plan` via the Rust sidecar.
+
+    Returns the Chapter list on success or None when the caller should fall
+    back to Python (flag off, sidecar failed, or unexpected payload).
+    """
+    try:
+        from shared.rust_sidecar import (
+            rust_chapter_fallback_enabled,
+            try_chapter_topic_plan_apply,
+        )
+
+        if not rust_chapter_fallback_enabled():
+            return None
+        rust_payload = try_chapter_topic_plan_apply(
+            plan=plan,
+            blocks=blocks,
+            total_duration_ms=total_duration_ms,
+            min_chapter_gap_ms=min_chapter_gap_ms,
+        )
+    except Exception:
+        logger.exception(
+            "Rust chapter topic-plan-apply bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if rust_payload is None:
+        return None
+
+    chapters: list[Chapter] = []
+    for entry in rust_payload:
+        try:
+            chapters.append(
+                Chapter(
+                    element_id=str(entry["element_id"]),
+                    title=str(entry["title"]),
+                    start_time_ms=int(entry["start_time_ms"]),
+                    end_time_ms=int(entry["end_time_ms"]),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Rust topic-plan-apply returned bad chapter entry; falling back"
+            )
+            return None
+
+    logger.info(
+        "Topic chapter plan applied via Rust sidecar",
+        extra={
+            "rust_path": "chapter_topic_plan_apply",
+            "chapter_count": len(chapters),
+        },
+    )
+    return chapters
 
 
 def _transcript_duration_ms(transcript_segments: Sequence[Any]) -> int | None:
@@ -1050,6 +1249,10 @@ def _retry_incomplete_topic_chapter_plan(
 
 
 def _parse_topic_chapter_response(content: str) -> list[tuple[int, str]]:
+    rust_result = _try_rust_topic_plan_parse(content)
+    if rust_result is not None:
+        return rust_result
+
     text = (content or "").strip()
     if not text:
         logger.warning(
@@ -1241,6 +1444,15 @@ def _chapters_from_topic_plan(
     total_duration_ms: int,
     min_chapter_gap_ms: int,
 ) -> list[Chapter]:
+    rust_chapters = _try_rust_chapters_from_topic_plan(
+        plan=plan,
+        blocks=blocks,
+        total_duration_ms=total_duration_ms,
+        min_chapter_gap_ms=min_chapter_gap_ms,
+    )
+    if rust_chapters is not None:
+        return rust_chapters
+
     if not plan or not blocks:
         logger.warning(
             "Topic chapter plan validation failed: empty plan or no blocks "

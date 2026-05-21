@@ -139,6 +139,44 @@ def cancel_existing_jobs_action(params: dict[str, Any]) -> int:
     return count
 
 
+def update_job_attribution_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Update a job's `jobs_manager_run_id`, `requested_by_user_id`, and/or
+    `billing_user_id` fields.
+
+    Used by `JobManager.ensure_job()` to backfill attribution onto an already-
+    active job when a new request arrives for the same post. The web/processing
+    sessions are read-only, so this mutation has to go through the writer
+    service. Only fields explicitly provided in `params` are touched, and the
+    action no-ops if no field actually changes (idempotent).
+    """
+    job_id = params.get("job_id")
+    if not job_id:
+        raise ValueError("job_id is required")
+
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+
+    changed = False
+    if "run_id" in params:
+        run_id = params.get("run_id")
+        if run_id and job.jobs_manager_run_id != run_id:
+            job.jobs_manager_run_id = run_id
+            changed = True
+    if "requested_by_user_id" in params:
+        requested_by_user_id = params.get("requested_by_user_id")
+        if requested_by_user_id and job.requested_by_user_id is None:
+            job.requested_by_user_id = requested_by_user_id
+            changed = True
+    if "billing_user_id" in params:
+        billing_user_id = params.get("billing_user_id")
+        if billing_user_id is not None and job.billing_user_id != billing_user_id:
+            job.billing_user_id = billing_user_id
+            changed = True
+
+    return {"job_id": job.id, "changed": changed}
+
+
 def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
     job_id = params.get("job_id")
     status = params.get("status")

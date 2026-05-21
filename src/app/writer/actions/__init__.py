@@ -51,6 +51,7 @@ from .jobs import (
 )
 from .jobs import reassign_pending_jobs_action as reassign_pending_jobs_action
 from .jobs import record_ad_windows_count_action as record_ad_windows_count_action
+from .jobs import update_job_attribution_action as update_job_attribution_action
 from .jobs import update_job_status_action as update_job_status_action
 from .processor import (
     finish_transcription_replace_action as finish_transcription_replace_action,

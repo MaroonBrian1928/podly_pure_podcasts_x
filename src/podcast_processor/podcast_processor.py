@@ -1254,6 +1254,11 @@ class PodcastProcessor:
                     chapters_for_output=chapters_for_output,
                     transcript_segments=transcript_segments_for_chapters,
                     post_id=post.id,
+                    post_guid=post.guid,
+                    # Rust must re-derive the ad-filtered segment set from the
+                    # DB, so it needs the removed windows that produced
+                    # `transcript_segments_for_chapters`.
+                    removed_windows_ms=removed_segments_ms,
                 )
             if chapters_for_output:
                 self.logger.info(
@@ -1402,6 +1407,10 @@ class PodcastProcessor:
                 chapters_for_output=chapters_for_output,
                 transcript_segments=transcript_segments,
                 post_id=post.id,
+                # Only the unfiltered path is safe to delegate to Rust — the
+                # other call site uses ad-window-filtered segments that Rust
+                # cannot reconstruct from the DB alone.
+                post_guid=post.guid,
             )
 
         self.status_manager.update_job_status(
@@ -1467,6 +1476,8 @@ class PodcastProcessor:
         chapters_for_output: list[Any],
         transcript_segments: list[Any],
         post_id: int | None,
+        post_guid: str | None = None,
+        removed_windows_ms: list[tuple[int, int]] | None = None,
     ) -> list[Any]:
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
@@ -1478,6 +1489,8 @@ class PodcastProcessor:
             openai_base_url=getattr(self.config, "openai_base_url", None),
             openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
             logger_override=self.logger,
+            post_guid=post_guid,
+            removed_windows_ms=removed_windows_ms,
         )
         if topic_chapters:
             refined_topic_chapters = refine_transcript_chapters_with_word_refiner(

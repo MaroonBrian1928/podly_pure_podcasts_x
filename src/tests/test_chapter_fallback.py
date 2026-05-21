@@ -12,6 +12,7 @@ from podcast_processor.chapter_fallback import (
     TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
     _build_topic_blocks,
     _build_topic_chapter_generation_prompt,
+    _chapters_from_topic_plan,
     _parse_topic_chapter_response,
     _topic_chapter_count_cap_for_duration,
     generate_chapters_from_transcript,
@@ -450,3 +451,385 @@ def test_topic_chapter_count_cap_for_duration_matches_configured_policy() -> Non
         (TOPIC_CHAPTER_SHORT_EPISODE_SECONDS + TOPIC_CHAPTER_CAP_WINDOW_SECONDS - 1)
         // TOPIC_CHAPTER_CAP_WINDOW_SECONDS
     )
+
+
+def test_generate_topic_chapters_uses_rust_topic_blocks_when_enabled(
+    monkeypatch,
+) -> None:
+    """When the chapter Rust flag is on and a post_guid is threaded through,
+    `_build_topic_blocks` is skipped in favour of the sidecar call. The Rust
+    payload is used verbatim for the LLM prompt; Python parsing/chapter
+    assembly downstream is unchanged."""
+    from types import SimpleNamespace
+
+    transcript_segments = [
+        SimpleNamespace(start_time=0.0, end_time=20.0, text="Intro segment"),
+        SimpleNamespace(start_time=310.0, end_time=330.0, text="Mid segment"),
+        SimpleNamespace(start_time=630.0, end_time=650.0, text="End segment"),
+    ]
+
+    rust_blocks = [
+        {
+            "block_index": 0,
+            "start_ms": 0,
+            "end_ms": 300_000,
+            "timestamp": "00:00",
+            "text": "Intro from Rust",
+        },
+        {
+            "block_index": 1,
+            "start_ms": 300_000,
+            "end_ms": 600_000,
+            "timestamp": "05:00",
+            "text": "Mid from Rust",
+        },
+        {
+            "block_index": 2,
+            "start_ms": 600_000,
+            "end_ms": 900_000,
+            "timestamp": "10:00",
+            "text": "End from Rust",
+        },
+    ]
+
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=(
+                        '{"chapters":['
+                        '{"block_index":0,"title":"From Rust 0"},'
+                        '{"block_index":1,"title":"From Rust 1"},'
+                        '{"block_index":2,"title":"From Rust 2"}'
+                        "]}"
+                    )
+                )
+            )
+        ]
+    )
+
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "shared.rust_sidecar.try_chapter_topic_blocks",
+            return_value=rust_blocks,
+        ) as rust_mock,
+        patch(
+            "podcast_processor.chapter_fallback._build_topic_blocks",
+            side_effect=AssertionError("python _build_topic_blocks must not run"),
+        ),
+    ):
+        chapters = generate_topic_chapters_from_transcript_with_llm(
+            transcript_segments,
+            llm_model="test-model",
+            llm_api_key="test-key",
+            openai_base_url="https://llm.example.com/v1",
+            total_duration_ms=900_000,
+            openai_timeout_sec=30,
+            min_chapter_seconds=0,
+            post_guid="post-abc",
+        )
+
+    assert rust_mock.called
+    assert rust_mock.call_args.kwargs["post_guid"] == "post-abc"
+    assert rust_mock.call_args.kwargs["total_duration_ms"] == 900_000
+    assert [c.title for c in chapters] == [
+        "From Rust 0",
+        "From Rust 1",
+        "From Rust 2",
+    ]
+
+
+def test_generate_topic_chapters_falls_back_to_python_when_rust_disabled(
+    monkeypatch,
+) -> None:
+    """Rust wrapper must not be called when the chapter flag is off."""
+    from types import SimpleNamespace
+
+    transcript_segments = [
+        SimpleNamespace(start_time=0.0, end_time=20.0, text="Host intro"),
+        SimpleNamespace(start_time=310.0, end_time=330.0, text="Mid talk"),
+    ]
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"chapters":[{"block_index":0,"title":"x"}]}'
+                )
+            )
+        ]
+    )
+
+    monkeypatch.delenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", raising=False)
+
+    def boom(**_kwargs):
+        raise AssertionError("try_chapter_topic_blocks invoked with flag disabled")
+
+    with (
+        patch("litellm.completion", return_value=response),
+        patch("shared.rust_sidecar.try_chapter_topic_blocks", side_effect=boom),
+    ):
+        chapters = generate_topic_chapters_from_transcript_with_llm(
+            transcript_segments,
+            llm_model="test-model",
+            llm_api_key="test-key",
+            total_duration_ms=600_000,
+            openai_timeout_sec=30,
+            min_chapter_seconds=0,
+            post_guid="post-abc",
+        )
+
+    assert chapters  # Python path produced at least one chapter.
+
+
+def test_generate_topic_chapters_falls_back_when_rust_returns_none(
+    monkeypatch,
+) -> None:
+    """Rust wrapper returning None (sidecar failed / bad payload) must trigger
+    the Python fallback rather than empty chapters."""
+    from types import SimpleNamespace
+
+    transcript_segments = [
+        SimpleNamespace(start_time=0.0, end_time=20.0, text="Intro talk"),
+        SimpleNamespace(start_time=310.0, end_time=330.0, text="Mid talk"),
+    ]
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"chapters":[{"block_index":0,"title":"From Python"}]}'
+                )
+            )
+        ]
+    )
+
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "shared.rust_sidecar.try_chapter_topic_blocks", return_value=None
+        ) as rust_mock,
+    ):
+        chapters = generate_topic_chapters_from_transcript_with_llm(
+            transcript_segments,
+            llm_model="test-model",
+            llm_api_key="test-key",
+            total_duration_ms=600_000,
+            openai_timeout_sec=30,
+            min_chapter_seconds=0,
+            post_guid="post-abc",
+        )
+
+    assert rust_mock.called
+    assert chapters  # Python path produced at least one chapter.
+
+
+def test_generate_topic_chapters_forwards_removed_windows_to_rust(
+    monkeypatch,
+) -> None:
+    """When the caller threads ad-removal windows through to the Rust path, the
+    wrapper receives them so the sidecar can reproduce the filter the Python
+    `_filter_transcript_segments_for_chapters` call would have applied."""
+    from types import SimpleNamespace
+
+    transcript_segments = [
+        SimpleNamespace(start_time=0.0, end_time=20.0, text="Intro"),
+        SimpleNamespace(start_time=310.0, end_time=330.0, text="Mid"),
+    ]
+    rust_blocks = [
+        {
+            "block_index": 0,
+            "start_ms": 0,
+            "end_ms": 600_000,
+            "timestamp": "00:00",
+            "text": "Block 0",
+        },
+    ]
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"chapters":[{"block_index":0,"title":"t0"}]}'
+                )
+            )
+        ]
+    )
+    removed_windows = [(100_000, 150_000), (200_000, 250_000)]
+
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    with (
+        patch("litellm.completion", return_value=response),
+        patch(
+            "shared.rust_sidecar.try_chapter_topic_blocks",
+            return_value=rust_blocks,
+        ) as rust_mock,
+    ):
+        chapters = generate_topic_chapters_from_transcript_with_llm(
+            transcript_segments,
+            llm_model="test-model",
+            llm_api_key="test-key",
+            total_duration_ms=600_000,
+            openai_timeout_sec=30,
+            min_chapter_seconds=0,
+            post_guid="post-abc",
+            removed_windows_ms=removed_windows,
+        )
+
+    assert rust_mock.called
+    forwarded = rust_mock.call_args.kwargs["removed_windows_ms"]
+    assert forwarded == removed_windows
+    assert chapters  # End-to-end success path.
+
+
+def test_parse_topic_chapter_response_uses_rust_when_enabled(monkeypatch) -> None:
+    """`_parse_topic_chapter_response` short-circuits to the Rust wrapper when
+    the chapter flag is on. The wrapper return shape is normalized back to the
+    Python `list[tuple[int, str]]` contract callers rely on."""
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    fake_payload = {
+        "entries": [(0, "Opening"), (3, "Closing")],
+        "expected_count": 2,
+        "salvaged": False,
+        "count_mismatch": False,
+    }
+
+    with patch(
+        "shared.rust_sidecar.try_chapter_topic_plan_parse",
+        return_value=fake_payload,
+    ) as rust_mock:
+        result = _parse_topic_chapter_response(
+            '{"chapter_count": 2, "chapters": [...]}'
+        )
+
+    assert rust_mock.called
+    assert result == [(0, "Opening"), (3, "Closing")]
+
+
+def test_parse_topic_chapter_response_falls_back_when_rust_returns_none(
+    monkeypatch,
+) -> None:
+    """A Rust None return triggers the Python parse path; same valid input
+    still produces the same `(block_index, title)` list."""
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    with patch(
+        "shared.rust_sidecar.try_chapter_topic_plan_parse", return_value=None
+    ) as rust_mock:
+        result = _parse_topic_chapter_response(
+            '{"chapter_count": 1, "chapters": [{"block_index": 0, "title": "X"}]}'
+        )
+
+    assert rust_mock.called
+    assert result == [(0, "X")]
+
+
+def test_parse_topic_chapter_response_skips_rust_for_empty_input(
+    monkeypatch,
+) -> None:
+    """Empty content should never invoke the Rust wrapper — Python handles the
+    WARN log path for that case."""
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    def boom(**_kwargs):
+        raise AssertionError("Rust wrapper called for empty content")
+
+    with patch("shared.rust_sidecar.try_chapter_topic_plan_parse", side_effect=boom):
+        assert _parse_topic_chapter_response("") == []
+        assert _parse_topic_chapter_response("   \n  ") == []
+
+
+def test_chapters_from_topic_plan_uses_rust_when_enabled(monkeypatch) -> None:
+    """`_chapters_from_topic_plan` short-circuits to the Rust wrapper when the
+    chapter flag is on, and the wrapper output is materialized into Chapter
+    objects the rest of the pipeline expects."""
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+
+    rust_chapters = [
+        {
+            "element_id": "tgen0",
+            "title": "Intro",
+            "start_time_ms": 0,
+            "end_time_ms": 300_000,
+        },
+        {
+            "element_id": "tgen1",
+            "title": "Outro",
+            "start_time_ms": 300_000,
+            "end_time_ms": 900_000,
+        },
+    ]
+    plan = [(0, "Intro"), (5, "Outro")]
+    blocks = [
+        {"block_index": 0, "start_ms": 0, "end_ms": 250_000, "text": "a"},
+        {"block_index": 5, "start_ms": 300_000, "end_ms": 900_000, "text": "b"},
+    ]
+
+    with patch(
+        "shared.rust_sidecar.try_chapter_topic_plan_apply",
+        return_value=rust_chapters,
+    ) as rust_mock:
+        result = _chapters_from_topic_plan(
+            plan,
+            blocks=blocks,
+            total_duration_ms=900_000,
+            min_chapter_gap_ms=60_000,
+        )
+
+    assert rust_mock.called
+    forwarded = rust_mock.call_args.kwargs
+    assert forwarded["plan"] == plan
+    assert forwarded["total_duration_ms"] == 900_000
+    assert forwarded["min_chapter_gap_ms"] == 60_000
+    assert [c.title for c in result] == ["Intro", "Outro"]
+    assert [c.start_time_ms for c in result] == [0, 300_000]
+    assert [c.end_time_ms for c in result] == [300_000, 900_000]
+
+
+def test_chapters_from_topic_plan_falls_back_when_rust_returns_none(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "true")
+    plan = [(0, "Intro"), (5, "Middle")]
+    blocks = [
+        {"block_index": 0, "start_ms": 0, "end_ms": 250_000, "text": "a"},
+        {"block_index": 5, "start_ms": 300_000, "end_ms": 600_000, "text": "b"},
+    ]
+
+    with patch(
+        "shared.rust_sidecar.try_chapter_topic_plan_apply", return_value=None
+    ) as rust_mock:
+        result = _chapters_from_topic_plan(
+            plan,
+            blocks=blocks,
+            total_duration_ms=600_000,
+            min_chapter_gap_ms=0,
+        )
+
+    assert rust_mock.called
+    # Python path produces the same two chapters.
+    assert [c.title for c in result] == ["Intro", "Middle"]
+
+
+def test_chapters_from_topic_plan_skips_rust_when_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", raising=False)
+
+    def boom(**_kwargs):
+        raise AssertionError("Rust apply wrapper invoked while flag disabled")
+
+    plan = [(0, "Intro")]
+    blocks = [
+        {"block_index": 0, "start_ms": 0, "end_ms": 100_000, "text": "a"},
+    ]
+    with patch("shared.rust_sidecar.try_chapter_topic_plan_apply", side_effect=boom):
+        result = _chapters_from_topic_plan(
+            plan,
+            blocks=blocks,
+            total_duration_ms=100_000,
+            min_chapter_gap_ms=0,
+        )
+    assert [c.title for c in result] == ["Intro"]

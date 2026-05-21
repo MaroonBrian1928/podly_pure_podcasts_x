@@ -1555,6 +1555,7 @@ class AdClassifier:
                     for s in transcript_segments
                 ],
                 post_id=post.id,
+                post_guid=post.guid,
                 first_seq_num=min(seq_nums) if seq_nums else None,
                 last_seq_num=max(seq_nums) if seq_nums else None,
             )

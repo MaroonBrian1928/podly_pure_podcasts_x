@@ -1,8 +1,12 @@
 import json
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 
 from app.sanitize import redact_secrets
+
+DEFAULT_LOG_MAX_BYTES = 50_000_000
+DEFAULT_LOG_BACKUP_COUNT = 5
 
 
 class ExtraFormatter(logging.Formatter):
@@ -86,7 +90,20 @@ def setup_logger(
         for h in logger.handlers
     )
     if not has_file_handler:
-        file_handler = logging.FileHandler(abs_log_file)
+        max_bytes = int(os.environ.get("PODLY_LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES))
+        backup_count = int(
+            os.environ.get("PODLY_LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT)
+        )
+        # delay=True: per-job processing_worker subprocesses import the logger
+        # but may never write. Without delay, every spawn bumps the file mtime
+        # and risks spurious rotation triggers across processes.
+        file_handler = RotatingFileHandler(
+            abs_log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+            delay=True,
+        )
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
 
