@@ -13,6 +13,10 @@ from typing import Any
 from jinja2 import Template
 
 from app.writer.client import writer_client
+from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
+)
 from shared.config import Config
 
 # Internal defaults for boundary expansion; not user-configurable.
@@ -118,16 +122,18 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 )
 
         try:
-            import litellm
-
-            response = litellm.completion(
-                model=self.config.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=4096,
-                timeout=self.config.openai_timeout,
-                api_key=self.config.llm_api_key,
-                base_url=self.config.openai_base_url,
+            completion_args: dict[str, Any] = {
+                "model": self.config.llm_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 4096,
+                "timeout": self.config.openai_timeout,
+                "api_key": self.config.llm_api_key,
+                "base_url": self.config.openai_base_url,
+            }
+            apply_service_tier(completion_args, self.config)
+            response = call_litellm_with_tier_retry(
+                completion_args, config=self.config, logger=self.logger
             )
 
             choice = response.choices[0] if response.choices else None

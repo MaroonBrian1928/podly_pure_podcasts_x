@@ -23,6 +23,7 @@ const DEFAULT_ENV_HINTS: Record<string, EnvOverrideEntry> = {
   'llm.llm_enable_token_rate_limiting': { env_var: 'LLM_ENABLE_TOKEN_RATE_LIMITING' },
   'llm.llm_max_input_tokens_per_call': { env_var: 'LLM_MAX_INPUT_TOKENS_PER_CALL' },
   'llm.llm_max_input_tokens_per_minute': { env_var: 'LLM_MAX_INPUT_TOKENS_PER_MINUTE' },
+  'llm.llm_service_tier': { env_var: 'LLM_SERVICE_TIER' },
   'whisper.whisper_type': { env_var: 'WHISPER_TYPE' },
   'whisper.api_key': { env_var: 'WHISPER_REMOTE_API_KEY' },
   'whisper.base_url': { env_var: 'WHISPER_REMOTE_BASE_URL' },

@@ -469,6 +469,11 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
     )
+    llm_service_tier = db.Column(
+        db.Text,
+        nullable=False,
+        default=DEFAULTS.LLM_SERVICE_TIER,
+    )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

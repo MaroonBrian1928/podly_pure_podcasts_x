@@ -33,6 +33,7 @@ export default function LLMSection() {
   const tokenRateLimitReadOnly = isFieldReadOnly('llm.llm_enable_token_rate_limiting');
   const maxInputPerCallReadOnly = isFieldReadOnly('llm.llm_max_input_tokens_per_call');
   const maxInputPerMinReadOnly = isFieldReadOnly('llm.llm_max_input_tokens_per_minute');
+  const serviceTierReadOnly = isFieldReadOnly('llm.llm_service_tier');
 
   const inputClass = (readOnly: boolean) =>
     readOnly ? 'input bg-gray-100 cursor-not-allowed' : 'input';
@@ -204,6 +205,25 @@ export default function LLMSection() {
                 )
               }
             />
+          </Field>
+          <Field
+            label="LLM Service Tier"
+            envMeta={getEnvHint('llm.llm_service_tier')}
+            hint="Forwarded to providers that support it (OpenAI, Gemini). 'flex' trades latency for ~50% lower cost; on 429/503 the call retries with exponential backoff and falls back to standard. 'priority' is faster/pricier. Ignored for other providers."
+          >
+            <select
+              className={inputClass(serviceTierReadOnly)}
+              value={pending?.llm?.llm_service_tier ?? 'default'}
+              onChange={(e) =>
+                setField(['llm', 'llm_service_tier'], e.target.value)
+              }
+              disabled={serviceTierReadOnly}
+            >
+              <option value="default">default</option>
+              <option value="flex">flex (cheaper, slower, may 429/503)</option>
+              <option value="priority">priority (faster, pricier)</option>
+              <option value="auto">auto</option>
+            </select>
           </Field>
           <Field label="Max Input Tokens Per Call (optional)" envMeta={getEnvHint('llm.llm_max_input_tokens_per_call')}>
             <input

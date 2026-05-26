@@ -1,9 +1,131 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from app.writer.client import writer_client
+from shared import defaults as DEFAULTS
+
+# Providers that accept the OpenAI-style `service_tier` kwarg via litellm.
+# Anthropic, Groq, xAI, etc. do not, so we skip the kwarg for those.
+_SERVICE_TIER_MODEL_PREFIXES = ("gemini/", "openai/")
+_VALID_SERVICE_TIERS = {"default", "flex", "priority", "auto"}
+
+
+def model_supports_service_tier(model_name: str | None) -> bool:
+    if not model_name:
+        return False
+    return model_name.startswith(_SERVICE_TIER_MODEL_PREFIXES)
+
+
+def _resolved_tier(config: Any) -> str:
+    tier = getattr(config, "llm_service_tier", DEFAULTS.LLM_SERVICE_TIER)
+    tier = (tier or DEFAULTS.LLM_SERVICE_TIER).strip().lower()
+    if tier not in _VALID_SERVICE_TIERS:
+        return DEFAULTS.LLM_SERVICE_TIER
+    return tier
+
+
+def apply_service_tier(
+    completion_args: dict[str, Any],
+    config: Any,
+) -> dict[str, Any]:
+    """If a non-default service tier is configured AND the model supports
+    `service_tier`, set it on the completion args in place.
+
+    litellm forwards `service_tier` to OpenAI as-is and translates it for
+    Gemini into `generationConfig.modelSelectionConfig.featureSelectionPreference`
+    ('flex' -> PRIORITIZE_COST, 'priority' -> PRIORITIZE_QUALITY). No-op for
+    other providers or when the tier is 'default'.
+    """
+    tier = _resolved_tier(config)
+    if tier == "default":
+        return completion_args
+    if not model_supports_service_tier(completion_args.get("model")):
+        return completion_args
+    completion_args["service_tier"] = tier
+    return completion_args
+
+
+def _is_tier_retryable(exc: Exception) -> bool:
+    """Flex tiers (Gemini and OpenAI) return 503 (busy) or 429 under load."""
+    err = str(exc).lower()
+    if "503" in err or "service unavailable" in err:
+        return True
+    if "429" in err or "rate limit" in err or "resource_exhausted" in err:
+        return True
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in (429, 503):
+        return True
+    return False
+
+
+def call_litellm_with_tier_retry(
+    completion_args: dict[str, Any],
+    *,
+    config: Any,
+    logger: logging.Logger,
+    max_retries: int | None = None,
+    base_delay: float | None = None,
+    sleep: Any = time.sleep,
+) -> Any:
+    """Run `litellm.completion(**args)` with Flex-aware retry + fallback.
+
+    When `service_tier == "flex"`, on 503/429 errors back off exponentially up
+    to `max_retries` times. On the final attempt, drop the `service_tier`
+    kwarg so the call retries at the standard tier instead of failing. For
+    'priority' / 'auto' / 'default' (or when the kwarg isn't set), this is a
+    single straight-through `litellm.completion` invocation.
+    """
+    import litellm  # local import to keep top-level imports cheap
+
+    flex_active = completion_args.get("service_tier") == "flex"
+    if not flex_active:
+        return litellm.completion(**completion_args)
+
+    retries = (
+        max_retries
+        if max_retries is not None
+        else DEFAULTS.LLM_SERVICE_TIER_MAX_RETRIES
+    )
+    delay = (
+        base_delay
+        if base_delay is not None
+        else DEFAULTS.LLM_SERVICE_TIER_BASE_DELAY_SEC
+    )
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return litellm.completion(**completion_args)
+        except Exception as exc:
+            last_err = exc
+            if not _is_tier_retryable(exc):
+                raise
+            is_last = attempt == retries - 1
+            if is_last:
+                logger.warning(
+                    "Flex tier exhausted after %d attempts (%s); "
+                    "falling back to standard tier",
+                    retries,
+                    exc,
+                )
+                fallback_args = dict(completion_args)
+                fallback_args.pop("service_tier", None)
+                return litellm.completion(**fallback_args)
+            wait = delay * (2**attempt)
+            logger.info(
+                "Flex tier busy (%s); retrying in %.1fs (attempt %d/%d)",
+                exc,
+                wait,
+                attempt + 1,
+                retries,
+            )
+            sleep(wait)
+
+    assert last_err is not None
+    raise last_err
 
 
 def render_prompt_and_upsert_model_call(

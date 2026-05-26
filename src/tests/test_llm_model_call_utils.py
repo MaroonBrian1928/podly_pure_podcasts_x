@@ -1,8 +1,15 @@
+import logging
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
     extract_litellm_finish_reason,
     extract_litellm_usage,
+    model_supports_service_tier,
 )
 
 
@@ -46,3 +53,187 @@ def test_extract_litellm_usage_handles_dict_response() -> None:
         "completion_tokens": 9,
         "total_tokens": 14,
     }
+
+
+# --------------------------------------------------------------------------
+# service_tier helper tests
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("gemini/gemini-2.5-flash", True),
+        ("openai/gpt-4o-mini", True),
+        ("anthropic/claude-3-5-sonnet", False),
+        ("groq/openai/gpt-oss-120b", False),
+        ("gpt-4o", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_model_supports_service_tier(model: str | None, expected: bool) -> None:
+    assert model_supports_service_tier(model) is expected
+
+
+def test_apply_service_tier_noop_when_default() -> None:
+    args: dict[str, Any] = {"model": "gemini/gemini-2.5-flash"}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="default"))
+    assert "service_tier" not in args
+
+
+def test_apply_service_tier_noop_for_unsupported_provider() -> None:
+    args: dict[str, Any] = {"model": "anthropic/claude-3-5-sonnet"}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="flex"))
+    assert "service_tier" not in args
+
+
+def test_apply_service_tier_sets_flex_for_gemini() -> None:
+    args: dict[str, Any] = {"model": "gemini/gemini-2.5-flash"}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="flex"))
+    assert args["service_tier"] == "flex"
+
+
+def test_apply_service_tier_sets_priority_for_openai() -> None:
+    args: dict[str, Any] = {"model": "openai/gpt-4o-mini"}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="priority"))
+    assert args["service_tier"] == "priority"
+
+
+def test_apply_service_tier_rejects_invalid_value() -> None:
+    args: dict[str, Any] = {"model": "gemini/gemini-2.5-flash"}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="bogus"))
+    assert "service_tier" not in args
+
+
+# --------------------------------------------------------------------------
+# call_litellm_with_tier_retry tests (patch litellm.completion directly)
+# --------------------------------------------------------------------------
+
+
+class _FakeCompletion:
+    def __init__(self, side_effects: list[Any]) -> None:
+        self.side_effects = side_effects
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        result = self.side_effects.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _patch_litellm(monkeypatch: pytest.MonkeyPatch, fake: _FakeCompletion) -> None:
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", fake)
+
+
+def test_tier_retry_passthrough_when_no_service_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(["ok"])
+    _patch_litellm(monkeypatch, fake)
+
+    result = call_litellm_with_tier_retry(
+        {"model": "gemini/gemini-2.5-flash"},
+        config=SimpleNamespace(llm_service_tier="default"),
+        logger=logging.getLogger("test"),
+        sleep=lambda _s: None,
+    )
+    assert result == "ok"
+    assert len(fake.calls) == 1
+    assert "service_tier" not in fake.calls[0]
+
+
+def test_tier_retry_succeeds_on_first_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(["ok"])
+    _patch_litellm(monkeypatch, fake)
+
+    result = call_litellm_with_tier_retry(
+        {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+        config=SimpleNamespace(llm_service_tier="flex"),
+        logger=logging.getLogger("test"),
+        sleep=lambda _s: None,
+    )
+    assert result == "ok"
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["service_tier"] == "flex"
+
+
+def test_tier_retry_backs_off_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(
+        [
+            RuntimeError("503 Service Unavailable"),
+            RuntimeError("429 rate limit"),
+            "ok",
+        ]
+    )
+    _patch_litellm(monkeypatch, fake)
+    sleeps: list[float] = []
+
+    result = call_litellm_with_tier_retry(
+        {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+        config=SimpleNamespace(llm_service_tier="flex"),
+        logger=logging.getLogger("test"),
+        max_retries=5,
+        base_delay=1.0,
+        sleep=sleeps.append,
+    )
+    assert result == "ok"
+    assert len(fake.calls) == 3
+    assert sleeps == [1.0, 2.0]
+    # All retries kept service_tier=flex
+    for call in fake.calls:
+        assert call["service_tier"] == "flex"
+
+
+def test_tier_retry_falls_back_to_standard_on_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(
+        [
+            RuntimeError("503 Service Unavailable"),
+            RuntimeError("503 Service Unavailable"),
+            RuntimeError("503 Service Unavailable"),
+            "ok-standard",
+        ]
+    )
+    _patch_litellm(monkeypatch, fake)
+
+    result = call_litellm_with_tier_retry(
+        {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+        config=SimpleNamespace(llm_service_tier="flex"),
+        logger=logging.getLogger("test"),
+        max_retries=3,
+        base_delay=0.0,
+        sleep=lambda _s: None,
+    )
+    assert result == "ok-standard"
+    # 3 flex attempts (all 503) + 1 standard-tier fallback.
+    assert len(fake.calls) == 4
+    assert fake.calls[0]["service_tier"] == "flex"
+    assert fake.calls[1]["service_tier"] == "flex"
+    assert fake.calls[2]["service_tier"] == "flex"
+    assert "service_tier" not in fake.calls[3]
+
+
+def test_tier_retry_reraises_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion([ValueError("bad request 400")])
+    _patch_litellm(monkeypatch, fake)
+
+    with pytest.raises(ValueError, match="bad request 400"):
+        call_litellm_with_tier_retry(
+            {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+            config=SimpleNamespace(llm_service_tier="flex"),
+            logger=logging.getLogger("test"),
+            sleep=lambda _s: None,
+        )
+    assert len(fake.calls) == 1

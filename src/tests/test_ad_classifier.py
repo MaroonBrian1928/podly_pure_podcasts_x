@@ -170,6 +170,46 @@ def test_call_model_retry_on_internal_error(test_config: Config, app: Flask) -> 
             assert refreshed.retry_attempts == 2
 
 
+def test_perform_llm_call_reraises_permanent_failure(
+    test_config: Config, app: Flask
+) -> None:
+    """A non-retryable LLM failure must escape `_perform_llm_call` so the
+    enclosing classify run fails the job. Previously it was swallowed with
+    a log line, which produced zero-ad runs marked successful when e.g.
+    litellm rejected an unsupported param.
+    """
+    with app.app_context():
+        classifier = AdClassifier(config=test_config, db_session=db.session)
+        # Skip the TestWhisperConfig short-circuit so _call_model runs.
+        classifier.config.whisper = MagicMock()
+
+        dummy_model_call = ModelCall(
+            post_id=0,
+            model_name="gemini/some-model",
+            prompt="test prompt",
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            status="pending",
+        )
+        db.session.add(dummy_model_call)
+        db.session.commit()
+
+        # ValueError isn't in the retryable set, so _call_model re-raises.
+        with patch(
+            "litellm.completion",
+            side_effect=ValueError("UnsupportedParamsError: service_tier"),
+        ):
+            with pytest.raises(ValueError, match="UnsupportedParamsError"):
+                classifier._perform_llm_call(
+                    model_call=dummy_model_call,
+                    system_prompt="sys",
+                )
+
+        refreshed = db.session.get(ModelCall, dummy_model_call.id)
+        assert refreshed is not None
+        assert refreshed.status == "failed_permanent"
+
+
 def test_process_chunk(test_config: Config, app: Flask) -> None:
     """Test processing a chunk of transcript segments"""
     with app.app_context():

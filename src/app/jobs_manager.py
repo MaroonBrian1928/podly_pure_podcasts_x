@@ -672,22 +672,29 @@ class JobsManager:
         to prevent race conditions where multiple jobs could be dequeued before
         any is marked as running.
         """
+        # writer_client.action requires an active Flask app context. The
+        # worker loop runs in a daemon thread that has none by default, and
+        # every other writer_client.action call site in this file wraps in
+        # _scheduler_app_context() -- wrap here too so callers don't have to.
         try:
-            run_id = self._get_run_id()
-            result = writer_client.action("dequeue_job", {"run_id": run_id}, wait=True)
-
-            if result and result.success and result.data:
-                job_id = result.data["job_id"]
-                post_guid = result.data["post_guid"]
-
-                logger.info(
-                    "[JOB_DEQUEUE] Successfully dequeued and marked running: job_id=%s post_guid=%s",
-                    job_id,
-                    post_guid,
+            with _scheduler_app_context():
+                run_id = self._get_run_id()
+                result = writer_client.action(
+                    "dequeue_job", {"run_id": run_id}, wait=True
                 )
-                return job_id, post_guid
 
-            return None
+                if result and result.success and result.data:
+                    job_id = result.data["job_id"]
+                    post_guid = result.data["post_guid"]
+
+                    logger.info(
+                        "[JOB_DEQUEUE] Successfully dequeued and marked running: job_id=%s post_guid=%s",
+                        job_id,
+                        post_guid,
+                    )
+                    return job_id, post_guid
+
+                return None
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error dequeuing job: {e}")
             return None

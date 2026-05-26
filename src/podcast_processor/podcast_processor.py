@@ -1491,6 +1491,7 @@ class PodcastProcessor:
             logger_override=self.logger,
             post_guid=post_guid,
             removed_windows_ms=removed_windows_ms,
+            llm_service_tier=getattr(self.config, "llm_service_tier", None),
         )
         if topic_chapters:
             refined_topic_chapters = refine_transcript_chapters_with_word_refiner(
@@ -1520,6 +1521,7 @@ class PodcastProcessor:
                 openai_base_url=getattr(self.config, "openai_base_url", None),
                 openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
                 logger_override=self.logger,
+                llm_service_tier=getattr(self.config, "llm_service_tier", None),
             )
             self.logger.info(
                 "Heuristic transcript chapter boundaries retained after LLM "

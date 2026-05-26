@@ -30,6 +30,10 @@ from podcast_processor.llm_concurrency_limiter import (
     LLMConcurrencyLimiter,
     get_concurrency_limiter,
 )
+from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
+)
 from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
@@ -682,6 +686,7 @@ class AdClassifier:
 
         completion_args["response_format"] = {"type": "json_object"}
 
+        apply_service_tier(completion_args, self.config)
         return completion_args
 
     def _generate_user_prompt(
@@ -828,7 +833,14 @@ class AdClassifier:
         return model_call.status not in ("success", "failed_permanent")
 
     def _perform_llm_call(self, *, model_call: ModelCall, system_prompt: str) -> None:
-        """Perform the LLM call for classification."""
+        """Perform the LLM call for classification.
+
+        Re-raises on failure. `_call_model` already handles transient errors
+        with its own retry loop; anything that escapes it (non-retryable
+        exception, retries exhausted) is a genuine failure that must fail the
+        whole job. Swallowing it here would produce a zero-ad run marked
+        successful, leaving ads in the output.
+        """
         self.logger.info(
             f"Calling LLM for ModelCall {model_call.id} (post {model_call.post_id}, segments {model_call.first_segment_sequence_num}-{model_call.last_segment_sequence_num})."
         )
@@ -837,11 +849,12 @@ class AdClassifier:
                 self._handle_test_mode_call(model_call)
             else:
                 self._call_model(model_call_obj=model_call, system_prompt=system_prompt)
-        except Exception as e:
+        except Exception:
             self.logger.error(
-                f"LLM interaction via _call_model for ModelCall {model_call.id} resulted in an exception: {e}",
+                f"LLM call failed for ModelCall {model_call.id}; failing classification.",
                 exc_info=True,
             )
+            raise
 
     def _handle_test_mode_call(self, model_call: ModelCall) -> None:
         """Handle LLM call in test mode."""
@@ -1134,15 +1147,22 @@ class AdClassifier:
                 if completion_args is None:
                     return None  # Token limit exceeded
 
-                import litellm
                 from litellm.types.utils import Choices
 
                 # Use concurrency limiter if available
                 if self.concurrency_limiter:
                     with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
-                        response = litellm.completion(**completion_args)
+                        response = call_litellm_with_tier_retry(
+                            completion_args,
+                            config=self.config,
+                            logger=self.logger,
+                        )
                 else:
-                    response = litellm.completion(**completion_args)
+                    response = call_litellm_with_tier_retry(
+                        completion_args,
+                        config=self.config,
+                        logger=self.logger,
+                    )
 
                 response_first_choice = response.choices[0]
                 assert isinstance(response_first_choice, Choices)
