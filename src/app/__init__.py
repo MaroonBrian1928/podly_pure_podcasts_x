@@ -48,12 +48,17 @@ from app.config_store import (  # noqa: E402
     hydrate_runtime_config_inplace,
 )
 from app.extensions import db, migrate, scheduler  # noqa: E402
+from app.litellm_silencer import silence_litellm_noise  # noqa: E402
 from app.logger import setup_logger  # noqa: E402
 from app.runtime_config import config, is_test  # noqa: E402
 from shared import defaults as DEFAULTS  # noqa: E402
 from shared.processing_paths import get_in_root, get_srv_root  # noqa: E402
 
 setup_logger("global_logger", "src/instance/logs/app.log")
+# Install the litellm log-noise filter before anything imports litellm so the
+# import-time "Bedrock/SageMaker: No module named botocore" warnings get
+# dropped, and so the "Give Feedback / Get Help" debug blurb on errors is off.
+silence_litellm_noise()
 app_logger: logging.Logger = logging.getLogger("global_logger")
 
 

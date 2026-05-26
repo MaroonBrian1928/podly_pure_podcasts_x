@@ -849,10 +849,14 @@ class AdClassifier:
                 self._handle_test_mode_call(model_call)
             else:
                 self._call_model(model_call_obj=model_call, system_prompt=system_prompt)
-        except Exception:
+        except Exception as e:
+            # `_call_model` already logged the exception with traceback before
+            # re-raising, so don't dump it a second time -- just leave a short
+            # breadcrumb so the failure is visible at this layer too.
             self.logger.error(
-                f"LLM call failed for ModelCall {model_call.id}; failing classification.",
-                exc_info=True,
+                "LLM call failed for ModelCall %s; failing classification: %s",
+                model_call.id,
+                e,
             )
             raise
 
