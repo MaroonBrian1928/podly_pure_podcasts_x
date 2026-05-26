@@ -21,6 +21,19 @@ class Chapter:
     start_time_ms: int
     end_time_ms: int
 
+    def __post_init__(self) -> None:
+        # Some ID3 producers write end_time < start_time. Clamp rather than
+        # raise so we don't break reads of malformed files; downstream writers
+        # would otherwise hand mutagen an invalid CHAP frame.
+        if self.end_time_ms < self.start_time_ms:
+            logger.warning(
+                "Clamping chapter '%s' end_time_ms %d -> %d (start_time_ms)",
+                self.title,
+                self.end_time_ms,
+                self.start_time_ms,
+            )
+            self.end_time_ms = self.start_time_ms
+
 
 def read_chapters(audio_path: str) -> list[Chapter]:
     """

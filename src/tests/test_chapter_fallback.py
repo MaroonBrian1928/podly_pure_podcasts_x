@@ -833,3 +833,50 @@ def test_chapters_from_topic_plan_skips_rust_when_disabled(monkeypatch) -> None:
             min_chapter_gap_ms=0,
         )
     assert [c.title for c in result] == ["Intro"]
+
+
+def test_segment_index_nearest_segment_seq() -> None:
+    """The bisect-backed index must return the same seq the linear scan did
+    for the three boundary cases: t inside a segment, t before any segment,
+    t after the last segment."""
+    from podcast_processor.chapter_fallback import _SegmentIndex
+
+    segments = [
+        {"sequence_num": 1, "start_time": 0.0, "end_time": 5.0, "text": "a"},
+        {"sequence_num": 2, "start_time": 10.0, "end_time": 15.0, "text": "b"},
+        {"sequence_num": 3, "start_time": 20.0, "end_time": 25.0, "text": "c"},
+    ]
+    idx = _SegmentIndex(segments)
+
+    assert idx.nearest_segment_seq_for_time(12_000) == 2  # inside seg 2
+    assert idx.nearest_segment_seq_for_time(-1_000) == 1  # before any
+    assert idx.nearest_segment_seq_for_time(100_000) == 3  # after last
+    # Gap between segments — closer to seg 1's end (5.0) than seg 2's start (10.0)
+    assert idx.nearest_segment_seq_for_time(6_000) == 1
+    # Gap between segments — closer to seg 2's start (10.0) than seg 1's end
+    assert idx.nearest_segment_seq_for_time(9_000) == 2
+
+
+def test_segment_index_context_window() -> None:
+    from podcast_processor.chapter_fallback import _SegmentIndex
+
+    segments = [
+        {"sequence_num": 1, "start_time": 0.0, "end_time": 5.0, "text": "a"},
+        {"sequence_num": 2, "start_time": 10.0, "end_time": 15.0, "text": "b"},
+        {"sequence_num": 3, "start_time": 20.0, "end_time": 25.0, "text": "c"},
+        {"sequence_num": 4, "start_time": 30.0, "end_time": 35.0, "text": "d"},
+    ]
+    idx = _SegmentIndex(segments)
+
+    selected = idx.context_segments_around_time(time_seconds=12.0, window_seconds=10.0)
+    seqs = [s["sequence_num"] for s in selected]
+    # Window is [2, 22] — covers seg 1 (overlap on right edge), seg 2 (fully),
+    # seg 3 (overlap on left edge); seg 4 is past the right edge.
+    assert seqs == [1, 2, 3]
+
+    # Falls outside all segments — falls back to first segment per existing
+    # behavior so the refiner doesn't get an empty context list.
+    selected = idx.context_segments_around_time(
+        time_seconds=1_000.0, window_seconds=1.0
+    )
+    assert [s["sequence_num"] for s in selected] == [1]

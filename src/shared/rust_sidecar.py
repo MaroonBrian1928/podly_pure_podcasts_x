@@ -575,6 +575,9 @@ def try_read_chapters(audio_path: Path) -> list[dict[str, Any]] | None:
             LOGGER.error("Rust chapters read returned invalid chapter: %r", chapter)
             return None
         parsed.append(chapter)
+    if not _chapters_are_monotonic(parsed):
+        LOGGER.error("Rust chapters read returned out-of-order chapters: %r", parsed)
+        return None
     return parsed
 
 
@@ -624,6 +627,8 @@ def _is_valid_chapter_detection_payload(payload: dict[str, Any]) -> bool:
             return False
         if not all(_is_valid_chapter_payload(chapter) for chapter in chapters):
             return False
+        if not _chapters_are_monotonic(chapters):
+            return False
     return True
 
 
@@ -631,12 +636,37 @@ def _is_valid_chapter_payload(chapter: object) -> bool:
     if not isinstance(chapter, dict):
         return False
     chapter_dict = cast(dict[str, Any], chapter)
-    return (
+    if not (
         isinstance(chapter_dict.get("element_id"), str)
         and isinstance(chapter_dict.get("title"), str)
         and isinstance(chapter_dict.get("start_time_ms"), int)
         and isinstance(chapter_dict.get("end_time_ms"), int)
-    )
+    ):
+        return False
+    # A chapter whose end precedes its start is meaningless and breaks
+    # downstream players. We treat the payload as bad rather than silently
+    # clamping so a Rust regression surfaces in the fallback log.
+    if chapter_dict["end_time_ms"] < chapter_dict["start_time_ms"]:
+        return False
+    if chapter_dict["start_time_ms"] < 0:
+        return False
+    return True
+
+
+def _chapters_are_monotonic(chapters: list[dict[str, Any]]) -> bool:
+    """Reject Rust chapter lists that aren't sorted by start_time_ms.
+
+    Both the reader and detector paths assume chapters arrive in playback
+    order; out-of-order entries point to a sidecar bug we want to fall back on
+    rather than silently propagate.
+    """
+    last_start: int | None = None
+    for chapter in chapters:
+        start = chapter["start_time_ms"]
+        if last_start is not None and start < last_start:
+            return False
+        last_start = start
+    return True
 
 
 def _try_audio_command(args: list[str], label: str) -> bool:
@@ -702,6 +732,36 @@ class _json_file:
             delete=False,
         )
         json.dump(self._payload, self._temp_file)
+        self._temp_file.close()
+        return Path(self._temp_file.name)
+
+    def __exit__(self, *_args: object) -> None:
+        if self._temp_file is not None:
+            Path(self._temp_file.name).unlink(missing_ok=True)
+
+
+class _text_file:
+    """Write a string payload to a temp file and unlink on exit.
+
+    Matches `_json_file` / `_windows_json_file` but for raw text (LLM responses
+    handed to the Rust sidecar's parse subcommands). Keeps the temp-file
+    lifetime tied to a `with` block so ruff's SIM115 stays happy and OS-level
+    cleanup happens even on raised exceptions.
+    """
+
+    def __init__(self, payload: str, *, suffix: str = ".txt") -> None:
+        self._payload = payload
+        self._suffix = suffix
+        self._temp_file: Any = None
+
+    def __enter__(self) -> Path:
+        self._temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=self._suffix,
+            delete=False,
+        )
+        self._temp_file.write(self._payload or "")
         self._temp_file.close()
         return Path(self._temp_file.name)
 
@@ -823,7 +883,7 @@ def try_wb_context(
     return result
 
 
-def try_wb_resolve(
+def try_wb_resolve(  # noqa: PLR0912 — branches mirror the Python `_refine_*` arg surface; splitting just hides the contract.
     *,
     db_path: Path,
     post_guid: str,
@@ -929,16 +989,7 @@ def try_wb_refine_from_llm(
     if not rust_word_boundary_enabled():
         return None
 
-    temp_file = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".txt",
-        delete=False,
-    )
-    try:
-        temp_file.write(raw_content or "")
-        temp_file.close()
-
+    with _text_file(raw_content or "") as raw_content_path:
         args: list[str] = [
             "transcript",
             "wb-refine-from-llm",
@@ -951,7 +1002,7 @@ def try_wb_refine_from_llm(
             "--orig-ad-end",
             repr(float(orig_ad_end)),
             "--raw-content-file",
-            temp_file.name,
+            str(raw_content_path),
         ]
         if first_seq is not None:
             args += ["--first-seq", str(int(first_seq))]
@@ -965,8 +1016,6 @@ def try_wb_refine_from_llm(
                 "Rust wb-refine-from-llm failed; falling back to Python implementation"
             )
             return None
-    finally:
-        Path(temp_file.name).unlink(missing_ok=True)
 
     parse_status = payload.get("parse_status")
     if parse_status not in {"ok", "salvaged", "failed"}:
@@ -1050,7 +1099,7 @@ def try_chapter_topic_blocks(
 
     if removed_windows_ms:
         with _windows_json_file(list(removed_windows_ms)) as windows_path:
-            payload = _invoke(base_args + ["--removed-windows-json", str(windows_path)])
+            payload = _invoke([*base_args, "--removed-windows-json", str(windows_path)])
     else:
         payload = _invoke(base_args)
 
@@ -1086,23 +1135,14 @@ def try_chapter_topic_plan_parse(*, raw_content: str) -> dict[str, Any] | None:
     if not rust_chapter_fallback_enabled():
         return None
 
-    temp_file = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".txt",
-        delete=False,
-    )
-    try:
-        temp_file.write(raw_content or "")
-        temp_file.close()
-
+    with _text_file(raw_content or "") as raw_content_path:
         try:
             payload = run_podly_tools(
                 [
                     "chapters",
                     "topic-plan-parse",
                     "--input",
-                    temp_file.name,
+                    str(raw_content_path),
                 ]
             )
         except RustSidecarError:
@@ -1110,8 +1150,6 @@ def try_chapter_topic_plan_parse(*, raw_content: str) -> dict[str, Any] | None:
                 "Rust chapter topic-plan-parse failed; falling back to Python"
             )
             return None
-    finally:
-        Path(temp_file.name).unlink(missing_ok=True)
 
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list):
@@ -1175,23 +1213,14 @@ def try_chapter_topic_plan_apply(
         "min_chapter_gap_ms": int(min_chapter_gap_ms),
     }
 
-    temp_file = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".json",
-        delete=False,
-    )
-    try:
-        json.dump(payload, temp_file)
-        temp_file.close()
-
+    with _json_file(payload) as payload_path:
         try:
             result = run_podly_tools(
                 [
                     "chapters",
                     "topic-plan-apply",
                     "--input",
-                    temp_file.name,
+                    str(payload_path),
                 ]
             )
         except RustSidecarError:
@@ -1199,8 +1228,6 @@ def try_chapter_topic_plan_apply(
                 "Rust chapter topic-plan-apply failed; falling back to Python"
             )
             return None
-    finally:
-        Path(temp_file.name).unlink(missing_ok=True)
 
     raw_chapters = result.get("chapters")
     if not isinstance(raw_chapters, list):

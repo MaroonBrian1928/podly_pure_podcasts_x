@@ -113,6 +113,9 @@ def test_write_adjusted_chapters_uses_rust_when_enabled(monkeypatch) -> None:
         return True
 
     monkeypatch.setattr(
+        "podcast_processor.chapter_writer.rust_audio_enabled", lambda: True
+    )
+    monkeypatch.setattr(
         "podcast_processor.chapter_writer.try_write_chapters", fake_write_chapters
     )
 
@@ -125,3 +128,46 @@ def test_write_adjusted_chapters_uses_rust_when_enabled(monkeypatch) -> None:
     assert calls[0]["chapters"] == [
         {"title": "Intro", "start_time_ms": 0, "end_time_ms": 110_000}
     ]
+
+
+def test_write_adjusted_chapters_skips_rust_payload_when_flag_off(monkeypatch) -> None:
+    """When the Rust audio flag is off we shouldn't waste cycles serializing
+    the chapter list into a dict payload that the wrapper would immediately
+    discard. Tracks the regression behind the chapter-writer cleanup."""
+
+    def fail_if_called(**_kwargs) -> bool:
+        raise AssertionError("try_write_chapters must not run when flag is off")
+
+    written: list[tuple[str, list]] = []
+
+    def fake_write_chapters(path, chapters) -> None:
+        written.append((path, chapters))
+
+    monkeypatch.setattr(
+        "podcast_processor.chapter_writer.rust_audio_enabled", lambda: False
+    )
+    monkeypatch.setattr(
+        "podcast_processor.chapter_writer.try_write_chapters", fail_if_called
+    )
+    monkeypatch.setattr(
+        "podcast_processor.chapter_writer.write_chapters", fake_write_chapters
+    )
+
+    write_adjusted_chapters(
+        "/tmp/audio.mp3",
+        [Chapter("c1", "Intro", 0, 120_000)],
+        [(10.0, 20.0)],
+    )
+
+    assert written == [
+        ("/tmp/audio.mp3", [Chapter("c1", "Intro", 0, 110_000)]),
+    ]
+
+
+def test_chapter_clamps_end_before_start() -> None:
+    """Reading a malformed CHAP frame shouldn't propagate an end < start state
+    that later breaks mutagen on write-back. We clamp end up to start instead
+    of raising so existing files keep loading."""
+    c = Chapter("c1", "Backwards", 60_000, 10_000)
+    assert c.start_time_ms == 60_000
+    assert c.end_time_ms == 60_000

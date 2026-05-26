@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import math
@@ -110,6 +111,7 @@ def refine_description_chapters_with_word_refiner(
     if not all_segments:
         return list(chapters)
 
+    segment_index = _SegmentIndex(all_segments)
     refiner_logger = log if isinstance(log, logging.Logger) else None
     refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
     max_shift_ms = max(0, int(max_shift_seconds * 1000))
@@ -120,9 +122,8 @@ def refine_description_chapters_with_word_refiner(
 
     for chapter in sorted_chapters:
         original_start_ms = int(chapter.start_time_ms)
-        preferred_seq = _nearest_segment_seq_for_time(all_segments, original_start_ms)
-        context_segments = _context_segments_around_time(
-            all_segments,
+        preferred_seq = segment_index.nearest_segment_seq_for_time(original_start_ms)
+        context_segments = segment_index.context_segments_around_time(
             time_seconds=original_start_ms / 1000.0,
             window_seconds=60.0,
         )
@@ -198,6 +199,7 @@ def refine_transcript_chapters_with_word_refiner(
     if not all_segments:
         return list(chapters)
 
+    segment_index = _SegmentIndex(all_segments)
     refiner_logger = log if isinstance(log, logging.Logger) else None
     refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
     max_shift_ms = max(0, int(max_shift_seconds * 1000))
@@ -213,8 +215,7 @@ def refine_transcript_chapters_with_word_refiner(
             candidate_starts_ms.append(original_start_ms)
             continue
 
-        context_segments = _context_segments_around_time(
-            all_segments,
+        context_segments = segment_index.context_segments_around_time(
             time_seconds=original_start_ms / 1000.0,
             window_seconds=context_window_seconds,
         )
@@ -336,55 +337,148 @@ def generate_chapters_from_transcript(
     return chapters
 
 
+def _safe_coerce_segment_times(
+    seg: Any,
+    fallback_seq: int,
+) -> tuple[int, float, float]:
+    """Pull (sequence_num, start_time, end_time) off a transcript segment.
+
+    Returns coerced defaults rather than raising — chapter refinement is a
+    best-effort pass and a malformed segment row shouldn't take down the whole
+    chapter generation.
+    """
+    try:
+        sequence_num = int(seg.sequence_num)
+    except Exception:  # noqa: BLE001
+        sequence_num = fallback_seq
+    try:
+        start_time = float(getattr(seg, "start_time", 0.0))
+    except Exception:  # noqa: BLE001
+        start_time = 0.0
+    try:
+        end_time = float(getattr(seg, "end_time", start_time))
+    except Exception:  # noqa: BLE001
+        end_time = start_time
+    return sequence_num, start_time, max(start_time, end_time)
+
+
 def _segments_for_word_refiner(
     transcript_segments: Sequence[Any],
+    *,
+    pre_sorted: bool = False,
 ) -> list[dict[str, Any]]:
-    segments: list[dict[str, Any]] = []
-    for idx, seg in enumerate(sorted(list(transcript_segments), key=_seg_start_ms)):
-        try:
-            sequence_num = int(seg.sequence_num)
-        except Exception:  # noqa: BLE001
-            sequence_num = idx
-        try:
-            start_time = float(getattr(seg, "start_time", 0.0))
-        except Exception:  # noqa: BLE001
-            start_time = 0.0
-        try:
-            end_time = float(getattr(seg, "end_time", start_time))
-        except Exception:  # noqa: BLE001
-            end_time = start_time
+    """Normalize raw transcript-segment objects into refiner-friendly dicts.
 
+    ``pre_sorted=True`` lets callers that already sorted by ``start_time``
+    skip the redundant resort.
+    """
+    iterable = (
+        transcript_segments
+        if pre_sorted
+        else sorted(list(transcript_segments), key=_seg_start_ms)
+    )
+    segments: list[dict[str, Any]] = []
+    for idx, seg in enumerate(iterable):
+        sequence_num, start_time, end_time = _safe_coerce_segment_times(seg, idx)
         segments.append(
             {
                 "sequence_num": sequence_num,
                 "start_time": start_time,
-                "end_time": max(start_time, end_time),
+                "end_time": end_time,
                 "text": str(getattr(seg, "text", "") or ""),
             }
         )
     return segments
 
 
+class _SegmentIndex:
+    """Bisect-backed lookup over normalized refiner segments.
+
+    Caches ``start_time`` / ``end_time`` arrays once so per-chapter boundary
+    queries are O(log n) instead of an O(n) full scan. The cost is one pass at
+    build time, which the existing code already pays implicitly by sorting in
+    ``_segments_for_word_refiner``.
+    """
+
+    def __init__(self, segments: Sequence[dict[str, Any]]) -> None:
+        self._segments: list[dict[str, Any]] = list(segments)
+        self._start_times: list[float] = [
+            float(seg.get("start_time", 0.0)) for seg in self._segments
+        ]
+        self._end_times: list[float] = [
+            float(seg.get("end_time", start))
+            for seg, start in zip(self._segments, self._start_times, strict=False)
+        ]
+
+    def __bool__(self) -> bool:
+        return bool(self._segments)
+
+    @property
+    def segments(self) -> list[dict[str, Any]]:
+        return self._segments
+
+    def nearest_segment_seq_for_time(self, time_ms: int) -> int | None:
+        if not self._segments:
+            return None
+        time_seconds = float(time_ms) / 1000.0
+
+        # bisect on start_time finds the first segment that starts after t.
+        # The candidate enclosing segment, if any, is the one immediately
+        # before that insertion point.
+        idx = bisect.bisect_right(self._start_times, time_seconds)
+        if idx > 0:
+            seg = self._segments[idx - 1]
+            if self._start_times[idx - 1] <= time_seconds <= self._end_times[idx - 1]:
+                return int(seg.get("sequence_num", 0))
+
+        # Otherwise pick whichever neighbor's boundary is closest.
+        candidates: list[int] = []
+        if idx - 1 >= 0:
+            candidates.append(idx - 1)
+        if idx < len(self._segments):
+            candidates.append(idx)
+
+        best: tuple[float, int] | None = None
+        for cand in candidates:
+            distance = min(
+                abs(time_seconds - self._start_times[cand]),
+                abs(time_seconds - self._end_times[cand]),
+            )
+            seq = int(self._segments[cand].get("sequence_num", 0))
+            if best is None or distance < best[0]:
+                best = (distance, seq)
+        return best[1] if best is not None else None
+
+    def context_segments_around_time(
+        self,
+        *,
+        time_seconds: float,
+        window_seconds: float,
+    ) -> list[dict[str, Any]]:
+        if not self._segments:
+            return []
+        window = max(0.0, float(window_seconds))
+        start_time = float(time_seconds) - window
+        end_time = float(time_seconds) + window
+
+        # First segment whose start is past the window is the right-hand bound;
+        # the first segment whose end has caught up to the window start is the
+        # left-hand bound. Falling back to a linear sweep from the right-hand
+        # bound covers overlapping segments cheaply (the overlap is bounded).
+        right = bisect.bisect_right(self._start_times, end_time)
+        left = right
+        while left > 0 and self._end_times[left - 1] >= start_time:
+            left -= 1
+
+        selected = [dict(self._segments[i]) for i in range(left, right)]
+        return selected or [dict(self._segments[0])]
+
+
 def _nearest_segment_seq_for_time(
     all_segments: Sequence[dict[str, Any]],
     time_ms: int,
 ) -> int | None:
-    if not all_segments:
-        return None
-
-    time_seconds = float(time_ms) / 1000.0
-    best: tuple[float, int] | None = None
-    for seg in all_segments:
-        start_time = float(seg.get("start_time", 0.0))
-        end_time = float(seg.get("end_time", start_time))
-        if start_time <= time_seconds <= end_time:
-            return int(seg.get("sequence_num", 0))
-
-        distance = min(abs(time_seconds - start_time), abs(time_seconds - end_time))
-        seq = int(seg.get("sequence_num", 0))
-        if best is None or distance < best[0]:
-            best = (distance, seq)
-    return best[1] if best is not None else None
+    return _SegmentIndex(all_segments).nearest_segment_seq_for_time(time_ms)
 
 
 def _context_segments_around_time(
@@ -393,18 +487,10 @@ def _context_segments_around_time(
     time_seconds: float,
     window_seconds: float,
 ) -> list[dict[str, Any]]:
-    if not all_segments:
-        return []
-    start_time = float(time_seconds) - max(0.0, float(window_seconds))
-    end_time = float(time_seconds) + max(0.0, float(window_seconds))
-
-    selected: list[dict[str, Any]] = []
-    for seg in all_segments:
-        seg_start = float(seg.get("start_time", 0.0))
-        seg_end = float(seg.get("end_time", seg_start))
-        if seg_end >= start_time and seg_start <= end_time:
-            selected.append(dict(seg))
-    return selected or [dict(all_segments[0])]
+    return _SegmentIndex(all_segments).context_segments_around_time(
+        time_seconds=time_seconds,
+        window_seconds=window_seconds,
+    )
 
 
 def refine_generated_chapter_titles_with_llm(

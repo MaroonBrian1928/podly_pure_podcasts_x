@@ -30,25 +30,28 @@ def _load_dotenv_files() -> None:
             load_dotenv(path, override=False)
 
 
+# Dotenv must run before any app-namespace imports so submodules see the
+# environment when they read it at import time. The E402 suppressions below
+# encode that ordering requirement intentionally.
 _load_dotenv_files()
-from flask_cors import CORS
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
+from flask_cors import CORS  # noqa: E402
+from sqlalchemy import event  # noqa: E402
+from sqlalchemy.engine import Engine  # noqa: E402
 
-from app import models as models
-from app.auth import AuthSettings, load_auth_settings
-from app.auth.bootstrap import bootstrap_admin_user
-from app.auth.discord_settings import load_discord_settings
-from app.auth.middleware import init_auth_middleware
-from app.config_store import (
+from app import models as models  # noqa: E402
+from app.auth import AuthSettings, load_auth_settings  # noqa: E402
+from app.auth.bootstrap import bootstrap_admin_user  # noqa: E402
+from app.auth.discord_settings import load_discord_settings  # noqa: E402
+from app.auth.middleware import init_auth_middleware  # noqa: E402
+from app.config_store import (  # noqa: E402
     ensure_defaults_and_hydrate,
     hydrate_runtime_config_inplace,
 )
-from app.extensions import db, migrate, scheduler
-from app.logger import setup_logger
-from app.runtime_config import config, is_test
-from shared import defaults as DEFAULTS
-from shared.processing_paths import get_in_root, get_srv_root
+from app.extensions import db, migrate, scheduler  # noqa: E402
+from app.logger import setup_logger  # noqa: E402
+from app.runtime_config import config, is_test  # noqa: E402
+from shared import defaults as DEFAULTS  # noqa: E402
+from shared.processing_paths import get_in_root, get_srv_root  # noqa: E402
 
 setup_logger("global_logger", "src/instance/logs/app.log")
 app_logger: logging.Logger = logging.getLogger("global_logger")

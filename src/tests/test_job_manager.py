@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 from app.extensions import db
@@ -162,13 +163,14 @@ def test_ensure_job_routes_attribution_update_through_writer_client(app) -> None
         captured["params"] = dict(params)
         captured["wait"] = wait
         # Apply the writer's intended mutation so the refresh below sees it.
-        job = db.session.get(ProcessingJob, params["job_id"])
+        job_row = db.session.get(ProcessingJob, params["job_id"])
+        assert job_row is not None
         if "run_id" in params:
-            job.jobs_manager_run_id = params["run_id"]
+            job_row.jobs_manager_run_id = params["run_id"]
         if "requested_by_user_id" in params:
-            job.requested_by_user_id = params["requested_by_user_id"]
+            job_row.requested_by_user_id = params["requested_by_user_id"]
         if "billing_user_id" in params:
-            job.billing_user_id = params["billing_user_id"]
+            job_row.billing_user_id = params["billing_user_id"]
         db.session.commit()
         return mock.MagicMock(success=True, data={"job_id": params["job_id"]})
 
@@ -180,7 +182,7 @@ def test_ensure_job_routes_attribution_update_through_writer_client(app) -> None
     assert action_mock.called
     assert captured["name"] == "update_job_attribution"
     assert captured["wait"] is True
-    params = captured["params"]
+    params = cast(dict[str, object], captured["params"])
     assert params["job_id"] == "job-123"
     assert params["run_id"] == "run-abc"
     assert params["requested_by_user_id"] == 7

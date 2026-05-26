@@ -118,7 +118,7 @@ def _print_timing(label: str, timings_ms: list[float]) -> None:
         return
     sorted_t = sorted(timings_ms)
     median = statistics.median(sorted_t)
-    p95_idx = max(0, int(round(0.95 * (len(sorted_t) - 1))))
+    p95_idx = max(0, round(0.95 * (len(sorted_t) - 1)))
     p95 = sorted_t[p95_idx]
     mn = sorted_t[0]
     mx = sorted_t[-1]
