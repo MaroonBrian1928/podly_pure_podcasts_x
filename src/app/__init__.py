@@ -5,7 +5,32 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from flask import Flask, current_app, g, has_app_context, request
+
+
+def _load_dotenv_files() -> None:
+    """Load .env.local and .env from the repo root.
+
+    Both the web server (waitress / flask CLI) and subprocesses (writer,
+    processing_worker) import this package, so loading here keeps env parity
+    across processes. Without this, env-based overrides (e.g.
+    WHISPER_REMOTE_MODEL) can apply in one process but not another and the
+    runtime config silently diverges from what was used to write the DB.
+    Existing process env wins (override=False) so docker-compose env_file and
+    real shell exports still take precedence. Skipped under pytest to avoid
+    polluting tests that assert specific env states.
+    """
+    if "pytest" in sys.modules:
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    for filename in (".env.local", ".env"):
+        path = repo_root / filename
+        if path.is_file():
+            load_dotenv(path, override=False)
+
+
+_load_dotenv_files()
 from flask_cors import CORS
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
