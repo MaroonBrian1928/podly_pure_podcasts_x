@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
 from app.sanitize import redact_secrets

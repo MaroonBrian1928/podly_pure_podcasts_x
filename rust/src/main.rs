@@ -3164,6 +3164,17 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
     Ok(json!({ "jobs": jobs }))
 }
 
+// Mirror Python `_TIER_IN_FLIGHT_STATUSES`: only these statuses warrant the
+// "in_flight" subobject because the wrapper retry loop hasn't terminated.
+const TIER_IN_FLIGHT_STATUSES: &[&str] = &["pending", "retrying"];
+
+struct TierBucket {
+    latest: String,
+    latest_status: String,
+    latest_attempt: i64,
+    tiers: HashSet<String>,
+}
+
 fn load_service_tier_summary(
     conn: &Connection,
     post_ids: &[i64],
@@ -3177,7 +3188,7 @@ fn load_service_tier_summary(
     // `latest` correctly even though we keep walking to detect mixed.
     let placeholders: Vec<String> = (1..=post_ids.len()).map(|i| format!("?{}", i)).collect();
     let sql = format!(
-        "SELECT post_id, service_tier
+        "SELECT post_id, service_tier, status, retry_attempts
          FROM model_call
          WHERE service_tier IS NOT NULL AND post_id IN ({})
          ORDER BY timestamp DESC",
@@ -3185,32 +3196,68 @@ fn load_service_tier_summary(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(post_ids.iter()), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+        ))
     })?;
 
-    let mut per_post: HashMap<i64, (String, HashSet<String>)> = HashMap::new();
+    let mut per_post: HashMap<i64, TierBucket> = HashMap::new();
     for r in rows {
-        let (pid, tier) = r?;
-        let entry = per_post
-            .entry(pid)
-            .or_insert_with(|| (tier.clone(), HashSet::new()));
-        entry.1.insert(tier);
+        let (pid, tier, status, retry_attempts) = r?;
+        let entry = per_post.entry(pid).or_insert_with(|| TierBucket {
+            latest: tier.clone(),
+            latest_status: status,
+            latest_attempt: retry_attempts,
+            tiers: HashSet::new(),
+        });
+        entry.tiers.insert(tier);
     }
+
+    let max_retries = load_llm_max_retry_attempts(conn);
 
     Ok(per_post
         .into_iter()
-        .map(|(pid, (latest, tiers))| {
-            let mixed = tiers.len() > 1;
-            (
-                pid,
-                json!({
-                    "label": latest,
-                    "latest": latest,
-                    "mixed": mixed,
-                }),
-            )
-        })
+        .map(|(pid, bucket)| (pid, build_tier_summary(&bucket, max_retries)))
         .collect())
+}
+
+fn build_tier_summary(bucket: &TierBucket, max_retries: Option<i64>) -> Value {
+    let mut summary = serde_json::Map::new();
+    summary.insert("label".to_string(), Value::String(bucket.latest.clone()));
+    summary.insert("latest".to_string(), Value::String(bucket.latest.clone()));
+    summary.insert("mixed".to_string(), Value::Bool(bucket.tiers.len() > 1));
+    if TIER_IN_FLIGHT_STATUSES.contains(&bucket.latest_status.as_str()) {
+        let mut in_flight = serde_json::Map::new();
+        in_flight.insert(
+            "status".to_string(),
+            Value::String(bucket.latest_status.clone()),
+        );
+        in_flight.insert(
+            "attempt".to_string(),
+            Value::Number(bucket.latest_attempt.into()),
+        );
+        if let Some(max) = max_retries {
+            in_flight.insert("max_retries".to_string(), Value::Number(max.into()));
+        }
+        summary.insert("in_flight".to_string(), Value::Object(in_flight));
+    }
+    Value::Object(summary)
+}
+
+fn load_llm_max_retry_attempts(conn: &Connection) -> Option<i64> {
+    // Singleton LLMSettings row; best-effort -- treat any failure (table
+    // missing, row missing) as "unknown" so callers omit the max from the
+    // summary rather than fail the request.
+    conn.query_row(
+        "SELECT llm_max_retry_attempts FROM llm_settings WHERE id = 1",
+        [],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
 const JOBS_MANAGER_SINGLETON_RUN_ID: &str = "jobs-manager-singleton";

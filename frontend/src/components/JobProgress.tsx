@@ -169,3 +169,84 @@ export function JobProgressIndicator({
     </div>
   );
 }
+
+// Shared shape mirrors the backend `service_tier` summary in
+// app/jobs_manager.py::_summarize_service_tier_for_post.
+export interface ServiceTierSummary {
+  label: string;
+  latest: string;
+  mixed: boolean;
+  in_flight?: {
+    status: 'pending' | 'retrying';
+    attempt: number;
+    max_retries?: number;
+  };
+}
+
+export function ServiceTierChip({ tier }: { tier: ServiceTierSummary }) {
+  const color =
+    tier.label === 'flex'
+      ? 'bg-purple-100 text-purple-800'
+      : tier.label === 'priority'
+        ? 'bg-blue-100 text-blue-800'
+        : 'bg-gray-100 text-gray-700';
+  const title = tier.mixed
+    ? `LLM calls so far used mixed tiers; latest=${tier.latest}`
+    : `LLM calls used the "${tier.label}" service tier`;
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span
+        title={title}
+        className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded ${color}`}
+      >
+        {tier.label}
+        {tier.mixed ? '*' : ''}
+      </span>
+      {tier.in_flight ? (
+        <span className="text-[10px] text-gray-500 italic">
+          {formatTierInFlight(tier.in_flight)}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+// Centered "Stage Name (NN%) [tier chip]" caption matching the layout
+// EpisodeProcessingStatus uses below its bar. Extracted so the JobsPage
+// card and the episode-list status indicator stay visually in sync.
+export function JobProgressCaption({
+  stageLabel,
+  percent,
+  tier,
+  className = '',
+}: {
+  stageLabel: string;
+  percent: number;
+  tier?: ServiceTierSummary;
+  className?: string;
+}) {
+  const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+  return (
+    <div
+      className={`text-xs text-center text-gray-600 flex items-center justify-center gap-1.5 ${className}`}
+    >
+      <span>
+        {stageLabel} ({clamped}%)
+      </span>
+      {tier ? <ServiceTierChip tier={tier} /> : null}
+    </div>
+  );
+}
+
+function formatTierInFlight(inFlight: {
+  status: 'pending' | 'retrying';
+  attempt: number;
+  max_retries?: number;
+}): string {
+  const verb = inFlight.status === 'retrying' ? 'retrying' : 'attempt';
+  const count =
+    inFlight.max_retries && inFlight.max_retries > 0
+      ? `${inFlight.attempt}/${inFlight.max_retries}`
+      : `${inFlight.attempt}`;
+  return `(${verb} ${count})`;
+}

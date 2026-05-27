@@ -6,6 +6,7 @@ import type {
   Episode,
   Job,
   JobManagerStatus,
+  JobStageEvent,
   CleanupPreview,
   CleanupRunResult,
   CombinedConfig,
@@ -206,7 +207,19 @@ export const feedsApi = {
     message: string;
     download_url?: string;
     error?: string;
-    service_tier?: { label: string; latest: string; mixed: boolean };
+    service_tier?: {
+      label: string;
+      latest: string;
+      mixed: boolean;
+      in_flight?: {
+        status: 'pending' | 'retrying';
+        attempt: number;
+        max_retries?: number;
+      };
+    };
+    stage_history?: JobStageEvent[];
+    started_at?: string | null;
+    completed_at?: string | null;
   }> => {
     const response = await api.get(postApiPath(guid, '/status'));
     return response.data;
@@ -482,7 +495,19 @@ export const feedsApi = {
     message: string;
     download_url?: string;
     error?: string;
-    service_tier?: { label: string; latest: string; mixed: boolean };
+    service_tier?: {
+      label: string;
+      latest: string;
+      mixed: boolean;
+      in_flight?: {
+        status: 'pending' | 'retrying';
+        attempt: number;
+        max_retries?: number;
+      };
+    };
+    stage_history?: JobStageEvent[];
+    started_at?: string | null;
+    completed_at?: string | null;
   }> => {
     return feedsApi.getPostStatus(guid);
   },

@@ -212,16 +212,29 @@ def _seed_fixture(db_path: Path) -> None:
             '2026-05-26 12:00:00', NULL, NULL, 0, 0
         );
 
-        -- Two ModelCall rows so the bulk tier summary picks up
-        -- mixed=true. Latest (by timestamp) is 'flex' so jobs list shows
-        -- the chip; the second row has no tier so it tests the NULL path.
+        -- ModelCall rows: latest (by timestamp) is a `retrying` Flex call
+        -- on attempt 2 -- this drives the `in_flight` subobject in the tier
+        -- summary so the UI can render "(retrying 2/5)" beside the chip.
+        -- The older success row contributes to the tier chip itself.
+        -- The chapter-sentinel row tests the segment_range label mapping.
         INSERT INTO model_call VALUES
             (1, 1, 0, 2363, 'gemini/gemini-3-flash-preview',
                 'classify prompt', 'classify response',
-                '2026-05-26 12:01:00', 'success', NULL, 1, 'flex'),
+                '2026-05-26 12:00:45', 'success', NULL, 1, 'flex'),
             (2, 1, -100, -100, 'gemini/gemini-3-flash-preview',
                 'chapters prompt', 'chapters response',
-                '2026-05-26 12:00:30', 'success', NULL, 1, NULL);
+                '2026-05-26 12:00:30', 'success', NULL, 1, NULL),
+            (3, 1, 2400, 2500, 'gemini/gemini-3-flash-preview',
+                'refine prompt', NULL,
+                '2026-05-26 12:01:00', 'retrying',
+                'Retrying (2/5): 503 service unavailable', 2, 'flex');
+
+        -- llm_settings singleton so the Rust max_retries lookup hits.
+        CREATE TABLE llm_settings (
+            id INTEGER PRIMARY KEY,
+            llm_max_retry_attempts INTEGER NOT NULL DEFAULT 5
+        );
+        INSERT INTO llm_settings VALUES (1, 5);
 
         INSERT INTO transcript_segment VALUES
             (1, 1, 0, 0.0, 10.0, 'hello', 'A'),
@@ -242,9 +255,7 @@ def _run_rust(rust_bin: Path, args: list[str]) -> dict:
         text=True,
         timeout=30,
     )
-    assert result.returncode == 0, (
-        f"podly_tools failed: stderr={result.stderr!r}"
-    )
+    assert result.returncode == 0, f"podly_tools failed: stderr={result.stderr!r}"
     payload = json.loads(result.stdout)
     assert isinstance(payload, dict)
     return payload
@@ -318,6 +329,33 @@ def test_rust_stats_model_calls_include_all_python_serializer_fields(
             f"If either side added a field, add it to the other path AND to "
             f"MODEL_CALL_DETAIL_FIELDS in this test."
         )
+
+
+def test_rust_jobs_list_surfaces_in_flight_attempt_info(
+    tmp_path: Path, rust_bin: Path
+) -> None:
+    """When the latest tiered ModelCall for a post is in a non-terminal
+    state (pending/retrying), the jobs-list `service_tier` blob must include
+    an `in_flight` subobject with `status`, `attempt`, and `max_retries`.
+    Drives the "Flex Processing (Attempt 2/5)" UI line.
+    """
+    db_path = tmp_path / "parity.sqlite"
+    _seed_fixture(db_path)
+
+    payload = _run_rust(
+        rust_bin, ["jobs", "active", "--db", str(db_path), "--limit", "10"]
+    )
+    jobs = payload["jobs"]
+    assert jobs, "fixture should have at least one active job"
+    tier = jobs[0].get("service_tier")
+    assert tier is not None, "fixture seeds a tiered ModelCall; chip should attach"
+    in_flight = tier.get("in_flight")
+    assert in_flight is not None, (
+        "latest ModelCall is `retrying`; in_flight should be populated"
+    )
+    assert in_flight["status"] == "retrying"
+    assert in_flight["attempt"] == 2
+    assert in_flight["max_retries"] == 5
 
 
 def test_rust_stats_uses_sentinel_segment_range_labels(

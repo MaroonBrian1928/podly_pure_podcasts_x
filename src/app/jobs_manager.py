@@ -32,18 +32,29 @@ def _scheduler_app_context() -> Any:
     return scheduler_app.app_context()
 
 
+_TIER_IN_FLIGHT_STATUSES = ("pending", "retrying")
+
+
 def _summarize_service_tiers_for_posts(
     post_ids: list[int],
 ) -> dict[int, dict[str, Any]]:
     """Bulk variant of `_summarize_service_tier_for_post` for the jobs-list
-    endpoints. Returns {post_id: {label, latest, mixed}} only for posts that
-    have at least one ModelCall row with a non-null service_tier.
+    endpoints. Returns {post_id: {label, latest, mixed, in_flight?}} only for
+    posts that have at least one ModelCall row with a non-null service_tier.
+
+    `in_flight` is included only when the most recent tiered ModelCall for the
+    post is in a non-terminal state (pending or retrying). The frontend uses
+    it to render text like "Flex Processing (Attempt 2/5)" beside the chip.
     """
     if not post_ids:
         return {}
     rows = (
         ModelCall.query.with_entities(
-            ModelCall.post_id, ModelCall.service_tier, ModelCall.timestamp
+            ModelCall.post_id,
+            ModelCall.service_tier,
+            ModelCall.status,
+            ModelCall.retry_attempts,
+            ModelCall.timestamp,
         )
         .filter(
             ModelCall.post_id.in_(post_ids),
@@ -52,49 +63,65 @@ def _summarize_service_tiers_for_posts(
         .order_by(ModelCall.timestamp.desc())
         .all()
     )
+    max_retries = _resolve_max_retries()
     per_post: dict[int, dict[str, Any]] = {}
-    for post_id, tier, _ts in rows:
+    for post_id, tier, status, retry_attempts, _ts in rows:
         bucket = per_post.setdefault(
-            post_id, {"label": tier, "latest": tier, "tiers": set()}
+            post_id,
+            {
+                "label": tier,
+                "latest": tier,
+                "latest_status": status,
+                "latest_attempt": retry_attempts or 0,
+                "tiers": set(),
+            },
         )
         bucket["tiers"].add(tier)
     return {
-        pid: {
-            "label": bucket["latest"],
-            "latest": bucket["latest"],
-            "mixed": len(bucket["tiers"]) > 1,
-        }
+        pid: _build_tier_summary(bucket, max_retries)
         for pid, bucket in per_post.items()
     }
 
 
 def _summarize_service_tier_for_post(post_id: int) -> dict[str, Any] | None:
-    """Build a small {label, mixed, latest} summary of service_tier across the
-    post's ModelCall rows for the in-progress UI.
-
-    Returns None when the post has no rows with a non-null service_tier yet
-    (either no calls have been made, or all calls ran at the default tier).
-    The UI uses `label` directly as the chip text and `mixed=True` to dim the
-    chip / annotate that some calls fell back to a different tier.
+    """Build a small tier summary for the per-episode status endpoint. See
+    `_summarize_service_tiers_for_posts` for the shape; returns None when the
+    post has no tiered ModelCall rows yet.
     """
-    rows = (
-        ModelCall.query.with_entities(ModelCall.service_tier, ModelCall.timestamp)
-        .filter(
-            ModelCall.post_id == post_id,
-            ModelCall.service_tier.isnot(None),
-        )
-        .order_by(ModelCall.timestamp.desc())
-        .all()
-    )
-    if not rows:
-        return None
-    latest = rows[0].service_tier
-    distinct = {r.service_tier for r in rows}
-    return {
-        "label": latest,
-        "latest": latest,
-        "mixed": len(distinct) > 1,
+    summary = _summarize_service_tiers_for_posts([post_id])
+    return summary.get(post_id)
+
+
+def _build_tier_summary(
+    bucket: dict[str, Any], max_retries: int | None
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "label": bucket["latest"],
+        "latest": bucket["latest"],
+        "mixed": len(bucket["tiers"]) > 1,
     }
+    latest_status = bucket["latest_status"]
+    if latest_status in _TIER_IN_FLIGHT_STATUSES:
+        in_flight: dict[str, Any] = {
+            "status": latest_status,
+            "attempt": int(bucket["latest_attempt"] or 0),
+        }
+        if max_retries is not None:
+            in_flight["max_retries"] = max_retries
+        summary["in_flight"] = in_flight
+    return summary
+
+
+def _resolve_max_retries() -> int | None:
+    """Look up the configured llm_max_retry_attempts so the UI can render
+    \"Attempt N/M\". Returns None if the runtime config can't be read."""
+    try:
+        from app.runtime_config import config as runtime_config
+
+        value = getattr(runtime_config, "llm_max_retry_attempts", None)
+        return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _env_float(name: str, default: float, *, minimum: float) -> float:
@@ -333,6 +360,14 @@ class JobsManager:
                 "progress_percentage": job.progress_percentage,
                 "message": job.step_name
                 or f"Step {job.current_step} of {job.total_steps}",
+                # Exposed so EpisodeProcessingStatus can render the same per-stage
+                # duration row that the JobsPage card already shows (Queue 4s /
+                # Download 2s / ...). Empty list when the job predates stage-
+                # history capture.
+                "stage_history": job.stage_history or [],
+                "completed_at": (
+                    job.completed_at.isoformat() if job.completed_at else None
+                ),
             }
             tier_info = _summarize_service_tier_for_post(post.id)
             if tier_info is not None:

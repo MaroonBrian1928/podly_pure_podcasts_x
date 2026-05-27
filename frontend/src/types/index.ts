@@ -89,7 +89,16 @@ export interface Job {
   // when at least one call was made at a non-default tier. `latest` is the
   // most recent call's tier; `mixed` is true when calls used multiple tiers
   // (e.g. Flex retried then fell back to standard).
-  service_tier?: { label: string; latest: string; mixed: boolean };
+  service_tier?: {
+    label: string;
+    latest: string;
+    mixed: boolean;
+    in_flight?: {
+      status: 'pending' | 'retrying';
+      attempt: number;
+      max_retries?: number;
+    };
+  };
 }
 
 export interface JobManagerRun {
