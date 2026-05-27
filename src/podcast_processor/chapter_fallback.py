@@ -113,6 +113,52 @@ def resolve_llm_path_chapters(
     return [], "none"
 
 
+def _assemble_refined_chapters(
+    sorted_chapters: Sequence[Chapter],
+    candidate_starts_ms: Sequence[int],
+) -> tuple[list[Chapter], int]:
+    """Apply refined candidate starts while preserving monotonic ordering.
+
+    If a refined candidate would land at or before the previous chapter's
+    kept start, fall back to the chapter's original start rather than emit a
+    1 ms nudge — that nudge still renders identically in the UI / MP3 tags
+    and is worse than just leaving the chapter un-refined.
+    """
+    adjusted_starts_ms: list[int] = []
+    refined_kept = 0
+    for idx, chapter in enumerate(sorted_chapters):
+        candidate = candidate_starts_ms[idx]
+        original_start_ms = int(chapter.start_time_ms)
+        if adjusted_starts_ms:
+            prev = adjusted_starts_ms[-1]
+            if candidate <= prev:
+                candidate = original_start_ms
+                if candidate <= prev:
+                    candidate = prev + 1
+        else:
+            candidate = max(candidate, 0)
+        adjusted_starts_ms.append(candidate)
+        if candidate != original_start_ms:
+            refined_kept += 1
+
+    adjusted: list[Chapter] = []
+    for idx, chapter in enumerate(sorted_chapters):
+        start_ms = adjusted_starts_ms[idx]
+        if idx + 1 < len(sorted_chapters):
+            end_ms = max(start_ms, adjusted_starts_ms[idx + 1])
+        else:
+            end_ms = max(start_ms, int(chapter.end_time_ms))
+        adjusted.append(
+            Chapter(
+                element_id=chapter.element_id,
+                title=chapter.title,
+                start_time_ms=start_ms,
+                end_time_ms=end_ms,
+            )
+        )
+    return adjusted, refined_kept
+
+
 def refine_description_chapters_with_word_refiner(
     chapters: Sequence[Chapter],
     transcript_segments: Sequence[Any],
@@ -171,32 +217,15 @@ def refine_description_chapters_with_word_refiner(
         if new_start_ms != original_start_ms:
             refined_count += 1
 
-    # Enforce monotonic starts and rebuild end times from the next start.
-    adjusted: list[Chapter] = []
-    last_start_ms = -1
-    for idx, chapter in enumerate(sorted_chapters):
-        start_ms = max(candidate_starts_ms[idx], last_start_ms + 1 if adjusted else 0)
-        if idx + 1 < len(sorted_chapters):
-            next_candidate = candidate_starts_ms[idx + 1]
-            end_ms = max(start_ms, next_candidate)
-        else:
-            end_ms = max(start_ms, int(chapter.end_time_ms))
+    adjusted, refined_kept = _assemble_refined_chapters(
+        sorted_chapters, candidate_starts_ms
+    )
 
-        adjusted.append(
-            Chapter(
-                element_id=chapter.element_id,
-                title=chapter.title,
-                start_time_ms=start_ms,
-                end_time_ms=end_ms,
-            )
-        )
-        last_start_ms = start_ms
-
-    if refined_count > 0:
+    if refined_kept > 0:
         log.info(
             "Refined %d description chapter boundary starts using word-level "
             "refiner heuristics",
-            refined_count,
+            refined_kept,
         )
     return adjusted
 
@@ -266,31 +295,15 @@ def refine_transcript_chapters_with_word_refiner(
         if new_start_ms != original_start_ms:
             refined_count += 1
 
-    adjusted: list[Chapter] = []
-    last_start_ms = -1
-    for idx, chapter in enumerate(sorted_chapters):
-        start_ms = max(candidate_starts_ms[idx], last_start_ms + 1 if adjusted else 0)
-        if idx + 1 < len(sorted_chapters):
-            next_candidate = candidate_starts_ms[idx + 1]
-            end_ms = max(start_ms, next_candidate)
-        else:
-            end_ms = max(start_ms, int(chapter.end_time_ms))
+    adjusted, refined_kept = _assemble_refined_chapters(
+        sorted_chapters, candidate_starts_ms
+    )
 
-        adjusted.append(
-            Chapter(
-                element_id=chapter.element_id,
-                title=chapter.title,
-                start_time_ms=start_ms,
-                end_time_ms=end_ms,
-            )
-        )
-        last_start_ms = start_ms
-
-    if refined_count > 0:
+    if refined_kept > 0:
         log.info(
             "Refined %d transcript topic chapter boundary starts using word-level "
             "phrase matching",
-            refined_count,
+            refined_kept,
         )
     return adjusted
 

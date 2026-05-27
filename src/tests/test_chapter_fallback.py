@@ -19,6 +19,7 @@ from podcast_processor.chapter_fallback import (
     generate_topic_chapters_from_transcript_with_llm,
     refine_description_chapters_with_word_refiner,
     refine_generated_chapter_titles_with_llm,
+    refine_transcript_chapters_with_word_refiner,
     resolve_llm_path_chapters,
 )
 from podcast_processor.chapter_reader import Chapter
@@ -150,6 +151,75 @@ def test_refine_description_chapters_with_word_refiner_adjusts_starts() -> None:
     assert [ch.start_time_ms for ch in refined] == [12_000, 318_000]
     assert [ch.end_time_ms for ch in refined] == [318_000, 650_000]
     assert [ch.title for ch in refined] == ["First story", "Second story"]
+
+
+def test_refine_transcript_chapters_falls_back_to_original_on_collision() -> None:
+    """When the phrase matcher would pull a chapter back to or before the
+    previous chapter's start, the refinement must be abandoned (use the
+    original start) instead of nudging by 1 ms — a 1 ms offset still renders
+    as the same MM:SS label in the UI and inside MP3 chapter tags.
+    """
+    config = create_standard_test_config()
+
+    chapters = [
+        Chapter("t0", "Intro to the case", 60_000, 250_000),
+        Chapter("t1", "Life in the home", 250_000, 260_000),
+        Chapter("t2", "Fire investigation", 260_000, 700_000),
+    ]
+    transcript_segments = [
+        SimpleNamespace(
+            sequence_num=0, start_time=0.0, end_time=20.0, text="Cold open"
+        ),
+        SimpleNamespace(
+            sequence_num=1,
+            start_time=240.0,
+            end_time=246.0,
+            text="Life in the home was modest",
+        ),
+        SimpleNamespace(
+            sequence_num=2,
+            start_time=235.0,
+            end_time=239.0,
+            text="Fire investigation begins early",
+        ),
+    ]
+
+    # Force the refiner to return the phrase times that previously triggered
+    # the 1 ms collision in the production log: chapter 2 pulled to 240 s and
+    # chapter 3 pulled to 235 s (i.e. *before* chapter 2's refined start).
+    def fake_estimate_phrase_time(
+        self,
+        *,
+        all_segments,
+        context_segments,
+        preferred_segment_seq,
+        phrase,
+        direction,
+    ) -> float | None:
+        if phrase == "Life in the home":
+            return 240.0
+        if phrase == "Fire investigation":
+            return 235.0
+        return None
+
+    with patch(
+        "podcast_processor.word_boundary_refiner.WordBoundaryRefiner._estimate_phrase_time",
+        new=fake_estimate_phrase_time,
+    ):
+        refined = refine_transcript_chapters_with_word_refiner(
+            chapters,
+            transcript_segments,
+            config=config,
+        )
+
+    starts = [ch.start_time_ms for ch in refined]
+    # Chapter 1 unchanged (idx 0 never refines), chapter 2 refined back to
+    # 240 s, chapter 3 falls back to its original 260 s because 235 s would
+    # collide with chapter 2.
+    assert starts == [60_000, 240_000, 260_000]
+    # The end of chapter 2 must equal the next chapter's start, not the
+    # refined-but-rejected 235 000 value.
+    assert refined[1].end_time_ms == 260_000
 
 
 def test_refine_generated_chapter_titles_with_llm_updates_titles() -> None:

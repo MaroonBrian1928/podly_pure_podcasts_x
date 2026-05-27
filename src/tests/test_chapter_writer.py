@@ -1,6 +1,6 @@
 from podcast_processor.chapter_reader import Chapter
 from podcast_processor.chapter_writer import (
-    _fill_chapter_gaps,
+    fill_chapter_gaps,
     recalculate_chapter_times,
     write_adjusted_chapters,
 )
@@ -12,7 +12,7 @@ def test_fill_chapter_gaps_extends_first_chapter_to_zero() -> None:
         Chapter("c2", "Body", 60_000, 120_000),
     ]
 
-    filled = _fill_chapter_gaps(chapters, audio_duration_ms=120_000)
+    filled = fill_chapter_gaps(chapters, audio_duration_ms=120_000)
 
     assert filled[0].start_time_ms == 0
     assert filled[0].end_time_ms == 60_000
@@ -26,7 +26,7 @@ def test_fill_chapter_gaps_extends_last_chapter_to_audio_end() -> None:
         Chapter("c2", "Body", 60_000, 100_000),
     ]
 
-    filled = _fill_chapter_gaps(chapters, audio_duration_ms=180_000)
+    filled = fill_chapter_gaps(chapters, audio_duration_ms=180_000)
 
     assert filled[-1].end_time_ms == 180_000
 
@@ -37,7 +37,7 @@ def test_fill_chapter_gaps_no_op_when_already_spans_file() -> None:
         Chapter("c2", "Body", 60_000, 120_000),
     ]
 
-    filled = _fill_chapter_gaps(chapters, audio_duration_ms=120_000)
+    filled = fill_chapter_gaps(chapters, audio_duration_ms=120_000)
 
     assert filled == chapters
 
@@ -47,7 +47,7 @@ def test_fill_chapter_gaps_handles_unknown_audio_duration() -> None:
         Chapter("c1", "Intro", 5_000, 60_000),
     ]
 
-    filled = _fill_chapter_gaps(chapters, audio_duration_ms=0)
+    filled = fill_chapter_gaps(chapters, audio_duration_ms=0)
 
     # First chapter is still pulled back to 0 even without a known duration.
     assert filled[0].start_time_ms == 0
@@ -161,6 +161,32 @@ def test_write_adjusted_chapters_skips_rust_payload_when_flag_off(monkeypatch) -
 
     assert written == [
         ("/tmp/audio.mp3", [Chapter("c1", "Intro", 0, 110_000)]),
+    ]
+
+
+def test_serialize_chapters_for_output_spans_full_audio(monkeypatch) -> None:
+    """`chapter_data["chapters_for_output"]` must always span the processed
+    audio file. Otherwise the UI shows a first chapter that starts mid-speech
+    (e.g. 00:02 instead of 00:00) and players that require gap-free chapters
+    silently drop the markup.
+    """
+    from podcast_processor.podcast_processor import _serialize_chapters_for_output
+
+    monkeypatch.setattr(
+        "podcast_processor.podcast_processor.get_audio_duration_ms",
+        lambda _path: 600_000,
+    )
+
+    chapters = [
+        Chapter("c1", "Intro to the case", 1_960, 182_960),
+        Chapter("c2", "Later", 182_960, 540_000),
+    ]
+
+    result = _serialize_chapters_for_output(chapters, "/tmp/processed.mp3")
+
+    assert result == [
+        {"title": "Intro to the case", "start_time": 0.0, "end_time": 183.0},
+        {"title": "Later", "start_time": 183.0, "end_time": 600.0},
     ]
 
 

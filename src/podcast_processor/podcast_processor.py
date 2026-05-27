@@ -20,7 +20,11 @@ from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
-from podcast_processor.audio import clip_segments_exact, overlay_beeps_with_ducking
+from podcast_processor.audio import (
+    clip_segments_exact,
+    get_audio_duration_ms,
+    overlay_beeps_with_ducking,
+)
 from podcast_processor.audio_processor import AudioProcessor
 from podcast_processor.chapter_ad_detector import (
     ChapterAdDetector,
@@ -35,6 +39,7 @@ from podcast_processor.chapter_fallback import (
 )
 from podcast_processor.chapter_filter import parse_filter_strings
 from podcast_processor.chapter_writer import (
+    fill_chapter_gaps,
     recalculate_chapter_times,
     write_adjusted_chapters,
 )
@@ -61,6 +66,30 @@ from shared.processing_paths import (
 )
 
 logger = logging.getLogger("global_logger")
+
+
+def _serialize_chapters_for_output(
+    chapters: list[Any], processed_audio_path: str
+) -> list[dict[str, Any]]:
+    """Return the chapter list serialized for chapter_data, forced to span the
+    full processed audio file. Padding chapters to [0, audio_duration_ms] keeps
+    UI display, RSS metadata, and MP3 chapter tags in agreement: a chapter set
+    that stops short of the file is mis-tagged in some players and confusing in
+    the UI ("first chapter starts at 00:02").
+    """
+    try:
+        duration_ms = get_audio_duration_ms(processed_audio_path) or 0
+    except Exception:  # noqa: BLE001 - probe is best-effort
+        duration_ms = 0
+    filled = fill_chapter_gaps(list(chapters), duration_ms)
+    return [
+        {
+            "title": ch.title,
+            "start_time": round(ch.start_time_ms / 1000.0, 1),
+            "end_time": round(ch.end_time_ms / 1000.0, 1),
+        }
+        for ch in filled
+    ]
 
 
 @dataclass(frozen=True)
@@ -1280,14 +1309,9 @@ class PodcastProcessor:
             chapter_data_json = json.dumps(
                 {
                     "chapter_source": chapter_source,
-                    "chapters_for_output": [
-                        {
-                            "title": ch.title,
-                            "start_time": round(ch.start_time_ms / 1000.0, 1),
-                            "end_time": round(ch.end_time_ms / 1000.0, 1),
-                        }
-                        for ch in adjusted_chapters
-                    ],
+                    "chapters_for_output": _serialize_chapters_for_output(
+                        adjusted_chapters, processed_audio_path
+                    ),
                 }
             )
 
@@ -1451,14 +1475,9 @@ class PodcastProcessor:
             chapter_data_json = json.dumps(
                 {
                     "chapter_source": chapter_source,
-                    "chapters_for_output": [
-                        {
-                            "title": ch.title,
-                            "start_time": round(ch.start_time_ms / 1000.0, 1),
-                            "end_time": round(ch.end_time_ms / 1000.0, 1),
-                        }
-                        for ch in chapters_for_output
-                    ],
+                    "chapters_for_output": _serialize_chapters_for_output(
+                        chapters_for_output, processed_audio_path
+                    ),
                 }
             )
 
@@ -1656,20 +1675,19 @@ class PodcastProcessor:
             removed_segments=ad_segments,
         )
 
-        # Build chapter data for stats
+        # Build chapter data for stats.
+        # `chapters_for_output` is what the UI / RSS render, and it must span
+        # the full processed audio file (see _serialize_chapters_for_output).
+        # `chapters_kept` and `chapters_removed` are diagnostic snapshots of
+        # the pre-removal chapter set, so they intentionally stay un-padded.
         adjusted_kept_chapters = recalculate_chapter_times(
             chapters_to_keep, ad_segments
         )
         chapter_data = {
             "filter_strings": filter_strings,
-            "chapters_for_output": [
-                {
-                    "title": ch.title,
-                    "start_time": round(ch.start_time_ms / 1000.0, 1),
-                    "end_time": round(ch.end_time_ms / 1000.0, 1),
-                }
-                for ch in adjusted_kept_chapters
-            ],
+            "chapters_for_output": _serialize_chapters_for_output(
+                adjusted_kept_chapters, processed_audio_path
+            ),
             "chapters_kept": [
                 {
                     "title": ch.title,
