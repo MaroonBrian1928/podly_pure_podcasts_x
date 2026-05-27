@@ -85,6 +85,11 @@ export interface Job {
   ad_windows_count?: number | null;
   had_classification_parse_error?: boolean;
   auto_retry_attempted?: boolean;
+  // Service tier summary across this post's ModelCall rows. Present only
+  // when at least one call was made at a non-default tier. `latest` is the
+  // most recent call's tier; `mixed` is true when calls used multiple tiers
+  // (e.g. Flex retried then fell back to standard).
+  service_tier?: { label: string; latest: string; mixed: boolean };
 }
 
 export interface JobManagerRun {

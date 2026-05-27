@@ -10,6 +10,7 @@ from litellm.types.utils import Choices
 
 from app.extensions import db
 from app.models import AudioSegment, Feed, ModelCall, Post, TranscriptSegment
+from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
 from podcast_processor.model_output import (
     AdSegmentPrediction,
@@ -168,6 +169,82 @@ def test_call_model_retry_on_internal_error(test_config: Config, app: Flask) -> 
             assert refreshed.status == "success"
             assert refreshed.response == "test response"
             assert refreshed.retry_attempts == 2
+
+
+def test_call_model_marks_retrying_during_backoff(
+    test_config: Config, app: Flask
+) -> None:
+    """During retryable-error backoff the ModelCall row should reflect
+    `status="retrying"` (with attempt-annotated error_message) instead of
+    sitting silently at `pending`. Regression test for the user-visible
+    "stuck at pending while we're actually mid-retry" UX issue.
+    """
+    with app.app_context():
+        classifier = AdClassifier(config=test_config, db_session=db.session)
+
+        dummy_model_call = ModelCall(
+            post_id=0,
+            model_name=test_config.llm_model,
+            prompt="test prompt",
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            status="pending",
+        )
+        db.session.add(dummy_model_call)
+        db.session.commit()
+
+        success_message = MagicMock()
+        success_message.content = "ok"
+        success_choice = MagicMock(spec=Choices)
+        success_choice.message = success_message
+        success_response = MagicMock()
+        success_response.choices = [success_choice]
+
+        side_effects = [
+            InternalServerError(
+                message="503 service unavailable",
+                llm_provider="gemini",
+                model="gemini-3-flash-preview",
+            ),
+            success_response,
+        ]
+
+        captured_statuses: list[str | None] = []
+        original_update = writer_client.update
+
+        def capture_update(
+            model_name: str, model_id: int, fields: dict, wait: bool = True
+        ):  # type: ignore[no-untyped-def]
+            if (
+                model_name == "ModelCall"
+                and "error_message" in fields
+                and fields.get("status") == "retrying"
+            ):
+                captured_statuses.append(fields.get("error_message"))
+            return original_update(model_name, model_id, fields, wait=wait)
+
+        with (
+            patch("time.sleep"),
+            patch("litellm.completion", side_effect=side_effects),
+            patch.object(writer_client, "update", side_effect=capture_update),
+        ):
+            response = classifier._call_model(
+                model_call_obj=dummy_model_call,
+                system_prompt="sys",
+            )
+
+        assert response == "ok"
+        # At least one retrying transition was persisted with an attempt-annotated
+        # message like "Retrying (1/5): 503 service unavailable".
+        assert captured_statuses, (
+            "expected status=retrying update during backoff; got none"
+        )
+        first = captured_statuses[0] or ""
+        assert "Retrying" in first
+        assert "503" in first or "service unavailable" in first.lower()
+        # Final row must reflect terminal success, not retrying.
+        db.session.refresh(dummy_model_call)
+        assert dummy_model_call.status == "success"
 
 
 def test_perform_llm_call_reraises_permanent_failure(

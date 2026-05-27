@@ -18,6 +18,7 @@ from podcast_processor.llm_model_call_utils import (
     extract_litellm_content,
     extract_litellm_finish_reason,
     extract_litellm_usage,
+    record_service_tier_on_model_call,
     render_prompt_and_upsert_model_call,
     try_update_model_call,
 )
@@ -114,6 +115,12 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 "base_url": self.config.openai_base_url,
             }
             apply_service_tier(completion_args, self.config)
+            record_service_tier_on_model_call(
+                model_call_id,
+                completion_args,
+                logger=self.logger,
+                log_prefix="Word boundary refine",
+            )
             response = call_litellm_with_tier_retry(
                 completion_args, config=self.config, logger=self.logger
             )

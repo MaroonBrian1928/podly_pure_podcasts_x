@@ -561,6 +561,7 @@ export default function LLMProcessingStats({
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Segment Range</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -576,11 +577,26 @@ export default function LLMProcessingStats({
                                     <td className="px-4 py-3">
                                       <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
                                         call.status === 'success' ? 'bg-green-100 text-green-800' :
-                                        call.status === 'failed' ? 'bg-red-100 text-red-800' :
+                                        call.status === 'failed' || call.status === 'failed_permanent' || call.status === 'failed_retries' ? 'bg-red-100 text-red-800' :
+                                        call.status === 'cancelled' ? 'bg-gray-200 text-gray-700' :
+                                        call.status === 'retrying' ? 'bg-orange-100 text-orange-800' :
                                         'bg-yellow-100 text-yellow-800'
                                       }`}>
                                         {call.status}
                                       </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-sm">
+                                      {call.service_tier ? (
+                                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                          call.service_tier === 'flex' ? 'bg-purple-100 text-purple-800' :
+                                          call.service_tier === 'priority' ? 'bg-blue-100 text-blue-800' :
+                                          'bg-gray-100 text-gray-700'
+                                        }`}>
+                                          {call.service_tier}
+                                        </span>
+                                      ) : (
+                                        <span className="text-gray-400">—</span>
+                                      )}
                                     </td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
@@ -595,7 +611,7 @@ export default function LLMProcessingStats({
                                   </tr>
                                   {expandedModelCalls.has(call.id) && (
                                     <tr className="bg-gray-50">
-                                      <td colSpan={7} className="px-4 py-4">
+                                      <td colSpan={8} className="px-4 py-4">
                                         <div className="space-y-4">
                                           {call.prompt && (
                                             <div>

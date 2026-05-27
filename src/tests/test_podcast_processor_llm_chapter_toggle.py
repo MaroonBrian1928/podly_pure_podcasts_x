@@ -695,6 +695,7 @@ def test_chapter_insert_strategy_writes_chapters_without_ad_removal() -> None:
         llm_model=config.llm_model,
         llm_api_key=config.llm_api_key,
         openai_base_url=config.openai_base_url,
+        post_id=post.id,
         post_guid=post.guid,
         removed_windows_ms=None,
         openai_timeout_sec=config.openai_timeout,

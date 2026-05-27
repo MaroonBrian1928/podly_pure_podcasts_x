@@ -164,6 +164,23 @@ def _extract_log_field(message: str, field_name: str) -> str | None:
     return match.group(1)
 
 
+# Sentinel (first_seq, last_seq) pairs that chapter_fallback.py uses to
+# create ModelCall rows for chapter-only LLM phases (no real transcript
+# segment range). Mirror keep in sync with the constants in chapter_fallback.
+_SEGMENT_RANGE_LABELS: dict[tuple[int, int], str] = {
+    (-100, -100): "chapter titles (LLM)",
+    (-200, -200): "chapter topic plan (LLM)",
+    (-201, -201): "chapter topic plan: continuation (LLM)",
+}
+
+
+def _format_segment_range_label(first_seq: int, last_seq: int) -> str:
+    label = _SEGMENT_RANGE_LABELS.get((first_seq, last_seq))
+    if label is not None:
+        return label
+    return f"{first_seq}-{last_seq}"
+
+
 def _extract_step_name(message: str) -> str | None:
     match = re.search(r"\bstep_name=(.*?)(?:\s+\w+=|$)", message)
     if match is None:
@@ -449,6 +466,7 @@ def get_post_json(p_guid: str) -> flask.Response:
                     else model_call.response
                 ),
                 "error": model_call.error_message,
+                "service_tier": model_call.service_tier,
             }
         )
 
@@ -700,7 +718,10 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "id": call.id,
                 "model_name": call.model_name,
                 "status": call.status,
-                "segment_range": f"{call.first_segment_sequence_num}-{call.last_segment_sequence_num}",
+                "segment_range": _format_segment_range_label(
+                    call.first_segment_sequence_num,
+                    call.last_segment_sequence_num,
+                ),
                 "first_segment_sequence_num": call.first_segment_sequence_num,
                 "last_segment_sequence_num": call.last_segment_sequence_num,
                 "timestamp": call.timestamp.isoformat() if call.timestamp else None,
@@ -711,6 +732,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "error_message": call.error_message,
                 "prompt": call.prompt,
                 "response": call.response,
+                "service_tier": call.service_tier,
             }
         )
 

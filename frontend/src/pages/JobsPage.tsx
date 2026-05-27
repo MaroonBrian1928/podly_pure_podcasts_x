@@ -570,6 +570,25 @@ export default function JobsPage() {
                         : '0 ads'}
                     </span>
                   ) : null}
+                  {job.service_tier ? (
+                    <span
+                      title={
+                        job.service_tier.mixed
+                          ? `LLM calls so far used mixed tiers; latest=${job.service_tier.latest}`
+                          : `LLM calls used the "${job.service_tier.label}" service tier`
+                      }
+                      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        job.service_tier.label === 'flex'
+                          ? 'bg-purple-100 text-purple-800'
+                          : job.service_tier.label === 'priority'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-gray-100 text-gray-700'
+                      }`}
+                    >
+                      {job.service_tier.label}
+                      {job.service_tier.mixed ? '*' : ''}
+                    </span>
+                  ) : null}
                   <StatusBadge status={job.status} />
                 </div>
               </div>

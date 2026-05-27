@@ -690,6 +690,7 @@ struct StatsModelCallRow {
     error_message: Option<String>,
     prompt: String,
     response: Option<String>,
+    service_tier: Option<String>,
 }
 
 struct StatsProcessingJobRow {
@@ -2996,7 +2997,10 @@ fn render_stats(args: StatsRenderArgs) -> Result<Value> {
                 "id": call.id,
                 "model_name": call.model_name,
                 "status": call.status,
-                "segment_range": format!("{}-{}", call.first_segment_sequence_num, call.last_segment_sequence_num),
+                "segment_range": format_segment_range_label(
+                    call.first_segment_sequence_num,
+                    call.last_segment_sequence_num,
+                ),
                 "first_segment_sequence_num": call.first_segment_sequence_num,
                 "last_segment_sequence_num": call.last_segment_sequence_num,
                 "timestamp": call.timestamp,
@@ -3005,6 +3009,7 @@ fn render_stats(args: StatsRenderArgs) -> Result<Value> {
                 "error_message": call.error_message,
                 "prompt": call.prompt,
                 "response": call.response,
+                "service_tier": call.service_tier,
             })
         }).collect::<Vec<_>>(),
         "transcript_segments": transcript_segments_data,
@@ -3090,7 +3095,8 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             processing_job.stage_history,
             processing_job.ad_windows_count,
             processing_job.had_classification_parse_error,
-            processing_job.auto_retry_attempted
+            processing_job.auto_retry_attempted,
+            post.id
          FROM processing_job
          LEFT JOIN post ON processing_job.post_guid = post.guid
          LEFT JOIN feed ON post.feed_id = feed.id
@@ -3109,7 +3115,8 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             .filter(|value| value.is_array())
             .unwrap_or_else(|| Value::Array(Vec::new()));
-        Ok(json!({
+        let post_id: Option<i64> = row.get(18)?;
+        let entry = json!({
             "job_id": row.get::<_, String>(0)?,
             "post_guid": row.get::<_, String>(1)?,
             "post_title": row.get::<_, Option<String>>(2)?,
@@ -3128,10 +3135,82 @@ fn render_jobs(args: JobsListArgs, active_only: bool) -> Result<Value> {
             "ad_windows_count": row.get::<_, Option<i64>>(15)?,
             "had_classification_parse_error": row.get::<_, bool>(16)?,
             "auto_retry_attempted": row.get::<_, bool>(17)?,
-        }))
+        });
+        Ok((post_id, entry))
     })?;
-    let jobs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    let entries: Vec<(Option<i64>, Value)> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Bulk-lookup service_tier summary per post so the chip shows up on the
+    // jobs page (same shape as the Python `_summarize_service_tiers_for_posts`
+    // helper). Latest = most recent non-null tier; mixed = >1 distinct tier
+    // across this post's ModelCall rows (e.g. Flex 503 → standard fallback).
+    let post_ids: Vec<i64> = entries.iter().filter_map(|(id, _)| *id).collect();
+    let tier_by_post = load_service_tier_summary(&conn, &post_ids)?;
+
+    let jobs: Vec<Value> = entries
+        .into_iter()
+        .map(|(post_id, mut entry)| {
+            if let Some(pid) = post_id {
+                if let Some(tier) = tier_by_post.get(&pid) {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("service_tier".to_string(), tier.clone());
+                    }
+                }
+            }
+            entry
+        })
+        .collect();
+
     Ok(json!({ "jobs": jobs }))
+}
+
+fn load_service_tier_summary(
+    conn: &Connection,
+    post_ids: &[i64],
+) -> Result<HashMap<i64, Value>> {
+    if post_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Build a parameterized IN clause; rusqlite's `params_from_iter` handles
+    // the binding. Ordering by timestamp DESC means the first row seen per
+    // post is the most recent tier, so HashMap::entry(or_insert) records
+    // `latest` correctly even though we keep walking to detect mixed.
+    let placeholders: Vec<String> = (1..=post_ids.len()).map(|i| format!("?{}", i)).collect();
+    let sql = format!(
+        "SELECT post_id, service_tier
+         FROM model_call
+         WHERE service_tier IS NOT NULL AND post_id IN ({})
+         ORDER BY timestamp DESC",
+        placeholders.join(",")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(post_ids.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut per_post: HashMap<i64, (String, HashSet<String>)> = HashMap::new();
+    for r in rows {
+        let (pid, tier) = r?;
+        let entry = per_post
+            .entry(pid)
+            .or_insert_with(|| (tier.clone(), HashSet::new()));
+        entry.1.insert(tier);
+    }
+
+    Ok(per_post
+        .into_iter()
+        .map(|(pid, (latest, tiers))| {
+            let mixed = tiers.len() > 1;
+            (
+                pid,
+                json!({
+                    "label": latest,
+                    "latest": latest,
+                    "mixed": mixed,
+                }),
+            )
+        })
+        .collect())
 }
 
 const JOBS_MANAGER_SINGLETON_RUN_ID: &str = "jobs-manager-singleton";
@@ -3303,7 +3382,7 @@ fn query_stats_feed(conn: &Connection, feed_id: i64) -> Result<Option<StatsFeedR
 fn query_stats_model_calls(conn: &Connection, post_id: i64) -> Result<Vec<StatsModelCallRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, model_name, status, first_segment_sequence_num, last_segment_sequence_num,
-                timestamp, retry_attempts, error_message, prompt, response
+                timestamp, retry_attempts, error_message, prompt, response, service_tier
          FROM model_call WHERE post_id = ?1
          ORDER BY model_name, first_segment_sequence_num",
     )?;
@@ -3321,9 +3400,23 @@ fn query_stats_model_calls(conn: &Connection, post_id: i64) -> Result<Vec<StatsM
             error_message: row.get(7)?,
             prompt: row.get(8)?,
             response: row.get(9)?,
+            service_tier: row.get(10)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+// Sentinel (first_seq, last_seq) pairs used by chapter_fallback.py when it
+// creates ModelCall rows for phases that have no real transcript segment
+// range. Mirror keep in sync with `_SEGMENT_RANGE_LABELS` in post_routes.py
+// and the constants in chapter_fallback.py.
+fn format_segment_range_label(first_seq: i64, last_seq: i64) -> String {
+    match (first_seq, last_seq) {
+        (-100, -100) => "chapter titles (LLM)".to_string(),
+        (-200, -200) => "chapter topic plan (LLM)".to_string(),
+        (-201, -201) => "chapter topic plan: continuation (LLM)".to_string(),
+        _ => format!("{first_seq}-{last_seq}"),
+    }
 }
 
 fn query_stats_processing_jobs(
@@ -6739,7 +6832,8 @@ mod tests {
             CREATE TABLE model_call (
                 id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, first_segment_sequence_num INTEGER NOT NULL,
                 last_segment_sequence_num INTEGER NOT NULL, model_name TEXT NOT NULL, prompt TEXT NOT NULL,
-                response TEXT, timestamp TEXT, status TEXT NOT NULL, error_message TEXT, retry_attempts INTEGER
+                response TEXT, timestamp TEXT, status TEXT NOT NULL, error_message TEXT, retry_attempts INTEGER,
+                service_tier TEXT
             );
             CREATE TABLE transcript_segment (
                 id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, sequence_num INTEGER NOT NULL,
@@ -6771,8 +6865,12 @@ mod tests {
             [],
         )
         .unwrap();
+        // Order by (model_name, first_segment_sequence_num); use 'model-b'
+        // for the chapter row so it sorts after [0] and doesn't break the
+        // existing assertion that [0] is the primary classifier row.
         conn.execute(
-            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2)",
+            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2, 'flex'),
+                                            (2, 1, -100, -100, 'model-b', 'chap prompt', 'chap response', '2026-05-08 12:00:02.000000', 'success', NULL, 1, NULL)",
             [],
         )
         .unwrap();
@@ -6819,6 +6917,16 @@ mod tests {
         assert_eq!(stats["processing_stats"]["total_segments"], 2);
         assert_eq!(stats["processing_stats"]["ad_segments_count"], 1);
         assert_eq!(stats["model_calls"][0]["retry_count"], 1);
+        // service_tier surfaces on the row that was made with Flex so the
+        // debug UI's Tier column can render the chip. The second row used
+        // the default tier and is rendered as the sentinel chapter label.
+        assert_eq!(stats["model_calls"][0]["service_tier"], "flex");
+        assert_eq!(stats["model_calls"][0]["segment_range"], "0-1");
+        assert_eq!(stats["model_calls"][1]["service_tier"], Value::Null);
+        assert_eq!(
+            stats["model_calls"][1]["segment_range"],
+            "chapter titles (LLM)"
+        );
         assert_eq!(stats["related_logs"]["latest_job_id"], "job-1");
         assert_eq!(
             stats["related_logs"]["entries"].as_array().unwrap().len(),
@@ -7023,6 +7131,15 @@ mod tests {
                 ad_windows_count INTEGER, had_classification_parse_error INTEGER NOT NULL DEFAULT 0,
                 auto_retry_attempted INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE model_call (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL,
+                first_segment_sequence_num INTEGER NOT NULL,
+                last_segment_sequence_num INTEGER NOT NULL,
+                model_name TEXT NOT NULL, prompt TEXT NOT NULL,
+                response TEXT, timestamp TEXT NOT NULL, status TEXT NOT NULL,
+                error_message TEXT, retry_attempts INTEGER NOT NULL DEFAULT 0,
+                service_tier TEXT
+            );
             INSERT INTO feed VALUES (1, 'Feed');
             INSERT INTO post VALUES (1, 1, 'guid-1', 'Episode 1');
             INSERT INTO processing_job VALUES
@@ -7034,7 +7151,15 @@ mod tests {
                 ('job-running', 'missing-guid', 'running', 2, 'Work', 4, 50.0,
                     '2026-05-08 12:00:00', NULL, NULL, '2026-05-08 12:00:00',
                     '[{\"step\":0,\"step_name\":\"Queued\",\"started_at\":\"2026-05-08T12:00:00\"},{\"step\":2,\"step_name\":\"Work\",\"started_at\":\"2026-05-08T12:00:30\"}]',
-                    NULL, 0, 0);",
+                    NULL, 0, 0);
+            -- Two tier rows for post 1: a 'flex' classification then a
+            -- later 'default' boundary-refine. The Rust summary should
+            -- report latest='default' and mixed=true.
+            INSERT INTO model_call VALUES
+                (1, 1, 0, 100, 'gemini/gemini-3-flash-preview', 'p', 'r',
+                    '2026-05-08 11:00:00', 'success', NULL, 1, 'flex'),
+                (2, 1, 101, 110, 'gemini/gemini-3-flash-preview', 'p', 'r',
+                    '2026-05-08 11:30:00', 'success', NULL, 1, 'default');",
         )
         .unwrap();
         drop(conn);
@@ -7091,6 +7216,17 @@ mod tests {
         // job-running: NULL ad_windows_count surfaces as JSON null, not 0.
         assert_eq!(active_jobs[0]["ad_windows_count"], Value::Null);
         assert_eq!(active_jobs[0]["had_classification_parse_error"], false);
+
+        // service_tier summary: the two jobs for post 1 (guid-1) both report
+        // the chip with latest='default' (most recent of the two seeded rows)
+        // and mixed=true (different tiers across rows).
+        let pending_tier = &active_jobs[1]["service_tier"];
+        assert_eq!(pending_tier["latest"], "default");
+        assert_eq!(pending_tier["label"], "default");
+        assert_eq!(pending_tier["mixed"], true);
+        // job-running has no matching post in `post` (missing-guid), so no
+        // post_id was joined and no service_tier chip should attach.
+        assert!(active_jobs[0].get("service_tier").is_none());
     }
 
     #[test]

@@ -1489,6 +1489,7 @@ class PodcastProcessor:
             openai_base_url=getattr(self.config, "openai_base_url", None),
             openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
             logger_override=self.logger,
+            post_id=post_id,
             post_guid=post_guid,
             removed_windows_ms=removed_windows_ms,
             llm_service_tier=getattr(self.config, "llm_service_tier", None),
@@ -1521,6 +1522,7 @@ class PodcastProcessor:
                 openai_base_url=getattr(self.config, "openai_base_url", None),
                 openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
                 logger_override=self.logger,
+                post_id=post_id,
                 llm_service_tier=getattr(self.config, "llm_service_tier", None),
             )
             self.logger.info(

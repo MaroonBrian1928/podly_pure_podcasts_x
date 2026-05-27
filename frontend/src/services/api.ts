@@ -206,6 +206,7 @@ export const feedsApi = {
     message: string;
     download_url?: string;
     error?: string;
+    service_tier?: { label: string; latest: string; mixed: boolean };
   }> => {
     const response = await api.get(postApiPath(guid, '/status'));
     return response.data;
@@ -346,6 +347,7 @@ export const feedsApi = {
       error_message: string | null;
       prompt: string | null;
       response: string | null;
+      service_tier: string | null;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -480,6 +482,7 @@ export const feedsApi = {
     message: string;
     download_url?: string;
     error?: string;
+    service_tier?: { label: string; latest: string; mixed: boolean };
   }> => {
     return feedsApi.getPostStatus(guid);
   },
@@ -554,6 +557,7 @@ export const feedsApi = {
       error_message: string | null;
       prompt: string | null;
       response: string | null;
+      service_tier: string | null;
     }>;
     transcript_segments: Array<{
       id: number;

@@ -245,6 +245,7 @@ def api_admin_costs_calls() -> flask.Response:
             "status": c.status,
             "timestamp": c.timestamp.isoformat() if c.timestamp else None,
             "retry_attempts": c.retry_attempts,
+            "service_tier": c.service_tier,
         }
         for c in calls
     ]

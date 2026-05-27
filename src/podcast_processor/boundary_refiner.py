@@ -16,6 +16,7 @@ from app.writer.client import writer_client
 from podcast_processor.llm_model_call_utils import (
     apply_service_tier,
     call_litellm_with_tier_retry,
+    record_service_tier_on_model_call,
 )
 from shared.config import Config
 
@@ -132,6 +133,12 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 "base_url": self.config.openai_base_url,
             }
             apply_service_tier(completion_args, self.config)
+            record_service_tier_on_model_call(
+                model_call_id,
+                completion_args,
+                logger=self.logger,
+                log_prefix="Boundary refine",
+            )
             response = call_litellm_with_tier_retry(
                 completion_args, config=self.config, logger=self.logger
             )

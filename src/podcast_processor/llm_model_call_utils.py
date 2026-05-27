@@ -27,6 +27,41 @@ def _resolved_tier(config: Any) -> str:
     return tier
 
 
+def record_service_tier_on_model_call(
+    model_call_id: int | None,
+    completion_args: dict[str, Any],
+    *,
+    logger: logging.Logger,
+    log_prefix: str = "ModelCall",
+) -> None:
+    """Persist `service_tier` from completion_args onto the ModelCall row.
+
+    Best-effort: silently skips when there's no model_call_id (best-effort
+    upsert never returned one) or the writer call fails -- the LLM call itself
+    is the load-bearing operation, this is just so the debug UI can show
+    which tier was used. Writes NULL when the call ran at the default tier
+    (`service_tier` absent from args).
+    """
+    if model_call_id is None:
+        return
+    tier = completion_args.get("service_tier")
+    try:
+        writer_client.update(
+            "ModelCall",
+            int(model_call_id),
+            {"service_tier": tier},
+            wait=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "%s: failed to record service_tier=%r on ModelCall %s: %s",
+            log_prefix,
+            tier,
+            model_call_id,
+            exc,
+        )
+
+
 def apply_service_tier(
     completion_args: dict[str, Any],
     config: Any,

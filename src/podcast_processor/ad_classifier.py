@@ -1133,23 +1133,32 @@ class AdClassifier:
             )
 
             try:
-                # Persist retry attempt + pending status via writer
+                # Prepare API call and validate token limits first so the
+                # pending-status writer update can also persist the resolved
+                # service_tier for this attempt.
+                completion_args = self._prepare_api_call(model_call_obj, system_prompt)
+                if completion_args is None:
+                    return None  # Token limit exceeded
+
+                attempt_service_tier = completion_args.get("service_tier")
+
+                # Persist retry attempt + pending status (+ tier) via writer
                 if model_call_obj.id is not None:
                     pending_res = writer_client.update(
                         "ModelCall",
                         model_call_obj.id,
-                        {"status": "pending", "retry_attempts": retry_attempts_value},
+                        {
+                            "status": "pending",
+                            "retry_attempts": retry_attempts_value,
+                            "service_tier": attempt_service_tier,
+                        },
                         wait=True,
                     )
                     if not pending_res or not pending_res.success:
                         raise RuntimeError(
                             getattr(pending_res, "error", "Failed to update ModelCall")
                         )
-
-                # Prepare API call and validate token limits
-                completion_args = self._prepare_api_call(model_call_obj, system_prompt)
-                if completion_args is None:
-                    return None  # Token limit exceeded
+                    model_call_obj.service_tier = attempt_service_tier
 
                 from litellm.types.utils import Choices
 
@@ -1245,20 +1254,28 @@ class AdClassifier:
         attempt: int,
         current_attempt_num: int,
     ) -> None:
-        """Handle a retryable error during LLM call."""
+        """Handle a retryable error during LLM call.
+
+        Flips the row to `status="retrying"` with an attempt-annotated error
+        message so the debug UI shows "retrying (2/5): rate limit" instead of
+        sitting silently at `pending` for the duration of the backoff sleep.
+        """
         self.logger.error(
             f"LLM retryable error for ModelCall {model_call_obj.id} (attempt {current_attempt_num}): {error}"
         )
+        retry_count = getattr(self.config, "llm_max_retry_attempts", 3)
+        error_message = f"Retrying ({current_attempt_num}/{retry_count}): {error}"
         res = writer_client.update(
             "ModelCall",
             model_call_obj.id,
-            {"error_message": str(error)},
+            {"status": "retrying", "error_message": error_message},
             wait=True,
         )
         if not res or not res.success:
             raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
         # Update local object to reflect database state
-        model_call_obj.error_message = str(error)
+        model_call_obj.status = "retrying"
+        model_call_obj.error_message = error_message
 
         # Use longer backoff for rate limiting errors
         error_str = str(error).lower()
