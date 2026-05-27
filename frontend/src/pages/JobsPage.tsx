@@ -10,6 +10,7 @@ import {
   JobProgressBar,
   JobProgressCaption,
   JobStageRail,
+  ServiceTierChip,
 } from '../components/JobProgress';
 import {
   backendDateMs,
@@ -528,6 +529,7 @@ export default function JobsPage() {
                         : '0 ads'}
                     </span>
                   ) : null}
+                  {job.service_tier ? <ServiceTierChip tier={job.service_tier} /> : null}
                   <StatusBadge status={job.status} />
                 </div>
               </div>
@@ -549,6 +551,7 @@ export default function JobsPage() {
                   stageLabel={progressModel.currentStageLabel}
                   percent={progressModel.progress}
                   tier={job.service_tier}
+                  hideChip
                 />
               </div>
 

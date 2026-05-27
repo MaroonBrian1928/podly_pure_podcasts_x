@@ -1,10 +1,17 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useState } from 'react';
 
 import { useEpisodeStatus } from '../hooks/useEpisodeStatus';
 import { buildProcessingProgressModel } from '../utils/processingProgress';
 import { computeStageDurationMs } from '../utils/jobStageDurations';
 import { JobProgressCaption, JobProgressIndicator } from './JobProgress';
 import type { JobStageEvent } from '../types';
+
+const ACTIVE_STATUSES = new Set([
+  'pending',
+  'running',
+  'starting',
+  'processing',
+]);
 
 interface EpisodeProcessingStatusProps {
   episodeGuid: string;
@@ -23,15 +30,19 @@ export default function EpisodeProcessingStatus({
 }: EpisodeProcessingStatusProps) {
   const { data: status } = useEpisodeStatus(episodeGuid, isWhitelisted, hasProcessedAudio, feedId);
 
-  // Cache `now` per render but only let it advance roughly every 3s so the
-  // active-stage duration ticks without thrashing the whole tree on every
-  // unrelated re-render (status polls every 3s anyway).
-  const nowRef = useRef<number>(Date.now());
-  const now = useMemo(() => {
-    nowRef.current = Date.now();
-    return nowRef.current;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  // Tick `now` once per second so the active-stage duration in the rail
+  // updates smoothly rather than waiting on the 3s status poll. Stops as
+  // soon as the post is no longer in an active state so we're not running
+  // an interval for nothing once processing finishes.
+  const [now, setNow] = useState<number>(() => Date.now());
+  const statusValue = status?.status;
+  useEffect(() => {
+    if (!statusValue || !ACTIVE_STATUSES.has(statusValue)) {
+      return undefined;
+    }
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [statusValue]);
 
   if (!status) return null;
 

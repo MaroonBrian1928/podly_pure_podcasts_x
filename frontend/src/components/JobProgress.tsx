@@ -211,18 +211,25 @@ export function ServiceTierChip({ tier }: { tier: ServiceTierSummary }) {
   );
 }
 
-// Centered "Stage Name (NN%) [tier chip]" caption matching the layout
-// EpisodeProcessingStatus uses below its bar. Extracted so the JobsPage
+// Centered "Stage Name (NN%) [tier chip] (attempt 1/5)" caption matching the
+// layout EpisodeProcessingStatus uses below its bar. Extracted so the JobsPage
 // card and the episode-list status indicator stay visually in sync.
+//
+// Callers that render the tier chip elsewhere (e.g. JobsPage shows it in the
+// top-right badge row) can pass `hideChip` to suppress the inline chip while
+// keeping the in-flight retry text, which still belongs inline with the
+// stage label.
 export function JobProgressCaption({
   stageLabel,
   percent,
   tier,
+  hideChip = false,
   className = '',
 }: {
   stageLabel: string;
   percent: number;
   tier?: ServiceTierSummary;
+  hideChip?: boolean;
   className?: string;
 }) {
   const clamped = Math.max(0, Math.min(100, Math.round(percent)));
@@ -233,7 +240,12 @@ export function JobProgressCaption({
       <span>
         {stageLabel} ({clamped}%)
       </span>
-      {tier ? <ServiceTierChip tier={tier} /> : null}
+      {tier && !hideChip ? <ServiceTierChip tier={tier} /> : null}
+      {tier?.in_flight && hideChip ? (
+        <span className="text-[10px] text-gray-500 italic">
+          {formatTierInFlight(tier.in_flight)}
+        </span>
+      ) : null}
     </div>
   );
 }
