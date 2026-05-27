@@ -54,7 +54,19 @@ from app.runtime_config import config, is_test  # noqa: E402
 from shared import defaults as DEFAULTS  # noqa: E402
 from shared.processing_paths import get_in_root, get_srv_root  # noqa: E402
 
-setup_logger("global_logger", "src/instance/logs/app.log")
+if is_test:
+    # Don't attach the production app.log file handler under pytest -- tests
+    # deliberately raise mocked errors (e.g. "boom" in test_processing_worker,
+    # mocked litellm.UnsupportedParamsError in test_ad_classifier) that would
+    # otherwise be written into src/instance/logs/app.log and look like real
+    # runtime errors. Tests still get console output via caplog / pytest's own
+    # log capture. test_logger_rotation.py exercises the file-handler path
+    # directly against tmp_path so this gate doesn't affect its coverage.
+    _global_logger = logging.getLogger("global_logger")
+    _global_logger.setLevel(logging.DEBUG)
+    _global_logger.propagate = False
+else:
+    setup_logger("global_logger", "src/instance/logs/app.log")
 # Install the litellm log-noise filter before anything imports litellm so the
 # import-time "Bedrock/SageMaker: No module named botocore" warnings get
 # dropped, and so the "Give Feedback / Get Help" debug blurb on errors is off.

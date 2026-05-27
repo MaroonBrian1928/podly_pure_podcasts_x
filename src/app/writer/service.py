@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -10,7 +11,16 @@ from app.writer.protocol import WriteCommand, WriteCommandType
 
 from .executor import CommandExecutor
 
-logger = setup_logger("writer", "src/instance/logs/app.log", level=logging.INFO)
+# Under pytest, skip attaching the file handler so tests that happen to import
+# anything from this module don't end up appending writer logs into the real
+# `src/instance/logs/app.log`. The console handler stays so test failures are
+# still debuggable; pytest's own log capture works regardless.
+if "pytest" in sys.modules:
+    logger = logging.getLogger("writer")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+else:
+    logger = setup_logger("writer", "src/instance/logs/app.log", level=logging.INFO)
 
 
 def _idle_trim_interval_seconds() -> int:
