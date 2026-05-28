@@ -361,6 +361,9 @@ export const feedsApi = {
       prompt: string | null;
       response: string | null;
       service_tier: string | null;
+      prompt_tokens: number | null;
+      completion_tokens: number | null;
+      total_tokens: number | null;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -583,6 +586,9 @@ export const feedsApi = {
       prompt: string | null;
       response: string | null;
       service_tier: string | null;
+      prompt_tokens: number | null;
+      completion_tokens: number | null;
+      total_tokens: number | null;
     }>;
     transcript_segments: Array<{
       id: number;

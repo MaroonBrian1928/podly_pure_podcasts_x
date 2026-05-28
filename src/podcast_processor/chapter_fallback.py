@@ -615,6 +615,7 @@ def refine_generated_chapter_titles_with_llm(
             error_message=None,
             logger=log,
             log_prefix="Chapter title refine",
+            usage=extract_litellm_usage(response),
         )
         refined_titles = _parse_refined_titles_response(content)
         if not refined_titles:
@@ -1394,6 +1395,7 @@ def _request_topic_chapter_plan(
         error_message=None,
         logger=log,
         log_prefix=phase_label,
+        usage=usage,
     )
     expected_count = _extract_topic_chapter_count_from_text(content)
     parsed = _parse_topic_chapter_response(content)

@@ -242,21 +242,28 @@ def try_update_model_call(
     error_message: str | None,
     logger: logging.Logger,
     log_prefix: str,
+    usage: dict[str, int | None] | None = None,
 ) -> None:
     """Best-effort ModelCall updater; no-op if call creation failed."""
     if model_call_id is None:
         return
 
+    data: dict[str, Any] = {
+        "status": status,
+        "response": response,
+        "error_message": error_message,
+        "retry_attempts": 1,
+    }
+    if usage:
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if usage.get(field) is not None:
+                data[field] = usage[field]
+
     try:
         writer_client.update(
             "ModelCall",
             int(model_call_id),
-            {
-                "status": status,
-                "response": response,
-                "error_message": error_message,
-                "retry_attempts": 1,
-            },
+            data,
             wait=True,
         )
     except Exception as exc:  # best-effort  # noqa: BLE001

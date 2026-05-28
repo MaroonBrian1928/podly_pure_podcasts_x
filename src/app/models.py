@@ -267,6 +267,12 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     # (Anthropic, Groq, etc.). Surfaced in the debug UI so it's obvious which
     # tier produced a given ModelCall row.
     service_tier = db.Column(db.Text, nullable=True)
+    # Token usage reported by the provider for the successful (or last) attempt
+    # of this call. Null when the provider didn't return usage, when the call
+    # never produced a response, or for legacy rows created before tracking.
+    prompt_tokens = db.Column(db.Integer, nullable=True)
+    completion_tokens = db.Column(db.Integer, nullable=True)
+    total_tokens = db.Column(db.Integer, nullable=True)
 
     identifications = db.relationship(
         "Identification", backref="model_call", lazy="dynamic"

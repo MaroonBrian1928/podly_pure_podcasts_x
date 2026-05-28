@@ -33,6 +33,7 @@ from podcast_processor.llm_concurrency_limiter import (
 from podcast_processor.llm_model_call_utils import (
     apply_service_tier,
     call_litellm_with_tier_retry,
+    extract_litellm_usage,
 )
 from podcast_processor.model_output import (
     AdSegmentPredictionList,
@@ -1097,6 +1098,40 @@ class AdClassifier:
 
         return LLMErrorClassifier.is_retryable_error(error)
 
+    def _build_success_payload(
+        self,
+        *,
+        response: Any,
+        raw_response_content: str,
+        retry_attempts_value: int,
+        model_call_id: int | None,
+        attempt_service_tier: str | None,
+    ) -> dict[str, Any]:
+        """Assemble the writer payload for a successful ModelCall update,
+        including per-provider token usage when reported. Kept separate from
+        ``_call_model`` so the latter stays under the branch-count budget.
+        """
+        usage = extract_litellm_usage(response)
+        payload: dict[str, Any] = {
+            "response": raw_response_content,
+            "status": "success",
+            "error_message": None,
+            "retry_attempts": retry_attempts_value,
+        }
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if usage.get(field) is not None:
+                payload[field] = usage[field]
+        if usage.get("total_tokens") is not None:
+            self.logger.info(
+                "ModelCall %s token usage: prompt=%s completion=%s total=%s (tier=%s)",
+                model_call_id,
+                usage.get("prompt_tokens"),
+                usage.get("completion_tokens"),
+                usage.get("total_tokens"),
+                attempt_service_tier or "default",
+            )
+        return payload
+
     def _call_model(
         self,
         model_call_obj: ModelCall,
@@ -1178,15 +1213,17 @@ class AdClassifier:
                 assert content is not None
                 raw_response_content = content
 
+                success_payload = self._build_success_payload(
+                    response=response,
+                    raw_response_content=raw_response_content,
+                    retry_attempts_value=retry_attempts_value,
+                    model_call_id=model_call_obj.id,
+                    attempt_service_tier=attempt_service_tier,
+                )
                 success_res = writer_client.update(
                     "ModelCall",
                     model_call_obj.id,
-                    {
-                        "response": raw_response_content,
-                        "status": "success",
-                        "error_message": None,
-                        "retry_attempts": retry_attempts_value,
-                    },
+                    success_payload,
                     wait=True,
                 )
                 if not success_res or not success_res.success:

@@ -10,6 +10,7 @@ from podcast_processor.llm_model_call_utils import (
     extract_litellm_finish_reason,
     extract_litellm_usage,
     model_supports_service_tier,
+    try_update_model_call,
 )
 
 
@@ -53,6 +54,58 @@ def test_extract_litellm_usage_handles_dict_response() -> None:
         "completion_tokens": 9,
         "total_tokens": 14,
     }
+
+
+def test_try_update_model_call_forwards_token_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When usage is supplied, the writer payload must include token counts so
+    the debug modal can render tokens alongside service tier. Missing fields
+    must be omitted (not stored as None) so older responses don't overwrite
+    existing values.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["model"] = model
+        captured["pk"] = pk
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+
+    try_update_model_call(
+        42,
+        status="success",
+        response="hi",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+
+    assert captured["model"] == "ModelCall"
+    assert captured["pk"] == 42
+    assert captured["data"]["prompt_tokens"] == 10
+    assert captured["data"]["completion_tokens"] == 5
+    assert captured["data"]["total_tokens"] == 15
+
+    # Now without usage: token keys must not appear at all.
+    captured.clear()
+    try_update_model_call(
+        42,
+        status="success",
+        response="hi",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+    )
+    assert "prompt_tokens" not in captured["data"]
+    assert "total_tokens" not in captured["data"]
 
 
 # --------------------------------------------------------------------------
