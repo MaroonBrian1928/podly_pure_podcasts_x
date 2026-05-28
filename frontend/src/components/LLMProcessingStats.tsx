@@ -562,7 +562,7 @@ export default function LLMProcessingStats({
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Segment Range</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + completion = total tokens reported by the provider">Tokens</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + cached prompt + completion = total tokens">Tokens</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -602,7 +602,7 @@ export default function LLMProcessingStats({
                                     <td className="px-4 py-3 text-sm text-gray-600">
                                       {call.total_tokens != null ? (
                                         <span
-                                          title={`prompt ${call.prompt_tokens ?? '—'} + completion ${call.completion_tokens ?? '—'}${call.service_tier === 'flex' ? ' (flex)' : ''}`}
+                                          title={`prompt ${call.prompt_tokens ?? '—'} + cached prompt ${call.cached_prompt_tokens ?? '—'} + completion ${call.completion_tokens ?? '—'}${call.service_tier === 'flex' ? ' (flex)' : ''}`}
                                         >
                                           {call.total_tokens.toLocaleString()}
                                           {call.service_tier === 'flex' && (

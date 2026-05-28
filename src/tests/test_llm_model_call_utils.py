@@ -32,6 +32,7 @@ def test_extract_litellm_usage_handles_object_and_numeric_strings() -> None:
     response = SimpleNamespace(
         usage=SimpleNamespace(
             prompt_tokens="101",
+            prompt_tokens_details=SimpleNamespace(cached_tokens="33"),
             completion_tokens=22,
             total_tokens=123,
         )
@@ -39,6 +40,7 @@ def test_extract_litellm_usage_handles_object_and_numeric_strings() -> None:
 
     assert extract_litellm_usage(response) == {
         "prompt_tokens": 101,
+        "cached_prompt_tokens": 33,
         "completion_tokens": 22,
         "total_tokens": 123,
     }
@@ -46,11 +48,47 @@ def test_extract_litellm_usage_handles_object_and_numeric_strings() -> None:
 
 def test_extract_litellm_usage_handles_dict_response() -> None:
     response = {
-        "usage": {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14}
+        "usage": {
+            "prompt_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens": 9,
+            "total_tokens": 14,
+        }
     }
 
     assert extract_litellm_usage(response) == {
         "prompt_tokens": 5,
+        "cached_prompt_tokens": 2,
+        "completion_tokens": 9,
+        "total_tokens": 14,
+    }
+
+
+def test_extract_litellm_usage_handles_cache_read_input_tokens_fallback() -> None:
+    response = {
+        "usage": {
+            "prompt_tokens": 5,
+            "cache_read_input_tokens": 2,
+            "completion_tokens": 9,
+            "total_tokens": 14,
+        }
+    }
+
+    assert extract_litellm_usage(response)["cached_prompt_tokens"] == 2
+
+
+def test_extract_litellm_usage_leaves_cached_prompt_tokens_null_when_missing() -> None:
+    response = {
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 9,
+            "total_tokens": 14,
+        }
+    }
+
+    assert extract_litellm_usage(response) == {
+        "prompt_tokens": 5,
+        "cached_prompt_tokens": None,
         "completion_tokens": 9,
         "total_tokens": 14,
     }
@@ -85,12 +123,18 @@ def test_try_update_model_call_forwards_token_usage(
         error_message=None,
         logger=logging.getLogger("test"),
         log_prefix="t",
-        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        usage={
+            "prompt_tokens": 10,
+            "cached_prompt_tokens": 4,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        },
     )
 
     assert captured["model"] == "ModelCall"
     assert captured["pk"] == 42
     assert captured["data"]["prompt_tokens"] == 10
+    assert captured["data"]["cached_prompt_tokens"] == 4
     assert captured["data"]["completion_tokens"] == 5
     assert captured["data"]["total_tokens"] == 15
 
@@ -105,7 +149,21 @@ def test_try_update_model_call_forwards_token_usage(
         log_prefix="t",
     )
     assert "prompt_tokens" not in captured["data"]
+    assert "cached_prompt_tokens" not in captured["data"]
     assert "total_tokens" not in captured["data"]
+
+    # Missing cached token data must not be coerced to zero or forwarded.
+    captured.clear()
+    try_update_model_call(
+        42,
+        status="success",
+        response="hi",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+    assert "cached_prompt_tokens" not in captured["data"]
 
 
 # --------------------------------------------------------------------------

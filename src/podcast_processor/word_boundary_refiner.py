@@ -136,6 +136,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 extra={
                     "content_preview": (content or "")[:200],
                     "prompt_tokens": usage.get("prompt_tokens"),
+                    "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
                     "total_tokens": usage.get("total_tokens"),
                 },
@@ -146,6 +147,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status="received_response",
                 response=raw_response,
                 error_message=None,
+                usage=usage,
             )
 
             rust_result = self._try_rust_refine_from_llm(
@@ -1271,6 +1273,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         status: str,
         response: str | None,
         error_message: str | None,
+        usage: dict[str, int | None] | None = None,
     ) -> None:
         try_update_model_call(
             model_call_id,
@@ -1279,4 +1282,5 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             error_message=error_message,
             logger=self.logger,
             log_prefix="Word boundary refine",
+            usage=usage,
         )

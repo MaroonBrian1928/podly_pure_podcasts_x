@@ -271,6 +271,7 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     # of this call. Null when the provider didn't return usage, when the call
     # never produced a response, or for legacy rows created before tracking.
     prompt_tokens = db.Column(db.Integer, nullable=True)
+    cached_prompt_tokens = db.Column(db.Integer, nullable=True)
     completion_tokens = db.Column(db.Integer, nullable=True)
     total_tokens = db.Column(db.Integer, nullable=True)
 

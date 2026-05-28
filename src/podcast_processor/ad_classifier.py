@@ -1118,14 +1118,20 @@ class AdClassifier:
             "error_message": None,
             "retry_attempts": retry_attempts_value,
         }
-        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        for field in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+        ):
             if usage.get(field) is not None:
                 payload[field] = usage[field]
         if usage.get("total_tokens") is not None:
             self.logger.info(
-                "ModelCall %s token usage: prompt=%s completion=%s total=%s (tier=%s)",
+                "ModelCall %s token usage: prompt=%s cached_prompt=%s completion=%s total=%s (tier=%s)",
                 model_call_id,
                 usage.get("prompt_tokens"),
+                usage.get("cached_prompt_tokens"),
                 usage.get("completion_tokens"),
                 usage.get("total_tokens"),
                 attempt_service_tier or "default",

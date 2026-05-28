@@ -695,6 +695,7 @@ struct StatsModelCallRow {
     response: Option<String>,
     service_tier: Option<String>,
     prompt_tokens: Option<i64>,
+    cached_prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
 }
@@ -3038,6 +3039,7 @@ fn render_stats(args: StatsRenderArgs) -> Result<Value> {
                 "response": call.response,
                 "service_tier": call.service_tier,
                 "prompt_tokens": call.prompt_tokens,
+                "cached_prompt_tokens": call.cached_prompt_tokens,
                 "completion_tokens": call.completion_tokens,
                 "total_tokens": call.total_tokens,
             })
@@ -3457,7 +3459,7 @@ fn query_stats_model_calls(conn: &Connection, post_id: i64) -> Result<Vec<StatsM
     let mut stmt = conn.prepare(
         "SELECT id, model_name, status, first_segment_sequence_num, last_segment_sequence_num,
                 timestamp, retry_attempts, error_message, prompt, response, service_tier,
-                prompt_tokens, completion_tokens, total_tokens
+                prompt_tokens, cached_prompt_tokens, completion_tokens, total_tokens
          FROM model_call WHERE post_id = ?1
          ORDER BY model_name, first_segment_sequence_num",
     )?;
@@ -3477,8 +3479,9 @@ fn query_stats_model_calls(conn: &Connection, post_id: i64) -> Result<Vec<StatsM
             response: row.get(9)?,
             service_tier: row.get(10)?,
             prompt_tokens: row.get(11)?,
-            completion_tokens: row.get(12)?,
-            total_tokens: row.get(13)?,
+            cached_prompt_tokens: row.get(12)?,
+            completion_tokens: row.get(13)?,
+            total_tokens: row.get(14)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -7044,7 +7047,8 @@ mod tests {
                 id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, first_segment_sequence_num INTEGER NOT NULL,
                 last_segment_sequence_num INTEGER NOT NULL, model_name TEXT NOT NULL, prompt TEXT NOT NULL,
                 response TEXT, timestamp TEXT, status TEXT NOT NULL, error_message TEXT, retry_attempts INTEGER,
-                service_tier TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER
+                service_tier TEXT, prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
+                completion_tokens INTEGER, total_tokens INTEGER
             );
             CREATE TABLE transcript_segment (
                 id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, sequence_num INTEGER NOT NULL,
@@ -7080,8 +7084,8 @@ mod tests {
         // for the chapter row so it sorts after [0] and doesn't break the
         // existing assertion that [0] is the primary classifier row.
         conn.execute(
-            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2, 'flex', 100, 50, 150),
-                                            (2, 1, -100, -100, 'model-b', 'chap prompt', 'chap response', '2026-05-08 12:00:02.000000', 'success', NULL, 1, NULL, NULL, NULL, NULL)",
+            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2, 'flex', 100, 25, 50, 150),
+                                            (2, 1, -100, -100, 'model-b', 'chap prompt', 'chap response', '2026-05-08 12:00:02.000000', 'success', NULL, 1, NULL, NULL, NULL, NULL, NULL)",
             [],
         )
         .unwrap();
@@ -7136,9 +7140,11 @@ mod tests {
         // Token usage is surfaced alongside service_tier so the debug modal
         // can render "tokens (flex)" without an extra round-trip.
         assert_eq!(stats["model_calls"][0]["prompt_tokens"], 100);
+        assert_eq!(stats["model_calls"][0]["cached_prompt_tokens"], 25);
         assert_eq!(stats["model_calls"][0]["completion_tokens"], 50);
         assert_eq!(stats["model_calls"][0]["total_tokens"], 150);
         assert_eq!(stats["model_calls"][1]["service_tier"], Value::Null);
+        assert_eq!(stats["model_calls"][1]["cached_prompt_tokens"], Value::Null);
         assert_eq!(stats["model_calls"][1]["total_tokens"], Value::Null);
         assert_eq!(
             stats["model_calls"][1]["segment_range"],

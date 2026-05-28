@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -138,9 +139,13 @@ def test_call_model_persists_token_usage(test_config: Config, app: Flask) -> Non
         mock_choice.message = mock_message
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
-        # litellm exposes usage as an object with int-valued attributes.
-        mock_response.usage = MagicMock(
-            prompt_tokens=120, completion_tokens=45, total_tokens=165
+        # LiteLLM exposes cached prompt hits under
+        # usage.prompt_tokens_details.cached_tokens.
+        mock_response.usage = SimpleNamespace(
+            prompt_tokens=120,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=30),
+            completion_tokens=45,
+            total_tokens=165,
         )
 
         with patch("litellm.completion", return_value=mock_response):
@@ -153,6 +158,7 @@ def test_call_model_persists_token_usage(test_config: Config, app: Flask) -> Non
         assert refreshed is not None
         assert refreshed.status == "success"
         assert refreshed.prompt_tokens == 120
+        assert refreshed.cached_prompt_tokens == 30
         assert refreshed.completion_tokens == 45
         assert refreshed.total_tokens == 165
 

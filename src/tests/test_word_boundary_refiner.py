@@ -13,6 +13,7 @@ def _build_response(
     content: str,
     finish_reason: str | None,
     prompt_tokens: int = 11,
+    cached_prompt_tokens: int = 3,
     completion_tokens: int = 7,
     total_tokens: int = 18,
 ) -> MagicMock:
@@ -25,6 +26,7 @@ def _build_response(
     response.choices = [choice]
     response.usage = SimpleNamespace(
         prompt_tokens=prompt_tokens,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=cached_prompt_tokens),
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
     )
@@ -88,6 +90,12 @@ def test_refine_tags_parse_failures_with_finish_reason(
     update_calls = cast(MagicMock, refiner._update_model_call).call_args_list
     assert update_calls[0].kwargs["status"] == "received_response"
     assert update_calls[0].kwargs["error_message"] is None
+    assert update_calls[0].kwargs["usage"] == {
+        "prompt_tokens": 11,
+        "cached_prompt_tokens": 3,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
     assert update_calls[1].kwargs["status"] == "success_heuristic"
     assert update_calls[1].kwargs["error_message"] == expected_error
 

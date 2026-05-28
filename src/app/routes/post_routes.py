@@ -734,6 +734,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "response": call.response,
                 "service_tier": call.service_tier,
                 "prompt_tokens": call.prompt_tokens,
+                "cached_prompt_tokens": call.cached_prompt_tokens,
                 "completion_tokens": call.completion_tokens,
                 "total_tokens": call.total_tokens,
             }

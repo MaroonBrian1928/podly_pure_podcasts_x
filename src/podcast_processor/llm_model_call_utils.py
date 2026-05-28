@@ -255,7 +255,12 @@ def try_update_model_call(
         "retry_attempts": 1,
     }
     if usage:
-        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        for field in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+        ):
             if usage.get(field) is not None:
                 data[field] = usage[field]
 
@@ -326,8 +331,26 @@ def extract_litellm_usage(response: Any) -> dict[str, int | None]:
             value = usage.get(name)
         return _maybe_int(value)
 
+    def _prompt_tokens_detail_field(name: str) -> int | None:
+        if usage is None:
+            return None
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is None and isinstance(usage, dict):
+            details = usage.get("prompt_tokens_details")
+        if details is None:
+            return None
+        value = getattr(details, name, None)
+        if value is None and isinstance(details, dict):
+            value = details.get(name)
+        return _maybe_int(value)
+
+    cached_prompt_tokens = _prompt_tokens_detail_field("cached_tokens")
+    if cached_prompt_tokens is None:
+        cached_prompt_tokens = _usage_field("cache_read_input_tokens")
+
     return {
         "prompt_tokens": _usage_field("prompt_tokens"),
+        "cached_prompt_tokens": cached_prompt_tokens,
         "completion_tokens": _usage_field("completion_tokens"),
         "total_tokens": _usage_field("total_tokens"),
     }

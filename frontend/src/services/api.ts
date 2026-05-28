@@ -362,6 +362,7 @@ export const feedsApi = {
       response: string | null;
       service_tier: string | null;
       prompt_tokens: number | null;
+      cached_prompt_tokens: number | null;
       completion_tokens: number | null;
       total_tokens: number | null;
     }>;
@@ -587,6 +588,7 @@ export const feedsApi = {
       response: string | null;
       service_tier: string | null;
       prompt_tokens: number | null;
+      cached_prompt_tokens: number | null;
       completion_tokens: number | null;
       total_tokens: number | null;
     }>;
