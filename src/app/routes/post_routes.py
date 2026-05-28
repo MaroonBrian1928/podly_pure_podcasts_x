@@ -29,6 +29,7 @@ from app.posts import (
     clear_post_processing_data,
     clear_post_processing_data_keep_transcript,
 )
+from app.routes.cost_routes import _is_billable_llm_call, _model_call_cost
 from app.routes.post_stats_utils import (
     build_edited_timeline_ad_markers,
     build_edited_timeline_bleep_windows,
@@ -63,6 +64,43 @@ logger = logging.getLogger("global_logger")
 
 
 post_bp = Blueprint("post", __name__)
+
+
+def _current_user_is_admin() -> bool:
+    current_user = getattr(g, "current_user", None)
+    if current_user is None:
+        return False
+
+    role = getattr(current_user, "role", None)
+    if role == "admin":
+        return True
+
+    user_id = getattr(current_user, "id", None)
+    if user_id is None:
+        return False
+
+    from app.models import User
+
+    user = db.session.get(User, int(user_id))
+    return bool(user and user.role == "admin")
+
+
+def _estimated_llm_cost_for_post(post_id: int) -> float:
+    calls: list[ModelCall] = ModelCall.query.filter(
+        ModelCall.post_id == post_id,
+        ModelCall.status == "success",
+    ).all()
+    return sum(_model_call_cost(call) for call in calls if _is_billable_llm_call(call))
+
+
+def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post_id: int) -> None:
+    if not _current_user_is_admin():
+        return
+    processing_stats = stats_data.get("processing_stats")
+    if not isinstance(processing_stats, dict):
+        return
+    processing_stats["estimated_cost"] = round(_estimated_llm_cost_for_post(post_id), 4)
+
 
 _LOG_LINE_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
@@ -655,6 +693,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
         srv_root=get_srv_root(),
     )
     if rust_stats is not None:
+        _maybe_add_admin_cost_estimate(rust_stats, int(post.id))
         return flask.jsonify(rust_stats)
 
     model_calls = (
@@ -941,6 +980,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             },
         }
 
+    _maybe_add_admin_cost_estimate(stats_data, int(post.id))
     return flask.jsonify(stats_data)
 
 

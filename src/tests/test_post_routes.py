@@ -974,6 +974,100 @@ def test_post_stats_falls_back_when_rust_payload_unavailable(app):
     render_mock.assert_called_once()
 
 
+def test_post_stats_includes_estimated_cost_for_admin(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    @app.before_request
+    def _set_admin_user() -> None:
+        g.current_user = SimpleNamespace(id=1, role="admin")
+
+    with app.app_context():
+        user = User(id=1, username="admin", password_hash="hash", role="admin")
+        feed = Feed(title="Stats Cost Feed", rss_url="https://example.com/feed.xml")
+        db.session.add_all([user, feed])
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-cost-admin-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Cost Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=1,
+                model_name="gpt-4o-mini",
+                prompt="classify",
+                status="success",
+                prompt_tokens=1_000_000,
+                cached_prompt_tokens=500_000,
+                completion_tokens=250_000,
+            )
+        )
+        db.session.commit()
+        guid = post.guid
+
+    with mock.patch("app.routes.post_routes.try_render_post_stats", return_value=None):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["estimated_cost"] == 0.3375
+
+
+def test_post_stats_omits_estimated_cost_for_non_admin(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    @app.before_request
+    def _set_regular_user() -> None:
+        g.current_user = SimpleNamespace(id=1, role="user")
+
+    with app.app_context():
+        user = User(id=1, username="user", password_hash="hash", role="user")
+        feed = Feed(title="Stats Cost Feed", rss_url="https://example.com/feed.xml")
+        db.session.add_all([user, feed])
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-cost-user-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Cost Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=1,
+                model_name="gpt-4o-mini",
+                prompt="classify",
+                status="success",
+                prompt_tokens=1_000_000,
+                cached_prompt_tokens=500_000,
+                completion_tokens=250_000,
+            )
+        )
+        db.session.commit()
+        guid = post.guid
+
+    with mock.patch("app.routes.post_routes.try_render_post_stats", return_value=None):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert "estimated_cost" not in payload["processing_stats"]
+
+
 def test_post_stats_rust_path_accepts_guid_with_slashes(app):
     app.testing = True
     app.register_blueprint(post_bp)

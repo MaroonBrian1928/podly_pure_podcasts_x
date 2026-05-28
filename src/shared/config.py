@@ -191,6 +191,8 @@ class Config(BaseModel):
     user_limit_total: int | None = DEFAULTS.APP_USER_LIMIT_TOTAL
     autoprocess_on_download: bool = DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
+    whisper_cost_rate_per_hour: float = DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
+    ina_cost_rate_per_hour: float = DEFAULTS.APP_INA_COST_RATE_PER_HOUR
 
     @model_validator(mode="before")
     @classmethod

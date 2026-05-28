@@ -228,6 +228,7 @@ export default function LLMProcessingStats({
   const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
     ? bleepTimelineSegments.length > 0
     : (stats?.processing_stats?.has_bleep_windows ?? false);
+  const estimatedCost = stats?.processing_stats?.estimated_cost;
   const getAudioLabelStyle = (label: string) => {
     switch (label) {
       case 'music':
@@ -366,7 +367,7 @@ export default function LLMProcessingStats({
 
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                           <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-blue-800/70 dark:from-blue-950 dark:to-slate-900">
                             <div className="text-2xl font-bold text-blue-600 dark:text-blue-200">
                               {stats.processing_stats?.total_segments || 0}
@@ -387,6 +388,14 @@ export default function LLMProcessingStats({
                             </div>
                             <div className="text-sm text-red-800 dark:text-red-100">Ad Segments Removed</div>
                           </div>
+                          {estimatedCost != null && (
+                            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
+                              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-200">
+                                ${estimatedCost.toFixed(4)}
+                              </div>
+                              <div className="text-sm text-indigo-800 dark:text-indigo-100">Estimated LLM Cost</div>
+                            </div>
+                          )}
                         </div>
                       </div>
 

@@ -1,7 +1,8 @@
 """Admin cost dashboard API endpoints.
 
-Calculates platform costs on-the-fly from existing tables — no migrations needed.
-Cost model: $0.04/hour x episode_duration / subscriber_count per user.
+Calculates platform costs on-the-fly from existing tables.
+Cost model: LiteLLM token pricing + configured Whisper/INA duration rates,
+attributed across subscribers.
 """
 
 import logging
@@ -25,6 +26,7 @@ from app.models import (
     UserFeed,
 )
 from app.writer.client import writer_client
+from shared import defaults as DEFAULTS
 
 logger = logging.getLogger("global_logger")
 
@@ -32,13 +34,79 @@ costs_bp = Blueprint("costs", __name__)
 
 
 def _compute_cost_per_subscriber(
-    duration_seconds: float, subscriber_count: int, cost_rate: float
+    total_episode_cost: float, subscriber_count: int
 ) -> float:
     """Cost attributed per subscriber for one episode."""
-    if subscriber_count <= 0 or duration_seconds <= 0:
+    if subscriber_count <= 0 or total_episode_cost <= 0:
         return 0.0
-    hours = duration_seconds / 3600.0
-    return cost_rate * hours / subscriber_count
+    return total_episode_cost / subscriber_count
+
+
+def _rate_from_litellm(model_name: str, key: str, service_tier: str | None) -> float:
+    """Read a per-token price from LiteLLM's model cost map."""
+    try:
+        import litellm
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LiteLLM unavailable for cost calculation: %s", exc)
+        return 0.0
+
+    cost_entry = litellm.model_cost.get(model_name)
+    if not cost_entry and "/" in model_name:
+        cost_entry = litellm.model_cost.get(model_name.split("/", 1)[1])
+    if not cost_entry:
+        return 0.0
+
+    normalized_tier = (service_tier or "default").lower()
+    if normalized_tier != "default":
+        tier_key = f"{key}_{normalized_tier}"
+        if tier_key in cost_entry:
+            return float(cost_entry[tier_key] or 0.0)
+    base_rate = float(cost_entry.get(key) or 0.0)
+    if normalized_tier == "flex":
+        return base_rate * 0.5
+    return base_rate
+
+
+def _model_call_cost(call: ModelCall) -> float:
+    """Calculate stored LLM call cost from LiteLLM rates and persisted tokens."""
+    prompt_tokens = int(call.prompt_tokens or 0)
+    cached_prompt_tokens = int(call.cached_prompt_tokens or 0)
+    completion_tokens = int(call.completion_tokens or 0)
+    if prompt_tokens <= 0 and cached_prompt_tokens <= 0 and completion_tokens <= 0:
+        return 0.0
+
+    input_rate = _rate_from_litellm(
+        call.model_name, "input_cost_per_token", call.service_tier
+    )
+    cached_input_rate = _rate_from_litellm(
+        call.model_name, "cache_read_input_token_cost", call.service_tier
+    )
+    if cached_input_rate == 0.0 and cached_prompt_tokens > 0:
+        cached_input_rate = input_rate
+    output_rate = _rate_from_litellm(
+        call.model_name, "output_cost_per_token", call.service_tier
+    )
+
+    return (
+        prompt_tokens * input_rate
+        + cached_prompt_tokens * cached_input_rate
+        + completion_tokens * output_rate
+    )
+
+
+def _is_ina_call(call: ModelCall) -> bool:
+    return call.model_name.startswith("ina:")
+
+
+def _is_billable_llm_call(call: ModelCall) -> bool:
+    if call.status != "success":
+        return False
+    if _is_ina_call(call):
+        return False
+    name = (call.model_name or "").lower()
+    if "whisper" in name or call.prompt == "Whisper transcription job":
+        return False
+    return True
 
 
 def _month_range(year: int, month: int) -> tuple[datetime, datetime]:
@@ -48,6 +116,74 @@ def _month_range(year: int, month: int) -> tuple[datetime, datetime]:
     last_day = calendar.monthrange(year, month)[1]
     end = datetime(year, month, last_day, 23, 59, 59)
     return start, end
+
+
+def _latest_completed_jobs_by_guid(
+    month_start: datetime, month_end: datetime
+) -> dict[str, ProcessingJob]:
+    completed_jobs: list[ProcessingJob] = ProcessingJob.query.filter(
+        ProcessingJob.status == "completed",
+        ProcessingJob.completed_at >= month_start,
+        ProcessingJob.completed_at <= month_end,
+    ).all()
+
+    job_by_guid: dict[str, ProcessingJob] = {}
+    for job in completed_jobs:
+        existing = job_by_guid.get(job.post_guid)
+        if existing is None or (job.completed_at or datetime.min) > (
+            existing.completed_at or datetime.min
+        ):
+            job_by_guid[job.post_guid] = job
+    return job_by_guid
+
+
+def _ad_time_by_post_id(post_ids: list[int]) -> dict[int, float]:
+    if not post_ids:
+        return {}
+    ad_segment_subq = (
+        db.session.query(Identification.transcript_segment_id)
+        .filter(Identification.label == "ad")
+        .scalar_subquery()
+    )
+    ad_time_rows = (
+        db.session.query(
+            TranscriptSegment.post_id,
+            db.func.sum(TranscriptSegment.end_time - TranscriptSegment.start_time),
+        )
+        .filter(
+            TranscriptSegment.post_id.in_(post_ids),
+            TranscriptSegment.id.in_(ad_segment_subq),
+        )
+        .group_by(TranscriptSegment.post_id)
+        .all()
+    )
+    return {row[0]: float(row[1]) for row in ad_time_rows}
+
+
+def _model_calls_by_post_id(post_ids: list[int]) -> dict[int, list[ModelCall]]:
+    if not post_ids:
+        return {}
+    model_calls = (
+        ModelCall.query.filter(
+            ModelCall.post_id.in_(post_ids),
+            ModelCall.status == "success",
+        )
+        .order_by(ModelCall.id.asc())
+        .all()
+    )
+    calls_by_post_id: dict[int, list[ModelCall]] = {}
+    for call in model_calls:
+        calls_by_post_id.setdefault(call.post_id, []).append(call)
+    return calls_by_post_id
+
+
+def _user_feed_maps() -> tuple[dict[int, list[int]], dict[int, list[int]]]:
+    user_feed_map: dict[int, list[int]] = {}
+    feed_user_map: dict[int, list[int]] = {}
+    for uf in UserFeed.query.all():
+        user_feed_map.setdefault(uf.user_id, []).append(uf.feed_id)
+        feed_user_map.setdefault(uf.feed_id, []).append(uf.user_id)
+    return user_feed_map, feed_user_map
 
 
 @costs_bp.route("/api/admin/costs", methods=["GET"])
@@ -72,7 +208,20 @@ def api_admin_costs() -> flask.Response:
     month_start, month_end = _month_range(year, month)
 
     config_data = read_combined()
-    cost_rate = config_data.get("app", {}).get("cost_rate_per_hour", 0.04)
+    app_config = config_data.get("app", {})
+    legacy_cost_rate = float(
+        app_config.get("cost_rate_per_hour", DEFAULTS.APP_COST_RATE_PER_HOUR) or 0.0
+    )
+    whisper_cost_rate = float(
+        app_config.get(
+            "whisper_cost_rate_per_hour", DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
+        )
+        or 0.0
+    )
+    ina_cost_rate = float(
+        app_config.get("ina_cost_rate_per_hour", DEFAULTS.APP_INA_COST_RATE_PER_HOUR)
+        or 0.0
+    )
 
     # --- Users ---
     users: list[User] = User.query.order_by(User.username).all()
@@ -83,24 +232,8 @@ def api_admin_costs() -> flask.Response:
     for feed in feeds:
         feed_subscriber_count[feed.id] = len(feed.user_feeds)
 
-    # --- Processed posts in date range (by completed_at on jobs) ---
-    completed_jobs: list[ProcessingJob] = ProcessingJob.query.filter(
-        ProcessingJob.status == "completed",
-        ProcessingJob.completed_at >= month_start,
-        ProcessingJob.completed_at <= month_end,
-    ).all()
-
-    # Map post_guid -> job for the month
-    job_by_guid: dict[str, ProcessingJob] = {}
-    for job in completed_jobs:
-        # Keep the latest completed job per post
-        existing = job_by_guid.get(job.post_guid)
-        if existing is None or (job.completed_at or datetime.min) > (
-            existing.completed_at or datetime.min
-        ):
-            job_by_guid[job.post_guid] = job
-
     # Fetch posts for these guids
+    job_by_guid = _latest_completed_jobs_by_guid(month_start, month_end)
     guids = list(job_by_guid.keys())
     posts_in_month: list[Post] = (
         Post.query.filter(Post.guid.in_(guids)).all() if guids else []
@@ -110,39 +243,18 @@ def api_admin_costs() -> flask.Response:
     # Batch-query ad time per post so we can reconstruct original duration.
     # post.duration is the cut (ad-removed) length; original = cut + ad_time.
     post_ids = [p.id for p in posts_in_month]
-    # Use scalar_subquery() (a SELECT construct) so SQLAlchemy doesn't coerce
-    # a Subquery into a select() at IN()-time and emit a SAWarning.
-    ad_segment_subq = (
-        db.session.query(Identification.transcript_segment_id)
-        .filter(Identification.label == "ad")
-        .scalar_subquery()
-    )
-    ad_time_rows = (
-        db.session.query(
-            TranscriptSegment.post_id,
-            db.func.sum(TranscriptSegment.end_time - TranscriptSegment.start_time),
-        )
-        .filter(
-            TranscriptSegment.post_id.in_(post_ids),
-            TranscriptSegment.id.in_(ad_segment_subq),
-        )
-        .group_by(TranscriptSegment.post_id)
-        .all()
-    )
-    ad_time_by_post_id: dict[int, float] = {
-        row[0]: float(row[1]) for row in ad_time_rows
-    }
+    ad_time_by_post_id = _ad_time_by_post_id(post_ids)
+    model_calls_by_post_id = _model_calls_by_post_id(post_ids)
 
     # --- Per-user monthly cost breakdown ---
-    user_feed_map: dict[int, list[int]] = {}  # user_id -> [feed_id, ...]
-    feed_user_map: dict[int, list[int]] = {}  # feed_id -> [user_id, ...]
-    for uf in UserFeed.query.all():
-        user_feed_map.setdefault(uf.user_id, []).append(uf.feed_id)
-        feed_user_map.setdefault(uf.feed_id, []).append(uf.user_id)
+    user_feed_map, feed_user_map = _user_feed_maps()
 
     # For each completed post this month, attribute cost to each subscriber
     user_costs: dict[int, float] = {u.id: 0.0 for u in users}
     feed_costs: dict[int, float] = {f.id: 0.0 for f in feeds}
+    feed_llm_costs: dict[int, float] = {f.id: 0.0 for f in feeds}
+    feed_whisper_costs: dict[int, float] = {f.id: 0.0 for f in feeds}
+    feed_ina_costs: dict[int, float] = {f.id: 0.0 for f in feeds}
     feed_episode_counts: dict[int, int] = {f.id: 0 for f in feeds}
 
     for guid, _job in job_by_guid.items():
@@ -154,12 +266,30 @@ def api_admin_costs() -> flask.Response:
         duration = cut_duration + ad_time  # original duration = cut + removed ad time
         feed_id = post.feed_id
         subscriber_count = feed_subscriber_count.get(feed_id, 0)
-        cost_per_sub = _compute_cost_per_subscriber(
-            duration, subscriber_count, cost_rate
+        duration_hours = duration / 3600.0 if duration > 0 else 0.0
+        post_model_calls = model_calls_by_post_id.get(post.id, [])
+        llm_cost = sum(
+            _model_call_cost(call)
+            for call in post_model_calls
+            if _is_billable_llm_call(call)
         )
-        total_episode_cost = cost_rate * (duration / 3600.0) if duration > 0 else 0.0
+        whisper_cost = whisper_cost_rate * duration_hours
+        ina_cost = (
+            ina_cost_rate * duration_hours
+            if any(_is_ina_call(call) for call in post_model_calls)
+            else 0.0
+        )
+        total_episode_cost = llm_cost + whisper_cost + ina_cost
+        cost_per_sub = _compute_cost_per_subscriber(
+            total_episode_cost, subscriber_count
+        )
 
         feed_costs[feed_id] = feed_costs.get(feed_id, 0.0) + total_episode_cost
+        feed_llm_costs[feed_id] = feed_llm_costs.get(feed_id, 0.0) + llm_cost
+        feed_whisper_costs[feed_id] = (
+            feed_whisper_costs.get(feed_id, 0.0) + whisper_cost
+        )
+        feed_ina_costs[feed_id] = feed_ina_costs.get(feed_id, 0.0) + ina_cost
         feed_episode_counts[feed_id] = feed_episode_counts.get(feed_id, 0) + 1
 
         for uf_user_id in feed_user_map.get(feed_id, []):
@@ -198,6 +328,9 @@ def api_admin_costs() -> flask.Response:
                 "subscriber_count": feed_subscriber_count.get(feed.id, 0),
                 "episodes_this_month": feed_episode_counts.get(feed.id, 0),
                 "monthly_cost": round(feed_costs.get(feed.id, 0.0), 4),
+                "llm_cost": round(feed_llm_costs.get(feed.id, 0.0), 4),
+                "whisper_cost": round(feed_whisper_costs.get(feed.id, 0.0), 4),
+                "ina_cost": round(feed_ina_costs.get(feed.id, 0.0), 4),
             }
         )
     feeds_data.sort(key=lambda f: f["monthly_cost"], reverse=True)
@@ -209,7 +342,12 @@ def api_admin_costs() -> flask.Response:
             "year": year,
             "month": month,
             "total_cost": total_cost,
-            "cost_rate_per_hour": cost_rate,
+            "cost_rate_per_hour": legacy_cost_rate,
+            "whisper_cost_rate_per_hour": whisper_cost_rate,
+            "ina_cost_rate_per_hour": ina_cost_rate,
+            "total_llm_cost": round(sum(feed_llm_costs.values()), 4),
+            "total_whisper_cost": round(sum(feed_whisper_costs.values()), 4),
+            "total_ina_cost": round(sum(feed_ina_costs.values()), 4),
             "users": users_data,
             "feeds": feeds_data,
         }
@@ -246,6 +384,13 @@ def api_admin_costs_calls() -> flask.Response:
             "timestamp": c.timestamp.isoformat() if c.timestamp else None,
             "retry_attempts": c.retry_attempts,
             "service_tier": c.service_tier,
+            "prompt_tokens": c.prompt_tokens,
+            "cached_prompt_tokens": c.cached_prompt_tokens,
+            "completion_tokens": c.completion_tokens,
+            "total_tokens": c.total_tokens,
+            "estimated_cost": round(_model_call_cost(c), 8)
+            if _is_billable_llm_call(c)
+            else 0.0,
         }
         for c in calls
     ]

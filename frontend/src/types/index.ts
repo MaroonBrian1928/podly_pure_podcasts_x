@@ -206,6 +206,8 @@ export interface AppConfigUI {
   user_limit_total: number | null;
   autoprocess_on_download: boolean;
   cost_rate_per_hour: number;
+  whisper_cost_rate_per_hour: number;
+  ina_cost_rate_per_hour: number;
 }
 
 export interface CombinedConfig {
@@ -310,6 +312,9 @@ export interface CostFeed {
   subscriber_count: number;
   episodes_this_month: number;
   monthly_cost: number;
+  llm_cost: number;
+  whisper_cost: number;
+  ina_cost: number;
 }
 
 export interface CostSummary {
@@ -317,6 +322,11 @@ export interface CostSummary {
   month: number;
   total_cost: number;
   cost_rate_per_hour: number;
+  whisper_cost_rate_per_hour: number;
+  ina_cost_rate_per_hour: number;
+  total_llm_cost: number;
+  total_whisper_cost: number;
+  total_ina_cost: number;
   users: CostUser[];
   feeds: CostFeed[];
 }
@@ -328,6 +338,12 @@ export interface CallLogEntry {
   status: string;
   timestamp: string | null;
   retry_attempts: number;
+  service_tier?: string | null;
+  prompt_tokens?: number | null;
+  cached_prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  estimated_cost?: number;
 }
 
 export interface CallLog {

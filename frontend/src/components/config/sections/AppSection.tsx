@@ -68,7 +68,7 @@ export default function AppSection() {
               }
             />
           </Field>
-          <Field label="Cost Rate Per Hour ($)">
+          <Field label="Legacy Cost Rate Per Hour ($)">
             <input
               className="input"
               type="number"
@@ -78,6 +78,36 @@ export default function AppSection() {
               onChange={(e) =>
                 setField(
                   ['app', 'cost_rate_per_hour'],
+                  Number(e.target.value)
+                )
+              }
+            />
+          </Field>
+          <Field label="Whisper Cost Per Hour ($)">
+            <input
+              className="input"
+              type="number"
+              step="0.01"
+              min="0"
+              value={pending?.app?.whisper_cost_rate_per_hour ?? 0.04}
+              onChange={(e) =>
+                setField(
+                  ['app', 'whisper_cost_rate_per_hour'],
+                  Number(e.target.value)
+                )
+              }
+            />
+          </Field>
+          <Field label="INA Cost Per Hour ($)">
+            <input
+              className="input"
+              type="number"
+              step="0.01"
+              min="0"
+              value={pending?.app?.ina_cost_rate_per_hour ?? 0}
+              onChange={(e) =>
+                setField(
+                  ['app', 'ina_cost_rate_per_hour'],
                   Number(e.target.value)
                 )
               }

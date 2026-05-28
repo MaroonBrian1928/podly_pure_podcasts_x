@@ -45,6 +45,19 @@ function MonthSelector({
   );
 }
 
+function costTokenTotal(call: CallLog['calls'][number]) {
+  const hasCostTokens =
+    call.prompt_tokens != null ||
+    call.cached_prompt_tokens != null ||
+    call.completion_tokens != null;
+  if (!hasCostTokens) return call.total_tokens ?? null;
+  return (
+    (call.prompt_tokens ?? 0) +
+    (call.cached_prompt_tokens ?? 0) +
+    (call.completion_tokens ?? 0)
+  );
+}
+
 export default function CostsTab() {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -87,7 +100,7 @@ export default function CostsTab() {
         <div>
           <h3 className="text-base font-semibold text-gray-900">Platform Costs</h3>
           <p className="text-sm text-gray-500 mt-1">
-            <b>Platform logic:</b> ${costs?.cost_rate_per_hour ?? 0.04}/hr of processing | <b>User attribution:</b> Divided by subscribers
+            <b>Platform logic:</b> LiteLLM token pricing + ${costs?.whisper_cost_rate_per_hour ?? 0.04}/hr Whisper + ${costs?.ina_cost_rate_per_hour ?? 0}/hr INA | <b>User attribution:</b> Divided by subscribers
           </p>
         </div>
         <MonthSelector
@@ -110,6 +123,11 @@ export default function CostsTab() {
               ${costs.total_cost.toFixed(2)}
             </div>
             <div className="text-sm text-gray-600 mt-1">Total processing cost this month</div>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-700">
+              <div>LLM: <span className="font-mono">${costs.total_llm_cost.toFixed(2)}</span></div>
+              <div>Whisper: <span className="font-mono">${costs.total_whisper_cost.toFixed(2)}</span></div>
+              <div>INA: <span className="font-mono">${costs.total_ina_cost.toFixed(2)}</span></div>
+            </div>
           </div>
 
           {/* Per-feed breakdown */}
@@ -125,6 +143,9 @@ export default function CostsTab() {
                       <th className="text-left py-2 pr-4 font-medium text-gray-600">Feed</th>
                       <th className="text-right py-2 pr-4 font-medium text-gray-600">Subs</th>
                       <th className="text-right py-2 pr-4 font-medium text-gray-600">Episodes</th>
+                      <th className="text-right py-2 pr-4 font-medium text-gray-600">LLM</th>
+                      <th className="text-right py-2 pr-4 font-medium text-gray-600">Whisper</th>
+                      <th className="text-right py-2 pr-4 font-medium text-gray-600">INA</th>
                       <th className="text-right py-2 font-medium text-gray-600">Cost</th>
                     </tr>
                   </thead>
@@ -134,6 +155,9 @@ export default function CostsTab() {
                         <td className="py-2 pr-4 text-gray-800 max-w-xs truncate">{feed.title}</td>
                         <td className="py-2 pr-4 text-right text-gray-600">{feed.subscriber_count}</td>
                         <td className="py-2 pr-4 text-right text-gray-600">{feed.episodes_this_month}</td>
+                        <td className="py-2 pr-4 text-right font-mono text-gray-600">${feed.llm_cost.toFixed(2)}</td>
+                        <td className="py-2 pr-4 text-right font-mono text-gray-600">${feed.whisper_cost.toFixed(2)}</td>
+                        <td className="py-2 pr-4 text-right font-mono text-gray-600">${feed.ina_cost.toFixed(2)}</td>
                         <td className="py-2 text-right font-mono text-gray-800">
                           ${feed.monthly_cost.toFixed(2)}
                         </td>
@@ -208,6 +232,8 @@ export default function CostsTab() {
                   <tr className="border-b border-gray-200">
                     <th className="text-left py-2 pr-4 font-medium text-gray-600">Model</th>
                     <th className="text-left py-2 pr-4 font-medium text-gray-600">Status</th>
+                    <th className="text-right py-2 pr-4 font-medium text-gray-600">Tokens</th>
+                    <th className="text-right py-2 pr-4 font-medium text-gray-600">Cost</th>
                     <th className="text-right py-2 pr-4 font-medium text-gray-600">Retries</th>
                     <th className="text-right py-2 font-medium text-gray-600">Timestamp</th>
                   </tr>
@@ -227,6 +253,15 @@ export default function CostsTab() {
                         >
                           {c.status}
                         </span>
+                      </td>
+                      <td
+                        className="py-2 pr-4 text-right text-gray-600 font-mono text-xs"
+                        title={`prompt ${c.prompt_tokens ?? '—'} + cached ${c.cached_prompt_tokens ?? '—'} + completion ${c.completion_tokens ?? '—'}`}
+                      >
+                        {costTokenTotal(c) != null ? costTokenTotal(c)?.toLocaleString() : '—'}
+                      </td>
+                      <td className="py-2 pr-4 text-right text-gray-600 font-mono">
+                        {c.estimated_cost != null ? `$${c.estimated_cost.toFixed(4)}` : '—'}
                       </td>
                       <td className="py-2 pr-4 text-right text-gray-600">{c.retry_attempts}</td>
                       <td className="py-2 text-right text-gray-500 text-xs">
