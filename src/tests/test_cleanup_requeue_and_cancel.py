@@ -7,7 +7,10 @@ from app.writer.actions.jobs import (
     cancel_existing_jobs_action,
     mark_cancelled_action,
 )
-from app.writer.actions.processor import upsert_model_call_action
+from app.writer.actions.processor import (
+    delete_model_calls_for_post_by_model_name_action,
+    upsert_model_call_action,
+)
 
 
 def _create_feed_and_post(app, *, guid="test-guid", audio_path="/tmp/nonexistent.mp3"):
@@ -232,3 +235,67 @@ class TestCancelExistingJobsCleansOrphanedModelCalls:
             assert existing.prompt == "fresh prompt"
             assert existing.retry_attempts == 0
             assert existing.error_message is None
+
+
+class TestDeleteModelCallsByPostAndModelName:
+    """The INA re-run path depends on this action to wipe rows whose segment
+    range will differ between runs (placeholder ``(0, 0)`` on the next run
+    would otherwise collide with the prior run's ``(0, N-1)`` row on the
+    final UPDATE)."""
+
+    def _create_post(self, guid: str) -> Post:
+        feed = Feed(
+            title="Feed",
+            description="d",
+            author="a",
+            rss_url=f"https://example.com/{guid}.xml",
+        )
+        db.session.add(feed)
+        db.session.commit()
+        post = Post(
+            guid=guid,
+            title="Episode",
+            download_url=f"https://example.com/{guid}.mp3",
+            feed_id=feed.id,
+        )
+        db.session.add(post)
+        db.session.commit()
+        return post
+
+    def test_deletes_all_rows_for_post_and_model_name(self, app) -> None:
+        with app.app_context():
+            post = self._create_post("ina-cleanup-guid")
+            # Prior run wrote the row at its real segment range.
+            stale = ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=629,
+                model_name="ina:speech_music_noise",
+                prompt="prior run",
+                status="success",
+                response="[...]",
+            )
+            # An unrelated model_call for the same post should NOT be touched.
+            unrelated = ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=10,
+                last_segment_sequence_num=20,
+                model_name="gemini/gemini-3-flash-preview",
+                prompt="ad classifier",
+                status="success",
+            )
+            db.session.add_all([stale, unrelated])
+            db.session.commit()
+            unrelated_id = unrelated.id
+
+            result = delete_model_calls_for_post_by_model_name_action(
+                {
+                    "post_id": post.id,
+                    "model_name": "ina:speech_music_noise",
+                }
+            )
+            db.session.commit()
+
+            assert result == {"deleted": 1}
+            remaining = db.session.query(ModelCall).filter_by(post_id=post.id).all()
+            assert [mc.id for mc in remaining] == [unrelated_id]

@@ -168,6 +168,10 @@ class CommandExecutor:
             "upsert_model_call", writer_actions.upsert_model_call_action
         )
         self.register_action(
+            "delete_model_calls_for_post_by_model_name",
+            writer_actions.delete_model_calls_for_post_by_model_name_action,
+        )
+        self.register_action(
             "upsert_whisper_model_call", writer_actions.upsert_whisper_model_call_action
         )
         self.register_action(

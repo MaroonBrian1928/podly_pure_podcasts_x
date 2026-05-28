@@ -57,7 +57,7 @@ TOPIC_CHAPTER_MIN_BLOCK_SECONDS = 60
 # Two-minute blocks are the largest window we allow before chapter starts get too coarse.
 TOPIC_CHAPTER_MAX_BLOCK_SECONDS = 2 * 60
 # Keep enough transcript from each block for specific, context-rich chapter titles.
-TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 800
+TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 1000
 # For long episodes, cap chapter counts to roughly one chapter every five minutes.
 TOPIC_CHAPTER_CAP_WINDOW_SECONDS = 5 * 60
 # Treat episodes under an hour as "short" when applying the hard chapter-count cap.
@@ -1065,6 +1065,11 @@ def _build_chapter_title_refinement_prompt(
         '- Return JSON object only: {"titles": [{"index": 0, "title": "..."}]}\n'
         "- Keep titles factual and concise (3-8 words preferred)\n"
         "- No quotes, no punctuation unless needed\n"
+        "- Titles must describe the actual content of the chapter. Do NOT "
+        "use generic placeholders such as 'Intro', 'Introduction', 'Outro', "
+        "'Conclusion', 'Main topic', 'Discussion', 'Wrap-up', 'Closing', "
+        "'Chapter 1', 'Part 2', etc. Every title must name a specific "
+        "subject, person, or event from its chapter's snippet.\n"
         "- Preserve chapter order and count\n\n"
         f"Chapters:\n{json.dumps(payload, ensure_ascii=True)}"
     )
@@ -1272,8 +1277,9 @@ def _build_topic_chapter_generation_prompt(
         "Return minified JSON only on a single line (no markdown, no code fences, "
         "no extra text).\n"
         "Format: "
-        '{"chapter_count":2,"chapters":[{"block_index":0,"title":"Intro"},'
-        '{"block_index":5,"title":"Main topic"}]}\n'
+        '{"chapter_count":2,"chapters":['
+        '{"block_index":0,"title":"Guest backstory and origins"},'
+        '{"block_index":5,"title":"Riverfront bridge search"}]}\n'
         "Rules:\n"
         "- Put chapter_count first in the JSON object\n"
         "- chapter_count must equal the number of items in chapters\n"
@@ -1286,6 +1292,11 @@ def _build_topic_chapter_generation_prompt(
         "unless intro/outro transitions justify it\n"
         "- Use only keys block_index and title for each chapter\n"
         "- Titles should be factual and concise (2-6 words preferred)\n"
+        "- Titles must describe the actual content of the block. Do NOT use "
+        "generic placeholders such as 'Intro', 'Introduction', 'Outro', "
+        "'Conclusion', 'Main topic', 'Discussion', 'Wrap-up', 'Closing', "
+        "'Chapter 1', 'Part 2', etc. Even the first chapter must name a "
+        "specific subject, person, or event from its block.\n"
         "- Preserve chronological order and do not repeat block_index\n\n"
         f"Episode duration: {_format_timestamp(total_duration_ms)}\n"
         f"Transcript blocks:\n{json.dumps(payload, ensure_ascii=True)}"

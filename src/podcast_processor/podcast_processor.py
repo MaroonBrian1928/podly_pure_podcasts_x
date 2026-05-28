@@ -528,6 +528,19 @@ class PodcastProcessor:
         self.logger.info("[INA] Starting INA analysis for post %s", post_id)
         model_call_id: int | None = None
         try:
+            # Clear any stale ina rows from a prior run before upserting. The
+            # final UPDATE to set last_segment_sequence_num=len(results)-1
+            # would otherwise collide with a previous run's identically-keyed
+            # ModelCall row (unique on post_id+first+last+model_name).
+            writer_client.action(
+                "delete_model_calls_for_post_by_model_name",
+                {
+                    "post_id": post_id,
+                    "model_name": "ina:speech_music_noise",
+                },
+                wait=True,
+            )
+
             upsert_res = writer_client.action(
                 "upsert_model_call",
                 {
@@ -576,7 +589,7 @@ class PodcastProcessor:
                 )
 
             if model_call_id is not None:
-                writer_client.update(
+                update_res = writer_client.update(
                     "ModelCall",
                     int(model_call_id),
                     {
@@ -588,6 +601,17 @@ class PodcastProcessor:
                     },
                     wait=True,
                 )
+                # Silent writer failures would leave the placeholder row
+                # stuck at status="pending" forever; surface them so the
+                # outer except branch can mark the call failed_permanent.
+                if not update_res or not update_res.success:
+                    raise RuntimeError(
+                        getattr(
+                            update_res,
+                            "error",
+                            "Failed to finalize INA ModelCall update",
+                        )
+                    )
 
             self.logger.info(
                 "[INA] INA analysis complete for post %s: %s segments",

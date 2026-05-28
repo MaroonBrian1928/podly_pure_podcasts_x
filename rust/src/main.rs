@@ -448,7 +448,10 @@ struct ChaptersTopicBlocksArgs {
     min_block_seconds: i64,
     #[arg(long = "max-block-seconds", default_value_t = 120)]
     max_block_seconds: i64,
-    #[arg(long = "max-chars-per-block", default_value_t = 800)]
+    // Keep in sync with TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK in
+    // src/podcast_processor/chapter_fallback.py. The wrapper passes this
+    // explicitly so the CLI default is only used by direct CLI invocations.
+    #[arg(long = "max-chars-per-block", default_value_t = 1000)]
     max_chars_per_block: i64,
     /// Optional override; otherwise Rust computes from max(end_time) over segments.
     #[arg(long = "total-duration-ms")]

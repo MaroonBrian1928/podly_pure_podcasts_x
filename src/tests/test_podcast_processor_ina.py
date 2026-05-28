@@ -29,6 +29,8 @@ def test_run_ina_analysis_persists_segments_and_updates_model_call(app) -> None:
         def fake_action(name: str, payload: dict, wait: bool = False):
             del wait
             action_calls.append((name, payload))
+            if name == "delete_model_calls_for_post_by_model_name":
+                return SimpleNamespace(success=True, data={"deleted": 0})
             if name == "upsert_model_call":
                 return SimpleNamespace(success=True, data={"model_call_id": 123})
             if name == "replace_audio_segments":
@@ -77,11 +79,17 @@ def test_run_ina_analysis_persists_segments_and_updates_model_call(app) -> None:
             base_url="http://ina.test",
             timeout=42,
         )
-        assert action_calls[0][0] == "upsert_model_call"
-        assert action_calls[1][0] == "replace_audio_segments"
-        assert action_calls[1][1]["post_id"] == 77
-        assert action_calls[1][1]["model_call_id"] == 123
-        assert action_calls[1][1]["segments"] == [
+        # Stale-row cleanup runs first so the final UPDATE doesn't collide
+        # with a prior run's identically-keyed ModelCall row.
+        assert action_calls[0] == (
+            "delete_model_calls_for_post_by_model_name",
+            {"post_id": 77, "model_name": "ina:speech_music_noise"},
+        )
+        assert action_calls[1][0] == "upsert_model_call"
+        assert action_calls[2][0] == "replace_audio_segments"
+        assert action_calls[2][1]["post_id"] == 77
+        assert action_calls[2][1]["model_call_id"] == 123
+        assert action_calls[2][1]["segments"] == [
             {"label": "music", "start_time": 0.0, "end_time": 1.0},
             {"label": "noise", "start_time": 1.0, "end_time": 2.0},
         ]
@@ -117,6 +125,8 @@ def test_run_ina_analysis_marks_model_call_failed_when_analysis_errors(app) -> N
         def fake_action(name: str, payload: dict, wait: bool = False):
             del wait
             action_calls.append((name, payload))
+            if name == "delete_model_calls_for_post_by_model_name":
+                return SimpleNamespace(success=True, data={"deleted": 0})
             if name == "upsert_model_call":
                 return SimpleNamespace(success=True, data={"model_call_id": 456})
             if name == "mark_model_call_failed":
@@ -148,8 +158,9 @@ def test_run_ina_analysis_marks_model_call_failed_when_analysis_errors(app) -> N
             else:
                 raise AssertionError("Expected INA analysis failure to propagate")
 
-        assert action_calls[0][0] == "upsert_model_call"
-        assert action_calls[1] == (
+        assert action_calls[0][0] == "delete_model_calls_for_post_by_model_name"
+        assert action_calls[1][0] == "upsert_model_call"
+        assert action_calls[2] == (
             "mark_model_call_failed",
             {
                 "model_call_id": 456,
@@ -157,3 +168,85 @@ def test_run_ina_analysis_marks_model_call_failed_when_analysis_errors(app) -> N
                 "status": "failed_permanent",
             },
         )
+
+
+def test_run_ina_analysis_surfaces_writer_update_failure(app) -> None:
+    """When the final ModelCall UPDATE fails (e.g. unique-index collision on
+    a stale row), the failure must propagate so the placeholder gets marked
+    failed_permanent — not be silently swallowed, which would leave the row
+    stuck at status="pending" and the post permanently "still processing".
+    """
+    with app.app_context():
+        processor = PodcastProcessor(
+            config=create_standard_test_config(),
+            transcription_manager=MagicMock(spec=TranscriptionManager),
+            ad_classifier=MagicMock(spec=AdClassifier),
+            audio_processor=MagicMock(spec=AudioProcessor),
+            status_manager=MagicMock(spec=ProcessingStatusManager),
+            db_session=MagicMock(),
+            downloader=MagicMock(spec=PodcastDownloader),
+        )
+
+        action_calls: list[tuple[str, dict]] = []
+
+        def fake_action(name: str, payload: dict, wait: bool = False):
+            del wait
+            action_calls.append((name, payload))
+            if name == "delete_model_calls_for_post_by_model_name":
+                return SimpleNamespace(success=True, data={"deleted": 0})
+            if name == "upsert_model_call":
+                return SimpleNamespace(success=True, data={"model_call_id": 999})
+            if name == "replace_audio_segments":
+                return SimpleNamespace(success=True, data={"segment_count": 1})
+            if name == "mark_model_call_failed":
+                return SimpleNamespace(success=True, data={"updated": True})
+            raise AssertionError(f"Unexpected writer action {name}")
+
+        def fake_update(model: str, model_id: int, payload: dict, wait: bool = False):
+            del model, model_id, payload, wait
+            return SimpleNamespace(
+                success=False,
+                error="UNIQUE constraint failed: model_call...",
+                data=None,
+            )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"INA_ENABLED": "true", "INA_BASE_URL": "http://ina.test"},
+                clear=False,
+            ),
+            patch(
+                "podcast_processor.podcast_processor.writer_client.action",
+                side_effect=fake_action,
+            ),
+            patch(
+                "podcast_processor.podcast_processor.writer_client.update",
+                side_effect=fake_update,
+            ),
+            patch(
+                "podcast_processor.podcast_processor.analyze_audio",
+                return_value=(
+                    [AudioSegmentResult(label="music", start_time=0.0, end_time=1.0)],
+                    "[]",
+                ),
+            ),
+        ):
+            try:
+                processor._run_ina_analysis(101, "/tmp/test.mp3")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(
+                    "Expected writer UPDATE failure to propagate as RuntimeError"
+                )
+
+        # Cleanup, upsert, replace_audio_segments, then the final failure
+        # branch marks the call failed_permanent.
+        action_names = [name for name, _ in action_calls]
+        assert action_names == [
+            "delete_model_calls_for_post_by_model_name",
+            "upsert_model_call",
+            "replace_audio_segments",
+            "mark_model_call_failed",
+        ]

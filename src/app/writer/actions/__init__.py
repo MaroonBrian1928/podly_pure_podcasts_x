@@ -54,6 +54,9 @@ from .jobs import record_ad_windows_count_action as record_ad_windows_count_acti
 from .jobs import update_job_attribution_action as update_job_attribution_action
 from .jobs import update_job_status_action as update_job_status_action
 from .processor import (
+    delete_model_calls_for_post_by_model_name_action as delete_model_calls_for_post_by_model_name_action,
+)
+from .processor import (
     finish_transcription_replace_action as finish_transcription_replace_action,
 )
 from .processor import (

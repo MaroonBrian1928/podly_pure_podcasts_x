@@ -222,6 +222,31 @@ def test_refine_transcript_chapters_falls_back_to_original_on_collision() -> Non
     assert refined[1].end_time_ms == 260_000
 
 
+def test_chapter_title_refinement_prompt_forbids_generic_titles() -> None:
+    """The title-refinement prompt must explicitly forbid generic
+    placeholder titles like 'Intro' or 'Conclusion'. Without this rule the
+    refinement step would happily "polish" content titles back into generics.
+    """
+    from podcast_processor.chapter_fallback import (
+        _build_chapter_title_refinement_prompt,
+    )
+
+    chapters = [
+        Chapter("c0", "Hello everybody", 0, 300_000),
+        Chapter("c1", "Gold challenge", 300_000, 600_000),
+    ]
+    transcript_segments = [
+        SimpleNamespace(start_time=0.0, end_time=20.0, text="Hello everybody"),
+        SimpleNamespace(start_time=310.0, end_time=330.0, text="Gold challenge"),
+    ]
+
+    prompt = _build_chapter_title_refinement_prompt(chapters, transcript_segments)
+
+    assert "Do NOT use" in prompt
+    assert "'Intro'" in prompt
+    assert "'Conclusion'" in prompt
+
+
 def test_refine_generated_chapter_titles_with_llm_updates_titles() -> None:
     chapters = [
         Chapter("gen0", "Hello everybody and welcome...", 0, 300_000),
@@ -445,9 +470,9 @@ def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
         total_duration_ms=45_000,
     )
 
-    assert TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK == 800
+    assert TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK == 1000
     assert len(blocks) == 1
-    assert len(blocks[0]["text"]) <= 800
+    assert len(blocks[0]["text"]) <= TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK
     assert topic_signal.strip() in blocks[0]["text"]
 
 
@@ -563,6 +588,16 @@ def test_build_topic_chapter_generation_prompt_requests_minified_and_hard_cap() 
         f"Hard cap: at most {TOPIC_CHAPTER_SHORT_EPISODE_CAP} chapters total" in prompt
     )
     assert "ceiling, not a target" in prompt
+    # The example titles must not include the generic placeholder words the
+    # rule below forbids — LLMs anchor heavily on examples, so an "Intro"
+    # example would directly cause the very problem the rule is trying to
+    # prevent. Keep this check in sync with both the example and the rule.
+    assert '"title":"Intro"' not in prompt
+    assert '"title":"Main topic"' not in prompt
+    # Explicit prohibition of generic placeholder titles.
+    assert "Do NOT use" in prompt
+    assert "'Intro'" in prompt
+    assert "'Conclusion'" in prompt
 
 
 def test_topic_chapter_count_cap_for_duration_matches_configured_policy() -> None:
@@ -668,7 +703,10 @@ def test_generate_topic_chapters_uses_rust_topic_blocks_when_enabled(
     assert rust_mock.called
     assert rust_mock.call_args.kwargs["post_guid"] == "post-abc"
     assert rust_mock.call_args.kwargs["total_duration_ms"] == 900_000
-    assert rust_mock.call_args.kwargs["max_chars_per_block"] == 800
+    assert (
+        rust_mock.call_args.kwargs["max_chars_per_block"]
+        == TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK
+    )
     assert [c.title for c in chapters] == [
         "From Rust 0",
         "From Rust 1",

@@ -1085,22 +1085,17 @@ class AdClassifier:
         )
 
     def _is_retryable_error(self, error: Exception) -> bool:
-        """Determine if an error should be retried."""
-        from litellm.exceptions import InternalServerError
+        """Determine if an error should be retried.
 
-        if isinstance(error, InternalServerError):
-            return True
+        Delegates to the shared LLMErrorClassifier so timeouts, rate limits,
+        and 5xx responses all use one definition. A previous narrower version
+        of this method omitted timeout patterns, which caused a single
+        ``litellm.Timeout`` from the ad classifier to mark the call
+        ``failed_permanent`` on attempt 1 and crash the whole processing job.
+        """
+        from podcast_processor.llm_error_classifier import LLMErrorClassifier
 
-        # Check for retryable HTTP errors in other exception types
-        error_str = str(error).lower()
-        return (
-            "503" in error_str
-            or "service unavailable" in error_str
-            or "rate_limit_error" in error_str
-            or "ratelimiterror" in error_str
-            or "429" in error_str
-            or "rate limit" in error_str
-        )
+        return LLMErrorClassifier.is_retryable_error(error)
 
     def _call_model(
         self,
