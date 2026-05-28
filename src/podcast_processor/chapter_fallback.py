@@ -1093,6 +1093,45 @@ def _chapter_snippet_text(chapter: Chapter, segments: Sequence[Any]) -> str:
     return " ".join(snippets).strip()
 
 
+_BLOCK_TEXT_TRUNCATION_SEPARATOR = " ... "
+
+
+def _truncate_block_text(text: str, max_chars: int) -> str:
+    """Fit `text` into `max_chars` by keeping the block's opening AND a window
+    around the block's midpoint, joined by ``" ... "``.
+
+    The LLM needs both signals to pick a good chapter title: the topic
+    transition typically sits in the first sentence, while the meat of the
+    discussion lands in the middle. Taking only the front (the old behavior)
+    starves it of the substantive content for blocks longer than the budget.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    sep = _BLOCK_TEXT_TRUNCATION_SEPARATOR
+    sep_len = len(sep)
+    # For very small budgets the separator overhead dominates — just keep the
+    # front. The default budget is hundreds of chars so this is a guard, not
+    # a primary path.
+    if max_chars <= sep_len + 4:
+        return text[:max_chars]
+
+    available = max_chars - sep_len
+    head_chars = available // 2
+    mid_chars = available - head_chars
+
+    head = text[:head_chars]
+    midpoint = len(text) // 2
+    mid_start = max(head_chars, midpoint - mid_chars // 2)
+    mid_end = min(len(text), mid_start + mid_chars)
+    # Re-anchor the middle window backward if we ran into the tail of the
+    # string so it still uses the full mid_chars budget when possible.
+    mid_start = max(head_chars, mid_end - mid_chars)
+    middle = text[mid_start:mid_end]
+
+    return f"{head}{sep}{middle}"
+
+
 def _build_topic_blocks(
     transcript_segments: Sequence[Any],
     *,
@@ -1123,16 +1162,15 @@ def _build_topic_blocks(
     current_start_ms: int | None = None
     current_end_ms: int | None = None
     current_text_parts: list[str] = []
-    current_char_count = 0
 
     def flush_block() -> None:
-        nonlocal current_start_ms, current_end_ms
-        nonlocal current_text_parts, current_char_count
+        nonlocal current_start_ms, current_end_ms, current_text_parts
         if current_start_ms is None or current_end_ms is None:
             return
-        text = " ".join(current_text_parts).strip()
-        if not text:
-            text = ""
+        text = _truncate_block_text(
+            " ".join(current_text_parts).strip(),
+            max_chars_per_block,
+        )
         blocks.append(
             {
                 "block_index": len(blocks),
@@ -1145,7 +1183,6 @@ def _build_topic_blocks(
         current_start_ms = None
         current_end_ms = None
         current_text_parts = []
-        current_char_count = 0
 
     for seg in transcript_segments:
         seg_start_ms = _seg_start_ms(seg)
@@ -1164,15 +1201,7 @@ def _build_topic_blocks(
 
         if not seg_text:
             continue
-
-        remaining = max(0, max_chars_per_block - current_char_count)
-        if remaining <= 0:
-            continue
-        clipped = seg_text[:remaining].strip()
-        if not clipped:
-            continue
-        current_text_parts.append(clipped)
-        current_char_count += len(clipped) + 1
+        current_text_parts.append(seg_text)
 
     flush_block()
 

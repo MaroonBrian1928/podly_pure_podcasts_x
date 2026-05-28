@@ -451,6 +451,47 @@ def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
     assert topic_signal.strip() in blocks[0]["text"]
 
 
+def test_build_topic_blocks_captures_mid_block_signal_via_split() -> None:
+    """When a block's content overflows the char budget, the truncation must
+    include a window around the block's midpoint, not just the front — that's
+    where substantive discussion (and thus chapter-title signal) typically
+    sits in a 2-minute topic block.
+    """
+    from podcast_processor.chapter_fallback import (
+        TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK as budget,
+    )
+
+    lead = "a" * 600
+    signal = " RIVERFRONT_SIGNAL "
+    tail = "b" * 600
+    segments = [
+        SimpleNamespace(
+            start_time=0.0,
+            end_time=45.0,
+            text=lead + signal + tail,
+        )
+    ]
+
+    blocks = _build_topic_blocks(segments, total_duration_ms=45_000)
+
+    assert len(blocks) == 1
+    text = blocks[0]["text"]
+    assert len(text) <= budget
+    assert text.startswith("a")
+    assert " ... " in text
+    assert "RIVERFRONT_SIGNAL" in text
+
+
+def test_build_topic_blocks_returns_full_text_when_under_budget() -> None:
+    segments = [
+        SimpleNamespace(start_time=0.0, end_time=10.0, text="short block content"),
+    ]
+    blocks = _build_topic_blocks(segments, total_duration_ms=10_000)
+    assert len(blocks) == 1
+    assert blocks[0]["text"] == "short block content"
+    assert " ... " not in blocks[0]["text"]
+
+
 def test_build_topic_blocks_caps_long_episode_window_at_two_minutes() -> None:
     segments = [
         SimpleNamespace(

@@ -2212,21 +2212,12 @@ fn chapter_build_topic_blocks(
         if seg_text.is_empty() {
             continue;
         }
+        // Accumulate the full segment text per block; truncation happens at
+        // flush time so we can take a head slice AND a middle slice (see
+        // chapter_truncate_block_text). This mirrors the Python helper in
+        // src/podcast_processor/chapter_fallback.py::_truncate_block_text.
         let block = current.as_mut().unwrap();
-        let remaining = max_chars.saturating_sub(block.char_count);
-        if remaining == 0 {
-            continue;
-        }
-        // Char-cap clipping uses Python `str` slicing, which on the actual
-        // workload is plain ASCII transcript text. Clip on char boundaries to
-        // avoid panicking on multi-byte UTF-8.
-        let mut clipped: String = seg_text.chars().take(remaining).collect();
-        clipped = clipped.trim().to_string();
-        if clipped.is_empty() {
-            continue;
-        }
-        block.char_count += clipped.chars().count() + 1;
-        block.text_parts.push(clipped);
+        block.text_parts.push(seg_text);
     }
 
     flush(&mut current, &mut blocks);
@@ -2252,7 +2243,8 @@ fn chapter_build_topic_blocks(
 
     for (new_idx, &orig_idx) in keep_indices.iter().enumerate() {
         let b = &blocks[orig_idx];
-        let text = b.text_parts.join(" ").trim().to_string();
+        let joined = b.text_parts.join(" ").trim().to_string();
+        let text = chapter_truncate_block_text(&joined, max_chars);
         out.push(json!({
             "block_index": new_idx as i64,
             "start_ms": b.start_ms,
@@ -2262,6 +2254,34 @@ fn chapter_build_topic_blocks(
         }));
     }
     out
+}
+
+/// Fit `text` into `max_chars` by keeping the block's opening AND a window
+/// around the block's midpoint, joined by " ... ". Mirrors
+/// `_truncate_block_text` in `src/podcast_processor/chapter_fallback.py`.
+fn chapter_truncate_block_text(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if max_chars == 0 || total_chars <= max_chars {
+        return text.to_string();
+    }
+    let sep = " ... ";
+    let sep_len = sep.chars().count();
+    if max_chars <= sep_len + 4 {
+        return text.chars().take(max_chars).collect();
+    }
+    let available = max_chars - sep_len;
+    let head_chars = available / 2;
+    let mid_chars = available - head_chars;
+
+    let chars: Vec<char> = text.chars().collect();
+    let head: String = chars[..head_chars].iter().collect();
+    let midpoint = total_chars / 2;
+    let mut mid_start = head_chars.max(midpoint.saturating_sub(mid_chars / 2));
+    let mid_end = total_chars.min(mid_start + mid_chars);
+    // Re-anchor backward so the middle window fills mid_chars when possible.
+    mid_start = head_chars.max(mid_end.saturating_sub(mid_chars));
+    let middle: String = chars[mid_start..mid_end].iter().collect();
+    format!("{head}{sep}{middle}")
 }
 
 /// Decode the JSON list of removed audio windows produced by Python's
@@ -7997,9 +8017,36 @@ mod tests {
         let blocks = chapter_build_topic_blocks(&segments, 2_000, 60, 60, 120, 220);
         assert_eq!(blocks.len(), 1);
         let text = blocks[0]["text"].as_str().unwrap();
-        // First clip is 220 chars of 'a'; remaining capacity (220 - 221 = 0) blocks 'b'.
-        assert!(text.starts_with(&"a".repeat(220)));
-        assert!(!text.contains('b'));
+        // Head+middle split: the head is 'a's from the front, and the middle
+        // window straddles the boundary between the 'a' and 'b' segments —
+        // proving the LLM now sees substantive mid-block content, not just
+        // the opening.
+        assert!(text.chars().count() <= 220);
+        assert!(text.starts_with('a'));
+        assert!(text.contains(" ... "));
+        assert!(text.contains('b'));
+    }
+
+    #[test]
+    fn chapter_truncate_block_text_takes_head_and_middle_window() {
+        // Place a distinctive token at the block's midpoint so we can verify
+        // the middle window actually captures mid-block content instead of
+        // discarding it (the old front-only truncation would drop it).
+        let lead = "a".repeat(400);
+        let signal = " RIVERFRONT_SIGNAL ";
+        let tail = "b".repeat(400);
+        let text = format!("{lead}{signal}{tail}");
+        let truncated = chapter_truncate_block_text(&text, 220);
+        assert!(truncated.chars().count() <= 220);
+        assert!(truncated.starts_with('a'));
+        assert!(truncated.contains(" ... "));
+        assert!(truncated.contains("RIVERFRONT_SIGNAL"));
+    }
+
+    #[test]
+    fn chapter_truncate_block_text_returns_full_text_when_under_budget() {
+        let text = "short block";
+        assert_eq!(chapter_truncate_block_text(text, 220), text);
     }
 
     #[test]
