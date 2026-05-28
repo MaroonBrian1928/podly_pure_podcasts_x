@@ -26,7 +26,7 @@ from app.feeds import (
     make_post,
     refresh_feed,
 )
-from app.models import Feed, Post
+from app.models import Feed, Post, ProcessingJob
 from app.runtime_config import config as runtime_config
 from app.writer.actions.feeds import refresh_feed_action
 
@@ -1269,6 +1269,125 @@ def test_generate_feed_xml_includes_all_when_autoprocess_enabled(
             mock_rss.to_xml.assert_called_once_with("utf-8")
             assert result == "<rss></rss>"
             assert trim_contexts == [f"feed XML feed_id={feed.id}"]
+        finally:
+            runtime_config.autoprocess_on_download = original_flag
+
+
+@mock.patch("app.feeds.feed_item")
+@mock.patch("app.feeds.PyRSS2Gen.Image")
+@mock.patch("app.feeds.PyRSS2Gen.RSS2")
+def test_generate_feed_xml_hides_posts_with_active_processing_job(
+    mock_rss_2, mock_image, mock_feed_item, app, monkeypatch
+):
+    """First-time processing in flight must hide the post from the RSS feed so
+    podcast clients (e.g. Pocket Casts) don't cache an un-chaptered MP3.
+    Already-processed posts stay visible even during re-processing.
+    """
+    with app.app_context():
+        original_flag = getattr(runtime_config, "autoprocess_on_download", False)
+        runtime_config.autoprocess_on_download = True
+        monkeypatch.setattr(
+            "app.feeds.release_memory_to_os",
+            lambda *_args, **_kwargs: None,
+        )
+        try:
+            feed = Feed(rss_url="http://example.com/feed", title="Feed 1")
+            db.session.add(feed)
+            db.session.commit()
+
+            historical = Post(
+                feed_id=feed.id,
+                title="Historical",
+                guid="g-historical",
+                download_url="http://example.com/h.mp3",
+                processed_audio_path=None,
+                whitelisted=False,
+                release_date=datetime.datetime(2023, 12, 1, tzinfo=datetime.UTC),
+            )
+            queued_first_time = Post(
+                feed_id=feed.id,
+                title="Brand New",
+                guid="g-new",
+                download_url="http://example.com/n.mp3",
+                processed_audio_path=None,
+                whitelisted=True,
+                release_date=datetime.datetime(2024, 1, 4, tzinfo=datetime.UTC),
+            )
+            reprocessing = Post(
+                feed_id=feed.id,
+                title="Re-processing",
+                guid="g-reprocess",
+                download_url="http://example.com/r.mp3",
+                processed_audio_path="/tmp/r.mp3",
+                whitelisted=True,
+                release_date=datetime.datetime(2024, 1, 3, tzinfo=datetime.UTC),
+            )
+            failed_post = Post(
+                feed_id=feed.id,
+                title="Failed",
+                guid="g-failed",
+                download_url="http://example.com/f.mp3",
+                processed_audio_path=None,
+                whitelisted=True,
+                release_date=datetime.datetime(2024, 1, 2, tzinfo=datetime.UTC),
+            )
+            queued_pending = Post(
+                feed_id=feed.id,
+                title="Queued Waiting",
+                guid="g-queued",
+                download_url="http://example.com/q.mp3",
+                processed_audio_path=None,
+                whitelisted=True,
+                release_date=datetime.datetime(2024, 1, 5, tzinfo=datetime.UTC),
+            )
+            db.session.add_all(
+                [
+                    historical,
+                    queued_first_time,
+                    reprocessing,
+                    failed_post,
+                    queued_pending,
+                ]
+            )
+            db.session.commit()
+
+            db.session.add_all(
+                [
+                    ProcessingJob(
+                        post_guid="g-new",
+                        status="running",
+                    ),
+                    ProcessingJob(
+                        post_guid="g-reprocess",
+                        status="pending",
+                    ),
+                    ProcessingJob(
+                        post_guid="g-failed",
+                        status="failed",
+                    ),
+                    # 'pending' = queued but not yet started. Must hide
+                    # just like 'running' would.
+                    ProcessingJob(
+                        post_guid="g-queued",
+                        status="pending",
+                    ),
+                ]
+            )
+            db.session.commit()
+
+            mock_feed_item.side_effect = lambda post, prepend_feed_title=False: (
+                mock.MagicMock(post_guid=post.guid)
+            )
+            mock_rss = mock_rss_2.return_value
+            mock_rss.to_xml.return_value = "<rss></rss>"
+
+            generate_feed_xml(feed)
+
+            called_guids = {call.args[0].guid for call in mock_feed_item.call_args_list}
+            # 'g-new' (running) and 'g-queued' (pending) are hidden because
+            # they have an active first-time job and no processed_audio_path.
+            # The other three are visible.
+            assert called_guids == {"g-historical", "g-reprocess", "g-failed"}
         finally:
             runtime_config.autoprocess_on_download = original_flag
 

@@ -429,6 +429,28 @@ def test_build_topic_blocks_reduces_prompt_payload_for_long_transcript() -> None
         assert len(block["text"]) <= TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK
 
 
+def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
+    lead_in = "a" * 700
+    topic_signal = " riverfront search at 2 a.m."
+    segments = [
+        SimpleNamespace(
+            start_time=0.0,
+            end_time=45.0,
+            text=lead_in + topic_signal + (" b" * 100),
+        )
+    ]
+
+    blocks = _build_topic_blocks(
+        segments,
+        total_duration_ms=45_000,
+    )
+
+    assert TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK == 800
+    assert len(blocks) == 1
+    assert len(blocks[0]["text"]) <= 800
+    assert topic_signal.strip() in blocks[0]["text"]
+
+
 def test_build_topic_blocks_caps_long_episode_window_at_two_minutes() -> None:
     segments = [
         SimpleNamespace(
@@ -605,6 +627,7 @@ def test_generate_topic_chapters_uses_rust_topic_blocks_when_enabled(
     assert rust_mock.called
     assert rust_mock.call_args.kwargs["post_guid"] == "post-abc"
     assert rust_mock.call_args.kwargs["total_duration_ms"] == 900_000
+    assert rust_mock.call_args.kwargs["max_chars_per_block"] == 800
     assert [c.title for c in chapters] == [
         "From Rust 0",
         "From Rust 1",

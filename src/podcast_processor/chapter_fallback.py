@@ -56,8 +56,8 @@ TOPIC_CHAPTER_TARGET_BLOCK_COUNT = 60
 TOPIC_CHAPTER_MIN_BLOCK_SECONDS = 60
 # Two-minute blocks are the largest window we allow before chapter starts get too coarse.
 TOPIC_CHAPTER_MAX_BLOCK_SECONDS = 2 * 60
-# Keep only a short snippet per block; ~220 chars is enough topic signal for the LLM.
-TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 220
+# Keep enough transcript from each block for specific, context-rich chapter titles.
+TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 800
 # For long episodes, cap chapter counts to roughly one chapter every five minutes.
 TOPIC_CHAPTER_CAP_WINDOW_SECONDS = 5 * 60
 # Treat episodes under an hour as "short" when applying the hard chapter-count cap.

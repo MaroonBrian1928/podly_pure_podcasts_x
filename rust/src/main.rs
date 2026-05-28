@@ -448,7 +448,7 @@ struct ChaptersTopicBlocksArgs {
     min_block_seconds: i64,
     #[arg(long = "max-block-seconds", default_value_t = 120)]
     max_block_seconds: i64,
-    #[arg(long = "max-chars-per-block", default_value_t = 220)]
+    #[arg(long = "max-chars-per-block", default_value_t = 800)]
     max_chars_per_block: i64,
     /// Optional override; otherwise Rust computes from max(end_time) over segments.
     #[arg(long = "total-duration-ms")]
@@ -5225,10 +5225,20 @@ fn render_feed(args: FeedRenderArgs) -> Result<XmlResponse> {
         .with_context(|| "failed to query feed")?;
 
     let posts = if args.include_unprocessed {
+        // Hide posts whose first processing pass is still queued or running:
+        // podcast clients (notably Pocket Casts) cache ID3 metadata on first
+        // parse and won't re-read after we add chapter tags. Mirrors the
+        // Python filter in src/app/feeds.py::generate_feed_xml.
         query_posts(
             &conn,
             "SELECT NULL, title, guid, processed_audio_path, description, release_date, duration, image_url, chapter_data \
-             FROM post WHERE feed_id = ?1 ORDER BY release_date DESC, id DESC",
+             FROM post \
+             WHERE feed_id = ?1 \
+               AND (processed_audio_path IS NOT NULL \
+                    OR NOT EXISTS (SELECT 1 FROM processing_job \
+                                   WHERE processing_job.post_guid = post.guid \
+                                     AND processing_job.status IN ('pending','running'))) \
+             ORDER BY release_date DESC, id DESC",
             [feed.id],
         )?
     } else {
@@ -6580,6 +6590,129 @@ mod tests {
         assert!(xml.contains("<itunes:duration>01:05</itunes:duration>"));
         assert!(xml.contains("<p><strong>Podly Chapters</strong></p><ul><li>00:00 Intro</li></ul>"));
         assert!(xml.contains("length=\"11\""));
+    }
+
+    #[test]
+    fn feed_render_hides_posts_with_active_processing_job() {
+        // include_unprocessed=true must still hide posts whose first
+        // processing pass is queued or running, so podcast clients don't
+        // cache an un-chaptered MP3.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                image_url TEXT,
+                last_changed_at TEXT
+            );
+            CREATE TABLE post (
+                id INTEGER PRIMARY KEY,
+                feed_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                guid TEXT NOT NULL,
+                processed_audio_path TEXT,
+                description TEXT,
+                release_date TEXT,
+                duration INTEGER,
+                image_url TEXT,
+                chapter_data TEXT,
+                whitelisted BOOLEAN NOT NULL DEFAULT 0
+            );
+            CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY,
+                post_guid TEXT NOT NULL,
+                status TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feed (id, title, last_changed_at)
+             VALUES (1, 'Feed', '2024-01-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+        // historical: no processed audio, no job → visible
+        conn.execute(
+            "INSERT INTO post (feed_id, title, guid, release_date)
+             VALUES (1, 'Historical', 'g-historical', '2023-12-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+        // new, first-time processing in flight → hidden
+        conn.execute(
+            "INSERT INTO post (feed_id, title, guid, release_date)
+             VALUES (1, 'Brand New', 'g-new', '2024-01-04 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_job (id, post_guid, status)
+             VALUES ('job-new', 'g-new', 'running')",
+            [],
+        )
+        .unwrap();
+        // processed already, currently re-processing → visible (client cached
+        // metadata long ago; hiding now would just make it disappear briefly)
+        conn.execute(
+            "INSERT INTO post (feed_id, title, guid, processed_audio_path, release_date)
+             VALUES (1, 'Re-processing', 'g-reprocess', '/srv/r.mp3', '2024-01-03 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_job (id, post_guid, status)
+             VALUES ('job-rep', 'g-reprocess', 'pending')",
+            [],
+        )
+        .unwrap();
+        // permanently failed → visible (no terminal-status job blocks it)
+        conn.execute(
+            "INSERT INTO post (feed_id, title, guid, release_date)
+             VALUES (1, 'Failed', 'g-failed', '2024-01-02 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_job (id, post_guid, status)
+             VALUES ('job-failed', 'g-failed', 'failed')",
+            [],
+        )
+        .unwrap();
+        // queued (pending, not yet started) first-time processing → hidden,
+        // same as the 'running' case.
+        conn.execute(
+            "INSERT INTO post (feed_id, title, guid, release_date)
+             VALUES (1, 'Queued Waiting', 'g-queued', '2024-01-05 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_job (id, post_guid, status)
+             VALUES ('job-queued', 'g-queued', 'pending')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let xml = render_feed(FeedRenderArgs {
+            db: db_path,
+            feed_id: 1,
+            base_url: "https://podly.test".to_string(),
+            include_unprocessed: true,
+            feed_token: None,
+            feed_secret: None,
+        })
+        .unwrap()
+        .xml;
+
+        assert!(xml.contains("g-historical"));
+        assert!(xml.contains("g-reprocess"));
+        assert!(xml.contains("g-failed"));
+        assert!(!xml.contains("g-new"));
+        assert!(!xml.contains("g-queued"));
     }
 
     fn seed_posts_listing_db(db_path: &Path) {

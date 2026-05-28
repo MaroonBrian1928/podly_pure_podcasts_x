@@ -1050,7 +1050,7 @@ def try_chapter_topic_blocks(
     target_block_count: int = 60,
     min_block_seconds: int = 60,
     max_block_seconds: int = 120,
-    max_chars_per_block: int = 220,
+    max_chars_per_block: int = 800,
     removed_windows_ms: list[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Run the Rust chapter topic-block builder.
