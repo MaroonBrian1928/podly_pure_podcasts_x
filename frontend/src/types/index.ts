@@ -353,3 +353,28 @@ export interface CallLog {
   per_page: number;
   pages: number;
 }
+
+export interface TokenBackfillModelSummary {
+  would_update: number;
+  updated: number;
+  tokenizer_errors: number;
+}
+
+export interface TokenBackfillResult {
+  apply: boolean;
+  scanned: number;
+  eligible: number;
+  would_update: number;
+  updated: number;
+  skipped_existing: number;
+  skipped_non_llm: number;
+  skipped_missing_text: number;
+  skipped_tokenizer_error: number;
+  failed_updates: number;
+  models: Record<string, TokenBackfillModelSummary>;
+  errors: Array<{
+    model_call_id: number;
+    model_name: string;
+    error: string;
+  }>;
+}

@@ -249,7 +249,7 @@ def test_dequeue_next_job_enters_app_context_for_writer_call(app, monkeypatch) -
         success = True
         data = {"job_id": "job-1", "post_guid": "guid-1"}
 
-    def fake_action(action: str, payload: dict, wait: bool):  # type: ignore[no-untyped-def]
+    def fake_action(action: str, payload: dict, wait: bool):
         import flask
 
         # The bug was: this raised "Working outside of application context".

@@ -59,7 +59,7 @@ def silence_litellm_noise() -> None:
 
     try:
         litellm: Any = __import__("litellm")
-        litellm.suppress_debug_info = True
+        vars(litellm)["suppress_debug_info"] = True
     except Exception:  # noqa: BLE001
         # litellm isn't installed in some minimal contexts (e.g. CLI tasks).
         # The logging filter is still in place for future imports.

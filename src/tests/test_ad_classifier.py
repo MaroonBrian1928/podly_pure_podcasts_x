@@ -263,7 +263,7 @@ def test_call_model_marks_retrying_during_backoff(
 
         def capture_update(
             model_name: str, model_id: int, fields: dict, wait: bool = True
-        ):  # type: ignore[no-untyped-def]
+        ):
             if (
                 model_name == "ModelCall"
                 and "error_message" in fields

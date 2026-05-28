@@ -15,6 +15,7 @@ from flask import Blueprint, jsonify, request
 from app.auth.guards import require_admin
 from app.config_store import read_combined
 from app.extensions import db
+from app.model_call_token_backfill import backfill_model_call_token_usage
 from app.models import (
     Feed,
     Identification,
@@ -404,6 +405,29 @@ def api_admin_costs_calls() -> flask.Response:
             "pages": max(1, (total + per_page - 1) // per_page),
         }
     )
+
+
+@costs_bp.route("/api/admin/costs/backfill-token-usage", methods=["POST"])
+def api_admin_backfill_token_usage() -> flask.Response:
+    """Estimate missing token usage for legacy LLM ModelCall rows."""
+    _, error_response = require_admin("backfill token usage")
+    if error_response:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    apply_backfill = bool(payload.get("apply", False))
+    limit_raw = payload.get("limit")
+    limit = None
+    if limit_raw not in (None, ""):
+        try:
+            limit = int(limit_raw)
+        except TypeError, ValueError:
+            return flask.make_response(jsonify({"error": "Invalid limit"}), 400)
+        if limit <= 0:
+            return flask.make_response(jsonify({"error": "Invalid limit"}), 400)
+
+    result = backfill_model_call_token_usage(apply=apply_backfill, limit=limit)
+    return jsonify(result)
 
 
 @costs_bp.route("/api/admin/costs/cleanup/cancelled-feeds", methods=["POST"])
