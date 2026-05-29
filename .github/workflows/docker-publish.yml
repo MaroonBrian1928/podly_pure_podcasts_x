@@ -20,7 +20,7 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -172,11 +172,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish multi-arch manifest
+        id: manifest
         run: |
           ref_name="${GITHUB_REF_NAME//\//-}"
           image_name="$(echo "${{ github.repository_owner }}/podly-pure-podcasts" | tr '[:upper:]' '[:lower:]')"
           image="${{ env.REGISTRY }}/${image_name}"
-          manifest_tag="${image}:${ref_name}-latest"
           sources=()
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.build_amd64 }}" = "true" ]; then
             sources+=("${image}:${ref_name}-amd64")
@@ -184,5 +184,66 @@ jobs:
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.build_arm64 }}" = "true" ]; then
             sources+=("${image}:${ref_name}-arm64")
           fi
-          docker buildx imagetools create -t "$manifest_tag" "${sources[@]}"
+
+          # Tags applied to the multi-arch manifest.
+          tags=("${ref_name}-latest")
+
+          # On a release / version tag (vX.Y.Z), also publish the clean
+          # version (X.Y.Z) and the rolling `latest` tag.
+          version=""
+          if [ "${{ github.event_name }}" = "release" ]; then
+            version="${{ github.event.release.tag_name }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="$GITHUB_REF_NAME"
+          fi
+          version="${version#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            tags+=("$version" "latest")
+          fi
+
+          tag_args=()
+          for t in "${tags[@]}"; do
+            tag_args+=("-t" "${image}:${t}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+
+          # Resolve the published digest for use in the release notes.
+          digest="$(docker buildx imagetools inspect "${image}:${tags[0]}" --format '{{.Manifest.Digest}}')"
+
+          {
+            echo "image=$image"
+            echo "version=$version"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Attach image details to the release
+        if: ${{ github.event_name == 'release' && steps.manifest.outputs.version != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          image="${{ steps.manifest.outputs.image }}"
+          version="${{ steps.manifest.outputs.version }}"
+          digest="${{ steps.manifest.outputs.digest }}"
+
+          body="$(gh release view "$tag" --json body --jq .body)"
+          if printf '%s' "$body" | grep -q '<!-- docker-image -->'; then
+            echo "Release notes already contain the Docker image section; skipping."
+            exit 0
+          fi
+
+          {
+            printf '%s\n\n' "$body"
+            echo '<!-- docker-image -->'
+            echo '## Docker image'
+            echo
+            echo '```'
+            echo "docker pull ${image}:${version}"
+            echo "docker pull ${image}:latest"
+            echo '```'
+            echo
+            echo "Digest: \`${digest}\`"
+          } > release_notes.md
+          gh release edit "$tag" --notes-file release_notes.md
         shell: bash
