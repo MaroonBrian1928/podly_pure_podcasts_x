@@ -291,7 +291,11 @@ export default function CostsTab() {
             <div className="text-2xl font-bold text-indigo-700">
               ${costs.total_cost.toFixed(2)}
             </div>
-            <div className="text-sm text-gray-600 mt-1">Total processing cost this month</div>
+            <div className="text-sm text-gray-600 mt-1">
+              Total processing cost this month
+              {' · '}
+              <span className="text-gray-700">{costs.total_audio_hours.toFixed(2)} hours of audio</span>
+            </div>
             <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-700">
               <div>LLM: <span className="font-mono">${costs.total_llm_cost.toFixed(2)}</span></div>
               <div>Whisper: <span className="font-mono">${costs.total_whisper_cost.toFixed(2)}</span></div>

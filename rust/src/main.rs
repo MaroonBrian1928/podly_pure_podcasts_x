@@ -5781,6 +5781,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         feeds.iter().map(|f| (f.0, 0.0)).collect();
     let mut feed_episode_counts: HashMap<i64, i64> =
         feeds.iter().map(|f| (f.0, 0)).collect();
+    let mut total_audio_hours: f64 = 0.0;
 
     for (guid, _) in latest_completed.iter() {
         let (post_id, feed_id, cut_duration) = match posts_by_guid.get(guid) {
@@ -5790,6 +5791,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         let ad_time = *ad_time_by_post.get(&post_id).unwrap_or(&0.0);
         let duration = cut_duration + ad_time;
         let duration_hours = if duration > 0.0 { duration / 3600.0 } else { 0.0 };
+        total_audio_hours += duration_hours;
         let post_calls = calls_by_post.get(&post_id);
         let llm_cost: f64 = post_calls
             .map(|calls| {
@@ -5901,6 +5903,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         "total_llm_cost": round_to(total_llm, 4),
         "total_whisper_cost": round_to(total_whisper, 4),
         "total_ina_cost": round_to(total_ina, 4),
+        "total_audio_hours": round_to(total_audio_hours, 2),
         "users": users_data,
         "feeds": feeds_data,
     }))
@@ -9177,6 +9180,9 @@ mod tests {
         assert_eq!(payload["total_whisper_cost"], 0.04);
         assert_eq!(payload["total_ina_cost"], 0.02);
         assert_eq!(payload["total_cost"], 0.3975);
+        // Post duration 3600s = 1 audio hour. No ad time in the fixture, so
+        // the total equals the cut duration.
+        assert_eq!(payload["total_audio_hours"], 1.0);
         let feeds = payload["feeds"].as_array().unwrap();
         assert_eq!(feeds.len(), 1);
         assert_eq!(feeds[0]["llm_cost"], 0.3375);

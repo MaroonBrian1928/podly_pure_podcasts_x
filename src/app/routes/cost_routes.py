@@ -306,6 +306,7 @@ def api_admin_costs() -> flask.Response:
     feed_whisper_costs: dict[int, float] = {f.id: 0.0 for f in feeds}
     feed_ina_costs: dict[int, float] = {f.id: 0.0 for f in feeds}
     feed_episode_counts: dict[int, int] = {f.id: 0 for f in feeds}
+    total_audio_hours = 0.0
 
     for guid, _job in job_by_guid.items():
         post = post_map.get(guid)
@@ -317,6 +318,7 @@ def api_admin_costs() -> flask.Response:
         feed_id = post.feed_id
         subscriber_count = feed_subscriber_count.get(feed_id, 0)
         duration_hours = duration / 3600.0 if duration > 0 else 0.0
+        total_audio_hours += duration_hours
         post_model_calls = model_calls_by_post_id.get(post.id, [])
         llm_cost = sum(
             _model_call_cost(call)
@@ -402,6 +404,7 @@ def api_admin_costs() -> flask.Response:
             "total_llm_cost": round(sum(feed_llm_costs.values()), 4),
             "total_whisper_cost": round(sum(feed_whisper_costs.values()), 4),
             "total_ina_cost": round(sum(feed_ina_costs.values()), 4),
+            "total_audio_hours": round(total_audio_hours, 2),
             "users": users_data,
             "feeds": feeds_data,
         }
