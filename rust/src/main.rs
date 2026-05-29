@@ -25,12 +25,49 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Audio(AudioCommand),
+    Costs(CostsCommand),
     Feed(FeedCommand),
     Jobs(JobsCommand),
     Posts(PostsCommand),
     Stats(StatsCommand),
     Transcript(TranscriptCommand),
     Chapters(ChaptersCommand),
+}
+
+#[derive(Args)]
+struct CostsCommand {
+    #[command(subcommand)]
+    command: CostsSubcommand,
+}
+
+#[derive(Subcommand)]
+enum CostsSubcommand {
+    RenderAdmin(CostsRenderAdminArgs),
+    RenderCalls(CostsRenderCallsArgs),
+}
+
+#[derive(Args)]
+struct CostsRenderAdminArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long)]
+    year: i32,
+    #[arg(long)]
+    month: u32,
+    #[arg(long = "rates-json")]
+    rates_json: PathBuf,
+}
+
+#[derive(Args)]
+struct CostsRenderCallsArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long, default_value_t = 1)]
+    page: i64,
+    #[arg(long = "per-page", default_value_t = 50)]
+    per_page: i64,
+    #[arg(long = "rates-json")]
+    rates_json: PathBuf,
 }
 
 #[derive(Args)]
@@ -738,6 +775,10 @@ fn run() -> Result<()> {
             AudioSubcommand::Cut(args) => print_json(&cut_audio(args)?),
             AudioSubcommand::Bleep(args) => print_json(&bleep_audio(args)?),
             AudioSubcommand::Split(args) => print_json(&split_audio(args)?),
+        },
+        Commands::Costs(costs) => match costs.command {
+            CostsSubcommand::RenderAdmin(args) => print_json(&render_admin_costs(args)?),
+            CostsSubcommand::RenderCalls(args) => print_json(&render_admin_costs_calls(args)?),
         },
         Commands::Feed(feed) => match feed.command {
             FeedSubcommand::Render(args) => print_json(&render_feed(args)?),
@@ -5436,6 +5477,513 @@ fn render_feed_posts(args: PostsFeedListArgs) -> Result<Value> {
     }))
 }
 
+// ===== Admin costs endpoints =====
+//
+// Mirrors `api_admin_costs` and `api_admin_costs_calls` in
+// src/app/routes/cost_routes.py. Python pre-resolves LiteLLM per-token rates
+// (including the Flex 0.5x discount and the cached_input→input fallback) and
+// passes them in via --rates-json so the sidecar never has to know about
+// LiteLLM. Keep the payload shape byte-identical to the Python responses —
+// the parity test in tests/test_cost_routes_rust_parity.py will fail loudly
+// if you drift.
+
+#[derive(Deserialize)]
+struct CostRatesPayload {
+    rates: HashMap<String, ModelRate>,
+    #[serde(default)]
+    whisper_rate_per_hour: f64,
+    #[serde(default)]
+    ina_rate_per_hour: f64,
+    #[serde(default)]
+    legacy_rate_per_hour: f64,
+}
+
+#[derive(Deserialize, Clone)]
+struct ModelRate {
+    #[serde(default)]
+    input: f64,
+    #[serde(default)]
+    cached_input: f64,
+    #[serde(default)]
+    output: f64,
+}
+
+struct CostsModelCallRow {
+    id: i64,
+    post_id: Option<i64>,
+    model_name: String,
+    status: String,
+    timestamp: Option<String>,
+    retry_attempts: i64,
+    service_tier: Option<String>,
+    prompt: Option<String>,
+    prompt_tokens: Option<i64>,
+    cached_prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+}
+
+fn rate_key(model_name: &str, service_tier: Option<&str>) -> String {
+    let tier = service_tier
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    format!("{model_name}|{tier}")
+}
+
+fn is_ina_call(model_name: &str) -> bool {
+    model_name.starts_with("ina:")
+}
+
+fn is_whisper_call(model_name: &str, prompt: Option<&str>) -> bool {
+    let lower = model_name.to_ascii_lowercase();
+    if lower.contains("whisper") {
+        return true;
+    }
+    if prompt == Some("Whisper transcription job") {
+        return true;
+    }
+    lower.starts_with("local_")
+}
+
+fn is_billable_llm_call(status: &str, model_name: &str, prompt: Option<&str>) -> bool {
+    if status != "success" {
+        return false;
+    }
+    if is_ina_call(model_name) {
+        return false;
+    }
+    if is_whisper_call(model_name, prompt) {
+        return false;
+    }
+    true
+}
+
+fn model_call_cost(call: &CostsModelCallRow, rates: &HashMap<String, ModelRate>) -> f64 {
+    let prompt_tokens = call.prompt_tokens.unwrap_or(0).max(0) as f64;
+    let cached_prompt_tokens = call.cached_prompt_tokens.unwrap_or(0).max(0) as f64;
+    let completion_tokens = call.completion_tokens.unwrap_or(0).max(0) as f64;
+    if prompt_tokens <= 0.0 && cached_prompt_tokens <= 0.0 && completion_tokens <= 0.0 {
+        return 0.0;
+    }
+    let key = rate_key(&call.model_name, call.service_tier.as_deref());
+    let rate = match rates.get(&key) {
+        Some(r) => r,
+        None => return 0.0,
+    };
+    prompt_tokens * rate.input
+        + cached_prompt_tokens * rate.cached_input
+        + completion_tokens * rate.output
+}
+
+fn load_cost_rates(path: &Path) -> Result<CostRatesPayload> {
+    let raw = fs::read_to_string(path).with_context(|| "failed to read cost rates JSON")?;
+    let payload: CostRatesPayload =
+        serde_json::from_str(&raw).with_context(|| "failed to parse cost rates JSON")?;
+    Ok(payload)
+}
+
+fn month_range(year: i32, month: u32) -> Result<(String, String)> {
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    let start_date = NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| anyhow!("Invalid year/month {year}/{month}"))?;
+    let next_month = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }
+    .ok_or_else(|| anyhow!("Invalid year/month {year}/{month}"))?;
+    let last_day = next_month.pred_opt().unwrap();
+    let start = NaiveDateTime::new(start_date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let end = NaiveDateTime::new(last_day, NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+    Ok((
+        start.format("%Y-%m-%d %H:%M:%S").to_string(),
+        end.format("%Y-%m-%d %H:%M:%S").to_string(),
+    ))
+}
+
+fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let rates_payload = load_cost_rates(&args.rates_json)?;
+    let rates = &rates_payload.rates;
+    let (month_start, month_end) = month_range(args.year, args.month)?;
+
+    // --- latest_completed_jobs_by_guid ---
+    let mut latest_completed: HashMap<String, String> = HashMap::new(); // guid -> completed_at (raw string)
+    {
+        let mut stmt = conn.prepare(
+            "SELECT post_guid, completed_at FROM processing_job \
+             WHERE status = 'completed' AND completed_at IS NOT NULL \
+               AND completed_at >= ?1 AND completed_at <= ?2",
+        )?;
+        let rows = stmt.query_map([&month_start, &month_end], |row| {
+            let guid: String = row.get(0)?;
+            let completed_at: String = row.get(1)?;
+            Ok((guid, completed_at))
+        })?;
+        for row in rows {
+            let (guid, completed_at) = row?;
+            let entry = latest_completed.entry(guid).or_insert_with(|| completed_at.clone());
+            if completed_at > *entry {
+                *entry = completed_at;
+            }
+        }
+    }
+    let guids: Vec<String> = latest_completed.keys().cloned().collect();
+
+    // --- Users ordered by username (lowercase normalized in DB already) ---
+    let users: Vec<(i64, String, String, String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, username, role, feed_subscription_status, stripe_subscription_id \
+             FROM users ORDER BY username",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    // --- Feeds ---
+    let feeds: Vec<(i64, Option<String>)> = {
+        let mut stmt = conn.prepare("SELECT id, title FROM feed")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    // --- feed_supporter -> user_feed / feed_user maps ---
+    let mut feed_subscriber_count: HashMap<i64, i64> = HashMap::new();
+    let mut feed_user_map: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut user_feed_map: HashMap<i64, Vec<i64>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT feed_id, user_id FROM feed_supporter")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (feed_id, user_id) = row?;
+            *feed_subscriber_count.entry(feed_id).or_insert(0) += 1;
+            feed_user_map.entry(feed_id).or_default().push(user_id);
+            user_feed_map.entry(user_id).or_default().push(feed_id);
+        }
+    }
+
+    // --- Posts for these guids ---
+    let mut posts_by_guid: HashMap<String, (i64, i64, f64)> = HashMap::new(); // guid -> (id, feed_id, duration)
+    let mut post_ids: Vec<i64> = Vec::new();
+    if !guids.is_empty() {
+        let placeholders: String =
+            (0..guids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, guid, feed_id, duration FROM post WHERE guid IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            guids.iter().map(|g| g as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let id: i64 = row.get(0)?;
+            let guid: String = row.get(1)?;
+            let feed_id: i64 = row.get(2)?;
+            let duration: Option<f64> = get_duration_f64(row, 3)?;
+            Ok((id, guid, feed_id, duration.unwrap_or(0.0)))
+        })?;
+        for row in rows {
+            let (id, guid, feed_id, duration) = row?;
+            posts_by_guid.insert(guid, (id, feed_id, duration));
+            post_ids.push(id);
+        }
+    }
+
+    // --- ad time per post (sum of (end-start) where label = 'ad') ---
+    let mut ad_time_by_post: HashMap<i64, f64> = HashMap::new();
+    if !post_ids.is_empty() {
+        let placeholders: String =
+            (0..post_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT transcript_segment.post_id, \
+                    SUM(transcript_segment.end_time - transcript_segment.start_time) \
+             FROM transcript_segment \
+             JOIN identification \
+               ON identification.transcript_segment_id = transcript_segment.id \
+             WHERE identification.label = 'ad' \
+               AND transcript_segment.post_id IN ({placeholders}) \
+             GROUP BY transcript_segment.post_id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            post_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (post_id, ad_time) = row?;
+            ad_time_by_post.insert(post_id, ad_time);
+        }
+    }
+
+    // --- Successful model_calls per post (used for aggregation only) ---
+    let mut calls_by_post: HashMap<i64, Vec<CostsModelCallRow>> = HashMap::new();
+    if !post_ids.is_empty() {
+        let placeholders: String =
+            (0..post_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
+                    service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
+                    completion_tokens, total_tokens \
+             FROM model_call \
+             WHERE status = 'success' AND post_id IN ({placeholders}) \
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            post_ids.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok(CostsModelCallRow {
+                id: row.get(0)?,
+                post_id: row.get(1)?,
+                model_name: row.get(2)?,
+                status: row.get(3)?,
+                timestamp: row.get(4)?,
+                retry_attempts: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                service_tier: row.get(6)?,
+                prompt: row.get(7)?,
+                prompt_tokens: row.get(8)?,
+                cached_prompt_tokens: row.get(9)?,
+                completion_tokens: row.get(10)?,
+                total_tokens: row.get(11)?,
+            })
+        })?;
+        for call_result in rows {
+            let call = call_result?;
+            if let Some(pid) = call.post_id {
+                calls_by_post.entry(pid).or_default().push(call);
+            }
+        }
+    }
+
+    // --- Per-feed / per-user aggregation ---
+    let mut user_costs: HashMap<i64, f64> =
+        users.iter().map(|u| (u.0, 0.0)).collect();
+    let mut feed_costs: HashMap<i64, f64> =
+        feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_llm_costs: HashMap<i64, f64> =
+        feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_whisper_costs: HashMap<i64, f64> =
+        feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_ina_costs: HashMap<i64, f64> =
+        feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_episode_counts: HashMap<i64, i64> =
+        feeds.iter().map(|f| (f.0, 0)).collect();
+
+    for (guid, _) in latest_completed.iter() {
+        let (post_id, feed_id, cut_duration) = match posts_by_guid.get(guid) {
+            Some(v) => *v,
+            None => continue,
+        };
+        let ad_time = *ad_time_by_post.get(&post_id).unwrap_or(&0.0);
+        let duration = cut_duration + ad_time;
+        let duration_hours = if duration > 0.0 { duration / 3600.0 } else { 0.0 };
+        let post_calls = calls_by_post.get(&post_id);
+        let llm_cost: f64 = post_calls
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter(|c| is_billable_llm_call(&c.status, &c.model_name, c.prompt.as_deref()))
+                    .map(|c| model_call_cost(c, rates))
+                    .sum()
+            })
+            .unwrap_or(0.0);
+        let has_whisper = post_calls
+            .map(|calls| {
+                calls
+                    .iter()
+                    .any(|c| is_whisper_call(&c.model_name, c.prompt.as_deref()))
+            })
+            .unwrap_or(false);
+        let has_ina = post_calls
+            .map(|calls| calls.iter().any(|c| is_ina_call(&c.model_name)))
+            .unwrap_or(false);
+        let whisper_cost = if has_whisper {
+            rates_payload.whisper_rate_per_hour * duration_hours
+        } else {
+            0.0
+        };
+        let ina_cost = if has_ina {
+            rates_payload.ina_rate_per_hour * duration_hours
+        } else {
+            0.0
+        };
+        let total_episode_cost = llm_cost + whisper_cost + ina_cost;
+        let subscriber_count = *feed_subscriber_count.get(&feed_id).unwrap_or(&0);
+        let cost_per_sub = if subscriber_count > 0 && total_episode_cost > 0.0 {
+            total_episode_cost / subscriber_count as f64
+        } else {
+            0.0
+        };
+
+        *feed_costs.entry(feed_id).or_insert(0.0) += total_episode_cost;
+        *feed_llm_costs.entry(feed_id).or_insert(0.0) += llm_cost;
+        *feed_whisper_costs.entry(feed_id).or_insert(0.0) += whisper_cost;
+        *feed_ina_costs.entry(feed_id).or_insert(0.0) += ina_cost;
+        *feed_episode_counts.entry(feed_id).or_insert(0) += 1;
+
+        if let Some(user_ids) = feed_user_map.get(&feed_id) {
+            for uid in user_ids {
+                *user_costs.entry(*uid).or_insert(0.0) += cost_per_sub;
+            }
+        }
+    }
+
+    // --- Build users JSON ---
+    // NOTE: the Python endpoint also fetches Stripe subscription amount via
+    // billing_cache.fetch_subscription_amount. That requires Stripe API access
+    // and a live cache, which the sidecar can't replicate. The Python wrapper
+    // post-processes the Rust response to fill in subscription_amount_cents
+    // for users whose stripe_subscription_id is non-null.
+    let users_data: Vec<Value> = users
+        .iter()
+        .map(|(uid, username, role, sub_status, stripe_sub_id)| {
+            let feed_count = user_feed_map.get(uid).map(|v| v.len()).unwrap_or(0);
+            json!({
+                "id": uid,
+                "username": username,
+                "role": role,
+                "feed_count": feed_count,
+                "subscription_status": sub_status,
+                "stripe_subscription_id": stripe_sub_id,
+                "subscription_amount_cents": Value::Null,
+                "monthly_cost": round_to(*user_costs.get(uid).unwrap_or(&0.0), 4),
+            })
+        })
+        .collect();
+
+    // --- Build feeds JSON sorted by monthly_cost desc ---
+    let mut feeds_data: Vec<Value> = feeds
+        .iter()
+        .map(|(fid, title)| {
+            json!({
+                "id": fid,
+                "title": title,
+                "subscriber_count": *feed_subscriber_count.get(fid).unwrap_or(&0),
+                "episodes_this_month": *feed_episode_counts.get(fid).unwrap_or(&0),
+                "monthly_cost": round_to(*feed_costs.get(fid).unwrap_or(&0.0), 4),
+                "llm_cost": round_to(*feed_llm_costs.get(fid).unwrap_or(&0.0), 4),
+                "whisper_cost": round_to(*feed_whisper_costs.get(fid).unwrap_or(&0.0), 4),
+                "ina_cost": round_to(*feed_ina_costs.get(fid).unwrap_or(&0.0), 4),
+            })
+        })
+        .collect();
+    feeds_data.sort_by(|a, b| {
+        let av = a.get("monthly_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let bv = b.get("monthly_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_cost: f64 = feed_costs.values().sum();
+    let total_llm: f64 = feed_llm_costs.values().sum();
+    let total_whisper: f64 = feed_whisper_costs.values().sum();
+    let total_ina: f64 = feed_ina_costs.values().sum();
+
+    Ok(json!({
+        "year": args.year,
+        "month": args.month,
+        "total_cost": round_to(total_cost, 4),
+        "cost_rate_per_hour": rates_payload.legacy_rate_per_hour,
+        "whisper_cost_rate_per_hour": rates_payload.whisper_rate_per_hour,
+        "ina_cost_rate_per_hour": rates_payload.ina_rate_per_hour,
+        "total_llm_cost": round_to(total_llm, 4),
+        "total_whisper_cost": round_to(total_whisper, 4),
+        "total_ina_cost": round_to(total_ina, 4),
+        "users": users_data,
+        "feeds": feeds_data,
+    }))
+}
+
+fn render_admin_costs_calls(args: CostsRenderCallsArgs) -> Result<Value> {
+    let conn = open_readonly_sqlite(&args.db)?;
+    let rates_payload = load_cost_rates(&args.rates_json)?;
+    let rates = &rates_payload.rates;
+
+    let page = args.page.max(1);
+    let per_page = args.per_page.clamp(1, 200);
+    let offset = (page - 1) * per_page;
+
+    let total: i64 =
+        conn.query_row("SELECT COUNT(*) FROM model_call", [], |row| row.get(0))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
+                service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
+                completion_tokens, total_tokens \
+         FROM model_call \
+         ORDER BY timestamp DESC \
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map([per_page, offset], |row| {
+        Ok(CostsModelCallRow {
+            id: row.get(0)?,
+            post_id: row.get(1)?,
+            model_name: row.get(2)?,
+            status: row.get(3)?,
+            timestamp: row.get(4)?,
+            retry_attempts: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+            service_tier: row.get(6)?,
+            prompt: row.get(7)?,
+            prompt_tokens: row.get(8)?,
+            cached_prompt_tokens: row.get(9)?,
+            completion_tokens: row.get(10)?,
+            total_tokens: row.get(11)?,
+        })
+    })?;
+    let calls: Vec<CostsModelCallRow> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let calls_data: Vec<Value> = calls
+        .iter()
+        .map(|c| {
+            let estimated = if is_billable_llm_call(&c.status, &c.model_name, c.prompt.as_deref()) {
+                round_to(model_call_cost(c, rates), 8)
+            } else {
+                0.0
+            };
+            json!({
+                "id": c.id,
+                "post_id": c.post_id,
+                "model_name": c.model_name,
+                "status": c.status,
+                "timestamp": c.timestamp.as_deref().map(sqlite_datetime_to_iso),
+                "retry_attempts": c.retry_attempts,
+                "service_tier": c.service_tier,
+                "prompt_tokens": c.prompt_tokens,
+                "cached_prompt_tokens": c.cached_prompt_tokens,
+                "completion_tokens": c.completion_tokens,
+                "total_tokens": c.total_tokens,
+                "estimated_cost": estimated,
+            })
+        })
+        .collect();
+
+    let pages = if total > 0 {
+        (total + per_page - 1) / per_page
+    } else {
+        1
+    };
+
+    Ok(json!({
+        "calls": calls_data,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+    }))
+}
+
 fn build_post_list_description_html(
     description: Option<&str>,
     chapter_data: Option<&str>,
@@ -8515,6 +9063,191 @@ mod tests {
         assert!(err.is_none());
         assert!(changed);
         assert_eq!(refined, 205.0);
+    }
+
+    fn seed_costs_db(db_path: &Path) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE users (
+                id INTEGER PRIMARY KEY, username TEXT NOT NULL, role TEXT NOT NULL,
+                feed_subscription_status TEXT NOT NULL, stripe_subscription_id TEXT
+             );
+             CREATE TABLE feed_supporter (
+                id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL, user_id INTEGER NOT NULL
+             );
+             CREATE TABLE post (
+                id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL, guid TEXT NOT NULL,
+                duration REAL
+             );
+             CREATE TABLE processing_job (
+                id TEXT PRIMARY KEY, post_guid TEXT NOT NULL, status TEXT NOT NULL,
+                completed_at TEXT
+             );
+             CREATE TABLE transcript_segment (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, sequence_num INTEGER,
+                start_time REAL NOT NULL, end_time REAL NOT NULL, text TEXT, speaker_label TEXT
+             );
+             CREATE TABLE identification (
+                id INTEGER PRIMARY KEY, transcript_segment_id INTEGER NOT NULL,
+                model_call_id INTEGER, confidence REAL, label TEXT NOT NULL
+             );
+             CREATE TABLE model_call (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL,
+                first_segment_sequence_num INTEGER NOT NULL,
+                last_segment_sequence_num INTEGER NOT NULL,
+                model_name TEXT NOT NULL, prompt TEXT NOT NULL, response TEXT,
+                timestamp TEXT, status TEXT NOT NULL, error_message TEXT,
+                retry_attempts INTEGER, service_tier TEXT,
+                prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
+                completion_tokens INTEGER, total_tokens INTEGER
+             );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO feed VALUES (1, 'Cost Feed')", []).unwrap();
+        conn.execute(
+            "INSERT INTO users VALUES (1, 'a', 'user', 'active', NULL), (2, 'b', 'user', 'active', 'sub_x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feed_supporter VALUES (1, 1, 1), (2, 1, 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO post VALUES (1, 1, 'cost-guid', 3600.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_job VALUES ('job-1', 'cost-guid', 'completed', '2026-05-15 12:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO model_call VALUES
+                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, 1000000, 500000, 250000, 1750000),
+                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL),
+                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn write_costs_rates_json(dir: &Path) -> PathBuf {
+        // 1.5e-7 input, 7.5e-8 cached, 6e-7 output → matches the Python parity
+        // test that exercises gpt-4o-mini with 1M/500k/250k tokens to 0.3375.
+        let path = dir.join("rates.json");
+        fs::write(
+            &path,
+            r#"{
+              "rates": {
+                "gpt-4o-mini|default": {"input": 0.00000015, "cached_input": 0.000000075, "output": 0.0000006}
+              },
+              "whisper_rate_per_hour": 0.04,
+              "ina_rate_per_hour": 0.02,
+              "legacy_rate_per_hour": 0.04
+            }"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn costs_render_admin_matches_python_dashboard_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs(CostsRenderAdminArgs {
+            db: db_path,
+            year: 2026,
+            month: 5,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["year"], 2026);
+        assert_eq!(payload["month"], 5);
+        assert_eq!(payload["whisper_cost_rate_per_hour"], 0.04);
+        assert_eq!(payload["ina_cost_rate_per_hour"], 0.02);
+        assert_eq!(payload["total_llm_cost"], 0.3375);
+        assert_eq!(payload["total_whisper_cost"], 0.04);
+        assert_eq!(payload["total_ina_cost"], 0.02);
+        assert_eq!(payload["total_cost"], 0.3975);
+        let feeds = payload["feeds"].as_array().unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0]["llm_cost"], 0.3375);
+        assert_eq!(feeds[0]["whisper_cost"], 0.04);
+        assert_eq!(feeds[0]["ina_cost"], 0.02);
+        assert_eq!(feeds[0]["episodes_this_month"], 1);
+        assert_eq!(feeds[0]["subscriber_count"], 2);
+        let users = payload["users"].as_array().unwrap();
+        assert_eq!(users.len(), 2);
+        // 0.3975 / 2 subscribers → 0.19875 → rounded to 0.1988
+        assert_eq!(users[0]["monthly_cost"], 0.1988);
+        assert_eq!(users[1]["monthly_cost"], 0.1988);
+        // Stripe enrichment is left to the Python wrapper; sidecar returns null.
+        assert_eq!(users[1]["stripe_subscription_id"], "sub_x");
+        assert_eq!(users[1]["subscription_amount_cents"], Value::Null);
+    }
+
+    #[test]
+    fn costs_render_admin_skips_whisper_and_ina_when_no_matching_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        // Drop the whisper + INA rows so only the LLM call remains.
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute("DELETE FROM model_call WHERE id IN (2, 3)", []).unwrap();
+        drop(conn);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs(CostsRenderAdminArgs {
+            db: db_path,
+            year: 2026,
+            month: 5,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total_whisper_cost"], 0.0);
+        assert_eq!(payload["total_ina_cost"], 0.0);
+        assert_eq!(payload["total_llm_cost"], 0.3375);
+    }
+
+    #[test]
+    fn costs_render_calls_paginates_in_timestamp_desc_with_estimated_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs_calls(CostsRenderCallsArgs {
+            db: db_path,
+            page: 1,
+            per_page: 10,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total"], 3);
+        assert_eq!(payload["page"], 1);
+        assert_eq!(payload["per_page"], 10);
+        assert_eq!(payload["pages"], 1);
+        let calls = payload["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 3);
+        // timestamp DESC: id 3 (ina) → 2 (whisper) → 1 (gpt-4o-mini)
+        assert_eq!(calls[0]["model_name"], "ina:speech_music_noise");
+        assert_eq!(calls[0]["estimated_cost"], 0.0);
+        assert_eq!(calls[1]["model_name"], "whisper-large-v3-turbo");
+        assert_eq!(calls[1]["estimated_cost"], 0.0);
+        assert_eq!(calls[2]["model_name"], "gpt-4o-mini");
+        assert_eq!(calls[2]["estimated_cost"], 0.3375);
+        // ISO format mirrors Python's datetime.isoformat() (space → 'T').
+        assert_eq!(calls[2]["timestamp"], "2026-05-15T12:00:01");
     }
 
     #[test]

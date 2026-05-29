@@ -102,6 +102,192 @@ def test_admin_costs_uses_litellm_tokens_and_configured_audio_rates(
     assert payload["users"][1]["monthly_cost"] == 0.1988
 
 
+def test_admin_costs_skips_whisper_and_ina_when_no_matching_model_calls(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(
+        cost_routes,
+        "read_combined",
+        lambda: {
+            "app": {
+                "cost_rate_per_hour": 0.04,
+                "whisper_cost_rate_per_hour": 0.04,
+                "ina_cost_rate_per_hour": 0.02,
+            }
+        },
+    )
+
+    with app.app_context():
+        feed = Feed(title="No Audio Feed", rss_url="https://example.com/feed.xml")
+        user = User(username="solo", password_hash="x", role="user")
+        db.session.add_all([feed, user])
+        db.session.flush()
+        db.session.add(UserFeed(feed_id=feed.id, user_id=user.id))
+        post = Post(
+            feed_id=feed.id,
+            guid="no-audio-guid",
+            download_url="https://example.com/audio.mp3",
+            title="No Audio Episode",
+            duration=3600,
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add(
+            ProcessingJob(
+                post_guid=post.guid,
+                status="completed",
+                completed_at=datetime(2026, 5, 15, 12, 0, 0),
+            )
+        )
+        # Only an LLM call — no Whisper, no INA.
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=1,
+                model_name="gpt-4o-mini",
+                prompt="classify",
+                status="success",
+                prompt_tokens=1_000_000,
+                cached_prompt_tokens=500_000,
+                completion_tokens=250_000,
+                total_tokens=1_750_000,
+            )
+        )
+        db.session.commit()
+
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total_whisper_cost"] == 0.0
+    assert payload["total_ina_cost"] == 0.0
+    assert payload["feeds"][0]["whisper_cost"] == 0.0
+    assert payload["feeds"][0]["ina_cost"] == 0.0
+
+
+def test_admin_costs_uses_rust_sidecar_response_when_available(
+    app: Any, monkeypatch: Any
+) -> None:
+    """When the Rust path returns a payload, the route forwards it and enriches
+    Stripe subscription amounts (sidecar can't reach Stripe so it leaves
+    ``subscription_amount_cents`` null)."""
+    app.register_blueprint(costs_bp)
+    monkeypatch.setenv("PODLY_STRIPE_BILLING_ENABLED", "true")
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "read_combined", lambda: {"app": {}})
+    monkeypatch.setattr(
+        cost_routes,
+        "try_render_admin_costs",
+        lambda **_kwargs: {
+            "year": 2026,
+            "month": 5,
+            "total_cost": 0.5,
+            "cost_rate_per_hour": 0.04,
+            "whisper_cost_rate_per_hour": 0.04,
+            "ina_cost_rate_per_hour": 0.02,
+            "total_llm_cost": 0.3,
+            "total_whisper_cost": 0.1,
+            "total_ina_cost": 0.1,
+            "users": [
+                {
+                    "id": 1,
+                    "username": "a",
+                    "stripe_subscription_id": None,
+                    "subscription_amount_cents": None,
+                    "monthly_cost": 0.25,
+                },
+                {
+                    "id": 2,
+                    "username": "b",
+                    "stripe_subscription_id": "sub_x",
+                    "subscription_amount_cents": None,
+                    "monthly_cost": 0.25,
+                },
+            ],
+            "feeds": [],
+        },
+    )
+    monkeypatch.setattr(
+        "app.billing_cache.fetch_subscription_amount",
+        lambda _sub_id: 999,
+    )
+
+    with app.app_context():
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total_cost"] == 0.5
+    # User with Stripe id gets the cents filled in; the other stays null.
+    assert payload["users"][0]["subscription_amount_cents"] is None
+    assert payload["users"][1]["subscription_amount_cents"] == 999
+
+
+def test_admin_costs_falls_back_to_python_when_rust_returns_none(
+    app: Any, monkeypatch: Any
+) -> None:
+    """The Rust wrapper returns None when the flag is off or the sidecar
+    fails. The route must then fall through to the Python implementation."""
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(
+        cost_routes,
+        "read_combined",
+        lambda: {
+            "app": {
+                "cost_rate_per_hour": 0.04,
+                "whisper_cost_rate_per_hour": 0.04,
+                "ina_cost_rate_per_hour": 0.02,
+            }
+        },
+    )
+    monkeypatch.setattr(cost_routes, "try_render_admin_costs", lambda **_kwargs: None)
+
+    with app.app_context():
+        feed = Feed(title="Fallback Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    # Python path produced the envelope (no episodes yet, but the shape is
+    # there, which is the cheapest way to prove the fallback ran).
+    assert payload["total_cost"] == 0.0
+    assert payload["feeds"][0]["title"] == "Fallback Feed"
+
+
+def test_admin_costs_calls_uses_rust_sidecar_response_when_available(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "read_combined", lambda: {"app": {}})
+    monkeypatch.setattr(
+        cost_routes,
+        "try_render_admin_costs_calls",
+        lambda **_kwargs: {
+            "calls": [{"id": 7, "model_name": "gpt-4o-mini", "estimated_cost": 0.001}],
+            "total": 1,
+            "page": 1,
+            "per_page": 50,
+            "pages": 1,
+        },
+    )
+
+    with app.app_context():
+        response = app.test_client().get("/api/admin/costs/calls?page=1&per_page=50")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert payload["calls"][0]["id"] == 7
+
+
 def test_model_call_cost_prices_gemini_flex_at_half_base_rate() -> None:
     call = ModelCall(
         model_name="gemini/gemini-3-flash-preview",

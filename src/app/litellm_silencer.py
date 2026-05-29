@@ -12,9 +12,22 @@ litellm 1.86+ emits two unrelated bits of noise we don't want in our logs:
    printed by litellm's error path on every failure. Controlled by
    `litellm.suppress_debug_info`.
 
-This module is import-side-effect free; call `silence_litellm_noise()`
-once at process startup (after the global logger is configured but before
-any litellm code runs).
+These are split into two functions so the cheap one can run at process
+startup without importing litellm:
+
+- ``install_litellm_log_filter()`` registers the logging filter by logger
+  name. The "LiteLLM" logger doesn't have to exist yet — Python's logging
+  module creates it on first ``getLogger("LiteLLM")`` call and the filter
+  is already attached. **No litellm import. Safe at startup.**
+
+- ``apply_litellm_suppress_debug_info()`` actually imports litellm to set
+  the module attribute. Importing litellm pulls in ~160 MiB and 500+
+  ``openai`` submodules, so call this lazily — right next to the call sites
+  that already trigger the import (e.g. ``litellm.completion``,
+  ``litellm.model_cost``). Both functions are idempotent.
+
+``silence_litellm_noise()`` is kept as a legacy shim that calls both —
+prefer the split functions for new call sites.
 """
 
 from __future__ import annotations
@@ -37,30 +50,50 @@ class _BotocoreMissingFilter(logging.Filter):
         return not any(frag in msg for frag in _BOTOCORE_NOISE_FRAGMENTS)
 
 
-_applied = False
+_filter_installed = False
+_suppress_applied = False
 
 
-def silence_litellm_noise() -> None:
-    """Idempotently attach the filter and flip suppress_debug_info.
+def install_litellm_log_filter() -> None:
+    """Attach the botocore-noise filter to the LiteLLM logger.
 
-    Safe to call before litellm is imported -- the filter applies to the
-    "LiteLLM" logger by name and takes effect when litellm later logs to it.
-    `litellm.suppress_debug_info` is set lazily inside a guarded import so
-    callers that don't depend on litellm still don't pay the import cost.
+    Idempotent. Does not import litellm — safe to call at process startup.
     """
-    global _applied
-    if _applied:
+    global _filter_installed
+    if _filter_installed:
         return
-    _applied = True
-
     litellm_logger = logging.getLogger("LiteLLM")
     if not any(isinstance(f, _BotocoreMissingFilter) for f in litellm_logger.filters):
         litellm_logger.addFilter(_BotocoreMissingFilter())
+    _filter_installed = True
 
+
+def apply_litellm_suppress_debug_info() -> None:
+    """Flip ``litellm.suppress_debug_info = True``.
+
+    Idempotent. Imports litellm, which is expensive — only call from code
+    paths that have already triggered (or are about to trigger) a litellm
+    import of their own.
+    """
+    global _suppress_applied
+    if _suppress_applied:
+        return
     try:
         litellm: Any = __import__("litellm")
         vars(litellm)["suppress_debug_info"] = True
     except Exception:  # noqa: BLE001
         # litellm isn't installed in some minimal contexts (e.g. CLI tasks).
         # The logging filter is still in place for future imports.
-        pass
+        return
+    _suppress_applied = True
+
+
+def silence_litellm_noise() -> None:
+    """Legacy entry point: install the filter and apply suppress_debug_info.
+
+    Calling this at startup forces a litellm import (~160 MiB). Prefer
+    ``install_litellm_log_filter()`` at startup plus
+    ``apply_litellm_suppress_debug_info()`` next to your litellm call sites.
+    """
+    install_litellm_log_filter()
+    apply_litellm_suppress_debug_info()

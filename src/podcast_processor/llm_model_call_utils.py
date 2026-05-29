@@ -115,6 +115,10 @@ def call_litellm_with_tier_retry(
     """
     import litellm  # local import to keep top-level imports cheap
 
+    from app.litellm_silencer import apply_litellm_suppress_debug_info
+
+    apply_litellm_suppress_debug_info()
+
     flex_active = completion_args.get("service_tier") == "flex"
     if not flex_active:
         return litellm.completion(**completion_args)

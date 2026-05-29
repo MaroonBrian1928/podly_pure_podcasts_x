@@ -16,6 +16,7 @@ from app.auth.guards import require_admin
 from app.config_store import read_combined
 from app.extensions import db
 from app.model_call_token_backfill import backfill_model_call_token_usage
+from app.model_call_utils import WHISPER_TRANSCRIPTION_PROMPT
 from app.models import (
     Feed,
     Identification,
@@ -28,6 +29,11 @@ from app.models import (
 )
 from app.writer.client import writer_client
 from shared import defaults as DEFAULTS
+from shared.processing_paths import get_instance_dir
+from shared.rust_sidecar import (
+    try_render_admin_costs,
+    try_render_admin_costs_calls,
+)
 
 logger = logging.getLogger("global_logger")
 
@@ -47,6 +53,10 @@ def _rate_from_litellm(model_name: str, key: str, service_tier: str | None) -> f
     """Read a per-token price from LiteLLM's model cost map."""
     try:
         import litellm
+
+        from app.litellm_silencer import apply_litellm_suppress_debug_info
+
+        apply_litellm_suppress_debug_info()
     except Exception as exc:  # noqa: BLE001
         logger.warning("LiteLLM unavailable for cost calculation: %s", exc)
         return 0.0
@@ -97,6 +107,18 @@ def _model_call_cost(call: ModelCall) -> float:
 
 def _is_ina_call(call: ModelCall) -> bool:
     return call.model_name.startswith("ina:")
+
+
+def _is_whisper_call(call: ModelCall) -> bool:
+    name = (call.model_name or "").lower()
+    if "whisper" in name:
+        return True
+    if call.prompt == WHISPER_TRANSCRIPTION_PROMPT:
+        return True
+    # Historical local Whisper calls were stored as local_<model>.
+    if name.startswith("local_"):
+        return True
+    return False
 
 
 def _is_billable_llm_call(call: ModelCall) -> bool:
@@ -187,6 +209,81 @@ def _user_feed_maps() -> tuple[dict[int, list[int]], dict[int, list[int]]]:
     return user_feed_map, feed_user_map
 
 
+def _build_rust_rates_payload(app_config: dict[str, Any]) -> dict[str, Any]:
+    """Pre-resolve LiteLLM per-token rates so the Rust sidecar doesn't need
+    to link against LiteLLM.
+
+    Returns a dict keyed by ``"{model_name}|{normalized_service_tier}"`` with
+    {input, cached_input, output} effective per-token rates. The Flex 0.5x
+    discount is baked into ``_rate_from_litellm``; the cached_input→input
+    fallback for legacy rows (LiteLLM has no cache_read price) is applied
+    here so the sidecar can just multiply tokens × rate.
+    """
+    distinct: list[tuple[str | None, str | None]] = (
+        db.session.query(ModelCall.model_name, ModelCall.service_tier).distinct().all()
+    )
+    rates: dict[str, dict[str, float]] = {}
+    for model_name, service_tier in distinct:
+        if not model_name:
+            continue
+        tier_key = (service_tier or "default").strip().lower() or "default"
+        key = f"{model_name}|{tier_key}"
+        if key in rates:
+            continue
+        input_rate = _rate_from_litellm(
+            model_name, "input_cost_per_token", service_tier
+        )
+        cached_rate = _rate_from_litellm(
+            model_name, "cache_read_input_token_cost", service_tier
+        )
+        output_rate = _rate_from_litellm(
+            model_name, "output_cost_per_token", service_tier
+        )
+        effective_cached = cached_rate if cached_rate else input_rate
+        rates[key] = {
+            "input": float(input_rate),
+            "cached_input": float(effective_cached),
+            "output": float(output_rate),
+        }
+    return {
+        "rates": rates,
+        "whisper_rate_per_hour": float(
+            app_config.get(
+                "whisper_cost_rate_per_hour", DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
+            )
+            or 0.0
+        ),
+        "ina_rate_per_hour": float(
+            app_config.get(
+                "ina_cost_rate_per_hour", DEFAULTS.APP_INA_COST_RATE_PER_HOUR
+            )
+            or 0.0
+        ),
+        "legacy_rate_per_hour": float(
+            app_config.get("cost_rate_per_hour", DEFAULTS.APP_COST_RATE_PER_HOUR) or 0.0
+        ),
+    }
+
+
+def _enrich_rust_users_with_stripe(users_data: list[dict[str, Any]]) -> None:
+    """Fill in subscription_amount_cents on the sidecar's users payload.
+
+    The Rust sidecar can't talk to Stripe, so it leaves
+    ``subscription_amount_cents`` as ``null``. Mirror the Python path that
+    uses ``billing_cache.fetch_subscription_amount`` for each user with a
+    Stripe subscription id.
+    """
+    from app.billing_cache import fetch_subscription_amount, stripe_billing_enabled
+
+    if not stripe_billing_enabled():
+        return
+
+    for user in users_data:
+        sub_id = user.get("stripe_subscription_id")
+        if sub_id:
+            user["subscription_amount_cents"] = fetch_subscription_amount(sub_id)
+
+
 @costs_bp.route("/api/admin/costs", methods=["GET"])
 def api_admin_costs() -> flask.Response:
     """Return platform cost data for the admin dashboard.
@@ -210,6 +307,19 @@ def api_admin_costs() -> flask.Response:
 
     config_data = read_combined()
     app_config = config_data.get("app", {})
+
+    # Rust sidecar path: pure SQLite read + aggregation. Falls back to the
+    # Python implementation below when the flag is off or the sidecar fails.
+    rust_payload = try_render_admin_costs(
+        db_path=get_instance_dir() / "sqlite3.db",
+        year=year,
+        month=month,
+        rates_payload=_build_rust_rates_payload(app_config),
+    )
+    if rust_payload is not None:
+        _enrich_rust_users_with_stripe(rust_payload.get("users", []))
+        return jsonify(rust_payload)
+
     legacy_cost_rate = float(
         app_config.get("cost_rate_per_hour", DEFAULTS.APP_COST_RATE_PER_HOUR) or 0.0
     )
@@ -274,7 +384,11 @@ def api_admin_costs() -> flask.Response:
             for call in post_model_calls
             if _is_billable_llm_call(call)
         )
-        whisper_cost = whisper_cost_rate * duration_hours
+        whisper_cost = (
+            whisper_cost_rate * duration_hours
+            if any(_is_whisper_call(call) for call in post_model_calls)
+            else 0.0
+        )
         ina_cost = (
             ina_cost_rate * duration_hours
             if any(_is_ina_call(call) for call in post_model_calls)
@@ -367,6 +481,16 @@ def api_admin_costs_calls() -> flask.Response:
         per_page = min(200, max(1, int(request.args.get("per_page", 50))))
     except ValueError, TypeError:
         return flask.make_response(jsonify({"error": "Invalid pagination params"}), 400)
+
+    config_data = read_combined()
+    rust_payload = try_render_admin_costs_calls(
+        db_path=get_instance_dir() / "sqlite3.db",
+        page=page,
+        per_page=per_page,
+        rates_payload=_build_rust_rates_payload(config_data.get("app", {})),
+    )
+    if rust_payload is not None:
+        return jsonify(rust_payload)
 
     total = db.session.query(ModelCall).count()
     calls: list[ModelCall] = (

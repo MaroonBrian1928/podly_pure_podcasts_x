@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
 import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
+import { formatBackendDateTime } from '../utils/datetime';
 import {
   formatTimelineRange,
 } from '../utils/processingTimeline';
@@ -15,7 +16,7 @@ interface ChapterProcessingStatsProps {
   className?: string;
 }
 
-type TabId = 'overview' | 'audio' | 'chapters' | 'speakers' | 'transcript' | 'logs';
+type TabId = 'overview' | 'audio' | 'chapters' | 'speakers' | 'model-calls' | 'transcript' | 'logs';
 
 export default function ChapterProcessingStats({
   episodeGuid,
@@ -24,6 +25,7 @@ export default function ChapterProcessingStats({
 }: ChapterProcessingStatsProps) {
   const [showModal, setShowModal] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [expandedModelCalls, setExpandedModelCalls] = useState<Set<number>>(new Set());
 
   const { data: stats, isLoading, error } = useQuery({
     queryKey: ['episode-stats', episodeGuid],
@@ -36,6 +38,22 @@ export default function ChapterProcessingStats({
     && (stats?.processing_stats?.speaker_breakdown?.length || 0) > 0;
   const hasAudioSegments = (stats?.audio_segments?.length || 0) > 0;
   const modelEntries = Object.entries(stats?.processing_stats?.model_types || {});
+  const estimatedCost = stats?.processing_stats?.estimated_cost;
+
+  const formatTimestamp = (timestamp: string | null) => {
+    if (!timestamp) return 'N/A';
+    return formatBackendDateTime(timestamp);
+  };
+
+  const toggleModelCallDetails = (callId: number) => {
+    const nextExpanded = new Set(expandedModelCalls);
+    if (nextExpanded.has(callId)) {
+      nextExpanded.delete(callId);
+    } else {
+      nextExpanded.add(callId);
+    }
+    setExpandedModelCalls(nextExpanded);
+  };
 
   useEffect(() => {
     if (!showTranscriptTab && activeTab === 'transcript') {
@@ -178,6 +196,7 @@ export default function ChapterProcessingStats({
                   ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
                   { id: 'chapters', label: 'Chapters' },
                   ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
+                  { id: 'model-calls', label: 'Model Calls' },
                   { id: 'logs', label: 'Related Logs' },
                   ...(showTranscriptTab ? [{ id: 'transcript', label: 'Transcript' }] : []),
                 ].map((tab) => (
@@ -194,6 +213,7 @@ export default function ChapterProcessingStats({
                     {stats && tab.id === 'audio' && ` (${stats.audio_segments?.length || 0})`}
                     {stats && tab.id === 'chapters' && stats.chapters && ` (${stats.chapters.chapters?.length || 0})`}
                     {stats && tab.id === 'speakers' && ` (${stats.processing_stats?.speaker_breakdown?.length || 0})`}
+                    {stats && tab.id === 'model-calls' && stats.model_calls && ` (${stats.model_calls.length})`}
                     {stats && tab.id === 'logs' && ` (${stats.related_logs?.entries.length || 0})`}
                     {stats && tab.id === 'transcript' && ` (${stats.transcript_segments?.length || 0})`}
                   </button>
@@ -268,6 +288,14 @@ export default function ChapterProcessingStats({
                               {isChapterInsert ? 'Chapters Removed (N/A)' : 'Chapters Removed'}
                             </div>
                           </div>
+                          {estimatedCost != null && (
+                            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
+                              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-200">
+                                ${estimatedCost.toFixed(4)}
+                              </div>
+                              <div className="text-sm text-indigo-800 dark:text-indigo-100">Estimated LLM Cost</div>
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -301,27 +329,50 @@ export default function ChapterProcessingStats({
                       )}
 
                       <div>
-                        <h3 className="font-semibold text-gray-900 mb-4 text-left">
-                          Models Used ({stats.processing_stats?.total_model_calls || 0} calls)
-                        </h3>
-                        {modelEntries.length === 0 ? (
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-                            No model calls were recorded for this run.
-                          </div>
-                        ) : (
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">AI Model Performance</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                           <div className="bg-white border rounded-lg p-4">
+                            <h4 className="font-medium text-gray-900 mb-3 text-left">Processing Status</h4>
+                            <div className="space-y-2">
+                              {Object.entries(stats.processing_stats?.model_call_statuses || {}).map(([status, count]) => (
+                                <div key={status} className="flex justify-between items-center">
+                                  <span className="text-sm text-gray-600 capitalize">{status}</span>
+                                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                    status === 'success' ? 'bg-green-100 text-green-800' :
+                                    status === 'failed' || status === 'failed_permanent' || status === 'failed_retries' ? 'bg-red-100 text-red-800' :
+                                    status === 'cancelled' ? 'bg-gray-200 text-gray-700' :
+                                    status === 'retrying' ? 'bg-orange-100 text-orange-800' :
+                                    'bg-gray-100 text-gray-800'
+                                  }`}>
+                                    {count}
+                                  </span>
+                                </div>
+                              ))}
+                              {Object.keys(stats.processing_stats?.model_call_statuses || {}).length === 0 && (
+                                <p className="text-sm text-gray-500 text-left">No model calls were recorded for this run.</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="bg-white border rounded-lg p-4">
+                            <h4 className="font-medium text-gray-900 mb-3 text-left">
+                              Models Used ({stats.processing_stats?.total_model_calls || 0} calls)
+                            </h4>
                             <div className="space-y-2">
                               {modelEntries.map(([model, count]) => (
-                                <div key={model} className="flex justify-between items-center">
-                                  <span className="text-sm text-gray-600">{model}</span>
-                                  <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                                <div key={model} className="flex justify-between items-center gap-4">
+                                  <span className="text-sm text-gray-600 break-all text-left">{model}</span>
+                                  <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium shrink-0">
                                     {count} calls
                                   </span>
                                 </div>
                               ))}
+                              {modelEntries.length === 0 && (
+                                <p className="text-sm text-gray-500 text-left">No model calls were recorded for this run.</p>
+                              )}
                             </div>
                           </div>
-                        )}
+                        </div>
                       </div>
 
                       {!isChapterInsert && (stats.chapters?.filter_strings ?? []).length > 0 && (
@@ -472,6 +523,123 @@ export default function ChapterProcessingStats({
                           No chapter data available.
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {activeTab === 'model-calls' && (
+                    <div>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Model Calls ({stats.model_calls?.length || 0})</h3>
+                      <div className="bg-white border rounded-lg overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Range / Phase</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + cached prompt + completion = total tokens">Tokens</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {(stats.model_calls || []).map((call) => {
+                                const tokenTotal = call.prompt_tokens != null || call.cached_prompt_tokens != null || call.completion_tokens != null
+                                  ? (call.prompt_tokens ?? 0) + (call.cached_prompt_tokens ?? 0) + (call.completion_tokens ?? 0)
+                                  : call.total_tokens;
+
+                                return (
+                                  <Fragment key={call.id}>
+                                    <tr className="hover:bg-gray-50">
+                                      <td className="px-4 py-3 text-sm text-gray-900">{call.id}</td>
+                                      <td className="px-4 py-3 text-sm text-gray-900 break-all">{call.model_name}</td>
+                                      <td className="px-4 py-3 text-sm text-gray-600">{call.segment_range}</td>
+                                      <td className="px-4 py-3">
+                                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                          call.status === 'success' ? 'bg-green-100 text-green-800' :
+                                          call.status === 'failed' || call.status === 'failed_permanent' || call.status === 'failed_retries' ? 'bg-red-100 text-red-800' :
+                                          call.status === 'cancelled' ? 'bg-gray-200 text-gray-700' :
+                                          call.status === 'retrying' ? 'bg-orange-100 text-orange-800' :
+                                          'bg-yellow-100 text-yellow-800'
+                                        }`}>
+                                          {call.status}
+                                        </span>
+                                      </td>
+                                      <td className="px-4 py-3 text-sm">
+                                        {call.service_tier ? (
+                                          <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                            call.service_tier === 'flex' ? 'bg-purple-100 text-purple-800' :
+                                            call.service_tier === 'priority' ? 'bg-blue-100 text-blue-800' :
+                                            'bg-gray-100 text-gray-700'
+                                          }`}>
+                                            {call.service_tier}
+                                          </span>
+                                        ) : (
+                                          <span className="text-gray-400">—</span>
+                                        )}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                        {tokenTotal != null ? (
+                                          <span title={`prompt ${call.prompt_tokens ?? '—'} + cached prompt ${call.cached_prompt_tokens ?? '—'} + completion ${call.completion_tokens ?? '—'}`}>
+                                            {tokenTotal.toLocaleString()}
+                                          </span>
+                                        ) : (
+                                          <span className="text-gray-400">—</span>
+                                        )}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
+                                      <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
+                                      <td className="px-4 py-3">
+                                        <button
+                                          onClick={() => toggleModelCallDetails(call.id)}
+                                          className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                                        >
+                                          {expandedModelCalls.has(call.id) ? 'Hide' : 'Details'}
+                                        </button>
+                                      </td>
+                                    </tr>
+                                    {expandedModelCalls.has(call.id) && (
+                                      <tr className="bg-gray-50">
+                                        <td colSpan={9} className="px-4 py-4">
+                                          <div className="space-y-4">
+                                            {call.prompt && (
+                                              <div>
+                                                <h5 className="font-medium text-gray-900 mb-2 text-left">Prompt:</h5>
+                                                <div className="bg-gray-100 p-3 rounded text-sm font-mono whitespace-pre-wrap max-h-40 overflow-y-auto text-left">
+                                                  {call.prompt}
+                                                </div>
+                                              </div>
+                                            )}
+                                            {call.error_message && (
+                                              <div>
+                                                <h5 className="font-medium text-red-900 mb-2 text-left">Error Message:</h5>
+                                                <div className="bg-red-50 p-3 rounded text-sm font-mono whitespace-pre-wrap text-left">
+                                                  {call.error_message}
+                                                </div>
+                                              </div>
+                                            )}
+                                            {call.response && (
+                                              <div>
+                                                <h5 className="font-medium text-gray-900 mb-2 text-left">Response:</h5>
+                                                <div className="bg-gray-100 p-3 rounded text-sm font-mono whitespace-pre-wrap max-h-40 overflow-y-auto text-left">
+                                                  {call.response}
+                                                </div>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     </div>
                   )}
 

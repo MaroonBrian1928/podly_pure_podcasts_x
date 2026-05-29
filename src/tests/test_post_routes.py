@@ -2070,6 +2070,76 @@ def test_post_stats_exposes_retry_count_separately_from_attempt_count(app):
     assert retry_counts[("whisper-1", "0-0")] == (0, 0)
 
 
+def test_post_stats_includes_chapter_llm_model_calls(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(
+            title="Chapter Stats Feed",
+            rss_url="https://example.com/feed.xml",
+            ad_detection_strategy="chapter_insert",
+        )
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="chapter-llm-model-call-stats-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Chapter LLM Model Call Stats",
+            processed_audio_path="/tmp/chapter-output.mp3",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=-100,
+                    last_segment_sequence_num=-100,
+                    model_name="gemini/gemini-3-flash-preview",
+                    prompt="chapter title prompt",
+                    response="chapter title response",
+                    status="success",
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    total_tokens=15,
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=-200,
+                    last_segment_sequence_num=-200,
+                    model_name="gemini/gemini-3-flash-preview",
+                    prompt="chapter topic prompt",
+                    response="chapter topic response",
+                    status="success",
+                    prompt_tokens=20,
+                    completion_tokens=8,
+                    total_tokens=28,
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["total_model_calls"] == 2
+    assert payload["processing_stats"]["model_types"] == {
+        "gemini/gemini-3-flash-preview": 2
+    }
+    ranges = {call["segment_range"] for call in payload["model_calls"]}
+    assert "chapter titles (LLM)" in ranges
+    assert "chapter topic plan (LLM)" in ranges
+    assert "-100--100" not in ranges
+
+
 def test_post_stats_includes_debug_info_when_enabled(app, tmp_path):
     app.testing = True
     app.register_blueprint(post_bp)

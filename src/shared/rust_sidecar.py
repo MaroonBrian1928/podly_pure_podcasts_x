@@ -25,6 +25,7 @@ RUST_PROFANITY_ENABLED_ENV = "PODLY_RUST_PROFANITY_ENABLED"
 RUST_FEED_POSTS_ENABLED_ENV = "PODLY_RUST_FEED_POSTS_ENABLED"
 RUST_WORD_BOUNDARY_ENABLED_ENV = "PODLY_RUST_WORD_BOUNDARY_ENABLED"
 RUST_CHAPTER_FALLBACK_ENABLED_ENV = "PODLY_RUST_CHAPTER_FALLBACK_ENABLED"
+RUST_COSTS_ENABLED_ENV = "PODLY_RUST_COSTS_ENABLED"
 
 
 class RustSidecarError(RuntimeError):
@@ -85,6 +86,10 @@ def rust_word_boundary_enabled() -> bool:
 
 def rust_chapter_fallback_enabled() -> bool:
     return env_flag_enabled(RUST_CHAPTER_FALLBACK_ENABLED_ENV)
+
+
+def rust_costs_enabled() -> bool:
+    return env_flag_enabled(RUST_COSTS_ENABLED_ENV)
 
 
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
@@ -1391,3 +1396,138 @@ def try_extract_profanity_windows(
             return None
         result.append((int(item[0]), int(item[1])))
     return result
+
+
+def try_render_admin_costs(
+    *,
+    db_path: Path,
+    year: int,
+    month: int,
+    rates_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Render the /api/admin/costs envelope via the Rust sidecar.
+
+    `rates_payload` must have shape::
+
+        {
+          "rates": {
+            "<model_name>|<service_tier_or_default>": {
+              "input": float, "cached_input": float, "output": float
+            },
+            ...
+          },
+          "whisper_rate_per_hour": float,
+          "ina_rate_per_hour": float,
+          "legacy_rate_per_hour": float,
+        }
+
+    The caller pre-resolves LiteLLM rates (with Flex 0.5x discount and the
+    cached_input→input fallback already applied) so the sidecar never has to
+    link against LiteLLM. Stripe subscription_amount_cents is left ``null`` by
+    the sidecar and filled in by the caller.
+
+    Returns the parsed envelope dict, or ``None`` when the Rust path is
+    disabled, the binary fails, or the response shape is wrong (caller should
+    fall back to the Python implementation).
+    """
+    if not rust_costs_enabled():
+        return None
+
+    with _json_file(rates_payload) as rates_path:
+        try:
+            payload = run_podly_tools(
+                [
+                    "costs",
+                    "render-admin",
+                    "--db",
+                    str(db_path),
+                    "--year",
+                    str(int(year)),
+                    "--month",
+                    str(int(month)),
+                    "--rates-json",
+                    str(rates_path),
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust costs render-admin failed; falling back to Python behavior"
+            )
+            return None
+
+    if not _is_valid_admin_costs_payload(payload):
+        LOGGER.error("Rust costs render-admin returned invalid payload: %r", payload)
+        return None
+    return payload
+
+
+def try_render_admin_costs_calls(
+    *,
+    db_path: Path,
+    page: int,
+    per_page: int,
+    rates_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Render the /api/admin/costs/calls envelope via the Rust sidecar.
+
+    See `try_render_admin_costs` for the `rates_payload` shape — both
+    endpoints share it.
+    """
+    if not rust_costs_enabled():
+        return None
+
+    with _json_file(rates_payload) as rates_path:
+        try:
+            payload = run_podly_tools(
+                [
+                    "costs",
+                    "render-calls",
+                    "--db",
+                    str(db_path),
+                    "--page",
+                    str(int(page)),
+                    "--per-page",
+                    str(int(per_page)),
+                    "--rates-json",
+                    str(rates_path),
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust costs render-calls failed; falling back to Python behavior"
+            )
+            return None
+
+    if not _is_valid_admin_costs_calls_payload(payload):
+        LOGGER.error("Rust costs render-calls returned invalid payload: %r", payload)
+        return None
+    return payload
+
+
+def _is_valid_admin_costs_payload(payload: dict[str, Any]) -> bool:
+    required = {
+        "year",
+        "month",
+        "total_cost",
+        "total_llm_cost",
+        "total_whisper_cost",
+        "total_ina_cost",
+        "users",
+        "feeds",
+    }
+    if not required.issubset(payload.keys()):
+        return False
+    if not isinstance(payload["users"], list) or not isinstance(payload["feeds"], list):
+        return False
+    return all(isinstance(u, dict) for u in payload["users"]) and all(
+        isinstance(f, dict) for f in payload["feeds"]
+    )
+
+
+def _is_valid_admin_costs_calls_payload(payload: dict[str, Any]) -> bool:
+    required = {"calls", "total", "page", "per_page", "pages"}
+    if not required.issubset(payload.keys()):
+        return False
+    if not isinstance(payload["calls"], list):
+        return False
+    return all(isinstance(c, dict) for c in payload["calls"])

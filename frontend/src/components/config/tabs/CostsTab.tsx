@@ -125,6 +125,10 @@ export default function CostsTab() {
   const [showBackfillWizard, setShowBackfillWizard] = useState(false);
   const [backfillLimit, setBackfillLimit] = useState('');
   const [backfillResult, setBackfillResult] = useState<TokenBackfillResult | null>(null);
+  const [backfillNotice, setBackfillNotice] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const queryClient = useQueryClient();
 
   const { data: costs, isLoading: costsLoading } = useQuery<CostSummary>({
@@ -160,17 +164,36 @@ export default function CostsTab() {
       apply,
       limit: backfillLimit.trim() ? Number(backfillLimit) : null,
     }),
+    onMutate: () => {
+      setBackfillNotice(null);
+    },
     onSuccess: (data) => {
       setBackfillResult(data);
       if (data.apply) {
+        setBackfillNotice({
+          type: data.failed_updates > 0 ? 'error' : 'success',
+          message: data.failed_updates > 0
+            ? `Backfill finished with ${data.updated} update(s) and ${data.failed_updates} failure(s).`
+            : `Backfill complete. Updated ${data.updated} model call(s).`,
+        });
         toast.success(`Backfilled ${data.updated} model call(s)`);
         queryClient.invalidateQueries({ queryKey: ['admin-costs'] });
         queryClient.invalidateQueries({ queryKey: ['admin-calls'] });
       } else {
+        setBackfillNotice({
+          type: 'success',
+          message: `Dry run complete. ${data.would_update} model call(s) would be updated.`,
+        });
         toast.success(`Dry run found ${data.would_update} model call(s) to update`);
       }
     },
-    onError: () => toast.error('Token backfill failed'),
+    onError: () => {
+      setBackfillNotice({
+        type: 'error',
+        message: 'Token backfill failed. No token usage was updated.',
+      });
+      toast.error('Token backfill failed');
+    },
   });
 
   return (
@@ -402,6 +425,7 @@ export default function CostsTab() {
             onClick={() => {
               setShowBackfillWizard(true);
               setBackfillResult(null);
+              setBackfillNotice(null);
             }}
             className="px-4 py-2 text-sm bg-blue-50 border border-blue-300 text-blue-800 rounded hover:bg-blue-100"
           >
@@ -441,6 +465,7 @@ export default function CostsTab() {
               onChange={(event) => {
                 setBackfillLimit(event.target.value);
                 setBackfillResult(null);
+                setBackfillNotice(null);
               }}
               placeholder="All model calls"
               className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
@@ -448,6 +473,19 @@ export default function CostsTab() {
           </label>
 
           {backfillResult && <BackfillSummary result={backfillResult} />}
+
+          {backfillNotice && (
+            <div
+              className={`text-sm rounded border px-3 py-2 ${backfillNotice.type === 'success'
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-red-50 border-red-200 text-red-800'
+                }`}
+              role="status"
+              aria-live="polite"
+            >
+              {backfillNotice.message}
+            </div>
+          )}
 
           <div className="flex flex-wrap justify-end gap-3">
             <button

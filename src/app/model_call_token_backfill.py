@@ -72,6 +72,9 @@ def _is_legacy_billable_llm_call(call: ModelCall) -> bool:
 def _estimate_text_tokens(model_name: str, text: str) -> int:
     import litellm
 
+    from app.litellm_silencer import apply_litellm_suppress_debug_info
+
+    apply_litellm_suppress_debug_info()
     return int(litellm.token_counter(model=model_name, text=text))
 
 

@@ -48,7 +48,7 @@ from app.config_store import (  # noqa: E402
     hydrate_runtime_config_inplace,
 )
 from app.extensions import db, migrate, scheduler  # noqa: E402
-from app.litellm_silencer import silence_litellm_noise  # noqa: E402
+from app.litellm_silencer import install_litellm_log_filter  # noqa: E402
 from app.logger import setup_logger  # noqa: E402
 from app.runtime_config import config, is_test  # noqa: E402
 from shared import defaults as DEFAULTS  # noqa: E402
@@ -69,8 +69,12 @@ else:
     setup_logger("global_logger", "src/instance/logs/app.log")
 # Install the litellm log-noise filter before anything imports litellm so the
 # import-time "Bedrock/SageMaker: No module named botocore" warnings get
-# dropped, and so the "Give Feedback / Get Help" debug blurb on errors is off.
-silence_litellm_noise()
+# dropped. The matching `suppress_debug_info` flip is deferred to the call
+# sites that actually import litellm (apply_litellm_suppress_debug_info)
+# because importing litellm here would pull ~160 MiB of openai submodules
+# into every long-lived process at startup, even on requests that never
+# touch the LLM.
+install_litellm_log_filter()
 app_logger: logging.Logger = logging.getLogger("global_logger")
 
 
