@@ -1,3 +1,33 @@
+# [1.3.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v1.2.1...v1.3.0) (2026-05-29)
+
+
+### Bug Fixes
+
+* fix jemalloc integration and logging for scheduled memory trims ([9071366](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/90713667dafaf59fb54d5fdecb0c6c34c6c32cd0))
+* tighten up css for mobile and refactor sort button ([0450392](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/045039221e8162b371748ba95256ef38681c349f))
+* Use scalar_subquery() (a SELECT construct) so SQLAlchemy doesn't coerce a Subquery into a select() at IN()-time and emit a SAWarning. ([82e4a37](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/82e4a37fc1d7f8b62c1722cbaf7d21135ada041a))
+
+
+### Features
+
+* Add cached prompt tokens tracking to ModelCall and update related processing logic across components ([c7b399a](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c7b399abb6abcc7b52756f90b3b045195cdf22e2))
+* add litellm noise suppression and improve error logging in AdClassifier ([c1257d4](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c1257d427cc7354bb51efedc6e009957d148921b))
+* add LLM service tier configuration and handling ([8f0e52d](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/8f0e52d647ca5549953f5543233c7c563f28d6dd))
+* add Rust sidecar support for fetching feed posts and added memory trimming jobs to manage memory usage effectively during idle periods. ([0c21b08](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/0c21b08e1b4ee791bc70753b06fabcde11657b6a))
+* Add service tier tracking to ModelCall and related processing ([9b67147](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/9b67147d10f0b3c90aa6062a634f6c7a76a6328d))
+* Add token usage tracking to ModelCall and update related processing logic and display in modelcall ui ([50059af](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/50059affc7176da92ca56117086f415f68503dd4))
+* Add total audio hours calculation and display in cost summary ([21f431e](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/21f431e861c1973bb8b60a1a271b1d7518ffcbc5))
+* Enhance chapter text truncation to include mid-block content for better chapter title generation ([88c95b5](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/88c95b5161109a90e05202fd517f0191887cd8cb))
+* Enhance service tier tracking with in-flight status and duration calculations. Unify UI between job page and episode list ([0fb68f5](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/0fb68f57d5954c79b8f6cb15c46d922530ea759c))
+* Implement delete_model_calls_for_post_by_model_name action and update related processing logic to ensure idempotency during re-runs ([c9fbf81](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c9fbf81d01097ed448a0ee1a46435d86d7c05fb9))
+* implement dotenv loading functionality and add tests for environment variable management ([257d948](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/257d948da0a62acea14e9f8c1d1ba5ad9218773d))
+* Implement token backfill functionality for legacy ModelCall entries and add related API endpoint ([2aafced](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/2aafceddb21657cc8e040e92819ec1164c3d10ac))
+* Modify logging setup to prevent file handler attachment during pytest runs, ensuring test logs remain separate from production logs. ([f206af2](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/f206af2fe71abf5a83b7408f1f0657b55607bcde))
+* Refactor chapter processing functions to improve chapter start time adjustments and ensure output spans full audio duration ([7616c89](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/7616c89865884c8f19d71d23b0ed1af59b503440))
+* Refactor EpisodeProcessingStatus to use setInterval for smoother time updates and enhance JobProgressCaption with optional tier chip visibility ([9caa0d6](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/9caa0d6f814b87164bf02d71c7d7707faf5f6ecf))
+* ship memory_followups plan (log rotation + word-boundary & ([e5e09af](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/e5e09af05e8d1fe0bb254421bc0727d03ffbd221))
+* Update chapter processing parameters to allow longer context in chapter titles and enhance feed generation logic to hide posts with active processing jobs ([3ba388f](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/3ba388f49c86abba1ee3e4cefbc9540cf49bf204))
+
 ## [1.2.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v1.2.0...v1.2.1) (2026-05-15)
 
 
