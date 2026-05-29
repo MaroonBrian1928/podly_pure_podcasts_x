@@ -1,6 +1,14 @@
 #!/bin/bash
 set -e
 
+# jemalloc preload is configured via /etc/ld.so.preload by the Dockerfile,
+# so it survives the gosu UID transition below (glibc strips LD_PRELOAD on
+# setresuid). To opt out at runtime, set PODLY_JEMALLOC_PRELOAD=0 and we
+# remove the preload file before exec'ing the app.
+if [ "${PODLY_JEMALLOC_PRELOAD:-1}" = "0" ] && [ -f /etc/ld.so.preload ]; then
+    rm -f /etc/ld.so.preload
+fi
+
 # Check if PUID/PGID env variables are set
 if [ -n "${PUID}" ] && [ -n "${PGID}" ] && [ "$(id -u)" = "0" ]; then
     echo "Using custom UID:GID = ${PUID}:${PGID}"

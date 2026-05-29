@@ -85,6 +85,20 @@ export interface Job {
   ad_windows_count?: number | null;
   had_classification_parse_error?: boolean;
   auto_retry_attempted?: boolean;
+  // Service tier summary across this post's ModelCall rows. Present only
+  // when at least one call was made at a non-default tier. `latest` is the
+  // most recent call's tier; `mixed` is true when calls used multiple tiers
+  // (e.g. Flex retried then fell back to standard).
+  service_tier?: {
+    label: string;
+    latest: string;
+    mixed: boolean;
+    in_flight?: {
+      status: 'pending' | 'retrying';
+      attempt: number;
+      max_retries?: number;
+    };
+  };
 }
 
 export interface JobManagerRun {
@@ -141,6 +155,7 @@ export interface LLMConfig {
   enable_boundary_refinement: boolean;
   enable_word_level_boundary_refinder?: boolean;
   enable_llm_chapter_fallback_tagging?: boolean;
+  llm_service_tier?: 'default' | 'flex' | 'priority' | 'auto';
 }
 
 export type WhisperConfig =
@@ -191,6 +206,8 @@ export interface AppConfigUI {
   user_limit_total: number | null;
   autoprocess_on_download: boolean;
   cost_rate_per_hour: number;
+  whisper_cost_rate_per_hour: number;
+  ina_cost_rate_per_hour: number;
 }
 
 export interface CombinedConfig {
@@ -295,6 +312,9 @@ export interface CostFeed {
   subscriber_count: number;
   episodes_this_month: number;
   monthly_cost: number;
+  llm_cost: number;
+  whisper_cost: number;
+  ina_cost: number;
 }
 
 export interface CostSummary {
@@ -302,6 +322,12 @@ export interface CostSummary {
   month: number;
   total_cost: number;
   cost_rate_per_hour: number;
+  whisper_cost_rate_per_hour: number;
+  ina_cost_rate_per_hour: number;
+  total_llm_cost: number;
+  total_whisper_cost: number;
+  total_ina_cost: number;
+  total_audio_hours: number;
   users: CostUser[];
   feeds: CostFeed[];
 }
@@ -313,6 +339,12 @@ export interface CallLogEntry {
   status: string;
   timestamp: string | null;
   retry_attempts: number;
+  service_tier?: string | null;
+  prompt_tokens?: number | null;
+  cached_prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  estimated_cost?: number;
 }
 
 export interface CallLog {
@@ -321,4 +353,37 @@ export interface CallLog {
   page: number;
   per_page: number;
   pages: number;
+}
+
+export interface TokenBackfillModelSummary {
+  would_update: number;
+  updated: number;
+  tokenizer_errors: number;
+}
+
+export interface EstimatedCostBackfillResult {
+  applied: boolean;
+  scanned: number;
+  eligible: number;
+  skipped_non_billable: number;
+  updated: number;
+}
+
+export interface TokenBackfillResult {
+  apply: boolean;
+  scanned: number;
+  eligible: number;
+  would_update: number;
+  updated: number;
+  skipped_existing: number;
+  skipped_non_llm: number;
+  skipped_missing_text: number;
+  skipped_tokenizer_error: number;
+  failed_updates: number;
+  models: Record<string, TokenBackfillModelSummary>;
+  errors: Array<{
+    model_call_id: number;
+    model_name: string;
+    error: string;
+  }>;
 }

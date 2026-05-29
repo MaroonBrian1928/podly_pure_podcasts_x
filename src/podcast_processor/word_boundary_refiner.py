@@ -13,9 +13,12 @@ from typing import Any, cast
 from jinja2 import Template
 
 from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
     extract_litellm_content,
     extract_litellm_finish_reason,
     extract_litellm_usage,
+    record_service_tier_on_model_call,
     render_prompt_and_upsert_model_call,
     try_update_model_call,
 )
@@ -72,6 +75,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         all_segments: list[dict[str, Any]],
         *,
         post_id: int | None = None,
+        post_guid: str | None = None,
         first_seq_num: int | None = None,
         last_seq_num: int | None = None,
     ) -> WordBoundaryRefinement:
@@ -81,6 +85,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             all_segments,
             first_seq_num=first_seq_num,
             last_seq_num=last_seq_num,
+            post_guid=post_guid,
         )
 
         prompt, model_call_id = render_prompt_and_upsert_model_call(
@@ -100,16 +105,24 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         raw_response: str | None = None
 
         try:
-            import litellm
-
-            response = litellm.completion(
-                model=self.config.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=4096,
-                timeout=self.config.openai_timeout,
-                api_key=self.config.llm_api_key,
-                base_url=self.config.openai_base_url,
+            completion_args: dict[str, Any] = {
+                "model": self.config.llm_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 4096,
+                "timeout": self.config.openai_timeout,
+                "api_key": self.config.llm_api_key,
+                "base_url": self.config.openai_base_url,
+            }
+            apply_service_tier(completion_args, self.config)
+            record_service_tier_on_model_call(
+                model_call_id,
+                completion_args,
+                logger=self.logger,
+                log_prefix="Word boundary refine",
+            )
+            response = call_litellm_with_tier_retry(
+                completion_args, config=self.config, logger=self.logger
             )
 
             content = extract_litellm_content(response)
@@ -123,6 +136,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 extra={
                     "content_preview": (content or "")[:200],
                     "prompt_tokens": usage.get("prompt_tokens"),
+                    "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
                     "total_tokens": usage.get("total_tokens"),
                 },
@@ -133,10 +147,19 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status="received_response",
                 response=raw_response,
                 error_message=None,
+                usage=usage,
             )
 
-            parsed = self._parse_json(content)
-            if not parsed:
+            rust_result = self._try_rust_refine_from_llm(
+                content=content,
+                ad_start=ad_start,
+                ad_end=ad_end,
+                post_guid=post_guid,
+                first_seq_num=first_seq_num,
+                last_seq_num=last_seq_num,
+            )
+
+            if rust_result is not None and rust_result.get("parse_status") == "failed":
                 parse_failure_reason = self._parse_failure_reason(finish_reason)
                 self.logger.warning(
                     "Word boundary refine: no parseable JSON (%s); falling back to original start",
@@ -157,27 +180,68 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 )
                 return self._fallback(ad_start, ad_end)
 
-            payload = self._extract_payload(parsed)
+            if rust_result is not None:
+                if rust_result.get("parse_status") == "salvaged":
+                    self.logger.warning(
+                        "Word boundary refine: recovered partial fields via Rust salvage",
+                        extra={
+                            "rust_path": "word_boundary_refine_from_llm",
+                            "content_preview": (content or "")[:200],
+                        },
+                    )
+                refined_start = float(rust_result["refined_start"])
+                start_changed = bool(rust_result["start_changed"])
+                start_err = rust_result.get("start_error") or None
+                refined_end = float(rust_result["refined_end"])
+                end_changed = bool(rust_result["end_changed"])
+                end_err = rust_result.get("end_error") or None
+                start_reason = str(rust_result.get("start_reason") or "")
+                end_reason = str(rust_result.get("end_reason") or "")
+            else:
+                parsed = self._parse_json(content)
+                if not parsed:
+                    parse_failure_reason = self._parse_failure_reason(finish_reason)
+                    self.logger.warning(
+                        "Word boundary refine: no parseable JSON (%s); falling back to original start",
+                        parse_failure_reason,
+                        extra={
+                            "finish_reason": finish_reason,
+                            "content_preview": (content or "")[:200],
+                            "prompt_tokens": usage.get("prompt_tokens"),
+                            "completion_tokens": usage.get("completion_tokens"),
+                            "total_tokens": usage.get("total_tokens"),
+                        },
+                    )
+                    self._update_model_call(
+                        model_call_id,
+                        status="success_heuristic",
+                        response=raw_response,
+                        error_message=f"parse_failed:{parse_failure_reason}",
+                    )
+                    return self._fallback(ad_start, ad_end)
 
-            refined_start, start_changed, start_reason, start_err = self._refine_start(
-                ad_start=ad_start,
-                all_segments=all_segments,
-                context_segments=context,
-                start_segment_seq=payload["start_segment_seq"],
-                start_phrase=payload["start_phrase"],
-                start_word=payload["start_word"],
-                start_occurrence=payload["start_occurrence"],
-                start_word_index=payload["start_word_index"],
-                start_reason=payload["start_reason"],
-            )
-            refined_end, end_changed, end_reason, end_err = self._refine_end(
-                ad_end=ad_end,
-                all_segments=all_segments,
-                context_segments=context,
-                end_segment_seq=payload["end_segment_seq"],
-                end_phrase=payload["end_phrase"],
-                end_reason=payload["end_reason"],
-            )
+                payload = self._extract_payload(parsed)
+                refined_start, start_changed, start_reason, start_err = (
+                    self._refine_start(
+                        ad_start=ad_start,
+                        all_segments=all_segments,
+                        context_segments=context,
+                        start_segment_seq=payload["start_segment_seq"],
+                        start_phrase=payload["start_phrase"],
+                        start_word=payload["start_word"],
+                        start_occurrence=payload["start_occurrence"],
+                        start_word_index=payload["start_word_index"],
+                        start_reason=payload["start_reason"],
+                    )
+                )
+                refined_end, end_changed, end_reason, end_err = self._refine_end(
+                    ad_end=ad_end,
+                    all_segments=all_segments,
+                    context_segments=context,
+                    end_segment_seq=payload["end_segment_seq"],
+                    end_phrase=payload["end_phrase"],
+                    end_reason=payload["end_reason"],
+                )
 
             partial_errors = [e for e in [start_err, end_err] if e]
 
@@ -621,7 +685,19 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         *,
         first_seq_num: int | None,
         last_seq_num: int | None,
+        post_guid: str | None = None,
     ) -> list[dict[str, Any]]:
+        rust_selected = self._try_rust_get_context(
+            ad_start,
+            ad_end,
+            all_segments,
+            first_seq_num=first_seq_num,
+            last_seq_num=last_seq_num,
+            post_guid=post_guid,
+        )
+        if rust_selected is not None:
+            return rust_selected
+
         selected = self._context_by_seq_window(
             all_segments,
             first_seq_num=first_seq_num,
@@ -631,6 +707,139 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             return selected
 
         return self._context_by_time_overlap(ad_start, ad_end, all_segments)
+
+    def _try_rust_get_context(
+        self,
+        ad_start: float,
+        ad_end: float,
+        all_segments: list[dict[str, Any]],
+        *,
+        first_seq_num: int | None,
+        last_seq_num: int | None,
+        post_guid: str | None,
+    ) -> list[dict[str, Any]] | None:
+        """Run the Rust wb-context selector and re-attach Python-side `words`.
+
+        Returns None when the Rust path is disabled, the caller didn't supply a
+        post_guid, or the sidecar fails — letting `_get_context` fall back to
+        the in-Python selectors.
+        """
+        if not post_guid:
+            return None
+
+        from shared.processing_paths import get_instance_dir
+        from shared.rust_sidecar import rust_word_boundary_enabled, try_wb_context
+
+        if not rust_word_boundary_enabled():
+            return None
+
+        try:
+            db_path = get_instance_dir() / "sqlite3.db"
+            rust_segments = try_wb_context(
+                db_path=db_path,
+                post_guid=post_guid,
+                ad_start=float(ad_start),
+                ad_end=float(ad_end),
+                first_seq=first_seq_num,
+                last_seq=last_seq_num,
+            )
+        except Exception:
+            self.logger.exception(
+                "Rust wb-context bootstrap failed; falling back to Python"
+            )
+            return None
+
+        if rust_segments is None:
+            return None
+
+        # Re-attach the in-memory segments (with their `words` arrays) by
+        # sequence_num so the downstream phrase-time helpers — which still run
+        # in Python — see the same shape they would have built locally.
+        by_seq: dict[int, dict[str, Any]] = {}
+        for seg in all_segments:
+            try:
+                by_seq[int(seg.get("sequence_num", -1))] = seg
+            except Exception:  # noqa: BLE001
+                continue
+
+        rehydrated: list[dict[str, Any]] = []
+        for item in rust_segments:
+            try:
+                seq = int(item.get("sequence_num", -1))
+            except Exception:  # noqa: BLE001
+                continue
+            original = by_seq.get(seq)
+            rehydrated.append(original if original is not None else item)
+
+        self.logger.info(
+            "Word-boundary context selected via Rust sidecar",
+            extra={
+                "rust_path": "word_boundary_context",
+                "selected_count": len(rehydrated),
+            },
+        )
+        return rehydrated
+
+    def _try_rust_refine_from_llm(
+        self,
+        *,
+        content: str,
+        ad_start: float,
+        ad_end: float,
+        post_guid: str | None,
+        first_seq_num: int | None,
+        last_seq_num: int | None,
+    ) -> dict[str, Any] | None:
+        """Bundle parse + context + resolve into a single Rust subprocess call.
+
+        Returns the sidecar payload (with `parse_status` set to `"ok"`,
+        `"salvaged"`, or `"failed"`) on success, or `None` to signal that the
+        caller should fall back to the Python chain (flag off, no post_guid,
+        sidecar error, or unexpected payload).
+        """
+        if not post_guid:
+            return None
+
+        from shared.processing_paths import get_instance_dir
+        from shared.rust_sidecar import (
+            rust_word_boundary_enabled,
+            try_wb_refine_from_llm,
+        )
+
+        if not rust_word_boundary_enabled():
+            return None
+
+        try:
+            db_path = get_instance_dir() / "sqlite3.db"
+            result = try_wb_refine_from_llm(
+                db_path=db_path,
+                post_guid=post_guid,
+                orig_ad_start=float(ad_start),
+                orig_ad_end=float(ad_end),
+                first_seq=first_seq_num,
+                last_seq=last_seq_num,
+                raw_content=content or "",
+            )
+        except Exception:
+            self.logger.exception(
+                "Rust wb-refine-from-llm bootstrap failed; falling back to Python"
+            )
+            return None
+
+        if result is None:
+            return None
+
+        self.logger.info(
+            "Word-boundary refined via bundled Rust sidecar",
+            extra={
+                "rust_path": "word_boundary_refine_from_llm",
+                "parse_status": result.get("parse_status"),
+                "start_changed": bool(result.get("start_changed")),
+                "end_changed": bool(result.get("end_changed")),
+            },
+        )
+
+        return result
 
     def _context_by_seq_window(
         self,
@@ -1064,6 +1273,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         status: str,
         response: str | None,
         error_message: str | None,
+        usage: dict[str, int | None] | None = None,
     ) -> None:
         try_update_model_call(
             model_call_id,
@@ -1072,4 +1282,5 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             error_message=error_message,
             logger=self.logger,
             log_prefix="Word boundary refine",
+            usage=usage,
         )

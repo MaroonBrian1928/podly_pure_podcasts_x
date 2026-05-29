@@ -228,6 +228,11 @@ export default function LLMProcessingStats({
   const hasBleepWindows = stats?.processing_stats?.edited_bleep_windows != null
     ? bleepTimelineSegments.length > 0
     : (stats?.processing_stats?.has_bleep_windows ?? false);
+  const estimatedCost = stats?.processing_stats?.estimated_cost;
+  // The backend only attaches per-call cost data for admins; use that as the
+  // signal for whether to render the Cost column at all so non-admins don't
+  // see a column full of em-dashes.
+  const showCostColumn = estimatedCost != null;
   const getAudioLabelStyle = (label: string) => {
     switch (label) {
       case 'music':
@@ -366,7 +371,7 @@ export default function LLMProcessingStats({
 
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
                           <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-blue-800/70 dark:from-blue-950 dark:to-slate-900">
                             <div className="text-2xl font-bold text-blue-600 dark:text-blue-200">
                               {stats.processing_stats?.total_segments || 0}
@@ -387,6 +392,14 @@ export default function LLMProcessingStats({
                             </div>
                             <div className="text-sm text-red-800 dark:text-red-100">Ad Segments Removed</div>
                           </div>
+                          {estimatedCost != null && (
+                            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
+                              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-200">
+                                ${estimatedCost.toFixed(4)}
+                              </div>
+                              <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated Cost</div>
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -561,6 +574,11 @@ export default function LLMProcessingStats({
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Segment Range</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + cached prompt + completion = total tokens">Tokens</th>
+                                {showCostColumn && (
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="USD cost for this call (LLM = tokens × LiteLLM rate; Whisper/INA = hourly rate × episode duration, split across success rows of that type)">Cost</th>
+                                )}
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -576,12 +594,50 @@ export default function LLMProcessingStats({
                                     <td className="px-4 py-3">
                                       <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
                                         call.status === 'success' ? 'bg-green-100 text-green-800' :
-                                        call.status === 'failed' ? 'bg-red-100 text-red-800' :
+                                        call.status === 'failed' || call.status === 'failed_permanent' || call.status === 'failed_retries' ? 'bg-red-100 text-red-800' :
+                                        call.status === 'cancelled' ? 'bg-gray-200 text-gray-700' :
+                                        call.status === 'retrying' ? 'bg-orange-100 text-orange-800' :
                                         'bg-yellow-100 text-yellow-800'
                                       }`}>
                                         {call.status}
                                       </span>
                                     </td>
+                                    <td className="px-4 py-3 text-sm">
+                                      {call.service_tier ? (
+                                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                          call.service_tier === 'flex' ? 'bg-purple-100 text-purple-800' :
+                                          call.service_tier === 'priority' ? 'bg-blue-100 text-blue-800' :
+                                          'bg-gray-100 text-gray-700'
+                                        }`}>
+                                          {call.service_tier}
+                                        </span>
+                                      ) : (
+                                        <span className="text-gray-400">—</span>
+                                      )}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                      {call.total_tokens != null ? (
+                                        <span
+                                          title={`prompt ${call.prompt_tokens ?? '—'} + cached prompt ${call.cached_prompt_tokens ?? '—'} + completion ${call.completion_tokens ?? '—'}${call.service_tier === 'flex' ? ' (flex)' : ''}`}
+                                        >
+                                          {call.total_tokens.toLocaleString()}
+                                          {call.service_tier === 'flex' && (
+                                            <span className="ml-1 text-purple-700">⚡</span>
+                                          )}
+                                        </span>
+                                      ) : (
+                                        <span className="text-gray-400">—</span>
+                                      )}
+                                    </td>
+                                    {showCostColumn && (
+                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                        {call.estimated_cost_usd != null ? (
+                                          `$${call.estimated_cost_usd.toFixed(4)}`
+                                        ) : (
+                                          <span className="text-gray-400">—</span>
+                                        )}
+                                      </td>
+                                    )}
                                     <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
                                     <td className="px-4 py-3">
@@ -595,7 +651,7 @@ export default function LLMProcessingStats({
                                   </tr>
                                   {expandedModelCalls.has(call.id) && (
                                     <tr className="bg-gray-50">
-                                      <td colSpan={7} className="px-4 py-4">
+                                      <td colSpan={showCostColumn ? 10 : 9} className="px-4 py-4">
                                         <div className="space-y-4">
                                           {call.prompt && (
                                             <div>

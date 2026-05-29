@@ -14,10 +14,11 @@ import feedparser
 import PyRSS2Gen
 import requests
 from flask import current_app, g, request
+from sqlalchemy.orm import defer
 
 from app.extensions import db
 from app.memory_pressure import release_memory_to_os, request_memory_trim_after_context
-from app.models import Feed, Post, User, UserFeed
+from app.models import Feed, Post, ProcessingJob, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
 from podcast_processor.podcast_downloader import find_audio_link
@@ -28,6 +29,20 @@ from shared.rust_sidecar import (
 )
 
 logger = logging.getLogger("global_logger")
+
+
+def post_feed_render_defers() -> tuple[Any, ...]:
+    """Defer load of large JSON columns that feed rendering never reads.
+
+    transcript_word_timestamps in particular can be megabytes per row; loading
+    it for every post on a feed render spikes RSS dramatically.
+    """
+    return (
+        defer(Post.transcript_word_timestamps),
+        defer(Post.bleep_windows),
+        defer(Post.refined_ad_boundaries),
+    )
+
 
 _FORWARDED_PROTO_RE = re.compile(
     r"(?:^|[;,])\s*proto=(\"?)(https?|[A-Za-z]+)\1", re.IGNORECASE
@@ -515,6 +530,15 @@ def refresh_feed(feed: Feed) -> None:
             existing_post_updates = cast(
                 list[dict[str, Any]], rust_plan["existing_post_updates"]
             )
+            # Positive confirmation log so operators can verify the Rust
+            # path is actually hot for this feed (the wrapper only logs
+            # the negative "falling back" case). Grep for "rust_path=feed_refresh".
+            logger.info(
+                "rust_path=feed_refresh feed_id=%s new=%d updated=%d",
+                feed_id,
+                len(new_posts),
+                len(existing_post_updates),
+            )
         else:
             # Either Rust disabled, raw fetch failed, or Rust planner returned None.
             # Run the standard feedparser-based path (parses raw_xml if we have it,
@@ -831,7 +855,37 @@ def generate_feed_xml(feed: Feed) -> Any:
         return rust_xml
 
     if include_unprocessed:
-        posts = list(cast(Iterable[Post], feed.posts))
+        # Hit Post directly with defers rather than walking feed.posts: the
+        # relationship loads every column including the megabyte-class
+        # transcript_word_timestamps JSON that feed_item never reads.
+        #
+        # Hide posts that are queued or running their *first* processing pass:
+        # podcast clients (notably Pocket Casts) cache ID3 metadata on first
+        # parse and won't re-read after we add chapter tags, so publishing the
+        # un-chaptered MP3 means a permanently chapter-less episode in the
+        # client until the user restarts the app. Once a post has a
+        # processed_audio_path it stays visible — re-processing leaves the
+        # last good audio in place and the client already cached it anyway.
+        active_job_subq = (
+            db.session.query(ProcessingJob.id)
+            .filter(
+                ProcessingJob.post_guid == Post.guid,
+                ProcessingJob.status.in_(("pending", "running")),
+            )
+            .exists()
+        )
+        posts = (
+            Post.query.filter(
+                Post.feed_id == feed.id,
+                db.or_(
+                    Post.processed_audio_path.isnot(None),
+                    ~active_job_subq,
+                ),
+            )
+            .options(*post_feed_render_defers())
+            .order_by(Post.release_date.desc().nullslast(), Post.id.desc())
+            .all()
+        )
     else:
         posts = (
             Post.query.filter(
@@ -839,6 +893,7 @@ def generate_feed_xml(feed: Feed) -> Any:
                 Post.whitelisted.is_(True),
                 Post.processed_audio_path.isnot(None),
             )
+            .options(*post_feed_render_defers())
             .order_by(Post.release_date.desc().nullslast(), Post.id.desc())
             .all()
         )
@@ -1012,6 +1067,7 @@ def get_user_aggregate_posts(user_id: int, limit_per_feed: int = 3) -> list[Post
                 Post.whitelisted.is_(True),
                 Post.processed_audio_path.isnot(None),
             )
+            .options(*post_feed_render_defers())
             .order_by(Post.release_date.desc().nullslast(), Post.id.desc())
             .limit(limit_per_feed)
             .all()

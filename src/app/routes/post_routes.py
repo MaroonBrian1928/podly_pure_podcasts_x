@@ -13,7 +13,7 @@ from flask.typing import ResponseReturnValue
 from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
 from app.extensions import db
-from app.feeds import build_post_feed_description_html
+from app.feeds import build_post_feed_description_html, post_feed_render_defers
 from app.jobs_manager import get_jobs_manager
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
@@ -63,6 +63,126 @@ logger = logging.getLogger("global_logger")
 
 
 post_bp = Blueprint("post", __name__)
+
+
+def _current_user_is_admin() -> bool:
+    current_user = getattr(g, "current_user", None)
+    if current_user is None:
+        return False
+
+    role = getattr(current_user, "role", None)
+    if role == "admin":
+        return True
+
+    user_id = getattr(current_user, "id", None)
+    if user_id is None:
+        return False
+
+    from app.models import User
+
+    user = db.session.get(User, int(user_id))
+    return bool(user and user.role == "admin")
+
+
+def _llm_costs_by_call_id(post_id: int) -> dict[int, float]:
+    """Map of ``ModelCall.id`` → persisted ``estimated_cost_usd`` for a post.
+
+    Reads only the billable-LLM rows: Whisper and INA rows are priced by
+    audio duration (computed elsewhere) and their column is left NULL by
+    the worker. Used to enrich the per-call breakdown the stats modal
+    renders. Cheap pure-SQL — no litellm import.
+    """
+    rows = (
+        db.session.query(ModelCall.id, ModelCall.estimated_cost_usd)
+        .filter(
+            ModelCall.post_id == post_id,
+            ModelCall.status == "success",
+            ModelCall.estimated_cost_usd.isnot(None),
+        )
+        .all()
+    )
+    return {int(call_id): float(cost) for call_id, cost in rows}
+
+
+def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> None:
+    """Populate ``processing_stats.estimated_cost`` and per-call costs.
+
+    The overview shows total compute cost (LLM + Whisper + INA). The
+    per-call breakdown attached to ``stats_data["model_calls"]`` lets the
+    modal render a Cost column: billable LLM rows show the persisted
+    ``estimated_cost_usd``; Whisper / INA rows show ``rate * hours`` split
+    evenly across success calls of that type for the post.
+    """
+    if not _current_user_is_admin():
+        return
+    processing_stats = stats_data.get("processing_stats")
+    if not isinstance(processing_stats, dict):
+        return
+
+    from app.config_store import read_combined
+    from app.llm_pricing import is_ina_call, is_whisper_call
+
+    app_config = read_combined().get("app", {})
+    whisper_rate = float(
+        app_config.get(
+            "whisper_cost_rate_per_hour", DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
+        )
+        or 0.0
+    )
+    ina_rate = float(
+        app_config.get("ina_cost_rate_per_hour", DEFAULTS.APP_INA_COST_RATE_PER_HOUR)
+        or 0.0
+    )
+    duration_hours = float(post.duration or 0.0) / 3600.0 if post.duration else 0.0
+
+    calls = stats_data.get("model_calls") or []
+
+    # Count success Whisper / INA rows to split the per-hour fee across.
+    whisper_success_count = sum(
+        1
+        for c in calls
+        if isinstance(c, dict)
+        and c.get("status") == "success"
+        and is_whisper_call(c.get("model_name") or "", c.get("prompt"))
+    )
+    ina_success_count = sum(
+        1
+        for c in calls
+        if isinstance(c, dict)
+        and c.get("status") == "success"
+        and is_ina_call(c.get("model_name") or "")
+    )
+
+    whisper_total = whisper_rate * duration_hours if whisper_success_count else 0.0
+    ina_total = ina_rate * duration_hours if ina_success_count else 0.0
+    whisper_per_call = (
+        whisper_total / whisper_success_count if whisper_success_count else 0.0
+    )
+    ina_per_call = ina_total / ina_success_count if ina_success_count else 0.0
+
+    llm_costs = _llm_costs_by_call_id(int(post.id))
+
+    llm_total = 0.0
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        if call.get("status") != "success":
+            call["estimated_cost_usd"] = 0.0
+            continue
+        model_name = call.get("model_name") or ""
+        prompt = call.get("prompt")
+        if is_whisper_call(model_name, prompt):
+            call["estimated_cost_usd"] = round(whisper_per_call, 6)
+        elif is_ina_call(model_name):
+            call["estimated_cost_usd"] = round(ina_per_call, 6)
+        else:
+            cost = float(llm_costs.get(int(call.get("id", 0)), 0.0))
+            call["estimated_cost_usd"] = round(cost, 6)
+            llm_total += cost
+
+    total = llm_total + whisper_total + ina_total
+    processing_stats["estimated_cost"] = round(total, 4)
+
 
 _LOG_LINE_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
@@ -162,6 +282,23 @@ def _extract_log_field(message: str, field_name: str) -> str | None:
     if match is None:
         return None
     return match.group(1)
+
+
+# Sentinel (first_seq, last_seq) pairs that chapter_fallback.py uses to
+# create ModelCall rows for chapter-only LLM phases (no real transcript
+# segment range). Mirror keep in sync with the constants in chapter_fallback.
+_SEGMENT_RANGE_LABELS: dict[tuple[int, int], str] = {
+    (-100, -100): "chapter titles (LLM)",
+    (-200, -200): "chapter topic plan (LLM)",
+    (-201, -201): "chapter topic plan: continuation (LLM)",
+}
+
+
+def _format_segment_range_label(first_seq: int, last_seq: int) -> str:
+    label = _SEGMENT_RANGE_LABELS.get((first_seq, last_seq))
+    if label is not None:
+        return label
+    return f"{first_seq}-{last_seq}"
 
 
 def _extract_step_name(message: str) -> str | None:
@@ -271,11 +408,14 @@ def _build_related_logs(
 @post_bp.route("/api/feeds/<int:feed_id>/posts", methods=["GET"])
 def api_feed_posts(feed_id: int) -> flask.Response:
     """Return a paginated JSON list of posts for a specific feed."""
+    from shared.rust_sidecar import (
+        FEED_POSTS_NOT_FOUND,
+        rust_feed_posts_enabled,
+        try_render_feed_posts,
+    )
 
     # Ensure we have fresh data
     db.session.expire_all()
-
-    feed = Feed.query.get_or_404(feed_id)
 
     # Pagination and filtering
     try:
@@ -297,8 +437,37 @@ def api_feed_posts(feed_id: int) -> flask.Response:
         "on",
     }
 
-    # Query posts directly to avoid stale relationship cache
-    base_query = Post.query.filter_by(feed_id=feed.id)
+    # Rust sidecar path: a short-lived subprocess reads the rows, builds the
+    # envelope, and exits. We pass its raw stdout bytes straight to the HTTP
+    # response — going through json.loads + flask.jsonify would re-allocate
+    # the entire ~290 KB envelope in the long-lived Python heap, defeating
+    # the memory win the port is supposed to deliver. Falls through to the
+    # Python query if the flag is off or the sidecar fails for any reason.
+    if rust_feed_posts_enabled():
+        from shared.processing_paths import get_instance_dir
+
+        rust_bytes = try_render_feed_posts(
+            db_path=get_instance_dir() / "sqlite3.db",
+            feed_id=feed_id,
+            page=page,
+            page_size=page_size,
+            whitelisted_only=whitelisted_only,
+        )
+        if rust_bytes is FEED_POSTS_NOT_FOUND:
+            flask.abort(404)
+        if isinstance(rust_bytes, bytes):
+            return flask.Response(rust_bytes, mimetype="application/json")
+
+    feed = Feed.query.get_or_404(feed_id)
+
+    # Query posts directly to avoid stale relationship cache. Defer the
+    # heavyweight JSON columns that this endpoint never serializes — each
+    # transcript_word_timestamps blob can be 1-3 MB for an hour-long episode,
+    # so loading a 25-row page without defers can spike RSS by 50+ MB per call.
+    # chapter_data stays loaded because build_post_feed_description_html reads it.
+    base_query = Post.query.filter_by(feed_id=feed.id).options(
+        *post_feed_render_defers()
+    )
     if whitelisted_only:
         base_query = base_query.filter_by(whitelisted=True)
 
@@ -417,6 +586,7 @@ def get_post_json(p_guid: str) -> flask.Response:
                     else model_call.response
                 ),
                 "error": model_call.error_message,
+                "service_tier": model_call.service_tier,
             }
         )
 
@@ -605,6 +775,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
         srv_root=get_srv_root(),
     )
     if rust_stats is not None:
+        _maybe_add_admin_cost_estimate(rust_stats, post)
         return flask.jsonify(rust_stats)
 
     model_calls = (
@@ -668,7 +839,10 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "id": call.id,
                 "model_name": call.model_name,
                 "status": call.status,
-                "segment_range": f"{call.first_segment_sequence_num}-{call.last_segment_sequence_num}",
+                "segment_range": _format_segment_range_label(
+                    call.first_segment_sequence_num,
+                    call.last_segment_sequence_num,
+                ),
                 "first_segment_sequence_num": call.first_segment_sequence_num,
                 "last_segment_sequence_num": call.last_segment_sequence_num,
                 "timestamp": call.timestamp.isoformat() if call.timestamp else None,
@@ -679,6 +853,11 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "error_message": call.error_message,
                 "prompt": call.prompt,
                 "response": call.response,
+                "service_tier": call.service_tier,
+                "prompt_tokens": call.prompt_tokens,
+                "cached_prompt_tokens": call.cached_prompt_tokens,
+                "completion_tokens": call.completion_tokens,
+                "total_tokens": call.total_tokens,
             }
         )
 
@@ -883,6 +1062,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             },
         }
 
+    _maybe_add_admin_cost_estimate(stats_data, post)
     return flask.jsonify(stats_data)
 
 

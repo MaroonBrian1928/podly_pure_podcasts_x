@@ -22,6 +22,10 @@ RUST_STATS_ENABLED_ENV = "PODLY_RUST_STATS_ENABLED"
 RUST_TRANSCRIPT_ENABLED_ENV = "PODLY_RUST_TRANSCRIPT_ENABLED"
 RUST_AD_MERGE_ENABLED_ENV = "PODLY_RUST_AD_MERGE_ENABLED"
 RUST_PROFANITY_ENABLED_ENV = "PODLY_RUST_PROFANITY_ENABLED"
+RUST_FEED_POSTS_ENABLED_ENV = "PODLY_RUST_FEED_POSTS_ENABLED"
+RUST_WORD_BOUNDARY_ENABLED_ENV = "PODLY_RUST_WORD_BOUNDARY_ENABLED"
+RUST_CHAPTER_FALLBACK_ENABLED_ENV = "PODLY_RUST_CHAPTER_FALLBACK_ENABLED"
+RUST_COSTS_ENABLED_ENV = "PODLY_RUST_COSTS_ENABLED"
 
 
 class RustSidecarError(RuntimeError):
@@ -70,6 +74,22 @@ def rust_ad_merge_enabled() -> bool:
 
 def rust_profanity_enabled() -> bool:
     return env_flag_enabled(RUST_PROFANITY_ENABLED_ENV)
+
+
+def rust_feed_posts_enabled() -> bool:
+    return env_flag_enabled(RUST_FEED_POSTS_ENABLED_ENV)
+
+
+def rust_word_boundary_enabled() -> bool:
+    return env_flag_enabled(RUST_WORD_BOUNDARY_ENABLED_ENV)
+
+
+def rust_chapter_fallback_enabled() -> bool:
+    return env_flag_enabled(RUST_CHAPTER_FALLBACK_ENABLED_ENV)
+
+
+def rust_costs_enabled() -> bool:
+    return env_flag_enabled(RUST_COSTS_ENABLED_ENV)
 
 
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
@@ -560,6 +580,9 @@ def try_read_chapters(audio_path: Path) -> list[dict[str, Any]] | None:
             LOGGER.error("Rust chapters read returned invalid chapter: %r", chapter)
             return None
         parsed.append(chapter)
+    if not _chapters_are_monotonic(parsed):
+        LOGGER.error("Rust chapters read returned out-of-order chapters: %r", parsed)
+        return None
     return parsed
 
 
@@ -609,6 +632,8 @@ def _is_valid_chapter_detection_payload(payload: dict[str, Any]) -> bool:
             return False
         if not all(_is_valid_chapter_payload(chapter) for chapter in chapters):
             return False
+        if not _chapters_are_monotonic(chapters):
+            return False
     return True
 
 
@@ -616,12 +641,37 @@ def _is_valid_chapter_payload(chapter: object) -> bool:
     if not isinstance(chapter, dict):
         return False
     chapter_dict = cast(dict[str, Any], chapter)
-    return (
+    if not (
         isinstance(chapter_dict.get("element_id"), str)
         and isinstance(chapter_dict.get("title"), str)
         and isinstance(chapter_dict.get("start_time_ms"), int)
         and isinstance(chapter_dict.get("end_time_ms"), int)
-    )
+    ):
+        return False
+    # A chapter whose end precedes its start is meaningless and breaks
+    # downstream players. We treat the payload as bad rather than silently
+    # clamping so a Rust regression surfaces in the fallback log.
+    if chapter_dict["end_time_ms"] < chapter_dict["start_time_ms"]:
+        return False
+    if chapter_dict["start_time_ms"] < 0:
+        return False
+    return True
+
+
+def _chapters_are_monotonic(chapters: list[dict[str, Any]]) -> bool:
+    """Reject Rust chapter lists that aren't sorted by start_time_ms.
+
+    Both the reader and detector paths assume chapters arrive in playback
+    order; out-of-order entries point to a sidecar bug we want to fall back on
+    rather than silently propagate.
+    """
+    last_start: int | None = None
+    for chapter in chapters:
+        start = chapter["start_time_ms"]
+        if last_start is not None and start < last_start:
+            return False
+        last_start = start
+    return True
 
 
 def _try_audio_command(args: list[str], label: str) -> bool:
@@ -695,6 +745,36 @@ class _json_file:
             Path(self._temp_file.name).unlink(missing_ok=True)
 
 
+class _text_file:
+    """Write a string payload to a temp file and unlink on exit.
+
+    Matches `_json_file` / `_windows_json_file` but for raw text (LLM responses
+    handed to the Rust sidecar's parse subcommands). Keeps the temp-file
+    lifetime tied to a `with` block so ruff's SIM115 stays happy and OS-level
+    cleanup happens even on raised exceptions.
+    """
+
+    def __init__(self, payload: str, *, suffix: str = ".txt") -> None:
+        self._payload = payload
+        self._suffix = suffix
+        self._temp_file: Any = None
+
+    def __enter__(self) -> Path:
+        self._temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=self._suffix,
+            delete=False,
+        )
+        self._temp_file.write(self._payload or "")
+        self._temp_file.close()
+        return Path(self._temp_file.name)
+
+    def __exit__(self, *_args: object) -> None:
+        if self._temp_file is not None:
+            Path(self._temp_file.name).unlink(missing_ok=True)
+
+
 def try_merge_ad_segments(
     *,
     db_path: Path,
@@ -748,6 +828,515 @@ def try_merge_ad_segments(
             return None
         result.append((float(item[0]), float(item[1])))
     return result
+
+
+def try_wb_context(
+    *,
+    db_path: Path,
+    post_guid: str,
+    ad_start: float,
+    ad_end: float,
+    first_seq: int | None,
+    last_seq: int | None,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust word-boundary context selector.
+
+    Mirrors `WordBoundaryRefiner._get_context` in Python: returns the slice of
+    transcript segments the caller should use as LLM prompt context for an ad
+    window. None means: flag off, sidecar failed, or returned an unexpected
+    payload — the caller falls back to the Python implementation.
+    """
+    if not rust_word_boundary_enabled():
+        return None
+
+    args: list[str] = [
+        "transcript",
+        "wb-context",
+        "--db",
+        str(db_path),
+        "--post-guid",
+        post_guid,
+        "--ad-start",
+        repr(float(ad_start)),
+        "--ad-end",
+        repr(float(ad_end)),
+    ]
+    if first_seq is not None:
+        args += ["--first-seq", str(int(first_seq))]
+    if last_seq is not None:
+        args += ["--last-seq", str(int(last_seq))]
+
+    try:
+        payload = run_podly_tools(args)
+    except RustSidecarError:
+        LOGGER.exception(
+            "Rust wb-context failed; falling back to Python implementation"
+        )
+        return None
+
+    raw = payload.get("context_segments")
+    if not isinstance(raw, list):
+        LOGGER.error("Rust wb-context returned invalid payload: %r", payload)
+        return None
+
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            LOGGER.error("Rust wb-context returned non-dict segment: %r", item)
+            return None
+        result.append(item)
+    return result
+
+
+def try_wb_resolve(  # noqa: PLR0912 — branches mirror the Python `_refine_*` arg surface; splitting just hides the contract.
+    *,
+    db_path: Path,
+    post_guid: str,
+    orig_ad_start: float,
+    orig_ad_end: float,
+    first_seq: int | None,
+    last_seq: int | None,
+    start_segment_seq: int | None,
+    start_phrase: str | None,
+    start_word: str | None,
+    start_occurrence: str | None,
+    start_word_index: int | None,
+    end_segment_seq: int | None,
+    end_phrase: str | None,
+) -> dict[str, Any] | None:
+    """Run the Rust word-boundary resolver.
+
+    Mirrors `WordBoundaryRefiner._refine_start` + `_refine_end` in Python:
+    given the LLM-extracted phrases / word hints, return the refined ad-start
+    and ad-end times along with `start_changed` / `end_changed` flags and any
+    `*_phrase_not_found` errors. None means: flag off, sidecar failed, or
+    returned an unexpected payload — the caller falls back to Python.
+    """
+    if not rust_word_boundary_enabled():
+        return None
+
+    args: list[str] = [
+        "transcript",
+        "wb-resolve",
+        "--db",
+        str(db_path),
+        "--post-guid",
+        post_guid,
+        "--orig-ad-start",
+        repr(float(orig_ad_start)),
+        "--orig-ad-end",
+        repr(float(orig_ad_end)),
+    ]
+    if first_seq is not None:
+        args += ["--first-seq", str(int(first_seq))]
+    if last_seq is not None:
+        args += ["--last-seq", str(int(last_seq))]
+    if start_segment_seq is not None:
+        args += ["--start-segment-seq", str(int(start_segment_seq))]
+    if start_phrase is not None and str(start_phrase).strip():
+        args += ["--start-phrase", str(start_phrase)]
+    if start_word is not None and str(start_word).strip():
+        args += ["--start-word", str(start_word)]
+    if start_occurrence is not None and str(start_occurrence).strip():
+        args += ["--start-occurrence", str(start_occurrence)]
+    if start_word_index is not None:
+        args += ["--start-word-index", str(int(start_word_index))]
+    if end_segment_seq is not None:
+        args += ["--end-segment-seq", str(int(end_segment_seq))]
+    if end_phrase is not None and str(end_phrase).strip():
+        args += ["--end-phrase", str(end_phrase)]
+
+    try:
+        payload = run_podly_tools(args)
+    except RustSidecarError:
+        LOGGER.exception(
+            "Rust wb-resolve failed; falling back to Python implementation"
+        )
+        return None
+
+    required_keys = {
+        "refined_start",
+        "refined_end",
+        "start_changed",
+        "end_changed",
+    }
+    if not required_keys.issubset(payload.keys()):
+        LOGGER.error("Rust wb-resolve returned invalid payload: %r", payload)
+        return None
+    if not isinstance(payload["refined_start"], (int, float)) or not isinstance(
+        payload["refined_end"], (int, float)
+    ):
+        LOGGER.error("Rust wb-resolve returned non-numeric times: %r", payload)
+        return None
+    return payload
+
+
+def try_wb_refine_from_llm(
+    *,
+    db_path: Path,
+    post_guid: str,
+    orig_ad_start: float,
+    orig_ad_end: float,
+    first_seq: int | None,
+    last_seq: int | None,
+    raw_content: str,
+) -> dict[str, Any] | None:
+    """Run the bundled Rust word-boundary refiner.
+
+    Replaces the previous `try_wb_json_parse` + `try_wb_resolve` pair so each
+    refinement spawns a single sidecar process instead of two. Mirrors
+    `WordBoundaryRefiner._parse_json` + `_extract_payload` + `_refine_start` +
+    `_refine_end` end-to-end. Returns the payload (with `parse_status` set to
+    `"ok"`, `"salvaged"`, or `"failed"`) or None to signal the caller should
+    fall back to the Python chain (flag off, sidecar error, or unexpected
+    payload).
+    """
+    if not rust_word_boundary_enabled():
+        return None
+
+    with _text_file(raw_content or "") as raw_content_path:
+        args: list[str] = [
+            "transcript",
+            "wb-refine-from-llm",
+            "--db",
+            str(db_path),
+            "--post-guid",
+            post_guid,
+            "--orig-ad-start",
+            repr(float(orig_ad_start)),
+            "--orig-ad-end",
+            repr(float(orig_ad_end)),
+            "--raw-content-file",
+            str(raw_content_path),
+        ]
+        if first_seq is not None:
+            args += ["--first-seq", str(int(first_seq))]
+        if last_seq is not None:
+            args += ["--last-seq", str(int(last_seq))]
+
+        try:
+            payload = run_podly_tools(args)
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust wb-refine-from-llm failed; falling back to Python implementation"
+            )
+            return None
+
+    parse_status = payload.get("parse_status")
+    if parse_status not in {"ok", "salvaged", "failed"}:
+        LOGGER.error(
+            "Rust wb-refine-from-llm returned invalid parse_status: %r", payload
+        )
+        return None
+    required_keys = {
+        "refined_start",
+        "refined_end",
+        "start_changed",
+        "end_changed",
+        "start_reason",
+        "end_reason",
+    }
+    if not required_keys.issubset(payload.keys()):
+        LOGGER.error("Rust wb-refine-from-llm returned invalid payload: %r", payload)
+        return None
+    if not isinstance(payload["refined_start"], (int, float)) or not isinstance(
+        payload["refined_end"], (int, float)
+    ):
+        LOGGER.error("Rust wb-refine-from-llm returned non-numeric times: %r", payload)
+        return None
+    return payload
+
+
+def try_chapter_topic_blocks(
+    *,
+    db_path: Path,
+    post_guid: str,
+    total_duration_ms: int | None = None,
+    target_block_count: int = 60,
+    min_block_seconds: int = 60,
+    max_block_seconds: int = 120,
+    max_chars_per_block: int = 1000,
+    removed_windows_ms: list[tuple[int, int]] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust chapter topic-block builder.
+
+    Mirrors `_build_topic_blocks` in `src/podcast_processor/chapter_fallback.py`.
+    Returns the list of block dicts on success, or None to signal the caller
+    should fall back to the Python implementation (flag off, sidecar failed, or
+    bad payload).
+
+    When `removed_windows_ms` is supplied, Rust filters segments overlapping
+    those windows before block-building (mirrors
+    `_filter_transcript_segments_for_chapters`). Parity rule: if the filter
+    would empty the segment list, the unfiltered set is used instead.
+    """
+    if not rust_chapter_fallback_enabled():
+        return None
+
+    base_args: list[str] = [
+        "chapters",
+        "topic-blocks",
+        "--db",
+        str(db_path),
+        "--post-guid",
+        post_guid,
+        "--target-block-count",
+        str(int(target_block_count)),
+        "--min-block-seconds",
+        str(int(min_block_seconds)),
+        "--max-block-seconds",
+        str(int(max_block_seconds)),
+        "--max-chars-per-block",
+        str(int(max_chars_per_block)),
+    ]
+    if total_duration_ms is not None:
+        base_args += ["--total-duration-ms", str(int(total_duration_ms))]
+
+    def _invoke(args: list[str]) -> dict[str, Any] | None:
+        try:
+            return run_podly_tools(args)
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust chapter topic-blocks failed; falling back to Python "
+                "implementation"
+            )
+            return None
+
+    if removed_windows_ms:
+        with _windows_json_file(list(removed_windows_ms)) as windows_path:
+            payload = _invoke([*base_args, "--removed-windows-json", str(windows_path)])
+    else:
+        payload = _invoke(base_args)
+
+    if payload is None:
+        return None
+
+    raw = payload.get("blocks")
+    if not isinstance(raw, list):
+        LOGGER.error("Rust chapter topic-blocks returned invalid payload: %r", payload)
+        return None
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            LOGGER.error("Rust chapter topic-blocks returned non-dict block: %r", item)
+            return None
+        result.append(item)
+    return result
+
+
+def try_chapter_topic_plan_parse(*, raw_content: str) -> dict[str, Any] | None:
+    """Run the Rust topic-plan response parser.
+
+    Mirrors `_parse_topic_chapter_response` (+ salvage helpers) in
+    `src/podcast_processor/chapter_fallback.py`. Returns a dict with shape:
+        {
+          "entries": [(block_index, title), ...],
+          "expected_count": int | None,
+          "salvaged": bool,
+          "count_mismatch": bool,
+        }
+    or None on flag-off / sidecar error so the caller falls back to Python.
+    """
+    if not rust_chapter_fallback_enabled():
+        return None
+
+    with _text_file(raw_content or "") as raw_content_path:
+        try:
+            payload = run_podly_tools(
+                [
+                    "chapters",
+                    "topic-plan-parse",
+                    "--input",
+                    str(raw_content_path),
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust chapter topic-plan-parse failed; falling back to Python"
+            )
+            return None
+
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        LOGGER.error(
+            "Rust chapter topic-plan-parse returned invalid entries: %r", payload
+        )
+        return None
+
+    entries: list[tuple[int, str]] = []
+    for item in raw_entries:
+        if not isinstance(item, list) or len(item) != 2:
+            LOGGER.error("Rust topic-plan-parse bad entry: %r", item)
+            return None
+        try:
+            entries.append((int(item[0]), str(item[1])))
+        except Exception:  # noqa: BLE001
+            LOGGER.error("Rust topic-plan-parse uncoercible entry: %r", item)
+            return None
+
+    expected_count = payload.get("expected_count")
+    if expected_count is not None and not isinstance(expected_count, int):
+        LOGGER.error("Rust topic-plan-parse bad expected_count: %r", expected_count)
+        return None
+
+    return {
+        "entries": entries,
+        "expected_count": expected_count,
+        "salvaged": bool(payload.get("salvaged", False)),
+        "count_mismatch": bool(payload.get("count_mismatch", False)),
+    }
+
+
+def try_chapter_topic_plan_apply(
+    *,
+    plan: list[tuple[int, str]],
+    blocks: list[dict[str, Any]],
+    total_duration_ms: int,
+    min_chapter_gap_ms: int,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust topic-plan applier.
+
+    Mirrors `_chapters_from_topic_plan` and friends in
+    `src/podcast_processor/chapter_fallback.py`. Returns a list of
+    `{element_id, title, start_time_ms, end_time_ms}` dicts on success or None
+    so the caller falls back to Python.
+    """
+    if not rust_chapter_fallback_enabled():
+        return None
+
+    payload = {
+        "plan": [[int(idx), str(title)] for idx, title in plan],
+        "blocks": [
+            {
+                "block_index": int(b.get("block_index", -1)),
+                "start_ms": int(b.get("start_ms", 0)),
+                "text": str(b.get("text", "") or ""),
+            }
+            for b in blocks
+        ],
+        "total_duration_ms": int(total_duration_ms),
+        "min_chapter_gap_ms": int(min_chapter_gap_ms),
+    }
+
+    with _json_file(payload) as payload_path:
+        try:
+            result = run_podly_tools(
+                [
+                    "chapters",
+                    "topic-plan-apply",
+                    "--input",
+                    str(payload_path),
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust chapter topic-plan-apply failed; falling back to Python"
+            )
+            return None
+
+    raw_chapters = result.get("chapters")
+    if not isinstance(raw_chapters, list):
+        LOGGER.error(
+            "Rust chapter topic-plan-apply returned invalid chapters: %r", result
+        )
+        return None
+
+    out: list[dict[str, Any]] = []
+    for item in raw_chapters:
+        if not isinstance(item, dict):
+            LOGGER.error("Rust topic-plan-apply bad chapter: %r", item)
+            return None
+        out.append(item)
+    return out
+
+
+class FeedPostsNotFound:
+    """Sentinel signaling the feed doesn't exist (Flask should return 404)."""
+
+
+FEED_POSTS_NOT_FOUND = FeedPostsNotFound()
+
+
+def try_render_feed_posts(
+    *,
+    db_path: Path,
+    feed_id: int,
+    page: int,
+    page_size: int,
+    whitelisted_only: bool,
+) -> bytes | FeedPostsNotFound | None:
+    """Render the /api/feeds/<id>/posts envelope via the Rust sidecar.
+
+    Returns the raw JSON bytes the sidecar emitted on stdout — these are
+    passed straight through to the HTTP response without a Python json.loads
+    / flask.jsonify round-trip. Bypassing that round-trip is the whole point
+    of this port: parsing a ~290 KB envelope into a Python dict graph just
+    to re-serialize it would allocate the same heap the original endpoint
+    did, defeating the memory win.
+
+    Returns FEED_POSTS_NOT_FOUND when the feed is missing (mirroring
+    Flask's get_or_404), or None when the Rust path is disabled / failed
+    so the caller falls back to the Python query.
+    """
+    if not rust_feed_posts_enabled():
+        return None
+
+    command = [
+        str(rust_tools_bin()),
+        "posts",
+        "feed-list",
+        "--db",
+        str(db_path),
+        "--feed-id",
+        str(feed_id),
+        "--page",
+        str(page),
+        "--page-size",
+        str(page_size),
+        "--whitelisted-only",
+        "true" if whitelisted_only else "false",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            timeout=300,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        LOGGER.exception(
+            "Rust feed-posts subprocess failed; falling back to Python implementation"
+        )
+        return None
+
+    if result.returncode != 0:
+        LOGGER.error(
+            "Rust feed-posts exited with %s: %s",
+            result.returncode,
+            result.stderr.decode("utf-8", errors="replace").strip() or "<no stderr>",
+        )
+        return None
+
+    stripped = result.stdout.strip()
+
+    # Rust's print_json uses compact serde_json::to_string, so the
+    # missing-feed sentinel is exactly this byte sequence — match without
+    # parsing to keep Python heap allocations to a minimum.
+    if stripped == b'{"not_found":true}':
+        return FEED_POSTS_NOT_FOUND
+
+    # Cheap sanity check that the payload looks like our envelope.
+    # render_feed_posts orders keys with "items" first, so a valid response
+    # always starts with this prefix. If it doesn't, fall back rather than
+    # forward garbage to the HTTP client.
+    if not stripped.startswith(b'{"items":'):
+        LOGGER.error(
+            "Rust feed-posts returned unexpected payload prefix: %r",
+            stripped[:80],
+        )
+        return None
+
+    return stripped
 
 
 def try_extract_profanity_windows(
@@ -807,3 +1396,138 @@ def try_extract_profanity_windows(
             return None
         result.append((int(item[0]), int(item[1])))
     return result
+
+
+def try_render_admin_costs(
+    *,
+    db_path: Path,
+    year: int,
+    month: int,
+    rates_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Render the /api/admin/costs envelope via the Rust sidecar.
+
+    `rates_payload` must have shape::
+
+        {
+          "rates": {
+            "<model_name>|<service_tier_or_default>": {
+              "input": float, "cached_input": float, "output": float
+            },
+            ...
+          },
+          "whisper_rate_per_hour": float,
+          "ina_rate_per_hour": float,
+          "legacy_rate_per_hour": float,
+        }
+
+    The caller pre-resolves LiteLLM rates (with Flex 0.5x discount and the
+    cached_input→input fallback already applied) so the sidecar never has to
+    link against LiteLLM. Stripe subscription_amount_cents is left ``null`` by
+    the sidecar and filled in by the caller.
+
+    Returns the parsed envelope dict, or ``None`` when the Rust path is
+    disabled, the binary fails, or the response shape is wrong (caller should
+    fall back to the Python implementation).
+    """
+    if not rust_costs_enabled():
+        return None
+
+    with _json_file(rates_payload) as rates_path:
+        try:
+            payload = run_podly_tools(
+                [
+                    "costs",
+                    "render-admin",
+                    "--db",
+                    str(db_path),
+                    "--year",
+                    str(int(year)),
+                    "--month",
+                    str(int(month)),
+                    "--rates-json",
+                    str(rates_path),
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust costs render-admin failed; falling back to Python behavior"
+            )
+            return None
+
+    if not _is_valid_admin_costs_payload(payload):
+        LOGGER.error("Rust costs render-admin returned invalid payload: %r", payload)
+        return None
+    return payload
+
+
+def try_render_admin_costs_calls(
+    *,
+    db_path: Path,
+    page: int,
+    per_page: int,
+    rates_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Render the /api/admin/costs/calls envelope via the Rust sidecar.
+
+    See `try_render_admin_costs` for the `rates_payload` shape — both
+    endpoints share it.
+    """
+    if not rust_costs_enabled():
+        return None
+
+    with _json_file(rates_payload) as rates_path:
+        try:
+            payload = run_podly_tools(
+                [
+                    "costs",
+                    "render-calls",
+                    "--db",
+                    str(db_path),
+                    "--page",
+                    str(int(page)),
+                    "--per-page",
+                    str(int(per_page)),
+                    "--rates-json",
+                    str(rates_path),
+                ]
+            )
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust costs render-calls failed; falling back to Python behavior"
+            )
+            return None
+
+    if not _is_valid_admin_costs_calls_payload(payload):
+        LOGGER.error("Rust costs render-calls returned invalid payload: %r", payload)
+        return None
+    return payload
+
+
+def _is_valid_admin_costs_payload(payload: dict[str, Any]) -> bool:
+    required = {
+        "year",
+        "month",
+        "total_cost",
+        "total_llm_cost",
+        "total_whisper_cost",
+        "total_ina_cost",
+        "users",
+        "feeds",
+    }
+    if not required.issubset(payload.keys()):
+        return False
+    if not isinstance(payload["users"], list) or not isinstance(payload["feeds"], list):
+        return False
+    return all(isinstance(u, dict) for u in payload["users"]) and all(
+        isinstance(f, dict) for f in payload["feeds"]
+    )
+
+
+def _is_valid_admin_costs_calls_payload(payload: dict[str, Any]) -> bool:
+    required = {"calls", "total", "page", "per_page", "pages"}
+    if not required.issubset(payload.keys()):
+        return False
+    if not isinstance(payload["calls"], list):
+        return False
+    return all(isinstance(c, dict) for c in payload["calls"])

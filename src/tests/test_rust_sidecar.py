@@ -18,6 +18,7 @@ def test_rust_feature_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("PODLY_RUST_JOBS_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_STATS_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.delenv("PODLY_RUST_FEED_POSTS_ENABLED", raising=False)
 
     assert rust_sidecar.rust_audio_enabled() is False
     assert rust_sidecar.rust_chapters_enabled() is False
@@ -26,6 +27,125 @@ def test_rust_feature_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None
     assert rust_sidecar.rust_jobs_enabled() is False
     assert rust_sidecar.rust_stats_enabled() is False
     assert rust_sidecar.rust_transcript_enabled() is False
+    assert rust_sidecar.rust_feed_posts_enabled() is False
+
+
+def test_try_render_feed_posts_returns_none_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PODLY_RUST_FEED_POSTS_ENABLED", raising=False)
+    assert (
+        rust_sidecar.try_render_feed_posts(
+            db_path=Path("/tmp/x.sqlite"),
+            feed_id=1,
+            page=1,
+            page_size=25,
+            whitelisted_only=False,
+        )
+        is None
+    )
+
+
+def test_try_render_feed_posts_returns_not_found_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'{"not_found":true}\n', stderr=b""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = rust_sidecar.try_render_feed_posts(
+        db_path=Path("/tmp/x.sqlite"),
+        feed_id=999,
+        page=1,
+        page_size=25,
+        whitelisted_only=False,
+    )
+    assert result is rust_sidecar.FEED_POSTS_NOT_FOUND
+
+
+def test_try_render_feed_posts_rejects_payload_without_items_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'{"oops":"wrong shape"}', stderr=b""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        rust_sidecar.try_render_feed_posts(
+            db_path=Path("/tmp/x.sqlite"),
+            feed_id=1,
+            page=1,
+            page_size=25,
+            whitelisted_only=False,
+        )
+        is None
+    )
+
+
+def test_try_render_feed_posts_returns_raw_bytes_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    seen: list[list[str]] = []
+    raw = (
+        b'{"items":[{"id":1,"guid":"g","title":"t"}],'
+        b'"page":2,"page_size":25,"total":1,"total_pages":1,"whitelisted_total":0}'
+    )
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=raw + b"\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    payload = rust_sidecar.try_render_feed_posts(
+        db_path=Path("/srv/podly/sqlite3.db"),
+        feed_id=7,
+        page=2,
+        page_size=25,
+        whitelisted_only=True,
+    )
+    # The wrapper must hand back the raw bytes unchanged (modulo trailing
+    # newline) so Flask streams them directly without re-serializing.
+    assert payload == raw
+    cmd = seen[0]
+    assert "posts" in cmd and "feed-list" in cmd
+    assert "--feed-id" in cmd and "7" in cmd
+    assert "--whitelisted-only" in cmd and "true" in cmd
+
+
+def test_try_render_feed_posts_falls_back_on_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            command, 2, stdout=b"", stderr=b"db locked\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        rust_sidecar.try_render_feed_posts(
+            db_path=Path("/tmp/x.sqlite"),
+            feed_id=1,
+            page=1,
+            page_size=25,
+            whitelisted_only=False,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])

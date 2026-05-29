@@ -4,7 +4,7 @@ from typing import Any
 from app.extensions import db
 from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
-from app.models import ProcessingJob
+from app.models import ModelCall, Post, ProcessingJob
 
 
 def dequeue_job_action(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -133,10 +133,68 @@ def cancel_existing_jobs_action(params: dict[str, Any]) -> int:
     for existing_job in existing_jobs:
         db.session.delete(existing_job)
 
+    # Mark any non-terminal ModelCall rows for this post as cancelled. The
+    # processing worker we just cancelled may have been mid-LLM-call (e.g.
+    # mid-retry-backoff), leaving a row in `pending` forever. That dangling
+    # row also collides with the next run's upsert against the
+    # (post_id, first_seq, last_seq, model_name) unique index.
     if count > 0:
+        post = Post.query.filter_by(guid=post_guid).first()
+        if post is not None:
+            # Anything not terminal-success / terminal-failed / already-cancelled.
+            # Catches "pending" (never started or mid-call), "retrying" (mid-backoff),
+            # and "failed_retries" (transient failure waiting to be picked up).
+            ModelCall.query.filter(
+                ModelCall.post_id == post.id,
+                ModelCall.status.notin_(("success", "failed_permanent", "cancelled")),
+            ).update(
+                {
+                    "status": "cancelled",
+                    "error_message": "Superseded by a new processing job",
+                },
+                synchronize_session=False,
+            )
         recalculate_run_counts(db.session)
 
     return count
+
+
+def update_job_attribution_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Update a job's `jobs_manager_run_id`, `requested_by_user_id`, and/or
+    `billing_user_id` fields.
+
+    Used by `JobManager.ensure_job()` to backfill attribution onto an already-
+    active job when a new request arrives for the same post. The web/processing
+    sessions are read-only, so this mutation has to go through the writer
+    service. Only fields explicitly provided in `params` are touched, and the
+    action no-ops if no field actually changes (idempotent).
+    """
+    job_id = params.get("job_id")
+    if not job_id:
+        raise ValueError("job_id is required")
+
+    job = db.session.get(ProcessingJob, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+
+    changed = False
+    if "run_id" in params:
+        run_id = params.get("run_id")
+        if run_id and job.jobs_manager_run_id != run_id:
+            job.jobs_manager_run_id = run_id
+            changed = True
+    if "requested_by_user_id" in params:
+        requested_by_user_id = params.get("requested_by_user_id")
+        if requested_by_user_id and job.requested_by_user_id is None:
+            job.requested_by_user_id = requested_by_user_id
+            changed = True
+    if "billing_user_id" in params:
+        billing_user_id = params.get("billing_user_id")
+        if billing_user_id is not None and job.billing_user_id != billing_user_id:
+            job.billing_user_id = billing_user_id
+            changed = True
+
+    return {"job_id": job.id, "changed": changed}
 
 
 def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:

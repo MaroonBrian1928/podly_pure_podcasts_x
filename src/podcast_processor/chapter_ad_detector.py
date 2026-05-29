@@ -75,6 +75,15 @@ class ChapterAdDetector:
             Path(audio_path),
             ",".join(self.filter_strings),
         )
+        if rust_detection is None:
+            # The wrapper logs the underlying cause (flag off, sidecar error,
+            # bad payload); this line makes the fallback visible at the
+            # decision point so a grep across this file's logs explains why
+            # the Python path ran.
+            self.logger.debug(
+                "Rust chapter detection unavailable; using Python fallback for %s",
+                audio_path,
+            )
         if rust_detection is not None:
             chapters_to_keep = [
                 Chapter(

@@ -98,6 +98,10 @@ class TestRateLimitingEdgeCases:
                 Exception("service unavailable"),
                 Exception("Error 503: Service unavailable"),
                 Exception("rate limit reached"),
+                # Timeouts and 5xx are transient — must be retried so a
+                # single network blip doesn't kill the whole job.
+                Exception("Connection timeout"),
+                Exception("Internal server error (500)"),
             ]
 
             # Test specific LiteLLM exceptions by importing at runtime
@@ -123,8 +127,6 @@ class TestRateLimitingEdgeCases:
                 Exception("Forbidden (403)"),
                 ValueError("Invalid input format"),
                 Exception("Model not found (404)"),
-                Exception("Connection timeout"),  # Not in the retryable list
-                Exception("Internal server error (500)"),  # Not in the retryable list
             ]
 
             for error in non_retryable_errors:

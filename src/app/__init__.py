@@ -5,27 +5,76 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from flask import Flask, current_app, g, has_app_context, request
-from flask_cors import CORS
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
 
-from app import models as models
-from app.auth import AuthSettings, load_auth_settings
-from app.auth.bootstrap import bootstrap_admin_user
-from app.auth.discord_settings import load_discord_settings
-from app.auth.middleware import init_auth_middleware
-from app.config_store import (
+
+def _load_dotenv_files() -> None:
+    """Load .env.local and .env from the repo root.
+
+    Both the web server (waitress / flask CLI) and subprocesses (writer,
+    processing_worker) import this package, so loading here keeps env parity
+    across processes. Without this, env-based overrides (e.g.
+    WHISPER_REMOTE_MODEL) can apply in one process but not another and the
+    runtime config silently diverges from what was used to write the DB.
+    Existing process env wins (override=False) so docker-compose env_file and
+    real shell exports still take precedence. Skipped under pytest to avoid
+    polluting tests that assert specific env states.
+    """
+    if "pytest" in sys.modules:
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    for filename in (".env.local", ".env"):
+        path = repo_root / filename
+        if path.is_file():
+            load_dotenv(path, override=False)
+
+
+# Dotenv must run before any app-namespace imports so submodules see the
+# environment when they read it at import time. The E402 suppressions below
+# encode that ordering requirement intentionally.
+_load_dotenv_files()
+from flask_cors import CORS  # noqa: E402
+from sqlalchemy import event  # noqa: E402
+from sqlalchemy.engine import Engine  # noqa: E402
+
+from app import models as models  # noqa: E402
+from app.auth import AuthSettings, load_auth_settings  # noqa: E402
+from app.auth.bootstrap import bootstrap_admin_user  # noqa: E402
+from app.auth.discord_settings import load_discord_settings  # noqa: E402
+from app.auth.middleware import init_auth_middleware  # noqa: E402
+from app.config_store import (  # noqa: E402
     ensure_defaults_and_hydrate,
     hydrate_runtime_config_inplace,
 )
-from app.extensions import db, migrate, scheduler
-from app.logger import setup_logger
-from app.runtime_config import config, is_test
-from shared import defaults as DEFAULTS
-from shared.processing_paths import get_in_root, get_srv_root
+from app.extensions import db, migrate, scheduler  # noqa: E402
+from app.litellm_silencer import install_litellm_log_filter  # noqa: E402
+from app.logger import setup_logger  # noqa: E402
+from app.runtime_config import config, is_test  # noqa: E402
+from shared import defaults as DEFAULTS  # noqa: E402
+from shared.processing_paths import get_in_root, get_srv_root  # noqa: E402
 
-setup_logger("global_logger", "src/instance/logs/app.log")
+if is_test:
+    # Don't attach the production app.log file handler under pytest -- tests
+    # deliberately raise mocked errors (e.g. "boom" in test_processing_worker,
+    # mocked litellm.UnsupportedParamsError in test_ad_classifier) that would
+    # otherwise be written into src/instance/logs/app.log and look like real
+    # runtime errors. Tests still get console output via caplog / pytest's own
+    # log capture. test_logger_rotation.py exercises the file-handler path
+    # directly against tmp_path so this gate doesn't affect its coverage.
+    _global_logger = logging.getLogger("global_logger")
+    _global_logger.setLevel(logging.DEBUG)
+    _global_logger.propagate = False
+else:
+    setup_logger("global_logger", "src/instance/logs/app.log")
+# Install the litellm log-noise filter before anything imports litellm so the
+# import-time "Bedrock/SageMaker: No module named botocore" warnings get
+# dropped. The matching `suppress_debug_info` flip is deferred to the call
+# sites that actually import litellm (apply_litellm_suppress_debug_info)
+# because importing litellm here would pull ~160 MiB of openai submodules
+# into every long-lived process at startup, even on requests that never
+# touch the LLM.
+install_litellm_log_filter()
 app_logger: logging.Logger = logging.getLogger("global_logger")
 
 
@@ -523,7 +572,11 @@ def _reset_processor_if_loaded() -> None:
 
 
 def _start_scheduler_and_jobs(app: Flask) -> None:
-    from app.background import add_background_job, schedule_cleanup_job
+    from app.background import (
+        add_background_job,
+        schedule_cleanup_job,
+        schedule_memory_trim_job,
+    )
     from app.jobs_manager import get_jobs_manager
 
     _clear_scheduler_jobstore()
@@ -542,3 +595,4 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
         else int(config.background_update_interval_minute)
     )
     schedule_cleanup_job(getattr(config, "post_cleanup_retention_days", None))
+    schedule_memory_trim_job()

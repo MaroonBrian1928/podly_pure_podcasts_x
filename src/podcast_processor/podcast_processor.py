@@ -20,7 +20,11 @@ from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from podcast_processor.ad_classifier import AdClassifier
-from podcast_processor.audio import clip_segments_exact, overlay_beeps_with_ducking
+from podcast_processor.audio import (
+    clip_segments_exact,
+    get_audio_duration_ms,
+    overlay_beeps_with_ducking,
+)
 from podcast_processor.audio_processor import AudioProcessor
 from podcast_processor.chapter_ad_detector import (
     ChapterAdDetector,
@@ -35,6 +39,7 @@ from podcast_processor.chapter_fallback import (
 )
 from podcast_processor.chapter_filter import parse_filter_strings
 from podcast_processor.chapter_writer import (
+    fill_chapter_gaps,
     recalculate_chapter_times,
     write_adjusted_chapters,
 )
@@ -61,6 +66,30 @@ from shared.processing_paths import (
 )
 
 logger = logging.getLogger("global_logger")
+
+
+def _serialize_chapters_for_output(
+    chapters: list[Any], processed_audio_path: str
+) -> list[dict[str, Any]]:
+    """Return the chapter list serialized for chapter_data, forced to span the
+    full processed audio file. Padding chapters to [0, audio_duration_ms] keeps
+    UI display, RSS metadata, and MP3 chapter tags in agreement: a chapter set
+    that stops short of the file is mis-tagged in some players and confusing in
+    the UI ("first chapter starts at 00:02").
+    """
+    try:
+        duration_ms = get_audio_duration_ms(processed_audio_path) or 0
+    except Exception:  # noqa: BLE001 - probe is best-effort
+        duration_ms = 0
+    filled = fill_chapter_gaps(list(chapters), duration_ms)
+    return [
+        {
+            "title": ch.title,
+            "start_time": round(ch.start_time_ms / 1000.0, 1),
+            "end_time": round(ch.end_time_ms / 1000.0, 1),
+        }
+        for ch in filled
+    ]
 
 
 @dataclass(frozen=True)
@@ -499,6 +528,19 @@ class PodcastProcessor:
         self.logger.info("[INA] Starting INA analysis for post %s", post_id)
         model_call_id: int | None = None
         try:
+            # Clear any stale ina rows from a prior run before upserting. The
+            # final UPDATE to set last_segment_sequence_num=len(results)-1
+            # would otherwise collide with a previous run's identically-keyed
+            # ModelCall row (unique on post_id+first+last+model_name).
+            writer_client.action(
+                "delete_model_calls_for_post_by_model_name",
+                {
+                    "post_id": post_id,
+                    "model_name": "ina:speech_music_noise",
+                },
+                wait=True,
+            )
+
             upsert_res = writer_client.action(
                 "upsert_model_call",
                 {
@@ -547,7 +589,7 @@ class PodcastProcessor:
                 )
 
             if model_call_id is not None:
-                writer_client.update(
+                update_res = writer_client.update(
                     "ModelCall",
                     int(model_call_id),
                     {
@@ -559,6 +601,17 @@ class PodcastProcessor:
                     },
                     wait=True,
                 )
+                # Silent writer failures would leave the placeholder row
+                # stuck at status="pending" forever; surface them so the
+                # outer except branch can mark the call failed_permanent.
+                if not update_res or not update_res.success:
+                    raise RuntimeError(
+                        getattr(
+                            update_res,
+                            "error",
+                            "Failed to finalize INA ModelCall update",
+                        )
+                    )
 
             self.logger.info(
                 "[INA] INA analysis complete for post %s: %s segments",
@@ -1254,6 +1307,11 @@ class PodcastProcessor:
                     chapters_for_output=chapters_for_output,
                     transcript_segments=transcript_segments_for_chapters,
                     post_id=post.id,
+                    post_guid=post.guid,
+                    # Rust must re-derive the ad-filtered segment set from the
+                    # DB, so it needs the removed windows that produced
+                    # `transcript_segments_for_chapters`.
+                    removed_windows_ms=removed_segments_ms,
                 )
             if chapters_for_output:
                 self.logger.info(
@@ -1275,14 +1333,9 @@ class PodcastProcessor:
             chapter_data_json = json.dumps(
                 {
                     "chapter_source": chapter_source,
-                    "chapters_for_output": [
-                        {
-                            "title": ch.title,
-                            "start_time": round(ch.start_time_ms / 1000.0, 1),
-                            "end_time": round(ch.end_time_ms / 1000.0, 1),
-                        }
-                        for ch in adjusted_chapters
-                    ],
+                    "chapters_for_output": _serialize_chapters_for_output(
+                        adjusted_chapters, processed_audio_path
+                    ),
                 }
             )
 
@@ -1402,6 +1455,10 @@ class PodcastProcessor:
                 chapters_for_output=chapters_for_output,
                 transcript_segments=transcript_segments,
                 post_id=post.id,
+                # Only the unfiltered path is safe to delegate to Rust — the
+                # other call site uses ad-window-filtered segments that Rust
+                # cannot reconstruct from the DB alone.
+                post_guid=post.guid,
             )
 
         self.status_manager.update_job_status(
@@ -1442,14 +1499,9 @@ class PodcastProcessor:
             chapter_data_json = json.dumps(
                 {
                     "chapter_source": chapter_source,
-                    "chapters_for_output": [
-                        {
-                            "title": ch.title,
-                            "start_time": round(ch.start_time_ms / 1000.0, 1),
-                            "end_time": round(ch.end_time_ms / 1000.0, 1),
-                        }
-                        for ch in chapters_for_output
-                    ],
+                    "chapters_for_output": _serialize_chapters_for_output(
+                        chapters_for_output, processed_audio_path
+                    ),
                 }
             )
 
@@ -1467,6 +1519,8 @@ class PodcastProcessor:
         chapters_for_output: list[Any],
         transcript_segments: list[Any],
         post_id: int | None,
+        post_guid: str | None = None,
+        removed_windows_ms: list[tuple[int, int]] | None = None,
     ) -> list[Any]:
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
@@ -1478,6 +1532,10 @@ class PodcastProcessor:
             openai_base_url=getattr(self.config, "openai_base_url", None),
             openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
             logger_override=self.logger,
+            post_id=post_id,
+            post_guid=post_guid,
+            removed_windows_ms=removed_windows_ms,
+            llm_service_tier=getattr(self.config, "llm_service_tier", None),
         )
         if topic_chapters:
             refined_topic_chapters = refine_transcript_chapters_with_word_refiner(
@@ -1507,6 +1565,8 @@ class PodcastProcessor:
                 openai_base_url=getattr(self.config, "openai_base_url", None),
                 openai_timeout_sec=int(getattr(self.config, "openai_timeout", 300)),
                 logger_override=self.logger,
+                post_id=post_id,
+                llm_service_tier=getattr(self.config, "llm_service_tier", None),
             )
             self.logger.info(
                 "Heuristic transcript chapter boundaries retained after LLM "
@@ -1639,20 +1699,19 @@ class PodcastProcessor:
             removed_segments=ad_segments,
         )
 
-        # Build chapter data for stats
+        # Build chapter data for stats.
+        # `chapters_for_output` is what the UI / RSS render, and it must span
+        # the full processed audio file (see _serialize_chapters_for_output).
+        # `chapters_kept` and `chapters_removed` are diagnostic snapshots of
+        # the pre-removal chapter set, so they intentionally stay un-padded.
         adjusted_kept_chapters = recalculate_chapter_times(
             chapters_to_keep, ad_segments
         )
         chapter_data = {
             "filter_strings": filter_strings,
-            "chapters_for_output": [
-                {
-                    "title": ch.title,
-                    "start_time": round(ch.start_time_ms / 1000.0, 1),
-                    "end_time": round(ch.end_time_ms / 1000.0, 1),
-                }
-                for ch in adjusted_kept_chapters
-            ],
+            "chapters_for_output": _serialize_chapters_for_output(
+                adjusted_kept_chapters, processed_audio_path
+            ),
             "chapters_kept": [
                 {
                     "title": ch.title,

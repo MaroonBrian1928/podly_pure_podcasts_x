@@ -72,8 +72,13 @@ def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
             if model_call is None:
                 raise
 
-    # Match prior behavior: reset only when pending/failed_retries.
-    if model_call.status in ["pending", "failed_retries"]:
+    # Reset rows the next run is allowed to re-attempt: previously aborted
+    # (pending, retrying, failed_retries) or explicitly cancelled by a
+    # superseding job. Without these here, the next upsert of the same chunk
+    # would find the row, leave its status alone, and the classifier would
+    # immediately re-call the LLM with the wrong carried-over error_message
+    # visible in the UI.
+    if model_call.status in ["pending", "retrying", "failed_retries", "cancelled"]:
         model_call.status = "pending"
         model_call.prompt = str(prompt)
         model_call.retry_attempts = 0
@@ -82,6 +87,33 @@ def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
 
     db.session.flush()
     return {"model_call_id": int(model_call.id)}
+
+
+def delete_model_calls_for_post_by_model_name_action(
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Delete every ModelCall row for ``(post_id, model_name)`` regardless of
+    its segment range.
+
+    The unique index on ``(post_id, first_segment_sequence_num,
+    last_segment_sequence_num, model_name)`` makes the INA flow brittle on
+    re-processing: a prior successful run leaves a row keyed at the *real*
+    segment count, but the next run's placeholder is keyed at ``(0, 0)``.
+    The final UPDATE then collides with the old row. Clearing the
+    name-scoped rows up-front makes the path idempotent.
+    """
+    post_id = params.get("post_id")
+    model_name = params.get("model_name")
+    if post_id is None or not model_name:
+        raise ValueError("post_id and model_name are required")
+
+    deleted = (
+        db.session.query(ModelCall)
+        .filter_by(post_id=int(post_id), model_name=str(model_name))
+        .delete(synchronize_session=False)
+    )
+    db.session.flush()
+    return {"deleted": int(deleted or 0)}
 
 
 def upsert_whisper_model_call_action(params: dict[str, Any]) -> dict[str, Any]:

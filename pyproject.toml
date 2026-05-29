@@ -31,7 +31,7 @@ dependencies = [
     "flask-migrate",
     "Flask-APScheduler",
     "ffmpeg-python",
-    "litellm",
+    "litellm>=1.86.1",
     "bleach",
     "groq",
     "async_timeout",

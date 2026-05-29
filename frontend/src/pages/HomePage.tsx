@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { feedsApi, billingApi } from '../services/api';
 import FeedList from '../components/FeedList';
 import FeedDetail from '../components/FeedDetail';
@@ -18,7 +18,7 @@ import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
 
-const MOBILE_FEED_DETAIL_TRANSITION_MS = 380;
+const MOBILE_FEED_DETAIL_TRANSITION_MS = 440;
 const HOME_ROUTE_QUERY_GC_TIME_MS = 5 * 60 * 1000;
 
 type MobileFeedTransitionState = 'idle' | 'entering' | 'exiting';
@@ -46,6 +46,13 @@ function captureMobileTransitionViewport(
   };
 }
 
+function scrollMobileMainToTop(container: HTMLDivElement | null): void {
+  const mainElement = container?.closest('main');
+  if (mainElement instanceof HTMLElement) {
+    mainElement.scrollTop = 0;
+  }
+}
+
 export default function HomePage() {
   const navigate = useNavigate();
   const { feedId } = useParams();
@@ -57,6 +64,8 @@ export default function HomePage() {
   const [mobileTransitionFeed, setMobileTransitionFeed] = useState<Feed | null>(null);
   const [mobileTransitionViewport, setMobileTransitionViewport] =
     useState<MobileTransitionViewport | null>(null);
+  const [showSortMenu, setShowSortMenu] = useState(false);
+  const sortMenuRef = useRef<HTMLDivElement>(null);
   const [feedSortBy, setFeedSortBy] = useState<FeedSortOption>(() =>
     loadFeedListSortPreference()
   );
@@ -123,7 +132,7 @@ export default function HomePage() {
     }
   }, [feeds, feedId, location.pathname, selectedFeed]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousSelectedFeed = previousSelectedFeedRef.current;
     const previousSelectedFeedId = previousSelectedFeed?.id ?? null;
     const nextSelectedFeedId = selectedFeed?.id ?? null;
@@ -142,6 +151,7 @@ export default function HomePage() {
     }
 
     if (previousSelectedFeedId === null && nextSelectedFeedId !== null && selectedFeed) {
+      scrollMobileMainToTop(pageContainerRef.current);
       setMobileTransitionViewport(
         captureMobileTransitionViewport(pageContainerRef.current)
       );
@@ -171,6 +181,7 @@ export default function HomePage() {
       previousSelectedFeedId !== nextSelectedFeedId &&
       selectedFeed
     ) {
+      scrollMobileMainToTop(pageContainerRef.current);
       setMobileTransitionViewport(
         captureMobileTransitionViewport(pageContainerRef.current)
       );
@@ -198,6 +209,17 @@ export default function HomePage() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!showSortMenu) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!sortMenuRef.current?.contains(event.target as Node)) {
+        setShowSortMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [showSortMenu]);
 
   if (isLoading) {
     return (
@@ -256,7 +278,17 @@ export default function HomePage() {
   const handleFeedSortChange = (nextSort: FeedSortOption) => {
     setFeedSortBy(nextSort);
     persistFeedListSortPreference(nextSort);
+    setShowSortMenu(false);
   };
+
+  const feedSortOptions: { value: FeedSortOption; label: string }[] = [
+    { value: 'newest', label: 'Newest Episode' },
+    { value: 'oldest', label: 'Oldest Episode' },
+    { value: 'title-asc', label: 'Title A–Z' },
+    { value: 'title-desc', label: 'Title Z–A' },
+    { value: 'feed-added-oldest', label: 'Feed Added (Oldest)' },
+    { value: 'feed-added-newest', label: 'Feed Added (Newest)' },
+  ];
 
   return (
     <div ref={pageContainerRef} className="relative h-full flex flex-col lg:flex-row gap-6">
@@ -269,26 +301,73 @@ export default function HomePage() {
             Podcast Feeds
           </h2>
           <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-            <div className="min-w-0 flex-1">
-              <label htmlFor="feed-sort" className="sr-only">
-                Sort feeds
-              </label>
-              <select
-                id="feed-sort"
-                value={feedSortBy}
-                onChange={(event) =>
-                  handleFeedSortChange(event.target.value as FeedSortOption)
-                }
-                className="h-10 w-full rounded-md border border-gray-200 bg-white px-3 text-sm text-gray-700 transition-colors hover:bg-gray-50 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            <div ref={sortMenuRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowSortMenu((prev) => !prev)}
                 title="Sort podcast feeds"
+                aria-haspopup="menu"
+                aria-expanded={showSortMenu}
+                className="h-10 w-10 flex items-center justify-center rounded-md border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors"
               >
-                <option value="newest">Newest Episode</option>
-                <option value="oldest">Oldest Episode</option>
-                <option value="title-asc">Title A-Z</option>
-                <option value="title-desc">Title Z-A</option>
-                <option value="feed-added-oldest">Feed Added (Oldest)</option>
-                <option value="feed-added-newest">Feed Added (Newest)</option>
-              </select>
+                <svg
+                  className="w-4 h-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M3 6h13" />
+                  <path d="M3 12h9" />
+                  <path d="M3 18h5" />
+                  <path d="M17 8V4m0 0l-3 3m3-3l3 3" />
+                  <path d="M17 16v4m0 0l-3-3m3 3l3-3" />
+                </svg>
+                <span className="sr-only">Sort feeds</span>
+              </button>
+              {showSortMenu && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full mt-1 w-48 rounded-md border border-gray-200 bg-white py-1 shadow-lg z-20 max-w-[calc(100vw-2rem)]"
+                >
+                  {feedSortOptions.map((option) => {
+                    const isActive = option.value === feedSortBy;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={isActive}
+                        onClick={() => handleFeedSortChange(option.value)}
+                        className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm leading-5 transition-colors ${
+                          isActive
+                            ? 'font-medium text-blue-600'
+                            : 'text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        <span>{option.label}</span>
+                        {isActive && (
+                          <svg
+                            className="h-3.5 w-3.5 shrink-0 text-blue-600"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
             {canRefreshAll && (
               <button

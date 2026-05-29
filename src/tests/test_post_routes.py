@@ -685,6 +685,63 @@ def test_feed_posts_include_podly_description_html(app):
     assert "Podly Post JSON" not in item["podly_description_html"]
 
 
+def test_feed_posts_defers_heavyweight_json_columns(app):
+    """api_feed_posts must not load transcript_word_timestamps / bleep_windows /
+    refined_ad_boundaries — those JSON blobs can be megabytes per row and the
+    endpoint never serializes them, so loading them turns a paginated GET into
+    a ~50MB allocation per call.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Heavy JSON Feed", rss_url="https://example.com/feed.xml")
+        db.session.add(feed)
+        db.session.commit()
+
+        large_word_timestamps = [
+            {"word": f"word-{i}", "start": float(i), "end": float(i) + 0.5}
+            for i in range(200)
+        ]
+        post = Post(
+            feed_id=feed.id,
+            guid="defer-guid",
+            download_url="https://example.com/defer.mp3",
+            title="Heavy episode",
+            transcript_word_timestamps=large_word_timestamps,
+            bleep_windows=[[1000, 2000]],
+            refined_ad_boundaries=[[10.0, 20.0]],
+        )
+        db.session.add(post)
+        db.session.commit()
+        db.session.expire_all()
+
+        client = app.test_client()
+        response = client.get(f"/api/feeds/{feed.id}/posts")
+        assert response.status_code == 200
+
+        # After the endpoint runs, re-fetching via the same defer options must
+        # leave the heavy columns unloaded. Use the same helper the endpoint
+        # uses so we test the exact configuration the endpoint applies.
+        from app.feeds import post_feed_render_defers
+
+        db.session.expire_all()
+        fetched = (
+            Post.query.filter_by(feed_id=feed.id)
+            .options(*post_feed_render_defers())
+            .first()
+        )
+        unloaded = sa_inspect(fetched).unloaded
+        assert "transcript_word_timestamps" in unloaded
+        assert "bleep_windows" in unloaded
+        assert "refined_ad_boundaries" in unloaded
+        # Spot-check we didn't accidentally defer something the endpoint needs.
+        assert "title" not in unloaded
+        assert "description" not in unloaded
+
+
 def test_reprocess_keep_transcript_accepts_active_whisper_model_call(app):
     app.testing = True
     app.register_blueprint(post_bp)
@@ -915,6 +972,205 @@ def test_post_stats_falls_back_when_rust_payload_unavailable(app):
     assert payload is not None
     assert payload["post"]["guid"] == guid
     render_mock.assert_called_once()
+
+
+def test_post_stats_includes_estimated_cost_for_admin(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    @app.before_request
+    def _set_admin_user() -> None:
+        g.current_user = SimpleNamespace(id=1, role="admin")
+
+    with app.app_context():
+        user = User(id=1, username="admin", password_hash="hash", role="admin")
+        feed = Feed(title="Stats Cost Feed", rss_url="https://example.com/feed.xml")
+        db.session.add_all([user, feed])
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-cost-admin-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Cost Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=1,
+                model_name="gpt-4o-mini",
+                prompt="classify",
+                status="success",
+                prompt_tokens=1_000_000,
+                cached_prompt_tokens=500_000,
+                completion_tokens=250_000,
+                # The writer is responsible for populating this column at
+                # finalize time. Set it directly here so we test the stats
+                # endpoint's read-path (which must NOT import litellm)
+                # rather than the writer's compute-path.
+                estimated_cost_usd=0.3375,
+            )
+        )
+        db.session.commit()
+        guid = post.guid
+
+    with (
+        mock.patch("app.routes.post_routes.try_render_post_stats", return_value=None),
+        mock.patch(
+            "app.config_store.read_combined",
+            return_value={
+                "app": {
+                    "whisper_cost_rate_per_hour": 0.04,
+                    "ina_cost_rate_per_hour": 0.02,
+                }
+            },
+        ),
+    ):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    # LLM-only post (no whisper/ina rows) → total equals the persisted
+    # ModelCall.estimated_cost_usd.
+    assert payload["processing_stats"]["estimated_cost"] == 0.3375
+
+
+def test_post_stats_omits_estimated_cost_for_non_admin(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    @app.before_request
+    def _set_regular_user() -> None:
+        g.current_user = SimpleNamespace(id=1, role="user")
+
+    with app.app_context():
+        user = User(id=1, username="user", password_hash="hash", role="user")
+        feed = Feed(title="Stats Cost Feed", rss_url="https://example.com/feed.xml")
+        db.session.add_all([user, feed])
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-cost-user-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Cost Episode",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=1,
+                model_name="gpt-4o-mini",
+                prompt="classify",
+                status="success",
+                prompt_tokens=1_000_000,
+                cached_prompt_tokens=500_000,
+                completion_tokens=250_000,
+            )
+        )
+        db.session.commit()
+        guid = post.guid
+
+    with mock.patch("app.routes.post_routes.try_render_post_stats", return_value=None):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert "estimated_cost" not in payload["processing_stats"]
+
+
+def test_post_stats_estimated_cost_includes_whisper_and_ina_when_present(app):
+    """Admin per-episode total = LLM + Whisper(rate * hours) + INA(rate * hours).
+
+    Each model_call also carries an `estimated_cost_usd` so the modal can
+    render a per-call cost column. Whisper / INA per-call costs are the
+    duration-based fee split across the success calls of that type.
+    """
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    @app.before_request
+    def _set_admin_user() -> None:
+        g.current_user = SimpleNamespace(id=1, role="admin")
+
+    with app.app_context():
+        user = User(id=1, username="admin2", password_hash="hash", role="admin")
+        feed = Feed(title="Stats Cost Feed", rss_url="https://example.com/feed.xml")
+        db.session.add_all([user, feed])
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="stats-cost-whisper-ina-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Stats Cost Episode",
+            whitelisted=True,
+            duration=3600.0,  # 1 hour
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add_all(
+            [
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=1,
+                    model_name="gpt-4o-mini",
+                    prompt="classify",
+                    status="success",
+                    estimated_cost_usd=0.3375,
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=-1,
+                    model_name="whisper-large-v3-turbo",
+                    prompt="Whisper transcription job",
+                    status="success",
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=-1,
+                    model_name="ina:speech_music_noise",
+                    prompt="INA",
+                    status="success",
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    with (
+        mock.patch("app.routes.post_routes.try_render_post_stats", return_value=None),
+        mock.patch(
+            "app.config_store.read_combined",
+            return_value={
+                "app": {
+                    "whisper_cost_rate_per_hour": 0.04,
+                    "ina_cost_rate_per_hour": 0.02,
+                }
+            },
+        ),
+    ):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    # 0.3375 (LLM) + 0.04 (Whisper * 1h) + 0.02 (INA * 1h) = 0.3975
+    assert payload["processing_stats"]["estimated_cost"] == 0.3975
+
+    calls_by_model = {c["model_name"]: c for c in payload["model_calls"]}
+    assert calls_by_model["gpt-4o-mini"]["estimated_cost_usd"] == 0.3375
+    assert calls_by_model["whisper-large-v3-turbo"]["estimated_cost_usd"] == 0.04
+    assert calls_by_model["ina:speech_music_noise"]["estimated_cost_usd"] == 0.02
 
 
 def test_post_stats_rust_path_accepts_guid_with_slashes(app):
@@ -1917,6 +2173,76 @@ def test_post_stats_exposes_retry_count_separately_from_attempt_count(app):
     assert retry_counts[("gemini/gemini-3.1-flash-lite-preview", "0-0")] == (1, 0)
     assert retry_counts[("gemini/gemini-3.1-flash-lite-preview", "1-1")] == (3, 2)
     assert retry_counts[("whisper-1", "0-0")] == (0, 0)
+
+
+def test_post_stats_includes_chapter_llm_model_calls(app):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(
+            title="Chapter Stats Feed",
+            rss_url="https://example.com/feed.xml",
+            ad_detection_strategy="chapter_insert",
+        )
+        db.session.add(feed)
+        db.session.commit()
+
+        post = Post(
+            feed_id=feed.id,
+            guid="chapter-llm-model-call-stats-guid",
+            download_url="https://example.com/audio.mp3",
+            title="Chapter LLM Model Call Stats",
+            processed_audio_path="/tmp/chapter-output.mp3",
+            whitelisted=True,
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        db.session.add_all(
+            [
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=-100,
+                    last_segment_sequence_num=-100,
+                    model_name="gemini/gemini-3-flash-preview",
+                    prompt="chapter title prompt",
+                    response="chapter title response",
+                    status="success",
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    total_tokens=15,
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    first_segment_sequence_num=-200,
+                    last_segment_sequence_num=-200,
+                    model_name="gemini/gemini-3-flash-preview",
+                    prompt="chapter topic prompt",
+                    response="chapter topic response",
+                    status="success",
+                    prompt_tokens=20,
+                    completion_tokens=8,
+                    total_tokens=28,
+                ),
+            ]
+        )
+        db.session.commit()
+        guid = post.guid
+
+    response = app.test_client().get(f"/api/posts/{guid}/stats")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload is not None
+    assert payload["processing_stats"]["total_model_calls"] == 2
+    assert payload["processing_stats"]["model_types"] == {
+        "gemini/gemini-3-flash-preview": 2
+    }
+    ranges = {call["segment_range"] for call in payload["model_calls"]}
+    assert "chapter titles (LLM)" in ranges
+    assert "chapter topic plan (LLM)" in ranges
+    assert "-100--100" not in ranges
 
 
 def test_post_stats_includes_debug_info_when_enabled(app, tmp_path):

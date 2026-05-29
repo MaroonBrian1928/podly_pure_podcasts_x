@@ -2,22 +2,49 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import math
 import re
 from collections.abc import Sequence
+from types import SimpleNamespace as _FlexShim
 from typing import Any
 
 from podcast_processor.chapter_reader import Chapter, read_chapters
 from podcast_processor.description_chapter_parser import parse_chapters_from_description
 from podcast_processor.llm_model_call_utils import (
+    apply_service_tier as _apply_service_tier,
+)
+from podcast_processor.llm_model_call_utils import (
+    call_litellm_with_tier_retry as _call_litellm_with_tier_retry,
+)
+from podcast_processor.llm_model_call_utils import (
     extract_litellm_content,
     extract_litellm_finish_reason,
     extract_litellm_usage,
 )
+from podcast_processor.llm_model_call_utils import (
+    record_service_tier_on_model_call as _record_service_tier_on_model_call,
+)
+from podcast_processor.llm_model_call_utils import (
+    try_update_model_call as _try_update_model_call,
+)
+from podcast_processor.llm_model_call_utils import (
+    try_upsert_model_call as _try_upsert_model_call,
+)
 from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 from shared.llm_utils import model_uses_max_completion_tokens
+
+# Sentinel (first_seq, last_seq) pairs used when chapter LLM calls are
+# recorded as ModelCall rows so they show up in the debug UI alongside
+# classification + boundary-refine calls. Negative values can't collide with
+# real transcript segment numbers, and each phase gets its own pair so the
+# unique (post_id, first_seq, last_seq, model_name) index doesn't dedupe
+# different phases of the same run into one row.
+_CHAPTER_TITLE_REFINE_RANGE = (-100, -100)
+_TOPIC_PLAN_RANGE = (-200, -200)
+_TOPIC_PLAN_CONTINUATION_RANGE = (-201, -201)
 
 logger = logging.getLogger("global_logger")
 
@@ -29,8 +56,8 @@ TOPIC_CHAPTER_TARGET_BLOCK_COUNT = 60
 TOPIC_CHAPTER_MIN_BLOCK_SECONDS = 60
 # Two-minute blocks are the largest window we allow before chapter starts get too coarse.
 TOPIC_CHAPTER_MAX_BLOCK_SECONDS = 2 * 60
-# Keep only a short snippet per block; ~220 chars is enough topic signal for the LLM.
-TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 220
+# Keep enough transcript from each block for specific, context-rich chapter titles.
+TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 1000
 # For long episodes, cap chapter counts to roughly one chapter every five minutes.
 TOPIC_CHAPTER_CAP_WINDOW_SECONDS = 5 * 60
 # Treat episodes under an hour as "short" when applying the hard chapter-count cap.
@@ -86,6 +113,52 @@ def resolve_llm_path_chapters(
     return [], "none"
 
 
+def _assemble_refined_chapters(
+    sorted_chapters: Sequence[Chapter],
+    candidate_starts_ms: Sequence[int],
+) -> tuple[list[Chapter], int]:
+    """Apply refined candidate starts while preserving monotonic ordering.
+
+    If a refined candidate would land at or before the previous chapter's
+    kept start, fall back to the chapter's original start rather than emit a
+    1 ms nudge — that nudge still renders identically in the UI / MP3 tags
+    and is worse than just leaving the chapter un-refined.
+    """
+    adjusted_starts_ms: list[int] = []
+    refined_kept = 0
+    for idx, chapter in enumerate(sorted_chapters):
+        candidate = candidate_starts_ms[idx]
+        original_start_ms = int(chapter.start_time_ms)
+        if adjusted_starts_ms:
+            prev = adjusted_starts_ms[-1]
+            if candidate <= prev:
+                candidate = original_start_ms
+                if candidate <= prev:
+                    candidate = prev + 1
+        else:
+            candidate = max(candidate, 0)
+        adjusted_starts_ms.append(candidate)
+        if candidate != original_start_ms:
+            refined_kept += 1
+
+    adjusted: list[Chapter] = []
+    for idx, chapter in enumerate(sorted_chapters):
+        start_ms = adjusted_starts_ms[idx]
+        if idx + 1 < len(sorted_chapters):
+            end_ms = max(start_ms, adjusted_starts_ms[idx + 1])
+        else:
+            end_ms = max(start_ms, int(chapter.end_time_ms))
+        adjusted.append(
+            Chapter(
+                element_id=chapter.element_id,
+                title=chapter.title,
+                start_time_ms=start_ms,
+                end_time_ms=end_ms,
+            )
+        )
+    return adjusted, refined_kept
+
+
 def refine_description_chapters_with_word_refiner(
     chapters: Sequence[Chapter],
     transcript_segments: Sequence[Any],
@@ -110,6 +183,7 @@ def refine_description_chapters_with_word_refiner(
     if not all_segments:
         return list(chapters)
 
+    segment_index = _SegmentIndex(all_segments)
     refiner_logger = log if isinstance(log, logging.Logger) else None
     refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
     max_shift_ms = max(0, int(max_shift_seconds * 1000))
@@ -120,9 +194,8 @@ def refine_description_chapters_with_word_refiner(
 
     for chapter in sorted_chapters:
         original_start_ms = int(chapter.start_time_ms)
-        preferred_seq = _nearest_segment_seq_for_time(all_segments, original_start_ms)
-        context_segments = _context_segments_around_time(
-            all_segments,
+        preferred_seq = segment_index.nearest_segment_seq_for_time(original_start_ms)
+        context_segments = segment_index.context_segments_around_time(
             time_seconds=original_start_ms / 1000.0,
             window_seconds=60.0,
         )
@@ -144,32 +217,15 @@ def refine_description_chapters_with_word_refiner(
         if new_start_ms != original_start_ms:
             refined_count += 1
 
-    # Enforce monotonic starts and rebuild end times from the next start.
-    adjusted: list[Chapter] = []
-    last_start_ms = -1
-    for idx, chapter in enumerate(sorted_chapters):
-        start_ms = max(candidate_starts_ms[idx], last_start_ms + 1 if adjusted else 0)
-        if idx + 1 < len(sorted_chapters):
-            next_candidate = candidate_starts_ms[idx + 1]
-            end_ms = max(start_ms, next_candidate)
-        else:
-            end_ms = max(start_ms, int(chapter.end_time_ms))
+    adjusted, refined_kept = _assemble_refined_chapters(
+        sorted_chapters, candidate_starts_ms
+    )
 
-        adjusted.append(
-            Chapter(
-                element_id=chapter.element_id,
-                title=chapter.title,
-                start_time_ms=start_ms,
-                end_time_ms=end_ms,
-            )
-        )
-        last_start_ms = start_ms
-
-    if refined_count > 0:
+    if refined_kept > 0:
         log.info(
             "Refined %d description chapter boundary starts using word-level "
             "refiner heuristics",
-            refined_count,
+            refined_kept,
         )
     return adjusted
 
@@ -198,6 +254,7 @@ def refine_transcript_chapters_with_word_refiner(
     if not all_segments:
         return list(chapters)
 
+    segment_index = _SegmentIndex(all_segments)
     refiner_logger = log if isinstance(log, logging.Logger) else None
     refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
     max_shift_ms = max(0, int(max_shift_seconds * 1000))
@@ -213,8 +270,7 @@ def refine_transcript_chapters_with_word_refiner(
             candidate_starts_ms.append(original_start_ms)
             continue
 
-        context_segments = _context_segments_around_time(
-            all_segments,
+        context_segments = segment_index.context_segments_around_time(
             time_seconds=original_start_ms / 1000.0,
             window_seconds=context_window_seconds,
         )
@@ -239,31 +295,15 @@ def refine_transcript_chapters_with_word_refiner(
         if new_start_ms != original_start_ms:
             refined_count += 1
 
-    adjusted: list[Chapter] = []
-    last_start_ms = -1
-    for idx, chapter in enumerate(sorted_chapters):
-        start_ms = max(candidate_starts_ms[idx], last_start_ms + 1 if adjusted else 0)
-        if idx + 1 < len(sorted_chapters):
-            next_candidate = candidate_starts_ms[idx + 1]
-            end_ms = max(start_ms, next_candidate)
-        else:
-            end_ms = max(start_ms, int(chapter.end_time_ms))
+    adjusted, refined_kept = _assemble_refined_chapters(
+        sorted_chapters, candidate_starts_ms
+    )
 
-        adjusted.append(
-            Chapter(
-                element_id=chapter.element_id,
-                title=chapter.title,
-                start_time_ms=start_ms,
-                end_time_ms=end_ms,
-            )
-        )
-        last_start_ms = start_ms
-
-    if refined_count > 0:
+    if refined_kept > 0:
         log.info(
             "Refined %d transcript topic chapter boundary starts using word-level "
             "phrase matching",
-            refined_count,
+            refined_kept,
         )
     return adjusted
 
@@ -336,55 +376,148 @@ def generate_chapters_from_transcript(
     return chapters
 
 
+def _safe_coerce_segment_times(
+    seg: Any,
+    fallback_seq: int,
+) -> tuple[int, float, float]:
+    """Pull (sequence_num, start_time, end_time) off a transcript segment.
+
+    Returns coerced defaults rather than raising — chapter refinement is a
+    best-effort pass and a malformed segment row shouldn't take down the whole
+    chapter generation.
+    """
+    try:
+        sequence_num = int(seg.sequence_num)
+    except Exception:  # noqa: BLE001
+        sequence_num = fallback_seq
+    try:
+        start_time = float(getattr(seg, "start_time", 0.0))
+    except Exception:  # noqa: BLE001
+        start_time = 0.0
+    try:
+        end_time = float(getattr(seg, "end_time", start_time))
+    except Exception:  # noqa: BLE001
+        end_time = start_time
+    return sequence_num, start_time, max(start_time, end_time)
+
+
 def _segments_for_word_refiner(
     transcript_segments: Sequence[Any],
+    *,
+    pre_sorted: bool = False,
 ) -> list[dict[str, Any]]:
-    segments: list[dict[str, Any]] = []
-    for idx, seg in enumerate(sorted(list(transcript_segments), key=_seg_start_ms)):
-        try:
-            sequence_num = int(seg.sequence_num)
-        except Exception:  # noqa: BLE001
-            sequence_num = idx
-        try:
-            start_time = float(getattr(seg, "start_time", 0.0))
-        except Exception:  # noqa: BLE001
-            start_time = 0.0
-        try:
-            end_time = float(getattr(seg, "end_time", start_time))
-        except Exception:  # noqa: BLE001
-            end_time = start_time
+    """Normalize raw transcript-segment objects into refiner-friendly dicts.
 
+    ``pre_sorted=True`` lets callers that already sorted by ``start_time``
+    skip the redundant resort.
+    """
+    iterable = (
+        transcript_segments
+        if pre_sorted
+        else sorted(list(transcript_segments), key=_seg_start_ms)
+    )
+    segments: list[dict[str, Any]] = []
+    for idx, seg in enumerate(iterable):
+        sequence_num, start_time, end_time = _safe_coerce_segment_times(seg, idx)
         segments.append(
             {
                 "sequence_num": sequence_num,
                 "start_time": start_time,
-                "end_time": max(start_time, end_time),
+                "end_time": end_time,
                 "text": str(getattr(seg, "text", "") or ""),
             }
         )
     return segments
 
 
+class _SegmentIndex:
+    """Bisect-backed lookup over normalized refiner segments.
+
+    Caches ``start_time`` / ``end_time`` arrays once so per-chapter boundary
+    queries are O(log n) instead of an O(n) full scan. The cost is one pass at
+    build time, which the existing code already pays implicitly by sorting in
+    ``_segments_for_word_refiner``.
+    """
+
+    def __init__(self, segments: Sequence[dict[str, Any]]) -> None:
+        self._segments: list[dict[str, Any]] = list(segments)
+        self._start_times: list[float] = [
+            float(seg.get("start_time", 0.0)) for seg in self._segments
+        ]
+        self._end_times: list[float] = [
+            float(seg.get("end_time", start))
+            for seg, start in zip(self._segments, self._start_times, strict=False)
+        ]
+
+    def __bool__(self) -> bool:
+        return bool(self._segments)
+
+    @property
+    def segments(self) -> list[dict[str, Any]]:
+        return self._segments
+
+    def nearest_segment_seq_for_time(self, time_ms: int) -> int | None:
+        if not self._segments:
+            return None
+        time_seconds = float(time_ms) / 1000.0
+
+        # bisect on start_time finds the first segment that starts after t.
+        # The candidate enclosing segment, if any, is the one immediately
+        # before that insertion point.
+        idx = bisect.bisect_right(self._start_times, time_seconds)
+        if idx > 0:
+            seg = self._segments[idx - 1]
+            if self._start_times[idx - 1] <= time_seconds <= self._end_times[idx - 1]:
+                return int(seg.get("sequence_num", 0))
+
+        # Otherwise pick whichever neighbor's boundary is closest.
+        candidates: list[int] = []
+        if idx - 1 >= 0:
+            candidates.append(idx - 1)
+        if idx < len(self._segments):
+            candidates.append(idx)
+
+        best: tuple[float, int] | None = None
+        for cand in candidates:
+            distance = min(
+                abs(time_seconds - self._start_times[cand]),
+                abs(time_seconds - self._end_times[cand]),
+            )
+            seq = int(self._segments[cand].get("sequence_num", 0))
+            if best is None or distance < best[0]:
+                best = (distance, seq)
+        return best[1] if best is not None else None
+
+    def context_segments_around_time(
+        self,
+        *,
+        time_seconds: float,
+        window_seconds: float,
+    ) -> list[dict[str, Any]]:
+        if not self._segments:
+            return []
+        window = max(0.0, float(window_seconds))
+        start_time = float(time_seconds) - window
+        end_time = float(time_seconds) + window
+
+        # First segment whose start is past the window is the right-hand bound;
+        # the first segment whose end has caught up to the window start is the
+        # left-hand bound. Falling back to a linear sweep from the right-hand
+        # bound covers overlapping segments cheaply (the overlap is bounded).
+        right = bisect.bisect_right(self._start_times, end_time)
+        left = right
+        while left > 0 and self._end_times[left - 1] >= start_time:
+            left -= 1
+
+        selected = [dict(self._segments[i]) for i in range(left, right)]
+        return selected or [dict(self._segments[0])]
+
+
 def _nearest_segment_seq_for_time(
     all_segments: Sequence[dict[str, Any]],
     time_ms: int,
 ) -> int | None:
-    if not all_segments:
-        return None
-
-    time_seconds = float(time_ms) / 1000.0
-    best: tuple[float, int] | None = None
-    for seg in all_segments:
-        start_time = float(seg.get("start_time", 0.0))
-        end_time = float(seg.get("end_time", start_time))
-        if start_time <= time_seconds <= end_time:
-            return int(seg.get("sequence_num", 0))
-
-        distance = min(abs(time_seconds - start_time), abs(time_seconds - end_time))
-        seq = int(seg.get("sequence_num", 0))
-        if best is None or distance < best[0]:
-            best = (distance, seq)
-    return best[1] if best is not None else None
+    return _SegmentIndex(all_segments).nearest_segment_seq_for_time(time_ms)
 
 
 def _context_segments_around_time(
@@ -393,18 +526,16 @@ def _context_segments_around_time(
     time_seconds: float,
     window_seconds: float,
 ) -> list[dict[str, Any]]:
-    if not all_segments:
-        return []
-    start_time = float(time_seconds) - max(0.0, float(window_seconds))
-    end_time = float(time_seconds) + max(0.0, float(window_seconds))
+    return _SegmentIndex(all_segments).context_segments_around_time(
+        time_seconds=time_seconds,
+        window_seconds=window_seconds,
+    )
 
-    selected: list[dict[str, Any]] = []
-    for seg in all_segments:
-        seg_start = float(seg.get("start_time", 0.0))
-        seg_end = float(seg.get("end_time", seg_start))
-        if seg_end >= start_time and seg_start <= end_time:
-            selected.append(dict(seg))
-    return selected or [dict(all_segments[0])]
+
+def _tier_config_shim(llm_service_tier: str | None) -> Any:
+    return _FlexShim(
+        llm_service_tier=llm_service_tier or "default",
+    )
 
 
 def refine_generated_chapter_titles_with_llm(
@@ -416,6 +547,8 @@ def refine_generated_chapter_titles_with_llm(
     openai_base_url: str | None = None,
     openai_timeout_sec: int = 300,
     logger_override: logging.Logger | None = None,
+    llm_service_tier: str | None = None,
+    post_id: int | None = None,
 ) -> list[Chapter]:
     """
     Refine transcript-generated chapter titles via a single batched LLM call.
@@ -450,11 +583,40 @@ def refine_generated_chapter_titles_with_llm(
     else:
         completion_args["max_tokens"] = 300
 
-    try:
-        import litellm
+    tier_config = _tier_config_shim(llm_service_tier)
+    _apply_service_tier(completion_args, tier_config)
 
-        response = litellm.completion(**completion_args)
+    first_seq, last_seq = _CHAPTER_TITLE_REFINE_RANGE
+    model_call_id = _try_upsert_model_call(
+        post_id=post_id,
+        first_seq_num=first_seq,
+        last_seq_num=last_seq,
+        model_name=llm_model,
+        prompt=prompt,
+        logger=log,
+        log_prefix="Chapter title refine",
+    )
+    _record_service_tier_on_model_call(
+        model_call_id,
+        completion_args,
+        logger=log,
+        log_prefix="Chapter title refine",
+    )
+
+    try:
+        response = _call_litellm_with_tier_retry(
+            completion_args, config=tier_config, logger=log
+        )
         content = extract_litellm_content(response)
+        _try_update_model_call(
+            model_call_id,
+            status="success",
+            response=content,
+            error_message=None,
+            logger=log,
+            log_prefix="Chapter title refine",
+            usage=extract_litellm_usage(response),
+        )
         refined_titles = _parse_refined_titles_response(content)
         if not refined_titles:
             return chapters
@@ -480,6 +642,14 @@ def refine_generated_chapter_titles_with_llm(
             "LLM chapter title refinement failed; using heuristic titles: %s",
             exc,
         )
+        _try_update_model_call(
+            model_call_id,
+            status="failed_permanent",
+            response=None,
+            error_message=str(exc),
+            logger=log,
+            log_prefix="Chapter title refine",
+        )
         return chapters
 
 
@@ -494,6 +664,10 @@ def generate_topic_chapters_from_transcript_with_llm(
     target_chapter_seconds: int = 8 * 60,
     min_chapter_seconds: int = 2 * 60,
     logger_override: logging.Logger | None = None,
+    post_id: int | None = None,
+    post_guid: str | None = None,
+    removed_windows_ms: list[tuple[int, int]] | None = None,
+    llm_service_tier: str | None = None,
 ) -> list[Chapter]:
     """
     Generate transcript chapters with topic-based boundaries via an LLM call.
@@ -515,13 +689,20 @@ def generate_topic_chapters_from_transcript_with_llm(
     if total_duration_ms is None or total_duration_ms <= 0:
         return []
 
-    blocks = _build_topic_blocks(
-        segments,
+    blocks = _try_rust_topic_blocks(
+        post_guid=post_guid,
         total_duration_ms=total_duration_ms,
-        target_block_count=TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
-        min_block_seconds=TOPIC_CHAPTER_MIN_BLOCK_SECONDS,
-        max_chars_per_block=TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
+        logger=log,
+        removed_windows_ms=removed_windows_ms,
     )
+    if blocks is None:
+        blocks = _build_topic_blocks(
+            segments,
+            total_duration_ms=total_duration_ms,
+            target_block_count=TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
+            min_block_seconds=TOPIC_CHAPTER_MIN_BLOCK_SECONDS,
+            max_chars_per_block=TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
+        )
     if not blocks:
         log.warning(
             "LLM topic chapter generation skipped: no transcript blocks built "
@@ -562,6 +743,9 @@ def generate_topic_chapters_from_transcript_with_llm(
             openai_timeout_sec=openai_timeout_sec,
             logger_override=log,
             phase_label="Topic chapter",
+            llm_service_tier=llm_service_tier,
+            post_id=post_id,
+            model_call_range=_TOPIC_PLAN_RANGE,
         )
         if not parsed:
             log.warning(
@@ -585,6 +769,8 @@ def generate_topic_chapters_from_transcript_with_llm(
             openai_base_url=openai_base_url,
             openai_timeout_sec=openai_timeout_sec,
             logger_override=log,
+            llm_service_tier=llm_service_tier,
+            post_id=post_id,
         )
 
         chapters = _chapters_from_topic_plan(
@@ -613,6 +799,196 @@ def generate_topic_chapters_from_transcript_with_llm(
             exc,
         )
         return []
+
+
+def _try_rust_topic_blocks(
+    *,
+    post_guid: str | None,
+    total_duration_ms: int,
+    logger: logging.Logger,
+    removed_windows_ms: list[tuple[int, int]] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust chapter topic-block builder.
+
+    Returns None when the Rust path is disabled, no post_guid was threaded
+    through, or the sidecar fails — letting the caller fall back to the
+    Python `_build_topic_blocks` implementation.
+    """
+    if not post_guid:
+        return None
+
+    try:
+        from shared.processing_paths import get_instance_dir
+        from shared.rust_sidecar import (
+            rust_chapter_fallback_enabled,
+            try_chapter_topic_blocks,
+        )
+
+        if not rust_chapter_fallback_enabled():
+            return None
+
+        db_path = get_instance_dir() / "sqlite3.db"
+        blocks = try_chapter_topic_blocks(
+            db_path=db_path,
+            post_guid=post_guid,
+            total_duration_ms=total_duration_ms,
+            target_block_count=TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
+            min_block_seconds=TOPIC_CHAPTER_MIN_BLOCK_SECONDS,
+            max_block_seconds=TOPIC_CHAPTER_MAX_BLOCK_SECONDS,
+            max_chars_per_block=TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
+            removed_windows_ms=removed_windows_ms,
+        )
+    except Exception:
+        logger.exception(
+            "Rust chapter topic-blocks bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if blocks is None:
+        return None
+
+    logger.info(
+        "Chapter topic-blocks built via Rust sidecar",
+        extra={
+            "rust_path": "chapter_topic_blocks",
+            "block_count": len(blocks),
+        },
+    )
+    return blocks
+
+
+def _try_rust_topic_plan_parse(content: str) -> list[tuple[int, str]] | None:
+    """Mirror of `_parse_topic_chapter_response` via the Rust sidecar.
+
+    Returns a list of `(block_index, title)` tuples on success or None to fall
+    back to the Python implementation (flag off, sidecar failed, or unexpected
+    payload). The Rust parser produces the same shape as Python including the
+    salvage path; on success we still emit Python's WARN logs so log-based
+    observability stays consistent.
+    """
+    text = (content or "").strip()
+    if not text:
+        # Empty input is a Python-only WARN — let the Python path handle it
+        # uniformly rather than swallowing the log inside the Rust wrapper.
+        return None
+
+    try:
+        from shared.rust_sidecar import (
+            rust_chapter_fallback_enabled,
+            try_chapter_topic_plan_parse,
+        )
+
+        if not rust_chapter_fallback_enabled():
+            return None
+        result = try_chapter_topic_plan_parse(raw_content=content)
+    except Exception:
+        logger.exception(
+            "Rust chapter topic-plan-parse bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if result is None:
+        return None
+
+    entries: list[tuple[int, str]] = list(result["entries"])
+    expected = result.get("expected_count")
+    if result.get("salvaged"):
+        if expected is not None and len(entries) < expected:
+            logger.warning(
+                "Recovered partial topic chapter plan is incomplete: "
+                "expected %d chapters, recovered %d",
+                expected,
+                len(entries),
+            )
+        logger.warning(
+            "Failed to parse full LLM topic chapter JSON response; recovered "
+            "%d chapters from partial response (via Rust sidecar).",
+            len(entries),
+        )
+    elif expected is None:
+        logger.warning(
+            "LLM topic chapter response missing valid 'chapter_count'; "
+            "continuing with parsed chapters_count=%d",
+            len(entries),
+        )
+    elif result.get("count_mismatch"):
+        logger.warning(
+            "LLM topic chapter response chapter_count mismatch: "
+            "expected %d, parsed %d chapter entries",
+            expected,
+            len(entries),
+        )
+    logger.info(
+        "Topic chapter plan parsed via Rust sidecar",
+        extra={
+            "rust_path": "chapter_topic_plan_parse",
+            "entry_count": len(entries),
+            "salvaged": bool(result.get("salvaged")),
+        },
+    )
+    return entries
+
+
+def _try_rust_chapters_from_topic_plan(
+    *,
+    plan: list[tuple[int, str]],
+    blocks: list[dict[str, Any]],
+    total_duration_ms: int,
+    min_chapter_gap_ms: int,
+) -> list[Chapter] | None:
+    """Mirror of `_chapters_from_topic_plan` via the Rust sidecar.
+
+    Returns the Chapter list on success or None when the caller should fall
+    back to Python (flag off, sidecar failed, or unexpected payload).
+    """
+    try:
+        from shared.rust_sidecar import (
+            rust_chapter_fallback_enabled,
+            try_chapter_topic_plan_apply,
+        )
+
+        if not rust_chapter_fallback_enabled():
+            return None
+        rust_payload = try_chapter_topic_plan_apply(
+            plan=plan,
+            blocks=blocks,
+            total_duration_ms=total_duration_ms,
+            min_chapter_gap_ms=min_chapter_gap_ms,
+        )
+    except Exception:
+        logger.exception(
+            "Rust chapter topic-plan-apply bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if rust_payload is None:
+        return None
+
+    chapters: list[Chapter] = []
+    for entry in rust_payload:
+        try:
+            chapters.append(
+                Chapter(
+                    element_id=str(entry["element_id"]),
+                    title=str(entry["title"]),
+                    start_time_ms=int(entry["start_time_ms"]),
+                    end_time_ms=int(entry["end_time_ms"]),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Rust topic-plan-apply returned bad chapter entry; falling back"
+            )
+            return None
+
+    logger.info(
+        "Topic chapter plan applied via Rust sidecar",
+        extra={
+            "rust_path": "chapter_topic_plan_apply",
+            "chapter_count": len(chapters),
+        },
+    )
+    return chapters
 
 
 def _transcript_duration_ms(transcript_segments: Sequence[Any]) -> int | None:
@@ -690,6 +1066,11 @@ def _build_chapter_title_refinement_prompt(
         '- Return JSON object only: {"titles": [{"index": 0, "title": "..."}]}\n'
         "- Keep titles factual and concise (3-8 words preferred)\n"
         "- No quotes, no punctuation unless needed\n"
+        "- Titles must describe the actual content of the chapter. Do NOT "
+        "use generic placeholders such as 'Intro', 'Introduction', 'Outro', "
+        "'Conclusion', 'Main topic', 'Discussion', 'Wrap-up', 'Closing', "
+        "'Chapter 1', 'Part 2', etc. Every title must name a specific "
+        "subject, person, or event from its chapter's snippet.\n"
         "- Preserve chapter order and count\n\n"
         f"Chapters:\n{json.dumps(payload, ensure_ascii=True)}"
     )
@@ -716,6 +1097,45 @@ def _chapter_snippet_text(chapter: Chapter, segments: Sequence[Any]) -> str:
             break
 
     return " ".join(snippets).strip()
+
+
+_BLOCK_TEXT_TRUNCATION_SEPARATOR = " ... "
+
+
+def _truncate_block_text(text: str, max_chars: int) -> str:
+    """Fit `text` into `max_chars` by keeping the block's opening AND a window
+    around the block's midpoint, joined by ``" ... "``.
+
+    The LLM needs both signals to pick a good chapter title: the topic
+    transition typically sits in the first sentence, while the meat of the
+    discussion lands in the middle. Taking only the front (the old behavior)
+    starves it of the substantive content for blocks longer than the budget.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    sep = _BLOCK_TEXT_TRUNCATION_SEPARATOR
+    sep_len = len(sep)
+    # For very small budgets the separator overhead dominates — just keep the
+    # front. The default budget is hundreds of chars so this is a guard, not
+    # a primary path.
+    if max_chars <= sep_len + 4:
+        return text[:max_chars]
+
+    available = max_chars - sep_len
+    head_chars = available // 2
+    mid_chars = available - head_chars
+
+    head = text[:head_chars]
+    midpoint = len(text) // 2
+    mid_start = max(head_chars, midpoint - mid_chars // 2)
+    mid_end = min(len(text), mid_start + mid_chars)
+    # Re-anchor the middle window backward if we ran into the tail of the
+    # string so it still uses the full mid_chars budget when possible.
+    mid_start = max(head_chars, mid_end - mid_chars)
+    middle = text[mid_start:mid_end]
+
+    return f"{head}{sep}{middle}"
 
 
 def _build_topic_blocks(
@@ -748,16 +1168,15 @@ def _build_topic_blocks(
     current_start_ms: int | None = None
     current_end_ms: int | None = None
     current_text_parts: list[str] = []
-    current_char_count = 0
 
     def flush_block() -> None:
-        nonlocal current_start_ms, current_end_ms
-        nonlocal current_text_parts, current_char_count
+        nonlocal current_start_ms, current_end_ms, current_text_parts
         if current_start_ms is None or current_end_ms is None:
             return
-        text = " ".join(current_text_parts).strip()
-        if not text:
-            text = ""
+        text = _truncate_block_text(
+            " ".join(current_text_parts).strip(),
+            max_chars_per_block,
+        )
         blocks.append(
             {
                 "block_index": len(blocks),
@@ -770,7 +1189,6 @@ def _build_topic_blocks(
         current_start_ms = None
         current_end_ms = None
         current_text_parts = []
-        current_char_count = 0
 
     for seg in transcript_segments:
         seg_start_ms = _seg_start_ms(seg)
@@ -789,15 +1207,7 @@ def _build_topic_blocks(
 
         if not seg_text:
             continue
-
-        remaining = max(0, max_chars_per_block - current_char_count)
-        if remaining <= 0:
-            continue
-        clipped = seg_text[:remaining].strip()
-        if not clipped:
-            continue
-        current_text_parts.append(clipped)
-        current_char_count += len(clipped) + 1
+        current_text_parts.append(seg_text)
 
     flush_block()
 
@@ -868,8 +1278,9 @@ def _build_topic_chapter_generation_prompt(
         "Return minified JSON only on a single line (no markdown, no code fences, "
         "no extra text).\n"
         "Format: "
-        '{"chapter_count":2,"chapters":[{"block_index":0,"title":"Intro"},'
-        '{"block_index":5,"title":"Main topic"}]}\n'
+        '{"chapter_count":2,"chapters":['
+        '{"block_index":0,"title":"Guest backstory and origins"},'
+        '{"block_index":5,"title":"Riverfront bridge search"}]}\n'
         "Rules:\n"
         "- Put chapter_count first in the JSON object\n"
         "- chapter_count must equal the number of items in chapters\n"
@@ -882,6 +1293,11 @@ def _build_topic_chapter_generation_prompt(
         "unless intro/outro transitions justify it\n"
         "- Use only keys block_index and title for each chapter\n"
         "- Titles should be factual and concise (2-6 words preferred)\n"
+        "- Titles must describe the actual content of the block. Do NOT use "
+        "generic placeholders such as 'Intro', 'Introduction', 'Outro', "
+        "'Conclusion', 'Main topic', 'Discussion', 'Wrap-up', 'Closing', "
+        "'Chapter 1', 'Part 2', etc. Even the first chapter must name a "
+        "specific subject, person, or event from its block.\n"
         "- Preserve chronological order and do not repeat block_index\n\n"
         f"Episode duration: {_format_timestamp(total_duration_ms)}\n"
         f"Transcript blocks:\n{json.dumps(payload, ensure_ascii=True)}"
@@ -897,6 +1313,9 @@ def _request_topic_chapter_plan(
     openai_timeout_sec: int,
     logger_override: logging.Logger | None = None,
     phase_label: str = "Topic chapter",
+    llm_service_tier: str | None = None,
+    post_id: int | None = None,
+    model_call_range: tuple[int, int] = _TOPIC_PLAN_RANGE,
 ) -> tuple[list[tuple[int, str]], str, str | None, int | None]:
     log = logger_override or logger
     completion_args: dict[str, Any] = {
@@ -920,9 +1339,40 @@ def _request_topic_chapter_plan(
     else:
         completion_args["max_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
 
-    import litellm
+    tier_config = _tier_config_shim(llm_service_tier)
+    _apply_service_tier(completion_args, tier_config)
 
-    response = litellm.completion(**completion_args)
+    first_seq, last_seq = model_call_range
+    model_call_id = _try_upsert_model_call(
+        post_id=post_id,
+        first_seq_num=first_seq,
+        last_seq_num=last_seq,
+        model_name=llm_model,
+        prompt=prompt,
+        logger=log,
+        log_prefix=phase_label,
+    )
+    _record_service_tier_on_model_call(
+        model_call_id,
+        completion_args,
+        logger=log,
+        log_prefix=phase_label,
+    )
+
+    try:
+        response = _call_litellm_with_tier_retry(
+            completion_args, config=tier_config, logger=log
+        )
+    except Exception as exc:
+        _try_update_model_call(
+            model_call_id,
+            status="failed_permanent",
+            response=None,
+            error_message=str(exc),
+            logger=log,
+            log_prefix=phase_label,
+        )
+        raise
     finish_reason = extract_litellm_finish_reason(response)
     usage = extract_litellm_usage(response)
     log.info(
@@ -938,6 +1388,15 @@ def _request_topic_chapter_plan(
             phase_label,
         )
     content = extract_litellm_content(response)
+    _try_update_model_call(
+        model_call_id,
+        status="success",
+        response=content,
+        error_message=None,
+        logger=log,
+        log_prefix=phase_label,
+        usage=usage,
+    )
     expected_count = _extract_topic_chapter_count_from_text(content)
     parsed = _parse_topic_chapter_response(content)
     return parsed, content, finish_reason, expected_count
@@ -957,6 +1416,8 @@ def _retry_incomplete_topic_chapter_plan(
     openai_base_url: str | None,
     openai_timeout_sec: int,
     logger_override: logging.Logger | None = None,
+    llm_service_tier: str | None = None,
+    post_id: int | None = None,
 ) -> list[tuple[int, str]]:
     log = logger_override or logger
     merged_plan = list(initial_plan)
@@ -1021,6 +1482,9 @@ def _retry_incomplete_topic_chapter_plan(
             openai_timeout_sec=openai_timeout_sec,
             logger_override=log,
             phase_label="Topic chapter continuation",
+            llm_service_tier=llm_service_tier,
+            post_id=post_id,
+            model_call_range=_TOPIC_PLAN_CONTINUATION_RANGE,
         )
     )
     if not retry_parsed:
@@ -1050,6 +1514,10 @@ def _retry_incomplete_topic_chapter_plan(
 
 
 def _parse_topic_chapter_response(content: str) -> list[tuple[int, str]]:
+    rust_result = _try_rust_topic_plan_parse(content)
+    if rust_result is not None:
+        return rust_result
+
     text = (content or "").strip()
     if not text:
         logger.warning(
@@ -1241,6 +1709,15 @@ def _chapters_from_topic_plan(
     total_duration_ms: int,
     min_chapter_gap_ms: int,
 ) -> list[Chapter]:
+    rust_chapters = _try_rust_chapters_from_topic_plan(
+        plan=plan,
+        blocks=blocks,
+        total_duration_ms=total_duration_ms,
+        min_chapter_gap_ms=min_chapter_gap_ms,
+    )
+    if rust_chapters is not None:
+        return rust_chapters
+
     if not plan or not blocks:
         logger.warning(
             "Topic chapter plan validation failed: empty plan or no blocks "

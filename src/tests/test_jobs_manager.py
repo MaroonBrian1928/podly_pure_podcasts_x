@@ -226,6 +226,46 @@ def _manager() -> tuple[JobsManager, FakeStatusManager]:
     return manager, status_manager
 
 
+def test_dequeue_next_job_enters_app_context_for_writer_call(app, monkeypatch) -> None:
+    """`_dequeue_next_job` must enter the scheduler app context before calling
+    writer_client.action, because the worker loop runs in a daemon thread
+    with no Flask context. Regression test for the "Error dequeuing job:
+    Working outside of application context" log.
+    """
+    from threading import Lock
+
+    manager = JobsManager.__new__(JobsManager)
+    manager._run_lock = Lock()
+    manager._run_id = "run-1"
+
+    entered: list[bool] = []
+    monkeypatch.setattr(
+        jobs_manager_module,
+        "_scheduler_app_context",
+        lambda: (entered.append(True), app.app_context())[1],
+    )
+
+    class _Result:
+        success = True
+        data = {"job_id": "job-1", "post_guid": "guid-1"}
+
+    def fake_action(action: str, payload: dict, wait: bool):
+        import flask
+
+        # The bug was: this raised "Working outside of application context".
+        assert flask.has_app_context(), (
+            f"writer_client.action({action!r}) must run inside an app context"
+        )
+        return _Result()
+
+    monkeypatch.setattr(jobs_manager_module.writer_client, "action", fake_action)
+
+    result = manager._dequeue_next_job()
+
+    assert result == ("job-1", "guid-1")
+    assert entered == [True]
+
+
 def test_process_job_spawns_expected_processing_worker_command(
     app, monkeypatch
 ) -> None:

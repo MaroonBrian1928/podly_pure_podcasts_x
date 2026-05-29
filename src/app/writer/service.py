@@ -1,4 +1,6 @@
 import logging
+import os
+import sys
 import threading
 import time
 
@@ -9,7 +11,52 @@ from app.writer.protocol import WriteCommand, WriteCommandType
 
 from .executor import CommandExecutor
 
-logger = setup_logger("writer", "src/instance/logs/app.log", level=logging.INFO)
+# Under pytest, skip attaching the file handler so tests that happen to import
+# anything from this module don't end up appending writer logs into the real
+# `src/instance/logs/app.log`. The console handler stays so test failures are
+# still debuggable; pytest's own log capture works regardless.
+if "pytest" in sys.modules:
+    logger = logging.getLogger("writer")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+else:
+    logger = setup_logger("writer", "src/instance/logs/app.log", level=logging.INFO)
+
+
+def _idle_trim_interval_seconds() -> int:
+    raw = os.environ.get("PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC", "900")
+    try:
+        return int(raw)
+    except ValueError:
+        return 900
+
+
+def _start_idle_trim_thread(activity_counter: list[int]) -> threading.Thread | None:
+    """Periodically trim allocator arenas if any commands were processed
+    since the last trim. Skips when truly idle so we don't churn syscalls
+    while waiting on an empty queue.
+    """
+    interval = _idle_trim_interval_seconds()
+    if interval <= 0:
+        return None
+
+    def _loop() -> None:
+        last_count = 0
+        while True:
+            time.sleep(interval)
+            current = activity_counter[0]
+            if current == last_count:
+                continue
+            last_count = current
+            try:
+                release_memory_to_os("writer idle tick", logger)
+            except Exception:  # noqa: BLE001
+                logger.debug("writer idle trim failed", exc_info=True)
+
+    thread = threading.Thread(target=_loop, name="writer-idle-trim", daemon=True)
+    thread.start()
+    return thread
+
 
 MEMORY_TRIM_ACTIONS = {
     "insert_identifications",
@@ -73,6 +120,11 @@ def run_writer_service() -> None:
     app = create_writer_app()
     executor = CommandExecutor(app)
 
+    # Activity counter consumed by the idle-trim watchdog. Using a single-element
+    # list avoids the `nonlocal`/`global` plumbing a bare int would need.
+    activity_counter = [0]
+    _start_idle_trim_thread(activity_counter)
+
     logger.info("Writer Loop starting...")
 
     # 4. Writer Loop
@@ -82,6 +134,7 @@ def run_writer_service() -> None:
         trim_context = None
         try:
             cmd = queue.get()
+            activity_counter[0] += 1
             trim_context = _memory_trim_context_for_command(cmd)
 
             # Check if this is a polling command (dequeue_job)

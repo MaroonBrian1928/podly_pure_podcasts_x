@@ -35,11 +35,27 @@ RUN apt-get update && \
     ca-certificates \
     ffmpeg \
     gosu \
+    libjemalloc2 \
     libsqlite3-dev \
     sqlite3 && \
     apt-get remove -y python3-blinker 2>/dev/null || true && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Preload jemalloc to replace glibc's ptmalloc allocator. jemalloc has
+# better fragmentation behavior for long-running multi-threaded Python
+# servers and exposes mallctl for explicit arena purging.
+#
+# We use /etc/ld.so.preload (system-wide) rather than the LD_PRELOAD env
+# var because docker-entrypoint.sh transitions UID via `gosu appuser`,
+# and glibc's ld.so strips LD_PRELOAD across setresuid in secure-execution
+# mode. /etc/ld.so.preload survives that transition because the kernel
+# applies it before user-space sees the process at all.
+RUN JEMALLOC_PATH="$(dpkg -L libjemalloc2 | grep -E 'libjemalloc\.so\.2$' | head -n1)" && \
+    test -n "$JEMALLOC_PATH" && \
+    printf '%s\n' "$JEMALLOC_PATH" > /etc/podly-jemalloc-path && \
+    printf '%s\n' "$JEMALLOC_PATH" > /etc/ld.so.preload
+ENV PODLY_JEMALLOC_PRELOAD=1
 
 COPY pyproject.toml uv.lock ./
 

@@ -52,20 +52,25 @@ class JobManager:
     def ensure_job(self) -> ProcessingJob:
         job = self.get_active_job()
         if job:
-            changed = False
+            # Web/processing sessions are read-only; attribution updates have
+            # to go through the writer service. Build the param dict from only
+            # the fields that need to change so the action no-ops cleanly when
+            # everything is already up to date.
+            params: dict[str, Any] = {"job_id": job.id}
             if self._run_id and job.jobs_manager_run_id != self._run_id:
-                job.jobs_manager_run_id = self._run_id
-                changed = True
+                params["run_id"] = self._run_id
             if self._requested_by_user_id and job.requested_by_user_id is None:
-                job.requested_by_user_id = self._requested_by_user_id
-                changed = True
+                params["requested_by_user_id"] = self._requested_by_user_id
             if self._billing_user_id is not None and (
                 job.billing_user_id != self._billing_user_id
             ):
-                job.billing_user_id = self._billing_user_id
-                changed = True
-            if changed:
-                self._status_manager.db_session.flush()
+                params["billing_user_id"] = self._billing_user_id
+
+            if len(params) > 1:
+                writer_client.action("update_job_attribution", params, wait=True)
+                # Refresh the in-memory row so callers see the writer's writes.
+                self._status_manager.db_session.expire(job)
+                self._status_manager.db_session.refresh(job)
             return job
         job_id = self._status_manager.generate_job_id()
         job = self._status_manager.create_job(

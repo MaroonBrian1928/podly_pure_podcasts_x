@@ -16,7 +16,7 @@ from app.extensions import scheduler
 from app.feeds import refresh_feed
 from app.job_manager import JobManager as SingleJobManager
 from app.memory_pressure import collect_incremental, release_memory_to_os
-from app.models import Feed, JobsManagerRun, Post, ProcessingJob
+from app.models import Feed, JobsManagerRun, ModelCall, Post, ProcessingJob
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from shared.processing_paths import find_existing_processed_audio_path
@@ -30,6 +30,98 @@ def _scheduler_app_context() -> Any:
     if scheduler_app is None:
         raise RuntimeError("Scheduler app is not initialized")
     return scheduler_app.app_context()
+
+
+_TIER_IN_FLIGHT_STATUSES = ("pending", "retrying")
+
+
+def _summarize_service_tiers_for_posts(
+    post_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Bulk variant of `_summarize_service_tier_for_post` for the jobs-list
+    endpoints. Returns {post_id: {label, latest, mixed, in_flight?}} only for
+    posts that have at least one ModelCall row with a non-null service_tier.
+
+    `in_flight` is included only when the most recent tiered ModelCall for the
+    post is in a non-terminal state (pending or retrying). The frontend uses
+    it to render text like "Flex Processing (Attempt 2/5)" beside the chip.
+    """
+    if not post_ids:
+        return {}
+    rows = (
+        ModelCall.query.with_entities(
+            ModelCall.post_id,
+            ModelCall.service_tier,
+            ModelCall.status,
+            ModelCall.retry_attempts,
+            ModelCall.timestamp,
+        )
+        .filter(
+            ModelCall.post_id.in_(post_ids),
+            ModelCall.service_tier.isnot(None),
+        )
+        .order_by(ModelCall.timestamp.desc())
+        .all()
+    )
+    max_retries = _resolve_max_retries()
+    per_post: dict[int, dict[str, Any]] = {}
+    for post_id, tier, status, retry_attempts, _ts in rows:
+        bucket = per_post.setdefault(
+            post_id,
+            {
+                "label": tier,
+                "latest": tier,
+                "latest_status": status,
+                "latest_attempt": retry_attempts or 0,
+                "tiers": set(),
+            },
+        )
+        bucket["tiers"].add(tier)
+    return {
+        pid: _build_tier_summary(bucket, max_retries)
+        for pid, bucket in per_post.items()
+    }
+
+
+def _summarize_service_tier_for_post(post_id: int) -> dict[str, Any] | None:
+    """Build a small tier summary for the per-episode status endpoint. See
+    `_summarize_service_tiers_for_posts` for the shape; returns None when the
+    post has no tiered ModelCall rows yet.
+    """
+    summary = _summarize_service_tiers_for_posts([post_id])
+    return summary.get(post_id)
+
+
+def _build_tier_summary(
+    bucket: dict[str, Any], max_retries: int | None
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "label": bucket["latest"],
+        "latest": bucket["latest"],
+        "mixed": len(bucket["tiers"]) > 1,
+    }
+    latest_status = bucket["latest_status"]
+    if latest_status in _TIER_IN_FLIGHT_STATUSES:
+        in_flight: dict[str, Any] = {
+            "status": latest_status,
+            "attempt": int(bucket["latest_attempt"] or 0),
+        }
+        if max_retries is not None:
+            in_flight["max_retries"] = max_retries
+        summary["in_flight"] = in_flight
+    return summary
+
+
+def _resolve_max_retries() -> int | None:
+    """Look up the configured llm_max_retry_attempts so the UI can render
+    \"Attempt N/M\". Returns None if the runtime config can't be read."""
+    try:
+        from app.runtime_config import config as runtime_config
+
+        value = getattr(runtime_config, "llm_max_retry_attempts", None)
+        return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _env_float(name: str, default: float, *, minimum: float) -> float:
@@ -268,7 +360,18 @@ class JobsManager:
                 "progress_percentage": job.progress_percentage,
                 "message": job.step_name
                 or f"Step {job.current_step} of {job.total_steps}",
+                # Exposed so EpisodeProcessingStatus can render the same per-stage
+                # duration row that the JobsPage card already shows (Queue 4s /
+                # Download 2s / ...). Empty list when the job predates stage-
+                # history capture.
+                "stage_history": job.stage_history or [],
+                "completed_at": (
+                    job.completed_at.isoformat() if job.completed_at else None
+                ),
             }
+            tier_info = _summarize_service_tier_for_post(post.id)
+            if tier_info is not None:
+                response["service_tier"] = tier_info
             if job.started_at:
                 response["started_at"] = job.started_at.isoformat()
             if job.status in {
@@ -330,38 +433,42 @@ class JobsManager:
                 .all()
             )
 
+            tier_by_post = _summarize_service_tiers_for_posts(
+                [post.id for _job, post, _prio in rows if post is not None]
+            )
             results: list[dict[str, Any]] = []
             for job, post, prio in rows:
-                results.append(
-                    {
-                        "job_id": job.id,
-                        "post_guid": job.post_guid,
-                        "post_title": post.title if post else None,
-                        "feed_title": post.feed.title if post and post.feed else None,
-                        "status": job.status,
-                        "priority": int(prio) if prio is not None else 0,
-                        "step": job.current_step,
-                        "step_name": job.step_name,
-                        "total_steps": job.total_steps,
-                        "progress_percentage": job.progress_percentage,
-                        "created_at": (
-                            job.created_at.isoformat() if job.created_at else None
-                        ),
-                        "started_at": (
-                            job.started_at.isoformat() if job.started_at else None
-                        ),
-                        "completed_at": (
-                            job.completed_at.isoformat() if job.completed_at else None
-                        ),
-                        "error_message": job.error_message,
-                        "stage_history": job.stage_history or [],
-                        "ad_windows_count": job.ad_windows_count,
-                        "had_classification_parse_error": bool(
-                            job.had_classification_parse_error
-                        ),
-                        "auto_retry_attempted": bool(job.auto_retry_attempted),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "job_id": job.id,
+                    "post_guid": job.post_guid,
+                    "post_title": post.title if post else None,
+                    "feed_title": post.feed.title if post and post.feed else None,
+                    "status": job.status,
+                    "priority": int(prio) if prio is not None else 0,
+                    "step": job.current_step,
+                    "step_name": job.step_name,
+                    "total_steps": job.total_steps,
+                    "progress_percentage": job.progress_percentage,
+                    "created_at": (
+                        job.created_at.isoformat() if job.created_at else None
+                    ),
+                    "started_at": (
+                        job.started_at.isoformat() if job.started_at else None
+                    ),
+                    "completed_at": (
+                        job.completed_at.isoformat() if job.completed_at else None
+                    ),
+                    "error_message": job.error_message,
+                    "stage_history": job.stage_history or [],
+                    "ad_windows_count": job.ad_windows_count,
+                    "had_classification_parse_error": bool(
+                        job.had_classification_parse_error
+                    ),
+                    "auto_retry_attempted": bool(job.auto_retry_attempted),
+                }
+                if post is not None and post.id in tier_by_post:
+                    entry["service_tier"] = tier_by_post[post.id]
+                results.append(entry)
 
             return results
 
@@ -382,38 +489,42 @@ class JobsManager:
                 .all()
             )
 
+            tier_by_post = _summarize_service_tiers_for_posts(
+                [post.id for _job, post, _prio in rows if post is not None]
+            )
             results: list[dict[str, Any]] = []
             for job, post, prio in rows:
-                results.append(
-                    {
-                        "job_id": job.id,
-                        "post_guid": job.post_guid,
-                        "post_title": post.title if post else None,
-                        "feed_title": post.feed.title if post and post.feed else None,
-                        "status": job.status,
-                        "priority": int(prio) if prio is not None else 0,
-                        "step": job.current_step,
-                        "step_name": job.step_name,
-                        "total_steps": job.total_steps,
-                        "progress_percentage": job.progress_percentage,
-                        "created_at": (
-                            job.created_at.isoformat() if job.created_at else None
-                        ),
-                        "started_at": (
-                            job.started_at.isoformat() if job.started_at else None
-                        ),
-                        "completed_at": (
-                            job.completed_at.isoformat() if job.completed_at else None
-                        ),
-                        "error_message": job.error_message,
-                        "stage_history": job.stage_history or [],
-                        "ad_windows_count": job.ad_windows_count,
-                        "had_classification_parse_error": bool(
-                            job.had_classification_parse_error
-                        ),
-                        "auto_retry_attempted": bool(job.auto_retry_attempted),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "job_id": job.id,
+                    "post_guid": job.post_guid,
+                    "post_title": post.title if post else None,
+                    "feed_title": post.feed.title if post and post.feed else None,
+                    "status": job.status,
+                    "priority": int(prio) if prio is not None else 0,
+                    "step": job.current_step,
+                    "step_name": job.step_name,
+                    "total_steps": job.total_steps,
+                    "progress_percentage": job.progress_percentage,
+                    "created_at": (
+                        job.created_at.isoformat() if job.created_at else None
+                    ),
+                    "started_at": (
+                        job.started_at.isoformat() if job.started_at else None
+                    ),
+                    "completed_at": (
+                        job.completed_at.isoformat() if job.completed_at else None
+                    ),
+                    "error_message": job.error_message,
+                    "stage_history": job.stage_history or [],
+                    "ad_windows_count": job.ad_windows_count,
+                    "had_classification_parse_error": bool(
+                        job.had_classification_parse_error
+                    ),
+                    "auto_retry_attempted": bool(job.auto_retry_attempted),
+                }
+                if post is not None and post.id in tier_by_post:
+                    entry["service_tier"] = tier_by_post[post.id]
+                results.append(entry)
 
             return results
 
@@ -672,22 +783,29 @@ class JobsManager:
         to prevent race conditions where multiple jobs could be dequeued before
         any is marked as running.
         """
+        # writer_client.action requires an active Flask app context. The
+        # worker loop runs in a daemon thread that has none by default, and
+        # every other writer_client.action call site in this file wraps in
+        # _scheduler_app_context() -- wrap here too so callers don't have to.
         try:
-            run_id = self._get_run_id()
-            result = writer_client.action("dequeue_job", {"run_id": run_id}, wait=True)
-
-            if result and result.success and result.data:
-                job_id = result.data["job_id"]
-                post_guid = result.data["post_guid"]
-
-                logger.info(
-                    "[JOB_DEQUEUE] Successfully dequeued and marked running: job_id=%s post_guid=%s",
-                    job_id,
-                    post_guid,
+            with _scheduler_app_context():
+                run_id = self._get_run_id()
+                result = writer_client.action(
+                    "dequeue_job", {"run_id": run_id}, wait=True
                 )
-                return job_id, post_guid
 
-            return None
+                if result and result.success and result.data:
+                    job_id = result.data["job_id"]
+                    post_guid = result.data["post_guid"]
+
+                    logger.info(
+                        "[JOB_DEQUEUE] Successfully dequeued and marked running: job_id=%s post_guid=%s",
+                        job_id,
+                        post_guid,
+                    )
+                    return job_id, post_guid
+
+                return None
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error dequeuing job: {e}")
             return None

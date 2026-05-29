@@ -6,6 +6,7 @@ import type {
   Episode,
   Job,
   JobManagerStatus,
+  JobStageEvent,
   CleanupPreview,
   CleanupRunResult,
   CombinedConfig,
@@ -18,6 +19,8 @@ import type {
   PagedResult,
   CostSummary,
   CallLog,
+  EstimatedCostBackfillResult,
+  TokenBackfillResult,
   FeedSubscribersResponse,
 } from '../types';
 
@@ -206,6 +209,19 @@ export const feedsApi = {
     message: string;
     download_url?: string;
     error?: string;
+    service_tier?: {
+      label: string;
+      latest: string;
+      mixed: boolean;
+      in_flight?: {
+        status: 'pending' | 'retrying';
+        attempt: number;
+        max_retries?: number;
+      };
+    };
+    stage_history?: JobStageEvent[];
+    started_at?: string | null;
+    completed_at?: string | null;
   }> => {
     const response = await api.get(postApiPath(guid, '/status'));
     return response.data;
@@ -297,6 +313,7 @@ export const feedsApi = {
       content_segments: number;
       ad_segments_count: number;
       ad_percentage: number;
+      estimated_cost?: number;
       estimated_ad_time_seconds: number;
       original_duration_seconds: number;
       edited_duration_seconds?: number;
@@ -346,6 +363,12 @@ export const feedsApi = {
       error_message: string | null;
       prompt: string | null;
       response: string | null;
+      service_tier: string | null;
+      prompt_tokens: number | null;
+      cached_prompt_tokens: number | null;
+      completion_tokens: number | null;
+      total_tokens: number | null;
+      estimated_cost_usd?: number | null;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -480,6 +503,19 @@ export const feedsApi = {
     message: string;
     download_url?: string;
     error?: string;
+    service_tier?: {
+      label: string;
+      latest: string;
+      mixed: boolean;
+      in_flight?: {
+        status: 'pending' | 'retrying';
+        attempt: number;
+        max_retries?: number;
+      };
+    };
+    stage_history?: JobStageEvent[];
+    started_at?: string | null;
+    completed_at?: string | null;
   }> => {
     return feedsApi.getPostStatus(guid);
   },
@@ -505,6 +541,7 @@ export const feedsApi = {
       content_segments: number;
       ad_segments_count: number;
       ad_percentage: number;
+      estimated_cost?: number;
       estimated_ad_time_seconds: number;
       original_duration_seconds: number;
       edited_duration_seconds?: number;
@@ -554,6 +591,12 @@ export const feedsApi = {
       error_message: string | null;
       prompt: string | null;
       response: string | null;
+      service_tier: string | null;
+      prompt_tokens: number | null;
+      cached_prompt_tokens: number | null;
+      completion_tokens: number | null;
+      total_tokens: number | null;
+      estimated_cost_usd?: number | null;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -835,6 +878,18 @@ export const costsApi = {
   },
   getCalls: async (page: number = 1, perPage: number = 50): Promise<CallLog> => {
     const response = await api.get('/api/admin/costs/calls', { params: { page, per_page: perPage } });
+    return response.data;
+  },
+  backfillTokenUsage: async (
+    payload: { apply: boolean; limit?: number | null }
+  ): Promise<TokenBackfillResult> => {
+    const response = await api.post('/api/admin/costs/backfill-token-usage', payload);
+    return response.data;
+  },
+  backfillEstimatedCost: async (
+    payload: { apply: boolean; limit?: number | null }
+  ): Promise<EstimatedCostBackfillResult> => {
+    const response = await api.post('/api/admin/costs/backfill-estimated-cost', payload);
     return response.data;
   },
   cleanupCancelledFeeds: async (): Promise<{ removed: number }> => {

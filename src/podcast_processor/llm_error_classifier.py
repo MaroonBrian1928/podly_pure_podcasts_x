@@ -41,6 +41,7 @@ class LLMErrorClassifier:
     # Server error patterns (retryable)
     SERVER_ERROR_PATTERNS = [
         re.compile(r"internal.?server.?error", re.IGNORECASE),
+        re.compile(r"service.?unavailable", re.IGNORECASE),
         re.compile(r"502", re.IGNORECASE),  # Bad Gateway
         re.compile(r"503", re.IGNORECASE),  # Service Unavailable
         re.compile(r"500", re.IGNORECASE),  # Internal Server Error

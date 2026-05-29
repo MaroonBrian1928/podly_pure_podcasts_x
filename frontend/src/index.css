@@ -128,10 +128,9 @@
     transform: translate3d(22px, 0, 0);
     filter: blur(10px);
     will-change: opacity, transform, filter;
-    transition:
-      opacity 280ms ease,
-      transform 360ms cubic-bezier(0.16, 1, 0.3, 1),
-      filter 320ms ease;
+    transition-property: opacity, transform, filter;
+    transition-duration: 320ms;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .podly-page-transition[data-state='open'] {
@@ -141,16 +140,20 @@
   }
 
   @media (max-width: 1023px) {
-    .podly-mobile-feed-detail-enter {
-      animation: podly-mobile-feed-detail-enter 380ms cubic-bezier(0.16, 1, 0.3, 1);
+    .podly-mobile-feed-detail-enter,
+    .podly-mobile-feed-detail-exit {
+      animation-duration: 440ms;
+      animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
       animation-fill-mode: both;
-      will-change: opacity, transform;
+      will-change: transform;
+    }
+
+    .podly-mobile-feed-detail-enter {
+      animation-name: podly-mobile-feed-detail-enter;
     }
 
     .podly-mobile-feed-detail-exit {
-      animation: podly-mobile-feed-detail-exit 380ms cubic-bezier(0.4, 0, 1, 1);
-      animation-fill-mode: both;
-      will-change: opacity, transform;
+      animation-name: podly-mobile-feed-detail-exit;
     }
   }
 
@@ -168,25 +171,21 @@
 
   @keyframes podly-mobile-feed-detail-enter {
     0% {
-      opacity: 0;
-      transform: translate3d(-96px, 0, 0);
+      transform: translate3d(100%, 0, 0);
     }
 
     100% {
-      opacity: 1;
       transform: translate3d(0, 0, 0);
     }
   }
 
   @keyframes podly-mobile-feed-detail-exit {
     0% {
-      opacity: 1;
       transform: translate3d(0, 0, 0);
     }
 
     100% {
-      opacity: 0;
-      transform: translate3d(-96px, 0, 0);
+      transform: translate3d(100%, 0, 0);
     }
   }
 

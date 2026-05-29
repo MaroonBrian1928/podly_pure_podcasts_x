@@ -30,6 +30,11 @@ from podcast_processor.llm_concurrency_limiter import (
     LLMConcurrencyLimiter,
     get_concurrency_limiter,
 )
+from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
+    extract_litellm_usage,
+)
 from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
@@ -682,6 +687,7 @@ class AdClassifier:
 
         completion_args["response_format"] = {"type": "json_object"}
 
+        apply_service_tier(completion_args, self.config)
         return completion_args
 
     def _generate_user_prompt(
@@ -828,7 +834,14 @@ class AdClassifier:
         return model_call.status not in ("success", "failed_permanent")
 
     def _perform_llm_call(self, *, model_call: ModelCall, system_prompt: str) -> None:
-        """Perform the LLM call for classification."""
+        """Perform the LLM call for classification.
+
+        Re-raises on failure. `_call_model` already handles transient errors
+        with its own retry loop; anything that escapes it (non-retryable
+        exception, retries exhausted) is a genuine failure that must fail the
+        whole job. Swallowing it here would produce a zero-ad run marked
+        successful, leaving ads in the output.
+        """
         self.logger.info(
             f"Calling LLM for ModelCall {model_call.id} (post {model_call.post_id}, segments {model_call.first_segment_sequence_num}-{model_call.last_segment_sequence_num})."
         )
@@ -838,10 +851,15 @@ class AdClassifier:
             else:
                 self._call_model(model_call_obj=model_call, system_prompt=system_prompt)
         except Exception as e:
+            # `_call_model` already logged the exception with traceback before
+            # re-raising, so don't dump it a second time -- just leave a short
+            # breadcrumb so the failure is visible at this layer too.
             self.logger.error(
-                f"LLM interaction via _call_model for ModelCall {model_call.id} resulted in an exception: {e}",
-                exc_info=True,
+                "LLM call failed for ModelCall %s; failing classification: %s",
+                model_call.id,
+                e,
             )
+            raise
 
     def _handle_test_mode_call(self, model_call: ModelCall) -> None:
         """Handle LLM call in test mode."""
@@ -1068,22 +1086,73 @@ class AdClassifier:
         )
 
     def _is_retryable_error(self, error: Exception) -> bool:
-        """Determine if an error should be retried."""
-        from litellm.exceptions import InternalServerError
+        """Determine if an error should be retried.
 
-        if isinstance(error, InternalServerError):
-            return True
+        Delegates to the shared LLMErrorClassifier so timeouts, rate limits,
+        and 5xx responses all use one definition. A previous narrower version
+        of this method omitted timeout patterns, which caused a single
+        ``litellm.Timeout`` from the ad classifier to mark the call
+        ``failed_permanent`` on attempt 1 and crash the whole processing job.
+        """
+        from podcast_processor.llm_error_classifier import LLMErrorClassifier
 
-        # Check for retryable HTTP errors in other exception types
-        error_str = str(error).lower()
-        return (
-            "503" in error_str
-            or "service unavailable" in error_str
-            or "rate_limit_error" in error_str
-            or "ratelimiterror" in error_str
-            or "429" in error_str
-            or "rate limit" in error_str
+        return LLMErrorClassifier.is_retryable_error(error)
+
+    def _build_success_payload(
+        self,
+        *,
+        response: Any,
+        raw_response_content: str,
+        retry_attempts_value: int,
+        model_call_id: int | None,
+        attempt_service_tier: str | None,
+    ) -> dict[str, Any]:
+        """Assemble the writer payload for a successful ModelCall update,
+        including per-provider token usage when reported. Kept separate from
+        ``_call_model`` so the latter stays under the branch-count budget.
+        """
+        usage = extract_litellm_usage(response)
+        payload: dict[str, Any] = {
+            "response": raw_response_content,
+            "status": "success",
+            "error_message": None,
+            "retry_attempts": retry_attempts_value,
+        }
+        for field in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+        ):
+            if usage.get(field) is not None:
+                payload[field] = usage[field]
+        if usage.get("total_tokens") is not None:
+            self.logger.info(
+                "ModelCall %s token usage: prompt=%s cached_prompt=%s completion=%s total=%s (tier=%s)",
+                model_call_id,
+                usage.get("prompt_tokens"),
+                usage.get("cached_prompt_tokens"),
+                usage.get("completion_tokens"),
+                usage.get("total_tokens"),
+                attempt_service_tier or "default",
+            )
+
+        # Persist USD cost computed against LiteLLM's price table while we
+        # still have litellm loaded in this short-lived worker. The web
+        # process reads the column directly and never imports litellm.
+        from podcast_processor.llm_model_call_utils import compute_estimated_cost_usd
+
+        cost = compute_estimated_cost_usd(
+            model_name=getattr(self.config, "llm_model", "") or "",
+            service_tier=attempt_service_tier,
+            prompt=None,
+            usage=usage,
+            logger=self.logger,
+            log_prefix=f"ModelCall {model_call_id}",
         )
+        if cost is not None:
+            payload["estimated_cost_usd"] = cost
+        return payload
 
     def _call_model(
         self,
@@ -1116,33 +1185,49 @@ class AdClassifier:
             )
 
             try:
-                # Persist retry attempt + pending status via writer
+                # Prepare API call and validate token limits first so the
+                # pending-status writer update can also persist the resolved
+                # service_tier for this attempt.
+                completion_args = self._prepare_api_call(model_call_obj, system_prompt)
+                if completion_args is None:
+                    return None  # Token limit exceeded
+
+                attempt_service_tier = completion_args.get("service_tier")
+
+                # Persist retry attempt + pending status (+ tier) via writer
                 if model_call_obj.id is not None:
                     pending_res = writer_client.update(
                         "ModelCall",
                         model_call_obj.id,
-                        {"status": "pending", "retry_attempts": retry_attempts_value},
+                        {
+                            "status": "pending",
+                            "retry_attempts": retry_attempts_value,
+                            "service_tier": attempt_service_tier,
+                        },
                         wait=True,
                     )
                     if not pending_res or not pending_res.success:
                         raise RuntimeError(
                             getattr(pending_res, "error", "Failed to update ModelCall")
                         )
+                    model_call_obj.service_tier = attempt_service_tier
 
-                # Prepare API call and validate token limits
-                completion_args = self._prepare_api_call(model_call_obj, system_prompt)
-                if completion_args is None:
-                    return None  # Token limit exceeded
-
-                import litellm
                 from litellm.types.utils import Choices
 
                 # Use concurrency limiter if available
                 if self.concurrency_limiter:
                     with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
-                        response = litellm.completion(**completion_args)
+                        response = call_litellm_with_tier_retry(
+                            completion_args,
+                            config=self.config,
+                            logger=self.logger,
+                        )
                 else:
-                    response = litellm.completion(**completion_args)
+                    response = call_litellm_with_tier_retry(
+                        completion_args,
+                        config=self.config,
+                        logger=self.logger,
+                    )
 
                 response_first_choice = response.choices[0]
                 assert isinstance(response_first_choice, Choices)
@@ -1150,15 +1235,17 @@ class AdClassifier:
                 assert content is not None
                 raw_response_content = content
 
+                success_payload = self._build_success_payload(
+                    response=response,
+                    raw_response_content=raw_response_content,
+                    retry_attempts_value=retry_attempts_value,
+                    model_call_id=model_call_obj.id,
+                    attempt_service_tier=attempt_service_tier,
+                )
                 success_res = writer_client.update(
                     "ModelCall",
                     model_call_obj.id,
-                    {
-                        "response": raw_response_content,
-                        "status": "success",
-                        "error_message": None,
-                        "retry_attempts": retry_attempts_value,
-                    },
+                    success_payload,
                     wait=True,
                 )
                 if not success_res or not success_res.success:
@@ -1221,20 +1308,28 @@ class AdClassifier:
         attempt: int,
         current_attempt_num: int,
     ) -> None:
-        """Handle a retryable error during LLM call."""
+        """Handle a retryable error during LLM call.
+
+        Flips the row to `status="retrying"` with an attempt-annotated error
+        message so the debug UI shows "retrying (2/5): rate limit" instead of
+        sitting silently at `pending` for the duration of the backoff sleep.
+        """
         self.logger.error(
             f"LLM retryable error for ModelCall {model_call_obj.id} (attempt {current_attempt_num}): {error}"
         )
+        retry_count = getattr(self.config, "llm_max_retry_attempts", 3)
+        error_message = f"Retrying ({current_attempt_num}/{retry_count}): {error}"
         res = writer_client.update(
             "ModelCall",
             model_call_obj.id,
-            {"error_message": str(error)},
+            {"status": "retrying", "error_message": error_message},
             wait=True,
         )
         if not res or not res.success:
             raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
         # Update local object to reflect database state
-        model_call_obj.error_message = str(error)
+        model_call_obj.status = "retrying"
+        model_call_obj.error_message = error_message
 
         # Use longer backoff for rate limiting errors
         error_str = str(error).lower()

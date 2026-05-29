@@ -5,14 +5,19 @@ import type {
   Job,
   JobManagerRun,
   JobManagerStatus,
-  JobStageEvent,
 } from '../types';
-import { JobProgressBar, JobStageRail } from '../components/JobProgress';
+import {
+  JobProgressBar,
+  JobProgressCaption,
+  JobStageRail,
+  ServiceTierChip,
+} from '../components/JobProgress';
 import {
   backendDateMs,
   formatBackendDateTime,
   formatDuration,
 } from '../utils/datetime';
+import { computeStageDurationMs } from '../utils/jobStageDurations';
 import { buildProcessingProgressModel } from '../utils/processingProgress';
 
 function getStatusColor(status: string) {
@@ -54,54 +59,8 @@ function RunStat({ label, value }: { label: string; value: number }) {
 
 const formatDateTime = formatBackendDateTime;
 
-// Compute how long stage `stageIndex` ran, using only server-recorded
-// transitions in `history`. Returns NaN when we don't have enough info
-// (e.g. the stage hasn't started, or the previous stage was never logged).
-function computeStageDurationMs(
-  history: JobStageEvent[],
-  stageIndex: number,
-  job: Job,
-  now: number,
-): number {
-  if (history.length === 0) {
-    return NaN;
-  }
-  // Use the latest entry for this step, in case a stage was re-entered.
-  const entryIndex = (() => {
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].step === stageIndex) return i;
-    }
-    return -1;
-  })();
-  if (entryIndex === -1) {
-    return NaN;
-  }
-  const start = backendDateMs(history[entryIndex].started_at);
-  if (!Number.isFinite(start)) {
-    return NaN;
-  }
-
-  // Stage end = the next history entry's start, if there is one, else the
-  // job's completed_at (for terminal jobs) or `now` (still running).
-  let end: number;
-  if (entryIndex < history.length - 1) {
-    end = backendDateMs(history[entryIndex + 1].started_at);
-  } else if (
-    job.status === 'completed' ||
-    job.status === 'skipped' ||
-    job.status === 'failed' ||
-    job.status === 'cancelled'
-  ) {
-    const completed = backendDateMs(job.completed_at);
-    end = Number.isFinite(completed) ? completed : now;
-  } else {
-    end = now;
-  }
-  if (!Number.isFinite(end)) {
-    return NaN;
-  }
-  return Math.max(0, end - start);
-}
+// computeStageDurationMs moved to utils/jobStageDurations.ts so the
+// EpisodeProcessingStatus indicator can share the same logic.
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -570,28 +529,29 @@ export default function JobsPage() {
                         : '0 ads'}
                     </span>
                   ) : null}
+                  {job.service_tier ? <ServiceTierChip tier={job.service_tier} /> : null}
                   <StatusBadge status={job.status} />
                 </div>
               </div>
               <div className="text-xs text-gray-600 truncate">{job.feed_title || 'Unknown feed'}</div>
 
               <div className="space-y-2">
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xs text-gray-700">
-                    <span>Progress</span>
-                    <span className="font-medium">{Math.round(progressModel.progress)}%</span>
-                  </div>
-                  <JobProgressBar
-                    value={progressModel.progress}
-                    colorClass={progressColorClass}
-                    animated={job.status === 'running'}
-                  />
-                </div>
+                <JobProgressBar
+                  value={progressModel.progress}
+                  colorClass={progressColorClass}
+                  animated={job.status === 'running'}
+                />
                 <JobStageRail
                   stages={progressModel.stages}
                   stageDurationsMs={progressModel.stages.map((stage) =>
                     computeStageDurationMs(job.stage_history ?? [], stage.index, job, now)
                   )}
+                />
+                <JobProgressCaption
+                  stageLabel={progressModel.currentStageLabel}
+                  percent={progressModel.progress}
+                  tier={job.service_tier}
+                  hideChip
                 />
               </div>
 

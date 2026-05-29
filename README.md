@@ -92,6 +92,55 @@ PODLY_HIDE_REPORT_ISSUE_BUTTON=false
 - `PODLY_HIDE_REPORT_ISSUE_BUTTON=true` hides the `Report issue` button from the
   desktop nav and mobile menu.
 
+## Stripe Billing (Optional)
+
+The admin cost dashboard can show Stripe subscription revenue alongside
+compute cost (the `subscription_amount_cents` column). This is opt-in:
+
+```env
+PODLY_STRIPE_BILLING_ENABLED=false
+STRIPE_SECRET_KEY=
+```
+
+- Default off. When off, Podly never imports the `stripe` SDK into the
+  long-lived Flask/writer processes — saves several MB of RAM for
+  deployments that don't track revenue.
+- Set `PODLY_STRIPE_BILLING_ENABLED=true` and provide `STRIPE_SECRET_KEY`
+  to enable the revenue-vs-cost view. Subscription amounts are cached
+  in-process for 1 hour to limit Stripe API calls.
+
+## Rust Sidecar (Optional)
+
+Several read-heavy endpoints can run in a short-lived Rust binary
+(`podly_tools`) instead of the long-lived Python process. The sidecar reads
+SQLite directly and returns the same JSON envelopes as the Python routes,
+keeping large transient allocations out of the Flask heap. Each path is
+gated by its own env flag so you can roll them out one at a time; on any
+sidecar error Podly silently falls back to the Python implementation (look
+for `falling back to Python` in `src/instance/logs/app.log`).
+
+```env
+PODLY_RUST_AUDIO_ENABLED=false
+PODLY_RUST_FEED_XML_ENABLED=false
+PODLY_RUST_CHAPTERS_ENABLED=false
+PODLY_RUST_FEED_REFRESH_ENABLED=false
+PODLY_RUST_JOBS_ENABLED=false
+PODLY_RUST_STATS_ENABLED=false
+PODLY_RUST_TRANSCRIPT_ENABLED=false
+PODLY_RUST_AD_MERGE_ENABLED=false
+PODLY_RUST_PROFANITY_ENABLED=false
+PODLY_RUST_FEED_POSTS_ENABLED=false
+PODLY_RUST_WORD_BOUNDARY_ENABLED=false
+PODLY_RUST_CHAPTER_FALLBACK_ENABLED=false
+PODLY_RUST_COSTS_ENABLED=false
+```
+
+`PODLY_RUST_COSTS_ENABLED=true` moves `/api/admin/costs` and
+`/api/admin/costs/calls` off the Flask heap. Python still pre-resolves
+LiteLLM token prices and passes them to the sidecar, and it enriches the
+response with Stripe revenue afterwards if `PODLY_STRIPE_BILLING_ENABLED`
+is on.
+
 ### Cost Breakdown
 *Monthly cost breakdown for 5 podcasts*
 

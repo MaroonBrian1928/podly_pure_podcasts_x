@@ -64,6 +64,29 @@ class TestAdClassifierRateLimiting:
             for error in rate_limit_errors:
                 assert classifier._is_retryable_error(error) is True
 
+    def test_is_retryable_error_timeouts(self):
+        """litellm.Timeout (and related transient timeout signatures) must be
+        classified as retryable. A previous narrower _is_retryable_error
+        omitted timeout patterns, which caused a single ``litellm.Timeout``
+        from the ad classifier to mark the call ``failed_permanent`` on
+        attempt 1 and crash the whole processing job.
+        """
+        config = create_test_config()
+
+        with patch("podcast_processor.ad_classifier.db.session") as mock_session:
+            classifier = AdClassifier(config=config, db_session=mock_session)
+
+            timeout_errors = [
+                Exception("litellm.Timeout: Connection timed out after None seconds."),
+                Exception("Read timeout occurred"),
+                Exception("HTTP 504 Gateway Timeout"),
+                Exception("Request timed-out"),
+            ]
+            for error in timeout_errors:
+                assert classifier._is_retryable_error(error) is True, (
+                    f"expected retryable: {error!r}"
+                )
+
     def test_is_retryable_error_non_retryable(self):
         """Test that non-retryable errors are correctly identified."""
         config = create_test_config()

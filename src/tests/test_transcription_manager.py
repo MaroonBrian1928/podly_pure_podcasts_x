@@ -221,8 +221,15 @@ def test_transcribe_new_writes_transcript_in_chunks(
     action_names: list[str] = []
     original_action = transcription_manager_module.writer_client.action
 
+    # Filter out `dequeue_job` because the background job-scheduler thread
+    # in the writer service polls via that action regardless of what the
+    # test is doing. If a prior test in the same pytest invocation left
+    # the scheduler running, those polls land in `action_names` and break
+    # the equality assertion below. We only care about the writes the
+    # transcription manager itself emits.
     def spy_action(action_name: str, params: dict, wait: bool = True):
-        action_names.append(action_name)
+        if action_name != "dequeue_job":
+            action_names.append(action_name)
         return original_action(action_name, params, wait=wait)
 
     monkeypatch.setattr(
