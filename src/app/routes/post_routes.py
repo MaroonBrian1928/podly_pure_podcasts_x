@@ -29,7 +29,6 @@ from app.posts import (
     clear_post_processing_data,
     clear_post_processing_data_keep_transcript,
 )
-from app.routes.cost_routes import _is_billable_llm_call, _model_call_cost
 from app.routes.post_stats_utils import (
     build_edited_timeline_ad_markers,
     build_edited_timeline_bleep_windows,
@@ -85,21 +84,104 @@ def _current_user_is_admin() -> bool:
     return bool(user and user.role == "admin")
 
 
-def _estimated_llm_cost_for_post(post_id: int) -> float:
-    calls: list[ModelCall] = ModelCall.query.filter(
-        ModelCall.post_id == post_id,
-        ModelCall.status == "success",
-    ).all()
-    return sum(_model_call_cost(call) for call in calls if _is_billable_llm_call(call))
+def _llm_costs_by_call_id(post_id: int) -> dict[int, float]:
+    """Map of ``ModelCall.id`` → persisted ``estimated_cost_usd`` for a post.
+
+    Reads only the billable-LLM rows: Whisper and INA rows are priced by
+    audio duration (computed elsewhere) and their column is left NULL by
+    the worker. Used to enrich the per-call breakdown the stats modal
+    renders. Cheap pure-SQL — no litellm import.
+    """
+    rows = (
+        db.session.query(ModelCall.id, ModelCall.estimated_cost_usd)
+        .filter(
+            ModelCall.post_id == post_id,
+            ModelCall.status == "success",
+            ModelCall.estimated_cost_usd.isnot(None),
+        )
+        .all()
+    )
+    return {int(call_id): float(cost) for call_id, cost in rows}
 
 
-def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post_id: int) -> None:
+def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> None:
+    """Populate ``processing_stats.estimated_cost`` and per-call costs.
+
+    The overview shows total compute cost (LLM + Whisper + INA). The
+    per-call breakdown attached to ``stats_data["model_calls"]`` lets the
+    modal render a Cost column: billable LLM rows show the persisted
+    ``estimated_cost_usd``; Whisper / INA rows show ``rate * hours`` split
+    evenly across success calls of that type for the post.
+    """
     if not _current_user_is_admin():
         return
     processing_stats = stats_data.get("processing_stats")
     if not isinstance(processing_stats, dict):
         return
-    processing_stats["estimated_cost"] = round(_estimated_llm_cost_for_post(post_id), 4)
+
+    from app.config_store import read_combined
+    from app.llm_pricing import is_ina_call, is_whisper_call
+
+    app_config = read_combined().get("app", {})
+    whisper_rate = float(
+        app_config.get(
+            "whisper_cost_rate_per_hour", DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
+        )
+        or 0.0
+    )
+    ina_rate = float(
+        app_config.get("ina_cost_rate_per_hour", DEFAULTS.APP_INA_COST_RATE_PER_HOUR)
+        or 0.0
+    )
+    duration_hours = float(post.duration or 0.0) / 3600.0 if post.duration else 0.0
+
+    calls = stats_data.get("model_calls") or []
+
+    # Count success Whisper / INA rows to split the per-hour fee across.
+    whisper_success_count = sum(
+        1
+        for c in calls
+        if isinstance(c, dict)
+        and c.get("status") == "success"
+        and is_whisper_call(c.get("model_name") or "", c.get("prompt"))
+    )
+    ina_success_count = sum(
+        1
+        for c in calls
+        if isinstance(c, dict)
+        and c.get("status") == "success"
+        and is_ina_call(c.get("model_name") or "")
+    )
+
+    whisper_total = whisper_rate * duration_hours if whisper_success_count else 0.0
+    ina_total = ina_rate * duration_hours if ina_success_count else 0.0
+    whisper_per_call = (
+        whisper_total / whisper_success_count if whisper_success_count else 0.0
+    )
+    ina_per_call = ina_total / ina_success_count if ina_success_count else 0.0
+
+    llm_costs = _llm_costs_by_call_id(int(post.id))
+
+    llm_total = 0.0
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        if call.get("status") != "success":
+            call["estimated_cost_usd"] = 0.0
+            continue
+        model_name = call.get("model_name") or ""
+        prompt = call.get("prompt")
+        if is_whisper_call(model_name, prompt):
+            call["estimated_cost_usd"] = round(whisper_per_call, 6)
+        elif is_ina_call(model_name):
+            call["estimated_cost_usd"] = round(ina_per_call, 6)
+        else:
+            cost = float(llm_costs.get(int(call.get("id", 0)), 0.0))
+            call["estimated_cost_usd"] = round(cost, 6)
+            llm_total += cost
+
+    total = llm_total + whisper_total + ina_total
+    processing_stats["estimated_cost"] = round(total, 4)
 
 
 _LOG_LINE_RE = re.compile(
@@ -693,7 +775,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
         srv_root=get_srv_root(),
     )
     if rust_stats is not None:
-        _maybe_add_admin_cost_estimate(rust_stats, int(post.id))
+        _maybe_add_admin_cost_estimate(rust_stats, post)
         return flask.jsonify(rust_stats)
 
     model_calls = (
@@ -980,7 +1062,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             },
         }
 
-    _maybe_add_admin_cost_estimate(stats_data, int(post.id))
+    _maybe_add_admin_cost_estimate(stats_data, post)
     return flask.jsonify(stats_data)
 
 

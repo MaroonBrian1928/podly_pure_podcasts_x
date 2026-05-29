@@ -360,6 +360,14 @@ export interface TokenBackfillModelSummary {
   tokenizer_errors: number;
 }
 
+export interface EstimatedCostBackfillResult {
+  applied: boolean;
+  scanned: number;
+  eligible: number;
+  skipped_non_billable: number;
+  updated: number;
+}
+
 export interface TokenBackfillResult {
   apply: boolean;
   scanned: number;

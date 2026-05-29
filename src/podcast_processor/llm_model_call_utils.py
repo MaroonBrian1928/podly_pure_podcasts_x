@@ -247,8 +247,19 @@ def try_update_model_call(
     logger: logging.Logger,
     log_prefix: str,
     usage: dict[str, int | None] | None = None,
+    model_name: str | None = None,
+    service_tier: str | None = None,
+    prompt: str | None = None,
 ) -> None:
-    """Best-effort ModelCall updater; no-op if call creation failed."""
+    """Best-effort ModelCall updater; no-op if call creation failed.
+
+    When ``status == "success"`` and token usage is supplied, this also
+    pre-computes ``estimated_cost_usd`` and passes it in the writer
+    payload. litellm is already loaded in this process (it just ran the
+    completion) so the price lookup is free here; the web process can
+    then read the persisted column without paying the ~160 MiB
+    ``import litellm`` cost.
+    """
     if model_call_id is None:
         return
 
@@ -268,6 +279,18 @@ def try_update_model_call(
             if usage.get(field) is not None:
                 data[field] = usage[field]
 
+    if status == "success" and model_name and usage:
+        cost = compute_estimated_cost_usd(
+            model_name=model_name,
+            service_tier=service_tier,
+            prompt=prompt,
+            usage=usage,
+            logger=logger,
+            log_prefix=log_prefix,
+        )
+        if cost is not None:
+            data["estimated_cost_usd"] = cost
+
     try:
         writer_client.update(
             "ModelCall",
@@ -282,6 +305,54 @@ def try_update_model_call(
             model_call_id,
             exc,
         )
+
+
+def compute_estimated_cost_usd(
+    *,
+    model_name: str,
+    service_tier: str | None,
+    prompt: str | None,
+    usage: dict[str, int | None],
+    logger: logging.Logger,
+    log_prefix: str,
+) -> float | None:
+    """Compute USD cost for a finalized LLM call.
+
+    Runs in the short-lived processing worker, which has already paid the
+    litellm import to make the completion call. Returns ``None`` when the
+    call is non-billable (whisper, ina) so the writer leaves the column
+    NULL and the dashboard treats it as 0. Returns ``0.0`` (not None) when
+    LiteLLM has no price entry — that's a known billable call we just
+    can't price, distinct from an unpriced whisper/ina row.
+    """
+    from app.llm_pricing import (
+        compute_model_call_cost,
+        is_ina_call,
+        is_whisper_call,
+    )
+
+    if is_ina_call(model_name) or is_whisper_call(model_name, prompt):
+        return None
+
+    try:
+        # `compute_model_call_cost` is typed against the ORM ModelCall but
+        # only reads the same five fields we hand it here. Build a duck
+        # object instead of importing the model — keeps this module free
+        # of ORM imports.
+        from types import SimpleNamespace
+
+        proxy = SimpleNamespace(
+            model_name=model_name,
+            service_tier=service_tier,
+            prompt=prompt,
+            prompt_tokens=usage.get("prompt_tokens") or 0,
+            cached_prompt_tokens=usage.get("cached_prompt_tokens") or 0,
+            completion_tokens=usage.get("completion_tokens") or 0,
+        )
+        return round(compute_model_call_cost(proxy), 8)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s: failed to compute estimated_cost_usd: %s", log_prefix, exc)
+        return None
 
 
 def extract_litellm_content(response: Any) -> str:

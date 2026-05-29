@@ -15,8 +15,22 @@ from flask import Blueprint, jsonify, request
 from app.auth.guards import require_admin
 from app.config_store import read_combined
 from app.extensions import db
+from app.llm_pricing import (
+    compute_model_call_cost as _model_call_cost,
+)
+from app.llm_pricing import (
+    is_billable_llm_call as _is_billable_llm_call,
+)
+from app.llm_pricing import (
+    is_ina_call as _is_ina_call_by_name,
+)
+from app.llm_pricing import (
+    is_whisper_call as _is_whisper_call_by_name,
+)
+from app.llm_pricing import (
+    rate_from_litellm as _rate_from_litellm,
+)
 from app.model_call_token_backfill import backfill_model_call_token_usage
-from app.model_call_utils import WHISPER_TRANSCRIPTION_PROMPT
 from app.models import (
     Feed,
     Identification,
@@ -49,87 +63,12 @@ def _compute_cost_per_subscriber(
     return total_episode_cost / subscriber_count
 
 
-def _rate_from_litellm(model_name: str, key: str, service_tier: str | None) -> float:
-    """Read a per-token price from LiteLLM's model cost map."""
-    try:
-        import litellm
-
-        from app.litellm_silencer import apply_litellm_suppress_debug_info
-
-        apply_litellm_suppress_debug_info()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("LiteLLM unavailable for cost calculation: %s", exc)
-        return 0.0
-
-    cost_entry = litellm.model_cost.get(model_name)
-    if not cost_entry and "/" in model_name:
-        cost_entry = litellm.model_cost.get(model_name.split("/", 1)[1])
-    if not cost_entry:
-        return 0.0
-
-    normalized_tier = (service_tier or "default").lower()
-    if normalized_tier != "default":
-        tier_key = f"{key}_{normalized_tier}"
-        if tier_key in cost_entry:
-            return float(cost_entry[tier_key] or 0.0)
-    base_rate = float(cost_entry.get(key) or 0.0)
-    if normalized_tier == "flex":
-        return base_rate * 0.5
-    return base_rate
-
-
-def _model_call_cost(call: ModelCall) -> float:
-    """Calculate stored LLM call cost from LiteLLM rates and persisted tokens."""
-    prompt_tokens = int(call.prompt_tokens or 0)
-    cached_prompt_tokens = int(call.cached_prompt_tokens or 0)
-    completion_tokens = int(call.completion_tokens or 0)
-    if prompt_tokens <= 0 and cached_prompt_tokens <= 0 and completion_tokens <= 0:
-        return 0.0
-
-    input_rate = _rate_from_litellm(
-        call.model_name, "input_cost_per_token", call.service_tier
-    )
-    cached_input_rate = _rate_from_litellm(
-        call.model_name, "cache_read_input_token_cost", call.service_tier
-    )
-    if cached_input_rate == 0.0 and cached_prompt_tokens > 0:
-        cached_input_rate = input_rate
-    output_rate = _rate_from_litellm(
-        call.model_name, "output_cost_per_token", call.service_tier
-    )
-
-    return (
-        prompt_tokens * input_rate
-        + cached_prompt_tokens * cached_input_rate
-        + completion_tokens * output_rate
-    )
-
-
 def _is_ina_call(call: ModelCall) -> bool:
-    return call.model_name.startswith("ina:")
+    return _is_ina_call_by_name(call.model_name)
 
 
 def _is_whisper_call(call: ModelCall) -> bool:
-    name = (call.model_name or "").lower()
-    if "whisper" in name:
-        return True
-    if call.prompt == WHISPER_TRANSCRIPTION_PROMPT:
-        return True
-    # Historical local Whisper calls were stored as local_<model>.
-    if name.startswith("local_"):
-        return True
-    return False
-
-
-def _is_billable_llm_call(call: ModelCall) -> bool:
-    if call.status != "success":
-        return False
-    if _is_ina_call(call):
-        return False
-    name = (call.model_name or "").lower()
-    if "whisper" in name or call.prompt == "Whisper transcription job":
-        return False
-    return True
+    return _is_whisper_call_by_name(call.model_name, call.prompt)
 
 
 def _month_range(year: int, month: int) -> tuple[datetime, datetime]:
@@ -217,7 +156,7 @@ def _build_rust_rates_payload(app_config: dict[str, Any]) -> dict[str, Any]:
     {input, cached_input, output} effective per-token rates. The Flex 0.5x
     discount is baked into ``_rate_from_litellm``; the cached_input→input
     fallback for legacy rows (LiteLLM has no cache_read price) is applied
-    here so the sidecar can just multiply tokens × rate.
+    here so the sidecar can just multiply tokens * rate.
     """
     distinct: list[tuple[str | None, str | None]] = (
         db.session.query(ModelCall.model_name, ModelCall.service_tier).distinct().all()
@@ -513,9 +452,15 @@ def api_admin_costs_calls() -> flask.Response:
             "cached_prompt_tokens": c.cached_prompt_tokens,
             "completion_tokens": c.completion_tokens,
             "total_tokens": c.total_tokens,
-            "estimated_cost": round(_model_call_cost(c), 8)
-            if _is_billable_llm_call(c)
-            else 0.0,
+            # Read the persisted cost the writer stored at finalize time so
+            # the listing doesn't have to import litellm in the web process.
+            # Legacy rows whose column is NULL appear as 0.0 until the
+            # admin backfill endpoint runs.
+            "estimated_cost": (
+                round(float(c.estimated_cost_usd), 8)
+                if c.estimated_cost_usd is not None
+                else 0.0
+            ),
         }
         for c in calls
     ]
@@ -527,6 +472,82 @@ def api_admin_costs_calls() -> flask.Response:
             "page": page,
             "per_page": per_page,
             "pages": max(1, (total + per_page - 1) // per_page),
+        }
+    )
+
+
+@costs_bp.route("/api/admin/costs/backfill-estimated-cost", methods=["POST"])
+def api_admin_backfill_estimated_cost() -> flask.Response:
+    """Populate ``ModelCall.estimated_cost_usd`` for legacy rows.
+
+    New ModelCalls are populated by the writer at finalize time. Rows that
+    predate the column will have ``estimated_cost_usd IS NULL`` — running
+    this endpoint pays the one-time ``import litellm`` cost in the web
+    process (only persisted while this process is alive; restart to reset)
+    and writes the computed value back via the writer.
+
+    POST body (all optional):
+      apply: bool (default False — dry run when false)
+      limit: int  (optional cap on rows to touch)
+    """
+    _, error_response = require_admin("backfill estimated cost")
+    if error_response:
+        return error_response
+
+    payload = request.get_json(silent=True) or {}
+    apply = bool(payload.get("apply", False))
+    limit_raw = payload.get("limit")
+    limit: int | None = None
+    if limit_raw not in (None, ""):
+        try:
+            limit = int(limit_raw)
+        except TypeError, ValueError:
+            return flask.make_response(jsonify({"error": "Invalid limit"}), 400)
+        if limit <= 0:
+            return flask.make_response(jsonify({"error": "Invalid limit"}), 400)
+
+    query = ModelCall.query.filter(
+        ModelCall.estimated_cost_usd.is_(None),
+        ModelCall.status == "success",
+    ).order_by(ModelCall.id.asc())
+    if limit:
+        query = query.limit(limit)
+    targets: list[ModelCall] = query.all()
+
+    eligible = 0
+    updated = 0
+    skipped_non_billable = 0
+    for call in targets:
+        if not _is_billable_llm_call(call):
+            skipped_non_billable += 1
+            if apply:
+                writer_client.update(
+                    "ModelCall",
+                    int(call.id),
+                    {"estimated_cost_usd": 0.0},
+                    wait=False,
+                )
+            continue
+        eligible += 1
+        if not apply:
+            continue
+        cost = round(_model_call_cost(call), 8)
+        result = writer_client.update(
+            "ModelCall",
+            int(call.id),
+            {"estimated_cost_usd": cost},
+            wait=False,
+        )
+        if result and result.success:
+            updated += 1
+
+    return jsonify(
+        {
+            "scanned": len(targets),
+            "eligible": eligible,
+            "skipped_non_billable": skipped_non_billable,
+            "updated": updated,
+            "applied": apply,
         }
     )
 

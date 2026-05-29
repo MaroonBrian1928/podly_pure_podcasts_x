@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'react-hot-toast';
 import ModalShell from '../../ModalShell';
 import { costsApi } from '../../../services/api';
-import type { CostSummary, CallLog, TokenBackfillResult } from '../../../types';
+import type { CostSummary, CallLog, EstimatedCostBackfillResult, TokenBackfillResult } from '../../../types';
 import { formatBackendDateTime } from '../../../utils/datetime';
 
 function MonthSelector({
@@ -56,6 +56,29 @@ function costTokenTotal(call: CallLog['calls'][number]) {
     (call.prompt_tokens ?? 0) +
     (call.cached_prompt_tokens ?? 0) +
     (call.completion_tokens ?? 0)
+  );
+}
+
+function EstimatedCostBackfillSummary({ result }: { result: EstimatedCostBackfillResult }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+      <div className="border border-gray-200 rounded p-2">
+        <div className="text-xs text-gray-500">Scanned</div>
+        <div className="font-mono text-gray-900">{result.scanned.toLocaleString()}</div>
+      </div>
+      <div className="border border-gray-200 rounded p-2">
+        <div className="text-xs text-gray-500">Eligible (billable LLM)</div>
+        <div className="font-mono text-gray-900">{result.eligible.toLocaleString()}</div>
+      </div>
+      <div className="border border-gray-200 rounded p-2">
+        <div className="text-xs text-gray-500">Non-billable</div>
+        <div className="font-mono text-gray-900">{result.skipped_non_billable.toLocaleString()}</div>
+      </div>
+      <div className="border border-gray-200 rounded p-2">
+        <div className="text-xs text-gray-500">Updated</div>
+        <div className="font-mono text-gray-900">{result.updated.toLocaleString()}</div>
+      </div>
+    </div>
   );
 }
 
@@ -129,6 +152,14 @@ export default function CostsTab() {
     type: 'success' | 'error';
     message: string;
   } | null>(null);
+  const [showCostBackfillWizard, setShowCostBackfillWizard] = useState(false);
+  const [costBackfillLimit, setCostBackfillLimit] = useState('');
+  const [costBackfillResult, setCostBackfillResult] =
+    useState<EstimatedCostBackfillResult | null>(null);
+  const [costBackfillNotice, setCostBackfillNotice] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const queryClient = useQueryClient();
 
   const { data: costs, isLoading: costsLoading } = useQuery<CostSummary>({
@@ -157,6 +188,41 @@ export default function CostsTab() {
       queryClient.invalidateQueries({ queryKey: ['admin-costs'] });
     },
     onError: () => toast.error('Cleanup failed'),
+  });
+
+  const costBackfillMutation = useMutation({
+    mutationFn: (apply: boolean) => costsApi.backfillEstimatedCost({
+      apply,
+      limit: costBackfillLimit.trim() ? Number(costBackfillLimit) : null,
+    }),
+    onMutate: () => {
+      setCostBackfillNotice(null);
+    },
+    onSuccess: (data) => {
+      setCostBackfillResult(data);
+      if (data.applied) {
+        setCostBackfillNotice({
+          type: 'success',
+          message: `Backfill complete. Updated ${data.updated} model call(s).`,
+        });
+        toast.success(`Backfilled ${data.updated} model call(s)`);
+        queryClient.invalidateQueries({ queryKey: ['admin-costs'] });
+        queryClient.invalidateQueries({ queryKey: ['admin-calls'] });
+      } else {
+        setCostBackfillNotice({
+          type: 'success',
+          message: `Dry run complete. ${data.eligible} model call(s) would be updated.`,
+        });
+        toast.success(`Dry run found ${data.eligible} model call(s) to price`);
+      }
+    },
+    onError: () => {
+      setCostBackfillNotice({
+        type: 'error',
+        message: 'Estimated-cost backfill failed. No model calls were updated.',
+      });
+      toast.error('Estimated-cost backfill failed');
+    },
   });
 
   const backfillMutation = useMutation({
@@ -431,6 +497,17 @@ export default function CostsTab() {
           >
             Backfill token usage
           </button>
+          <button
+            onClick={() => {
+              setShowCostBackfillWizard(true);
+              setCostBackfillResult(null);
+              setCostBackfillNotice(null);
+            }}
+            className="px-4 py-2 text-sm bg-blue-50 border border-blue-300 text-blue-800 rounded hover:bg-blue-100"
+            title="Populate ModelCall.estimated_cost_usd for legacy rows so the stats page can render cost without importing LiteLLM into the web process."
+          >
+            Backfill estimated cost
+          </button>
         </div>
       </section>
 
@@ -502,6 +579,88 @@ export default function CostsTab() {
                 !backfillResult ||
                 backfillResult.apply ||
                 backfillResult.would_update <= 0
+              }
+              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            >
+              Apply backfill
+            </button>
+          </div>
+        </div>
+      </ModalShell>
+
+      <ModalShell
+        isOpen={showCostBackfillWizard}
+        onClose={() => setShowCostBackfillWizard(false)}
+        panelClassName="w-full max-w-2xl bg-white rounded-lg shadow-xl p-5"
+      >
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h4 className="text-base font-semibold text-gray-900">Backfill Estimated Cost</h4>
+              <p className="text-sm text-gray-500 mt-1">
+                Populate <code>ModelCall.estimated_cost_usd</code> for legacy
+                rows so the stats page can render per-call cost without
+                importing LiteLLM into the web process. This one call loads
+                LiteLLM into the current web process (~160 MiB); restart the
+                web service afterwards to release it. New calls are priced
+                automatically by the worker.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowCostBackfillWizard(false)}
+              className="text-gray-400 hover:text-gray-700"
+              aria-label="Close"
+            >
+              ×
+            </button>
+          </div>
+
+          <label className="block">
+            <span className="text-sm font-medium text-gray-700">Scan limit</span>
+            <input
+              type="number"
+              min="1"
+              value={costBackfillLimit}
+              onChange={(event) => {
+                setCostBackfillLimit(event.target.value);
+                setCostBackfillResult(null);
+                setCostBackfillNotice(null);
+              }}
+              placeholder="All unpriced successful calls"
+              className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+          </label>
+
+          {costBackfillResult && <EstimatedCostBackfillSummary result={costBackfillResult} />}
+
+          {costBackfillNotice && (
+            <div
+              className={`text-sm rounded border px-3 py-2 ${costBackfillNotice.type === 'success'
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-red-50 border-red-200 text-red-800'
+                }`}
+              role="status"
+              aria-live="polite"
+            >
+              {costBackfillNotice.message}
+            </div>
+          )}
+
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              onClick={() => costBackfillMutation.mutate(false)}
+              disabled={costBackfillMutation.isPending}
+              className="px-4 py-2 text-sm border border-gray-300 rounded text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {costBackfillMutation.isPending ? 'Running…' : 'Run dry run'}
+            </button>
+            <button
+              onClick={() => costBackfillMutation.mutate(true)}
+              disabled={
+                costBackfillMutation.isPending ||
+                !costBackfillResult ||
+                costBackfillResult.applied ||
+                costBackfillResult.eligible <= 0
               }
               className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
             >

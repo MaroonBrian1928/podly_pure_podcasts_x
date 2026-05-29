@@ -42,7 +42,12 @@ def test_install_litellm_log_filter_does_not_import_litellm(
         args=(),
         exc_info=None,
     )
-    assert any(not f.filter(record) for f in litellm_logger.filters)
+    # ``filters`` is typed as ``list[_SupportsFilter | Callable]``; our filter
+    # is a real ``logging.Filter`` subclass, so narrow to that branch first.
+    assert any(
+        isinstance(f, logging.Filter) and not f.filter(record)
+        for f in litellm_logger.filters
+    )
 
 
 def test_apply_litellm_suppress_debug_info_is_idempotent_and_noop_without_litellm(

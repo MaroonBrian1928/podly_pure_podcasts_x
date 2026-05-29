@@ -19,6 +19,7 @@ import type {
   PagedResult,
   CostSummary,
   CallLog,
+  EstimatedCostBackfillResult,
   TokenBackfillResult,
   FeedSubscribersResponse,
 } from '../types';
@@ -367,6 +368,7 @@ export const feedsApi = {
       cached_prompt_tokens: number | null;
       completion_tokens: number | null;
       total_tokens: number | null;
+      estimated_cost_usd?: number | null;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -594,6 +596,7 @@ export const feedsApi = {
       cached_prompt_tokens: number | null;
       completion_tokens: number | null;
       total_tokens: number | null;
+      estimated_cost_usd?: number | null;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -881,6 +884,12 @@ export const costsApi = {
     payload: { apply: boolean; limit?: number | null }
   ): Promise<TokenBackfillResult> => {
     const response = await api.post('/api/admin/costs/backfill-token-usage', payload);
+    return response.data;
+  },
+  backfillEstimatedCost: async (
+    payload: { apply: boolean; limit?: number | null }
+  ): Promise<EstimatedCostBackfillResult> => {
+    const response = await api.post('/api/admin/costs/backfill-estimated-cost', payload);
     return response.data;
   },
   cleanupCancelledFeeds: async (): Promise<{ removed: number }> => {

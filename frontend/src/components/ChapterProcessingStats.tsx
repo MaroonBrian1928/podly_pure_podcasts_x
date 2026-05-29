@@ -39,6 +39,10 @@ export default function ChapterProcessingStats({
   const hasAudioSegments = (stats?.audio_segments?.length || 0) > 0;
   const modelEntries = Object.entries(stats?.processing_stats?.model_types || {});
   const estimatedCost = stats?.processing_stats?.estimated_cost;
+  // The backend only attaches per-call cost data for admins; use that as the
+  // signal for whether to render the Cost column at all so non-admins don't
+  // see a column full of em-dashes.
+  const showCostColumn = estimatedCost != null;
 
   const formatTimestamp = (timestamp: string | null) => {
     if (!timestamp) return 'N/A';
@@ -263,7 +267,7 @@ export default function ChapterProcessingStats({
 
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
                           <div className="rounded-lg border border-transparent bg-gradient-to-br from-purple-50 to-purple-100 p-4 text-center dark:border-purple-800/70 dark:from-purple-950 dark:to-slate-900">
                             <div className="text-2xl font-bold text-purple-600 dark:text-purple-200">
                               {stats.chapters?.total_chapters || 0}
@@ -293,7 +297,7 @@ export default function ChapterProcessingStats({
                               <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-200">
                                 ${estimatedCost.toFixed(4)}
                               </div>
-                              <div className="text-sm text-indigo-800 dark:text-indigo-100">Estimated LLM Cost</div>
+                              <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated Cost</div>
                             </div>
                           )}
                         </div>
@@ -540,6 +544,9 @@ export default function ChapterProcessingStats({
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + cached prompt + completion = total tokens">Tokens</th>
+                                {showCostColumn && (
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="USD cost for this call (LLM = tokens × LiteLLM rate; Whisper/INA = hourly rate × episode duration, split across success rows of that type)">Cost</th>
+                                )}
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -590,6 +597,15 @@ export default function ChapterProcessingStats({
                                           <span className="text-gray-400">—</span>
                                         )}
                                       </td>
+                                      {showCostColumn && (
+                                        <td className="px-4 py-3 text-sm text-gray-600">
+                                          {call.estimated_cost_usd != null ? (
+                                            `$${call.estimated_cost_usd.toFixed(4)}`
+                                          ) : (
+                                            <span className="text-gray-400">—</span>
+                                          )}
+                                        </td>
+                                      )}
                                       <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
                                       <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
                                       <td className="px-4 py-3">
@@ -603,7 +619,7 @@ export default function ChapterProcessingStats({
                                     </tr>
                                     {expandedModelCalls.has(call.id) && (
                                       <tr className="bg-gray-50">
-                                        <td colSpan={9} className="px-4 py-4">
+                                        <td colSpan={showCostColumn ? 10 : 9} className="px-4 py-4">
                                           <div className="space-y-4">
                                             {call.prompt && (
                                               <div>

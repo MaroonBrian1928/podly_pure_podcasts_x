@@ -274,6 +274,13 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     cached_prompt_tokens = db.Column(db.Integer, nullable=True)
     completion_tokens = db.Column(db.Integer, nullable=True)
     total_tokens = db.Column(db.Integer, nullable=True)
+    # USD cost computed from token usage * LiteLLM rates at the moment the
+    # row is finalized (writer-side, where litellm is already loaded).
+    # Persisted so the web process can show per-post cost in the stats page
+    # without importing litellm — which pulls in ~160 MiB of openai
+    # submodules. NULL for legacy rows; backfilled via the admin
+    # `/api/admin/costs/backfill-estimated-cost` endpoint.
+    estimated_cost_usd = db.Column(db.Float, nullable=True)
 
     identifications = db.relationship(
         "Identification", backref="model_call", lazy="dynamic"

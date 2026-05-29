@@ -166,6 +166,117 @@ def test_try_update_model_call_forwards_token_usage(
     assert "cached_prompt_tokens" not in captured["data"]
 
 
+def test_try_update_model_call_persists_estimated_cost_usd_for_llm_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On success, the writer payload must include ``estimated_cost_usd``
+    so the web process never has to import litellm to render a stats page.
+    The processing worker already has litellm loaded — computing the cost
+    here is essentially free and is short-lived (worker exits after job).
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+    # Mock the price lookup so the test doesn't depend on litellm's price
+    # table being shipped with the installed wheel.
+    monkeypatch.setattr("app.llm_pricing.compute_model_call_cost", lambda _call: 0.0042)
+
+    try_update_model_call(
+        7,
+        status="success",
+        response="ok",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        },
+        model_name="gpt-4o-mini",
+        service_tier=None,
+        prompt="classify",
+    )
+
+    assert captured["data"]["estimated_cost_usd"] == 0.0042
+
+
+def test_try_update_model_call_omits_cost_for_whisper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whisper transcription rows are not billable LLM calls; the worker
+    must leave ``estimated_cost_usd`` out of the payload so the writer
+    keeps the column NULL (dashboard treats NULL as 0 without importing
+    litellm)."""
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+
+    try_update_model_call(
+        9,
+        status="success",
+        response="ok",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        model_name="whisper-large-v3-turbo",
+        prompt="Whisper transcription job",
+    )
+
+    assert "estimated_cost_usd" not in captured["data"]
+
+
+def test_try_update_model_call_omits_cost_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-success transitions shouldn't compute or persist a cost."""
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+
+    try_update_model_call(
+        9,
+        status="failed_retries",
+        response=None,
+        error_message="boom",
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        },
+        model_name="gpt-4o-mini",
+    )
+
+    assert "estimated_cost_usd" not in captured["data"]
+
+
 # --------------------------------------------------------------------------
 # service_tier helper tests
 # --------------------------------------------------------------------------
