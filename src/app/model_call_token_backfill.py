@@ -102,7 +102,7 @@ def _append_error(
     )
 
 
-def _build_update_payload(call: ModelCall) -> dict[str, int | None]:
+def _build_update_payload(call: ModelCall) -> dict[str, int | float | None]:
     prompt_tokens = call.prompt_tokens
     completion_tokens = call.completion_tokens
 
@@ -111,13 +111,36 @@ def _build_update_payload(call: ModelCall) -> dict[str, int | None]:
     if completion_tokens is None:
         completion_tokens = _estimate_text_tokens(call.model_name, call.response or "")
 
-    payload: dict[str, int | None] = {}
+    payload: dict[str, int | float | None] = {}
     if call.prompt_tokens is None:
         payload["prompt_tokens"] = prompt_tokens
     if call.completion_tokens is None:
         payload["completion_tokens"] = completion_tokens
     if call.total_tokens is None:
         payload["total_tokens"] = int(prompt_tokens or 0) + int(completion_tokens or 0)
+
+    # While we already paid the LiteLLM import to estimate tokens, also
+    # price the call so the cost dashboard / stats modal don't need a
+    # second backfill pass. Only fill if the column is currently NULL —
+    # never overwrite an existing value.
+    if call.estimated_cost_usd is None:
+        from types import SimpleNamespace
+
+        from app.llm_pricing import compute_model_call_cost
+
+        proxy = SimpleNamespace(
+            model_name=call.model_name,
+            service_tier=call.service_tier,
+            prompt_tokens=prompt_tokens,
+            cached_prompt_tokens=call.cached_prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        try:
+            payload["estimated_cost_usd"] = round(compute_model_call_cost(proxy), 8)
+        except Exception:  # noqa: BLE001
+            # Pricing is best-effort; the explicit estimated-cost backfill
+            # endpoint can retry later.
+            pass
     return payload
 
 

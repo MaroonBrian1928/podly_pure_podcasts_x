@@ -16,7 +16,9 @@ from app.writer.client import writer_client
 from podcast_processor.llm_model_call_utils import (
     apply_service_tier,
     call_litellm_with_tier_retry,
+    extract_litellm_usage,
     record_service_tier_on_model_call,
+    try_update_model_call,
 )
 from shared.config import Config
 
@@ -142,6 +144,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
             response = call_litellm_with_tier_retry(
                 completion_args, config=self.config, logger=self.logger
             )
+            usage = extract_litellm_usage(response)
 
             choice = response.choices[0] if response.choices else None
             content = ""
@@ -187,6 +190,8 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 status="received_response",
                 response=raw_response,
                 error_message=None,
+                usage=usage,
+                prompt=prompt,
             )
             # Parse JSON (strip markdown fences). Log parse diagnostics so failures are actionable.
             cleaned = re.sub(r"```json|```", "", content.strip())
@@ -223,6 +228,8 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                     status="success",
                     response=raw_response,
                     error_message=None,
+                    usage=usage,
+                    prompt=prompt,
                 )
                 self.logger.info(
                     "LLM refinement applied",
@@ -281,21 +288,30 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
         status: str,
         response: str | None,
         error_message: str | None,
+        usage: dict[str, int | None] | None = None,
+        prompt: str | None = None,
     ) -> None:
-        """Best-effort ModelCall updater; no-op if call creation failed."""
+        """Best-effort ModelCall updater; no-op if call creation failed.
+
+        Routes through ``try_update_model_call`` so the success transition
+        can pre-compute ``estimated_cost_usd`` while litellm is loaded in
+        this worker process — keeps the web process from having to import
+        it just to render this row's cost in the stats modal.
+        """
         if model_call_id is None:
             return
         try:
-            writer_client.update(
-                "ModelCall",
+            try_update_model_call(
                 int(model_call_id),
-                {
-                    "status": status,
-                    "response": response,
-                    "error_message": error_message,
-                    "retry_attempts": 1,
-                },
-                wait=True,
+                status=status,
+                response=response,
+                error_message=error_message,
+                logger=self.logger,
+                log_prefix="Boundary refine",
+                usage=usage,
+                model_name=getattr(self.config, "llm_model", None),
+                service_tier=getattr(self.config, "llm_service_tier", None),
+                prompt=prompt,
             )
         except Exception as exc:  # best-effort; do not block refinement  # noqa: BLE001
             self.logger.warning(
