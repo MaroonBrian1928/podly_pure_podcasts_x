@@ -160,8 +160,6 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: ${{ steps.tags.outputs.arch_tag }}
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
   publish-manifest:
     needs: build-arch
