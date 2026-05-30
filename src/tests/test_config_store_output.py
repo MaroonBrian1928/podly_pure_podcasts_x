@@ -1,5 +1,6 @@
 from typing import Any
 
+from app.extensions import db
 from app.models import OutputSettings
 from shared import defaults as DEFAULTS
 
@@ -35,7 +36,7 @@ def test_output_config_updates_bleep_padding(app: Any) -> None:
                 }
             }
         )
-        row = OutputSettings.query.get(1)
+        row = db.session.get(OutputSettings, 1)
         assert row is not None
         row_start_ms = row.bleep_padding_start_ms
         row_end_ms = row.bleep_padding_end_ms

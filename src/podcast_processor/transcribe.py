@@ -577,7 +577,10 @@ class GroqWhisperTranscriber(Transcriber):
                 max_attempts,
             )
 
-            if transcription.segments is None:  # type: ignore [attr-defined]
+            # The verbose_json response exposes `segments`, but it isn't on the
+            # Groq Transcription type stub, so read it defensively.
+            transcription_segments = getattr(transcription, "segments", None)
+            if transcription_segments is None:
                 self.logger.warning(
                     "[GROQ_API_CALL] No segments found in transcription for %s",
                     chunk_path,
@@ -588,7 +591,7 @@ class GroqWhisperTranscriber(Transcriber):
                 GroqTranscriptionSegment(
                     start=seg["start"], end=seg["end"], text=seg["text"]
                 )
-                for seg in transcription.segments  # type: ignore [attr-defined]
+                for seg in transcription_segments
             ]
 
             self.logger.info(

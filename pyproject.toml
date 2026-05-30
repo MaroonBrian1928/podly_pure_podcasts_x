@@ -9,21 +9,13 @@ description = "Ad-block for podcasts. Create an ad-free RSS feed."
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "speechrecognition",
     "openai",
     "python-dotenv",
     "jinja2",
     "flask",
     "pyrss2gen",
     "feedparser",
-    "certifi",
-    "cd",
-    "pyyaml",
-    "prompt-toolkit",
-    "pypodcastparser",
     "werkzeug",
-    "exceptiongroup",
-    "zeroconf",
     "waitress",
     "validators",
     "beartype",
@@ -32,12 +24,9 @@ dependencies = [
     "Flask-APScheduler",
     "ffmpeg-python",
     "litellm>=1.86.1",
-    "bleach",
     "groq",
-    "async_timeout",
     "flask-cors",
     "bcrypt",
-    "httpx-aiohttp",
     "stripe",
     "mutagen",
 ]
@@ -46,8 +35,6 @@ dependencies = [
 dev = [
     "ruff",
     "ty",
-    "types-bleach",
-    "types-pyyaml",
     "types-requests",
     "types-waitress",
     "pytest",
@@ -64,6 +51,14 @@ dev = [
 pythonpath = ["src", "."]
 norecursedirs = ["scripts", "scripts/*", ".worktrees", ".worktrees/*"]
 testpaths = []  # No test paths - tests converted to standalone scripts
+# Fail CI if the warning families cleaned up in docs/plans/test_fixes.md
+# regress. Scoped to those specific categories so unrelated third-party
+# warnings don't break the suite.
+filterwarnings = [
+    "error::sqlalchemy.exc.LegacyAPIWarning",
+    "error::pydantic.PydanticDeprecatedSince211",
+    "error::pytest.PytestCollectionWarning",
+]
 
 [tool.ruff]
 line-length = 88
@@ -126,3 +121,15 @@ invalid-method-override = "warn"
 invalid-assignment = "warn"
 no-matching-overload = "warn"
 not-subscriptable = "warn"
+# flask_sqlalchemy's `db.Model` is a dynamically-constructed declarative base
+# that ty cannot resolve an MRO for, so every `class X(db.Model)` would
+# otherwise emit a spurious unsupported-base diagnostic.
+unsupported-base = "ignore"
+
+# Tests routinely assign Mock/MagicMock onto instance methods, which ty flags
+# as invalid-assignment. That pattern is intentional in test code.
+[[tool.ty.overrides]]
+include = ["src/tests/**"]
+
+[tool.ty.overrides.rules]
+invalid-assignment = "ignore"

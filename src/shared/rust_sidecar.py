@@ -32,8 +32,23 @@ class RustSidecarError(RuntimeError):
     """Raised when the Rust helper exits unsuccessfully or returns bad JSON."""
 
 
-def env_flag_enabled(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+TRUTHY_FLAG_VALUES = {"1", "true", "yes", "on"}
+FALSY_FLAG_VALUES = {"0", "false", "no", "off"}
+
+# Rust sidecar paths ship enabled by default. They are validated for parity
+# with the Python implementation and fall back to Python automatically on any
+# error, so the default-on flag below is opt-out rather than opt-in.
+RUST_DEFAULT_ENABLED = True
+
+
+def env_flag_enabled(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized == "":
+        return default
+    return normalized in TRUTHY_FLAG_VALUES
 
 
 def rust_tools_bin() -> Path:
@@ -41,55 +56,55 @@ def rust_tools_bin() -> Path:
 
 
 def rust_audio_enabled() -> bool:
-    return env_flag_enabled(RUST_AUDIO_ENABLED_ENV)
+    return env_flag_enabled(RUST_AUDIO_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_feed_xml_enabled() -> bool:
-    return env_flag_enabled(RUST_FEED_XML_ENABLED_ENV)
+    return env_flag_enabled(RUST_FEED_XML_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_feed_refresh_enabled() -> bool:
-    return env_flag_enabled(RUST_FEED_REFRESH_ENABLED_ENV)
+    return env_flag_enabled(RUST_FEED_REFRESH_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_chapters_enabled() -> bool:
-    return env_flag_enabled(RUST_CHAPTERS_ENABLED_ENV)
+    return env_flag_enabled(RUST_CHAPTERS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_jobs_enabled() -> bool:
-    return env_flag_enabled(RUST_JOBS_ENABLED_ENV)
+    return env_flag_enabled(RUST_JOBS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_stats_enabled() -> bool:
-    return env_flag_enabled(RUST_STATS_ENABLED_ENV)
+    return env_flag_enabled(RUST_STATS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_transcript_enabled() -> bool:
-    return env_flag_enabled(RUST_TRANSCRIPT_ENABLED_ENV)
+    return env_flag_enabled(RUST_TRANSCRIPT_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_ad_merge_enabled() -> bool:
-    return env_flag_enabled(RUST_AD_MERGE_ENABLED_ENV)
+    return env_flag_enabled(RUST_AD_MERGE_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_profanity_enabled() -> bool:
-    return env_flag_enabled(RUST_PROFANITY_ENABLED_ENV)
+    return env_flag_enabled(RUST_PROFANITY_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_feed_posts_enabled() -> bool:
-    return env_flag_enabled(RUST_FEED_POSTS_ENABLED_ENV)
+    return env_flag_enabled(RUST_FEED_POSTS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_word_boundary_enabled() -> bool:
-    return env_flag_enabled(RUST_WORD_BOUNDARY_ENABLED_ENV)
+    return env_flag_enabled(RUST_WORD_BOUNDARY_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_chapter_fallback_enabled() -> bool:
-    return env_flag_enabled(RUST_CHAPTER_FALLBACK_ENABLED_ENV)
+    return env_flag_enabled(RUST_CHAPTER_FALLBACK_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def rust_costs_enabled() -> bool:
-    return env_flag_enabled(RUST_COSTS_ENABLED_ENV)
+    return env_flag_enabled(RUST_COSTS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
 
 from flask import Blueprint, Response, current_app, g, jsonify, request, session
 
@@ -334,7 +333,7 @@ def _require_authenticated_user() -> User | None:
     if current is None:
         return None
 
-    return cast(User | None, db.session.get(User, current.id))
+    return db.session.get(User, current.id)
 
 
 def _unauthorized_response() -> RouteResult:

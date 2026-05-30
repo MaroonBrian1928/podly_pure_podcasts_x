@@ -2,15 +2,25 @@
 
 This guide will walk you through setting up Podly from scratch using Docker. Podly creates ad-free RSS feeds for podcasts by automatically detecting and removing advertisement segments.
 
-## Highly Recommend!
+## Highly Recommended: Let an AI agent set this up for you
 
-Want an expert to guide you through the setup? Download an AI powered IDE like cursor https://www.cursor.com/ or windsurf https://windsurf.com/
+The easiest way to get Podly running is to let an AI coding assistant do it
+alongside you — it can run the commands, read the output, and fix problems as
+they come up. Any of these work:
 
-Most IDEs have a free tier you can use to get started. Alternatively, you can use your own [LLM API key in Cursor](https://docs.cursor.com/settings/api-keys).
+- **Agentic command-line tools** — [Claude Code](https://www.anthropic.com/claude-code)
+  (Anthropic) or [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+  (Google). Install one, then run it in a terminal inside the project folder.
+- **AI-powered IDEs** — [Cursor](https://www.cursor.com/) or
+  [Windsurf](https://windsurf.com/). Open the project, open the AI chat panel,
+  and turn on "Agent" mode if it's available.
 
-Open the AI chat in the IDE. Enable 'Agent' mode if available, which will allow the IDE to help you run commands, view the output, and debug or take corrective steps if necessary.
+Most of these have a free tier to get started, and many let you bring your own
+LLM API key (for example, [API keys in Cursor](https://docs.cursor.com/settings/api-keys)).
 
-Paste one of the prompts below into the chat box.
+Whichever you choose, make sure agent / command-execution mode is enabled so the
+assistant can run commands, view their output, and debug or take corrective
+steps for you. Then paste one of the prompts below into the chat.
 
 If you don't have the repo downloaded:
 
@@ -22,7 +32,8 @@ After the project is cloned, help me:
 - configure the app via the web UI at http://localhost:5001/config
 Be sure to check if a dependency is already installed before downloading.
 We recommend Docker because installing ffmpeg and the app runtime can be difficult.
-For transcription, configure Groq or an OpenAI-compatible remote transcription service in the web UI.
+For transcription, configure Groq (easiest) or a self-hosted OpenAI-compatible
+server like WhisperX API server or ParakeetX in the web UI.
 Podly works with many different LLMs, it does not require an OpenAI key.
 Check your work by retrieving the index page from localhost:5001 at the end.
 ```
@@ -37,7 +48,8 @@ Briefly, help me:
 - configure the app via the web UI at http://localhost:5001/config
 Be sure to check if a dependency is already installed before downloading.
 We recommend docker because installing ffmpeg and the app runtime can be difficult.
-For transcription, configure Groq or an OpenAI-compatible remote transcription service in the web UI.
+For transcription, configure Groq (easiest) or a self-hosted OpenAI-compatible
+server like WhisperX API server or ParakeetX in the web UI.
 Podly works with many different LLMs; it does not need to work with OpenAI.
 Check your work by retrieving the index page from localhost:5001 at the end.
 ```
@@ -86,17 +98,27 @@ docker compose version
 
 You should see version information for both commands.
 
-### 2. Get an OpenAI API Key (if using OpenAI)
+### 2. Get API Keys for Transcription and the LLM
 
-1. Go to [OpenAI's API platform](https://platform.openai.com/)
-2. Sign up for an account or log in if you already have one
-3. Navigate to the [API Keys section](https://platform.openai.com/api-keys)
-4. Click "Create new secret key"
-5. Give it a name (e.g., "Podly")
-6. **Important**: Copy the key immediately and save it somewhere safe - you won't be able to see it again!
-7. Your API key will look something like: `sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+Podly is provider-neutral. You need two things, and they can come from the same
+provider or different ones:
 
-> **Note**: OpenAI API usage requires payment. Make sure to set up billing and usage limits in your OpenAI account to avoid unexpected charges.
+- **Transcription:** the easiest option is a [Groq](https://console.groq.com/)
+  API key (free tier available). Alternatively, self-host an OpenAI-compatible
+  transcription server such as
+  [WhisperX API server](https://github.com/Nyralei/whisperx-api-server) or
+  [ParakeetX](https://github.com/MaroonBrian1928/parakeetX) and use no key at all.
+- **Ad detection (LLM):** any of the major providers work — OpenAI, Anthropic
+  (Claude), Google (Gemini), Groq, or a local/self-hosted model. Pick one,
+  create an API key in its dashboard, and you're set. Podly does **not** require
+  an OpenAI key.
+
+To create a key, sign in to your chosen provider, find its "API Keys" page,
+create a new key, and copy it somewhere safe — most providers only show it once.
+
+> **Note**: Hosted API usage is paid per-use. Set up billing and usage limits in
+> your provider's dashboard to avoid unexpected charges. Groq and self-hosted
+> transcription keep costs low.
 
 ## Setup Podly
 
@@ -118,7 +140,12 @@ chmod +x run_podly_docker.sh
 ./run_podly_docker.sh --dev --build     # build local image after code changes
 ```
 
-### Optional: Enable Authentication
+### Recommended: Enable Authentication
+
+> ⚠️ **Strongly recommended, especially for any internet-exposed deployment.**
+> Without authentication, anyone who can reach your Podly URL can read and
+> control your feeds. The example config (`.env.local.example`) ships with
+> `REQUIRE_AUTH=true` for this reason — keep it on and set your own password.
 
 The Docker image reads environment variables from `.env.local` files or your shell. To require login:
 
@@ -127,13 +154,37 @@ The Docker image reads environment variables from `.env.local` files or your she
 ```bash
 export REQUIRE_AUTH=true
 export PODLY_ADMIN_USERNAME='podly_admin'
-export PODLY_ADMIN_PASSWORD='SuperSecurePass!2024'
+export PODLY_ADMIN_PASSWORD='SuperSecurePass!2024'      # use your own strong password
 export PODLY_SECRET_KEY='replace-with-a-strong-64-char-secret'
 ```
+
+   Generate a strong secret key with:
+   `python -c "import secrets; print(secrets.token_hex(32))"`
 
 2. Start Podly as usual. On first boot with auth enabled and an empty database, the admin account is created automatically. If you are turning auth on for an existing volume, clear the `sqlite3.db` file so the bootstrap can succeed.
 
 3. Sign in at `http://localhost:5001`, then visit the Config page to change your password, add users, and copy RSS URLs with the "Copy protected feed" button. Podly generates feed-specific access tokens and embeds them in the link so podcast players can subscribe without exposing your main password. Remember to update your environment variables whenever you rotate the admin password.
+
+### Subscribing in a podcast app (public feeds & PocketCasts)
+
+Some podcast apps fetch your RSS feed from **their own servers** rather than
+your phone, so the feed URL must be reachable from the public internet — a
+`localhost` or LAN-only address won't work. **Pocket Casts is the most common
+example**;
+To use Podly with these apps:
+
+1. Host Podly somewhere publicly reachable (for example, the
+   [Railway deployment](how_to_run_railway.md), or your own server with a public
+   URL / reverse proxy).
+2. Keep authentication enabled (above) and use the **"Copy protected feed"**
+   button on the Config page. The copied URL contains a per-feed access token,
+   so the app can fetch the feed over the public internet **without** exposing
+   your admin login. This gives you a publicly *reachable* feed that is still
+   *protected* by a secret token.
+
+Apps that fetch the feed directly on-device (e.g. some self-hosting-friendly
+players) can use a LAN address, but for Pocket Casts and similar a public,
+token-protected URL is the way to go.
 
 ### First Run
 
@@ -185,11 +236,11 @@ export PODLY_SECRET_KEY='replace-with-a-strong-64-char-secret'
 - On macOS/Linux, make sure the script is executable: `chmod +x run_podly_docker.sh`
 - On Windows, try running Command Prompt as Administrator
 
-### OpenAI API errors
+### API / LLM errors
 
 - Double-check your API key in the Config page at `/config`
-- Make sure you have billing set up in your OpenAI account
-- Check your usage limits haven't been exceeded
+- Make sure billing is set up in your provider's account (OpenAI, Anthropic, Groq, etc.)
+- Check your usage limits or rate limits haven't been exceeded
 
 ### Port 5001 already in use
 

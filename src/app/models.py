@@ -2,7 +2,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy.orm import validates
+from sqlalchemy.orm import Mapped, relationship, validates
 
 from app.auth.passwords import hash_password, verify_password
 from app.extensions import db
@@ -56,10 +56,10 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     # feeds can short-circuit reader polls with a 304.
     last_changed_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
 
-    posts = db.relationship(
+    posts: Mapped[list[Post]] = relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
     )
-    user_feeds = db.relationship(
+    user_feeds: Mapped[list["UserFeed"]] = relationship(
         "UserFeed",
         back_populates="feed",
         cascade="all, delete-orphan",

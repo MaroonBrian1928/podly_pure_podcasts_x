@@ -1011,10 +1011,14 @@ class JobsManager:
 
 
 # Singleton accessor
+_jobs_manager_instance: JobsManager | None = None
+
+
 def get_jobs_manager() -> JobsManager:
-    if not hasattr(get_jobs_manager, "_instance"):
-        get_jobs_manager._instance = JobsManager()  # type: ignore[attr-defined]
-    return get_jobs_manager._instance  # type: ignore[attr-defined, no-any-return]
+    global _jobs_manager_instance
+    if _jobs_manager_instance is None:
+        _jobs_manager_instance = JobsManager()
+    return _jobs_manager_instance
 
 
 def scheduled_refresh_all_feeds() -> None:

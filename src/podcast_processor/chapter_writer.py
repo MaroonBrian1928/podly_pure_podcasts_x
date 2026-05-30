@@ -291,7 +291,7 @@ def write_adjusted_chapters(
     """
     adjusted_chapters = recalculate_chapter_times(chapters_to_keep, removed_segments)
     if rust_audio_enabled():
-        chapter_payload = [
+        chapter_payload: list[dict[str, object]] = [
             {
                 "title": chapter.title,
                 "start_time_ms": chapter.start_time_ms,

@@ -347,7 +347,7 @@ def create_feed_share_link(feed_id: int) -> ResponseReturnValue:
     if current is None:
         return jsonify({"error": "Authentication required."}), 401
 
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
     user = db.session.get(User, current.id)
     if user is None:
         return jsonify({"error": "User not found."}), 404
@@ -572,7 +572,7 @@ def get_feed(f_id: int) -> Response:
     if hasattr(g, "current_user") and g.current_user:
         update_user_last_active(g.current_user.id)
 
-    feed = Feed.query.get_or_404(f_id)
+    feed = db.get_or_404(Feed, f_id)
 
     # Fast path: if the reader already has the current version, return 304
     # before doing any upstream fetch or XML build. Stays correct because the
@@ -609,7 +609,7 @@ def delete_feed(f_id: int) -> ResponseReturnValue:
     if error:
         return error
 
-    feed = Feed.query.get_or_404(f_id)
+    feed = db.get_or_404(Feed, f_id)
     if user is not None and user.role != "admin":
         return (
             jsonify({"error": "Only administrators can delete feeds."}),
@@ -666,7 +666,7 @@ def refresh_feed_endpoint(f_id: int) -> ResponseReturnValue:
     if hasattr(g, "current_user") and g.current_user:
         update_user_last_active(g.current_user.id)
 
-    feed = Feed.query.get_or_404(f_id)
+    feed = db.get_or_404(Feed, f_id)
     feed_title = feed.title
     app = cast(Any, current_app)._get_current_object()
 
@@ -694,7 +694,7 @@ def update_feed_settings_endpoint(feed_id: int) -> ResponseReturnValue:
     if error_response is not None:
         return error_response
 
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
     payload = request.get_json(silent=True) or {}
     updates, error_response = _build_feed_settings_updates(feed, payload)
     if error_response is not None:
@@ -732,7 +732,7 @@ def get_feed_subscribers(feed_id: int) -> ResponseReturnValue:
         return jsonify({"error": "Feed not found"}), 404
 
     subscribers = []
-    for uf in cast(list[UserFeed], feed.user_feeds):
+    for uf in feed.user_feeds:
         u = uf.user
         if u is None:
             continue
@@ -824,7 +824,7 @@ def api_feeds() -> ResponseReturnValue:
                 .all()
             )
             # Hack: Always include Feed 1
-            feed_1 = Feed.query.get(1)
+            feed_1 = db.session.get(Feed, 1)
             if feed_1 and feed_1 not in feeds:
                 feeds.append(feed_1)
         else:
@@ -850,7 +850,7 @@ def api_join_feed(feed_id: int) -> ResponseReturnValue:
     if user is None:
         return jsonify({"error": "Authentication required."}), 401
 
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
     existing_membership = UserFeed.query.filter_by(
         feed_id=feed.id, user_id=user.id
     ).first()
@@ -875,7 +875,7 @@ def api_join_feed(feed_id: int) -> ResponseReturnValue:
                 402,
             )
     if existing_membership:
-        refreshed = Feed.query.get(feed_id)
+        refreshed = db.session.get(Feed, feed_id)
         return jsonify(_serialize_feed(refreshed or feed, current_user=user)), 200
 
     created, previous_count = ensure_user_feed_membership(
@@ -883,7 +883,7 @@ def api_join_feed(feed_id: int) -> ResponseReturnValue:
     )
     if created and previous_count == 0:
         whitelist_latest_for_first_member(feed, getattr(user, "id", None))
-    refreshed = Feed.query.get(feed_id)
+    refreshed = db.session.get(Feed, feed_id)
     return (
         jsonify(_serialize_feed(refreshed or feed, current_user=user)),
         200,
@@ -898,13 +898,13 @@ def api_exit_feed(feed_id: int) -> ResponseReturnValue:
     if user is None:
         return jsonify({"error": "Authentication required."}), 401
 
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
     writer_client.action(
         "remove_user_feed_membership",
         {"feed_id": feed.id, "user_id": user.id},
         wait=True,
     )
-    refreshed = Feed.query.get(feed_id)
+    refreshed = db.session.get(Feed, feed_id)
     return (
         jsonify(_serialize_feed(refreshed or feed, current_user=user)),
         200,
@@ -920,7 +920,7 @@ def api_leave_feed(feed_id: int) -> ResponseReturnValue:
     if user is None:
         return jsonify({"error": "Authentication required."}), 401
 
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
     writer_client.action(
         "remove_user_feed_membership",
         {"feed_id": feed.id, "user_id": user.id},
@@ -1213,7 +1213,7 @@ def _serialize_feed(
         member_ids = [
             membership.user_id for membership in getattr(feed, "user_feeds", [])
         ]
-        posts_count = len(cast(list[Any], feed.posts))
+        posts_count = len(feed.posts)
         latest_release_date = _latest_episode_release_date(feed)
 
     # In no-auth mode, everyone is functionally a member.

@@ -5,7 +5,7 @@ import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -353,9 +353,10 @@ def insert_transcript_segments_action(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Post {post_id_i} not found")
 
     payload = []
-    for i, seg in enumerate(segments):
-        if not isinstance(seg, dict):
+    for i, raw_seg in enumerate(segments):
+        if not isinstance(raw_seg, dict):
             continue
+        seg = cast(dict[str, Any], raw_seg)
         speaker_label = seg.get("speaker_label")
         payload.append(
             {

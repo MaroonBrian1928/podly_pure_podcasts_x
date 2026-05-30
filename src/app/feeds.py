@@ -390,14 +390,12 @@ def _build_refresh_feed_payload(
         if feed.image_url != new_image_url:
             updates["image_url"] = new_image_url
 
-    existing_posts = {post.guid: post for post in feed.posts}  # type: ignore[attr-defined]
+    existing_posts = {post.guid: post for post in feed.posts}
     existing_posts_by_url = {
-        post.download_url: post
-        for post in feed.posts  # type: ignore[attr-defined]
-        if post.download_url
+        post.download_url: post for post in feed.posts if post.download_url
     }
     oldest_post = min(
-        (post for post in feed.posts if post.release_date),  # type: ignore[attr-defined]
+        (post for post in feed.posts if post.release_date),
         key=lambda p: p.release_date,
         default=None,
     )

@@ -187,7 +187,7 @@ def cleanup_feed_directories(feed: Feed) -> None:
 
     # Clean up in/ directories (unprocessed audio)
     # in/{sanitized_post_title}/
-    for post in feed.posts:  # type: ignore[attr-defined]
+    for post in feed.posts:
         sanitized_post_title = sanitize_title(post.title)
         in_post_dir = get_in_root() / sanitized_post_title
         if in_post_dir.exists() and in_post_dir.is_dir():
