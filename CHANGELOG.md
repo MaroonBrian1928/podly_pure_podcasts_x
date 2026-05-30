@@ -1,3 +1,10 @@
+## [2.0.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.0...v2.0.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* add missing call cost calculation call to chapter creation and boundary refiner ([13eef36](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/13eef3688d2f647105aa5256c01e832be92c1c9f))
+
 # [1.3.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v1.2.1...v1.3.0) (2026-05-29)
 
 
