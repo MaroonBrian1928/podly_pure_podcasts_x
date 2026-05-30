@@ -13,13 +13,22 @@
 
 ## Overview
 
-Podly uses Whisper and Chat GPT to remove ads from podcasts.
+Podly transcribes each podcast episode, uses an LLM to find the ad segments, and
+cuts them out — giving you back a clean, ad-free RSS feed. It is provider-neutral:
+transcription runs on Groq or any OpenAI-compatible Whisper/Parakeet server, and
+ad detection works with most LLMs (OpenAI, Anthropic, Gemini, Groq, or a local
+model) — no OpenAI key required.
 
 <img width="100%" src="docs/images/screenshot.png" />
 
 ## How To Run
 
 You have a few options to get started:
+
+> 🚀 **New to self-hosting?** Start with the
+> [Ultimate Beginner's Guide](docs/how_to_run_beginners.md). It walks you through
+> the Docker setup step by step — and even shows you how to have an AI assistant
+> (Claude Code, Gemini CLI, Cursor, or Windsurf) run the whole setup for you.
 
 - [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/podly?referralCode=NMdeg5&utm_medium=integration&utm_source=template&utm_campaign=generic)
    - quick and easy setup in the cloud, follow our [Railway deployment guide](docs/how_to_run_railway.md). 
@@ -28,25 +37,49 @@ You have a few options to get started:
    - For local development and customization, 
    - see our [beginner's guide for running locally](docs/how_to_run_beginners.md). 
    - Use this for the most cost-optimal & private setup.
-- **[Join The Preview Server](https://podly.up.railway.app/)**: 
-   - pay what you want (limited sign ups available)
+
+> ⚠️ **Enable authentication before exposing Podly to the internet.** Without it,
+> anyone who can reach your URL can read and control your feeds. Auth is on by
+> default in `.env.example` — set your own password and keep it enabled.
+> Note that some podcast apps (e.g. **Pocket Casts**) fetch feeds from their own
+> servers, so your feed URL must be **publicly reachable**; use the "Copy
+> protected feed" button to share a public URL that stays token-protected. See
+> the [beginner's guide](docs/how_to_run_beginners.md#recommended-enable-authentication)
+> for details.
 
 
 ## How it works:
 
 - You request an episode
 - Podly downloads the requested episode
-- Whisper transcribes the episode
-- LLM labels ad segments
+- A transcription model (Whisper or Parakeet) transcribes the episode
+- An LLM labels the ad segments
 - Podly removes the ad segments
 - Podly delivers the ad-free version of the podcast to you
 
-## Whisper Configuration
+## Transcription (Whisper)
 
-Podly does not run embedded local Whisper inside the app container. Use Groq or
-set `WHISPER_TYPE=remote` with `WHISPER_REMOTE_BASE_URL` pointed at an
-OpenAI-compatible transcription service such as `whisper-x-fastapi`,
-`speaches.ai`, or another compatible endpoint.
+Podly does not run embedded local Whisper inside the app container. You point it
+at a transcription backend instead. Two options:
+
+- **Groq (easiest):** set `WHISPER_TYPE=groq` and add a `GROQ_API_KEY`. Works out
+  of the box, nothing to self-host.
+- **Self-hosted / local (most private):** set `WHISPER_TYPE=remote` and point
+  `WHISPER_REMOTE_BASE_URL` at any OpenAI-compatible transcription server. We
+  recommend running one of these on your own machine or GPU box:
+  - [WhisperX API server](https://github.com/Nyralei/whisperx-api-server) —
+    OpenAI-compatible WhisperX with word timestamps and diarization.
+  - [ParakeetX](https://github.com/MaroonBrian1928/parakeetX) — fast
+    OpenAI-compatible server built on NVIDIA Parakeet.
+
+  Example:
+
+  ```env
+  WHISPER_TYPE=remote
+  WHISPER_REMOTE_BASE_URL=http://localhost:8000/v1
+  WHISPER_REMOTE_MODEL=whisper-1
+  # WHISPER_REMOTE_API_KEY=   # only if your server requires one
+  ```
 
 If you are using `WHISPER_TYPE=remote`, Podly also supports OpenAI-compatible
 transcription flags for diarization:
@@ -62,8 +95,24 @@ adds speaker embeddings to the diarization payload and requires diarization to
 be enabled. See [.env.local.example](.env.local.example) for the full set of
 environment variables.
 
-Podly can also optionally call a separate INA-compatible audio segmenter to
-detect non-speech regions such as music, noise, and silence-like gaps:
+### Optional: INA audio segmentation (better ad boundaries)
+
+The transcript only contains words — it can't "hear" the music stings, jingles,
+and silence gaps that almost always wrap a podcast ad. INA
+([inaSpeechSegmenter](https://github.com/ina-foss/inaSpeechSegmenter)) is an
+audio classifier that tags time ranges as `speech`, `music`, `silence`, or
+`noenergy`. Enabling it gives Podly that extra audio layer, which it uses to:
+
+- **Feed audio cues to the LLM** — non-speech regions are injected into the
+  transcript sent to the model (e.g. `[122.4] [MUSIC] (5.2s)`), a strong hint
+  that an ad break starts or ends there.
+- **Clean up the cut boundaries** — adjacent ad windows separated only by
+  music/silence are bridged into one block, and ads at the start/end of an
+  episode are extended to swallow the leading/trailing music sting. The result
+  is fewer half-second jingles or dead-air gaps left behind after a cut.
+
+The trade-off is that it runs a separate service and adds a full audio-analysis
+pass per episode, so it is off by default.
 
 ```env
 INA_ENABLED=false
@@ -72,10 +121,13 @@ INA_TIMEOUT_SEC=3600
 ```
 
 Set `INA_ENABLED=true` and point `INA_BASE_URL` at a service that exposes
-`POST /segment`. INA analysis is best-effort: processing still completes if the
-INA service is unavailable, but the extra audio segment metadata will be
-missing from stats/debug views. This is separate from remote Whisper
-speaker diarization, which continues to use the `WHISPER_REMOTE_*` flags above.
+`POST /segment`. For a ready-made local server, run
+[InaFastAPI](https://github.com/MaroonBrian1928/InaFastAPI), which wraps
+inaSpeechSegmenter behind that endpoint. INA analysis is best-effort:
+processing still completes if the INA service is unavailable, but the extra
+audio segment metadata (and the boundary cleanup above) will be missing. This is
+separate from remote Whisper speaker diarization, which continues to use the
+`WHISPER_REMOTE_*` flags above.
 
 ## Optional UI Flags
 
@@ -109,30 +161,34 @@ STRIPE_SECRET_KEY=
   to enable the revenue-vs-cost view. Subscription amounts are cached
   in-process for 1 hour to limit Stripe API calls.
 
-## Rust Sidecar (Optional)
+## Rust Sidecar
 
-Several read-heavy endpoints can run in a short-lived Rust binary
+Several read-heavy and audio-heavy paths run in a short-lived Rust binary
 (`podly_tools`) instead of the long-lived Python process. The sidecar reads
 SQLite directly and returns the same JSON envelopes as the Python routes,
-keeping large transient allocations out of the Flask heap. Each path is
-gated by its own env flag so you can roll them out one at a time; on any
-sidecar error Podly silently falls back to the Python implementation (look
-for `falling back to Python` in `src/instance/logs/app.log`).
+keeping large transient allocations out of the Flask heap. **These paths are
+enabled by default** — the Docker image ships the binary and you don't need to
+configure anything. On any sidecar error Podly silently falls back to the
+Python implementation (look for `falling back to Python` in
+`src/instance/logs/app.log`).
+
+You only need these flags to **opt out** of a specific path (for debugging or
+parity checks). Set any of them to `false` to force the Python implementation:
 
 ```env
-PODLY_RUST_AUDIO_ENABLED=false
-PODLY_RUST_FEED_XML_ENABLED=false
-PODLY_RUST_CHAPTERS_ENABLED=false
-PODLY_RUST_FEED_REFRESH_ENABLED=false
-PODLY_RUST_JOBS_ENABLED=false
-PODLY_RUST_STATS_ENABLED=false
-PODLY_RUST_TRANSCRIPT_ENABLED=false
-PODLY_RUST_AD_MERGE_ENABLED=false
-PODLY_RUST_PROFANITY_ENABLED=false
-PODLY_RUST_FEED_POSTS_ENABLED=false
-PODLY_RUST_WORD_BOUNDARY_ENABLED=false
-PODLY_RUST_CHAPTER_FALLBACK_ENABLED=false
-PODLY_RUST_COSTS_ENABLED=false
+PODLY_RUST_AUDIO_ENABLED=true
+PODLY_RUST_FEED_XML_ENABLED=true
+PODLY_RUST_CHAPTERS_ENABLED=true
+PODLY_RUST_FEED_REFRESH_ENABLED=true
+PODLY_RUST_JOBS_ENABLED=true
+PODLY_RUST_STATS_ENABLED=true
+PODLY_RUST_TRANSCRIPT_ENABLED=true
+PODLY_RUST_AD_MERGE_ENABLED=true
+PODLY_RUST_PROFANITY_ENABLED=true
+PODLY_RUST_FEED_POSTS_ENABLED=true
+PODLY_RUST_WORD_BOUNDARY_ENABLED=true
+PODLY_RUST_CHAPTER_FALLBACK_ENABLED=true
+PODLY_RUST_COSTS_ENABLED=true
 ```
 
 `PODLY_RUST_COSTS_ENABLED=true` moves `/api/admin/costs` and
@@ -148,8 +204,6 @@ is on.
 |---------|----------|---------------|--------|
 | **$5**  | local    | remote        | remote |
 | **$10** | public (railway)  | remote        | remote |
-| **Pay What You Want** | [preview server](https://podly.up.railway.app/)    | n/a         | n/a  |
-| **$5.99/mo** | https://zeroads.ai/ | production fork of podly | |
 
 
 ## Contributing

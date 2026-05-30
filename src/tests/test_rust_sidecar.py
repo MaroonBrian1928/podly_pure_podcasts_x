@@ -10,7 +10,7 @@ from shared import rust_sidecar
 from shared.rust_sidecar import RustSidecarError
 
 
-def test_rust_feature_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rust_feature_flags_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PODLY_RUST_AUDIO_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_CHAPTERS_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_FEED_REFRESH_ENABLED", raising=False)
@@ -20,20 +20,29 @@ def test_rust_feature_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("PODLY_RUST_TRANSCRIPT_ENABLED", raising=False)
     monkeypatch.delenv("PODLY_RUST_FEED_POSTS_ENABLED", raising=False)
 
+    assert rust_sidecar.rust_audio_enabled() is True
+    assert rust_sidecar.rust_chapters_enabled() is True
+    assert rust_sidecar.rust_feed_refresh_enabled() is True
+    assert rust_sidecar.rust_feed_xml_enabled() is True
+    assert rust_sidecar.rust_jobs_enabled() is True
+    assert rust_sidecar.rust_stats_enabled() is True
+    assert rust_sidecar.rust_transcript_enabled() is True
+    assert rust_sidecar.rust_feed_posts_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off"])
+def test_rust_feature_flags_opt_out_with_falsy_value(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_AUDIO_ENABLED", value)
+
     assert rust_sidecar.rust_audio_enabled() is False
-    assert rust_sidecar.rust_chapters_enabled() is False
-    assert rust_sidecar.rust_feed_refresh_enabled() is False
-    assert rust_sidecar.rust_feed_xml_enabled() is False
-    assert rust_sidecar.rust_jobs_enabled() is False
-    assert rust_sidecar.rust_stats_enabled() is False
-    assert rust_sidecar.rust_transcript_enabled() is False
-    assert rust_sidecar.rust_feed_posts_enabled() is False
 
 
 def test_try_render_feed_posts_returns_none_when_flag_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("PODLY_RUST_FEED_POSTS_ENABLED", raising=False)
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "false")
     assert (
         rust_sidecar.try_render_feed_posts(
             db_path=Path("/tmp/x.sqlite"),
@@ -190,7 +199,7 @@ def test_run_podly_tools_rejects_failed_exit(
 def test_try_probe_audio_duration_falls_back_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("PODLY_RUST_AUDIO_ENABLED", raising=False)
+    monkeypatch.setenv("PODLY_RUST_AUDIO_ENABLED", "false")
 
     assert rust_sidecar.try_probe_audio_duration_ms(Path("x.mp3")) is None
 
@@ -352,7 +361,7 @@ def test_try_render_aggregate_feed_xml_omits_require_auth_when_false(
 def test_try_render_post_stats_returns_none_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("PODLY_RUST_STATS_ENABLED", raising=False)
+    monkeypatch.setenv("PODLY_RUST_STATS_ENABLED", "false")
 
     assert (
         rust_sidecar.try_render_post_stats(

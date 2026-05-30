@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -62,6 +63,7 @@ WhisperConfigTypes = Literal["remote", "test", "groq"]
 
 
 class TestWhisperConfig(BaseModel):
+    __test__ = False  # Not a pytest test class; prevents pytest collection.
     whisper_type: Literal["test"] = "test"
 
 
@@ -218,34 +220,41 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_whisper_config(self) -> Config:
-        new_style = self.whisper is not None
+        # This validator intentionally migrates the deprecated `remote_whisper`
+        # and `whisper_model` fields to the new `whisper` config, so reading and
+        # clearing them here is by design — suppress the deprecation warnings
+        # those accesses would otherwise raise.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            new_style = self.whisper is not None
 
-        if new_style:
+            if new_style:
+                self.whisper_model = None
+                self.remote_whisper = None
+                return self
+
+            # if we have old style, change to the equivalent new style
+            if self.remote_whisper:
+                assert self.llm_api_key is not None, (
+                    "must supply api key to use remote whisper"
+                )
+                self.whisper = RemoteWhisperConfig(
+                    api_key=self.llm_api_key,
+                    base_url=self.openai_base_url or "https://api.openai.com/v1",
+                )
+            elif "remote_whisper" not in self.model_fields_set and (
+                "whisper_model" not in self.model_fields_set
+                or self.whisper_model is None
+            ):
+                self.whisper = GroqWhisperConfig(api_key="")
+            else:
+                raise ValueError(
+                    "Old-style local Whisper config is no longer supported. "
+                    "Use whisper={whisper_type='remote', ...} or set "
+                    "remote_whisper=true with remote credentials."
+                )
+
             self.whisper_model = None
             self.remote_whisper = None
-            return self
-
-        # if we have old style, change to the equivalent new style
-        if self.remote_whisper:
-            assert self.llm_api_key is not None, (
-                "must supply api key to use remote whisper"
-            )
-            self.whisper = RemoteWhisperConfig(
-                api_key=self.llm_api_key,
-                base_url=self.openai_base_url or "https://api.openai.com/v1",
-            )
-        elif "remote_whisper" not in self.model_fields_set and (
-            "whisper_model" not in self.model_fields_set or self.whisper_model is None
-        ):
-            self.whisper = GroqWhisperConfig(api_key="")
-        else:
-            raise ValueError(
-                "Old-style local Whisper config is no longer supported. "
-                "Use whisper={whisper_type='remote', ...} or set "
-                "remote_whisper=true with remote credentials."
-            )
-
-        self.whisper_model = None
-        self.remote_whisper = None
 
         return self

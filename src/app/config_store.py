@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from typing import Any
 
 from flask import current_app
@@ -167,11 +168,11 @@ def ensure_defaults() -> None:
 def read_combined() -> dict[str, Any]:
     ensure_defaults()
 
-    llm = LLMSettings.query.get(1)
-    whisper = WhisperSettings.query.get(1)
-    processing = ProcessingSettings.query.get(1)
-    output = OutputSettings.query.get(1)
-    app_s = AppSettings.query.get(1)
+    llm = db.session.get(LLMSettings, 1)
+    whisper = db.session.get(WhisperSettings, 1)
+    processing = db.session.get(ProcessingSettings, 1)
+    output = db.session.get(OutputSettings, 1)
+    app_s = db.session.get(AppSettings, 1)
 
     assert llm and whisper and processing and output and app_s
 
@@ -253,7 +254,7 @@ def read_combined() -> dict[str, Any]:
 
 
 def _update_section_llm(data: dict[str, Any]) -> None:
-    row = LLMSettings.query.get(1)
+    row = db.session.get(LLMSettings, 1)
     assert row is not None
     for key in [
         "llm_api_key",
@@ -285,7 +286,7 @@ def _update_section_llm(data: dict[str, Any]) -> None:
 
 
 def _update_section_whisper(data: dict[str, Any]) -> None:
-    row = WhisperSettings.query.get(1)
+    row = db.session.get(WhisperSettings, 1)
     assert row is not None
     if "whisper_type" in data and data["whisper_type"] in {
         "remote",
@@ -335,7 +336,7 @@ def _update_section_whisper(data: dict[str, Any]) -> None:
 
 
 def _update_section_processing(data: dict[str, Any]) -> None:
-    row = ProcessingSettings.query.get(1)
+    row = db.session.get(ProcessingSettings, 1)
     assert row is not None
     for key in [
         "num_segments_to_input_to_prompt",
@@ -351,7 +352,7 @@ def _update_section_processing(data: dict[str, Any]) -> None:
 
 
 def _update_section_output(data: dict[str, Any]) -> None:
-    row = OutputSettings.query.get(1)
+    row = db.session.get(OutputSettings, 1)
     assert row is not None
     for key in [
         "fade_ms",
@@ -373,7 +374,7 @@ def _update_section_output(data: dict[str, Any]) -> None:
 
 
 def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
-    row = AppSettings.query.get(1)
+    row = db.session.get(AppSettings, 1)
     assert row is not None
     old_interval: int | None = row.background_update_interval_minute
     old_retention: int | None = row.post_cleanup_retention_days
@@ -457,7 +458,7 @@ def update_combined(payload: dict[str, Any]) -> dict[str, Any]:
     if "app" in payload:
         old_interval, old_retention = _update_section_app(payload["app"] or {})
 
-        app_s = AppSettings.query.get(1)
+        app_s = db.session.get(AppSettings, 1)
         if app_s:
             _maybe_reschedule_refresh_job(
                 old_interval, app_s.background_update_interval_minute
@@ -1008,9 +1009,14 @@ def _commit_runtime_config(cfg: PydanticConfig) -> None:
         bool(getattr(cfg, "llm_api_key", None)),
         bool(getattr(getattr(cfg, "whisper", None), "api_key", None)),
     )
-    # Copy values from cfg to runtime_config, preserving Pydantic model instances
-    for key in cfg.model_fields.keys():
-        setattr(runtime_config, key, getattr(cfg, key))
+    # Copy values from cfg to runtime_config, preserving Pydantic model
+    # instances. This intentionally copies every field, including the
+    # `@deprecated` legacy whisper fields, so suppress the deprecation
+    # warnings those reads would otherwise raise.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        for key in type(cfg).model_fields.keys():
+            setattr(runtime_config, key, getattr(cfg, key))
 
 
 def _log_final_snapshot() -> None:

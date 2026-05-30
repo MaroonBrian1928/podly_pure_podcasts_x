@@ -2,18 +2,36 @@
 
 This guide will walk you through deploying Podly on Railway using the one-click template.
 
+> **Podly is provider-agnostic.** This guide uses [Groq](https://groq.com/) for
+> transcription because it has a generous free tier and is the simplest way to
+> get going on Railway. You are not locked in: transcription can point at any
+> OpenAI-compatible Whisper/Parakeet server, and ad detection works with most
+> LLMs (OpenAI, Anthropic, Gemini, Groq, or a local model). See the
+> [Transcription](../README.md#transcription-whisper) and `.env.local.example`
+> notes for other providers — set the relevant `WHISPER_*` / `LLM_*` variables
+> in Railway instead of `GROQ_API_KEY`.
+
 ## 0. Important! Set Budgets
 
-Both Railway and Groq allow you to set budgets on your processing. Set a $10 (minimum possible, expect smaller bill) budget on Railway. Set a $5 budget for Groq.
+Set spending limits before you process anything. Set a $10 budget on Railway
+(the minimum; expect a smaller bill). If you use Groq (below), set a $5 budget in
+the Groq console too. If you use a different transcription or LLM provider, set
+the equivalent limit in that provider's dashboard.
 
-## 1. Get Free Groq API Key
+## 1. Get a Transcription API Key (Groq recommended)
 
-Podly uses Groq to transcribe podcasts quickly and for free.
+The quickest option is Groq — it transcribes quickly and has a free tier:
 
 1.  Go to [https://console.groq.com/keys](https://console.groq.com/keys).
 2.  Sign up for a free account.
 3.  Create a new API key.
 4.  Copy the key and paste it into the `GROQ_API_KEY` field during the Railway deployment.
+
+Prefer something else? Skip the Groq key and instead set `WHISPER_TYPE=remote`
+with `WHISPER_REMOTE_BASE_URL` (and `WHISPER_REMOTE_API_KEY` if required) in
+Railway, pointing at any OpenAI-compatible transcription server such as
+[WhisperX API server](https://github.com/Nyralei/whisperx-api-server) or
+[ParakeetX](https://github.com/MaroonBrian1928/parakeetX).
 
 ## 2. Deploy Railway Template
 
@@ -39,7 +57,9 @@ After the deployment is complete, you need to expose the service to the internet
 
 ## 4. Set Budgets & Expected Pricing
 
-Set a $10 budget on Railway and a $5 budget on Groq (or use the free tier for Groq which will slow processing).
+Set a $10 budget on Railway, plus a budget on whichever transcription/LLM
+provider you chose (e.g. $5 on Groq, or use Groq's free tier, which will slow
+processing).
 
 Podly is designed to run efficiently on Railway's hobby plan.
 
@@ -47,7 +67,7 @@ If you process a large volume of podcasts, you can check the **Config** page in 
 
 ## 5. Secure Your Deployment
 
-Podly now uses secure session cookies for the web dashboard while keeping HTTP Basic authentication for RSS feeds and audio downloads. Before inviting listeners, secure the app:
+Podly uses secure session cookies for the web dashboard and per-feed access tokens (embedded in the feed URL) for RSS feeds and audio downloads. Before inviting listeners, secure the app:
 
 1. In the Railway dashboard, open your Podly service and head to **Variables**.
 2. Add `REQUIRE_AUTH` with value `true`.
@@ -66,3 +86,11 @@ After signing in, use the Config page to change your password, add additional us
 3.  Add the RSS feed URL of a podcast you want to process.
 4.  Go to your favorite podcast client and subscribe to the new feed URL provided by Podly (e.g., `https://your-podly-app.up.railway.app/feed/1`).
 5.  Download and enjoy ad-free episodes!
+
+> **Subscribing with auth enabled:** if you turned on authentication (step 5),
+> use the **"Copy protected feed"** button on the Feeds/Config page rather than
+> the bare `/feed/1` URL. It embeds a per-feed access token so podcast apps can
+> fetch the feed without your login. This matters for apps like **Pocket Casts**,
+> which fetch feeds from their own servers and therefore need a publicly
+> reachable URL — your Railway domain is public, and the token keeps it
+> protected.

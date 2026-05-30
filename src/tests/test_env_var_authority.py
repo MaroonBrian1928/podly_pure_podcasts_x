@@ -109,7 +109,7 @@ class TestEnvVarAuthority:
             hydrate_runtime_config_inplace()
 
             # Check DB values - they should NOT have env values
-            llm = LLMSettings.query.get(1)
+            llm = db.session.get(LLMSettings, 1)
             assert llm is not None
             # DB should have defaults, not env values
             assert llm.llm_api_key != "env-api-key-123"
@@ -416,7 +416,7 @@ class TestWhisperRuntimeOverlay:
             from app.config_store import to_pydantic_config
 
             _create_default_settings()
-            row = WhisperSettings.query.get(1)
+            row = db.session.get(WhisperSettings, 1)
             assert row is not None
             row.whisper_type = "local"
             db.session.commit()

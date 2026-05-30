@@ -133,11 +133,12 @@ class AdClassifier:
         # Initialize cue detector for neighbor expansion
         self.cue_detector = CueDetector()
 
-        # Initialize boundary refiner (conditionally based on config)
-        self.boundary_refiner: BoundaryRefiner | None = None
+        # Initialize boundary refiner (conditionally based on config).
+        # Either refiner type may be used; both expose a compatible `.refine()`.
+        self.boundary_refiner: BoundaryRefiner | WordBoundaryRefiner | None = None
         if config.enable_boundary_refinement:
             if getattr(config, "enable_word_level_boundary_refinder", False):
-                self.boundary_refiner = WordBoundaryRefiner(config, self.logger)  # type: ignore[assignment]
+                self.boundary_refiner = WordBoundaryRefiner(config, self.logger)
                 self.logger.info("Word-level boundary refiner enabled")
             else:
                 self.boundary_refiner = BoundaryRefiner(config, self.logger)

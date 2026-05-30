@@ -229,7 +229,7 @@ def _build_file_debug(path_value: str | None) -> dict[str, Any]:
 def _build_candidate_file_debug(candidates: list[Path]) -> list[dict[str, Any]]:
     candidate_details: list[dict[str, Any]] = []
     for candidate in candidates:
-        detail = {
+        detail: dict[str, Any] = {
             "path": str(candidate),
             "exists": False,
             "size_bytes": None,
@@ -458,7 +458,7 @@ def api_feed_posts(feed_id: int) -> flask.Response:
         if isinstance(rust_bytes, bytes):
             return flask.Response(rust_bytes, mimetype="application/json")
 
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
 
     # Query posts directly to avoid stale relationship cache. Defer the
     # heavyweight JSON columns that this endpoint never serializes — each
@@ -1140,7 +1140,7 @@ def api_toggle_whitelist_all(feed_id: int) -> ResponseReturnValue:
 
     Admin only.
     """
-    feed = Feed.query.get_or_404(feed_id)
+    feed = db.get_or_404(Feed, feed_id)
 
     _, error = require_admin("toggle whitelist for all posts")
     if error:

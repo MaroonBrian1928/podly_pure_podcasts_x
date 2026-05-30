@@ -107,7 +107,7 @@ def whitelist_all(f_id: str, val: str) -> flask.Response:
     if error_response:
         return error_response
 
-    feed = Feed.query.get_or_404(f_id)
+    feed = db.get_or_404(Feed, f_id)
     new_status = val.lower() == "true"
     try:
         result = writer_client.action(

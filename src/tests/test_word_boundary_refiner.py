@@ -388,7 +388,7 @@ def test_get_context_skips_rust_when_flag_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     refiner = WordBoundaryRefiner(config=create_standard_test_config())
-    monkeypatch.delenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", raising=False)
+    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "false")
 
     all_segments = [
         {"sequence_num": 1, "start_time": 0.0, "end_time": 1.0, "text": "x"}

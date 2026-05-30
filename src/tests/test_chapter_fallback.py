@@ -734,7 +734,7 @@ def test_generate_topic_chapters_falls_back_to_python_when_rust_disabled(
         ]
     )
 
-    monkeypatch.delenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", raising=False)
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "false")
 
     def boom(**_kwargs):
         raise AssertionError("try_chapter_topic_blocks invoked with flag disabled")
@@ -988,7 +988,7 @@ def test_chapters_from_topic_plan_falls_back_when_rust_returns_none(
 
 
 def test_chapters_from_topic_plan_skips_rust_when_disabled(monkeypatch) -> None:
-    monkeypatch.delenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", raising=False)
+    monkeypatch.setenv("PODLY_RUST_CHAPTER_FALLBACK_ENABLED", "false")
 
     def boom(**_kwargs):
         raise AssertionError("Rust apply wrapper invoked while flag disabled")
