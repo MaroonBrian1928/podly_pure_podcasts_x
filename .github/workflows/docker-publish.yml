@@ -1,13 +1,21 @@
 name: Build and Publish Docker Images
 
+# Publishing happens on:
+#   - the "Release" workflow completing successfully (semantic-release just cut
+#     a new vX.Y.Z tag). This is the automatic path: `workflow_run` is allowed
+#     to fire here because the Release run was started by a real push to main,
+#     not by the GITHUB_TOKEN.
+#   - a manual `vX.Y.Z` tag push.
+#   - a manual `workflow_dispatch` run (point it at a tag for clean version tags).
+#
+# Released images are tagged with the exact version (X.Y.Z), the rolling major
+# tag (<major>.x, e.g. 2.x), and `latest`.
 on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       build_amd64:
@@ -27,73 +35,42 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  changes:
+  gate:
     runs-on: ubuntu-latest
     outputs:
-      skip: ${{ steps.check_files.outputs.skip }}
+      proceed: ${{ steps.decide.outputs.proceed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
-      - name: Check for documentation-only changes
-        id: check_files
+      - name: Decide whether to publish
+        id: decide
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.event.pull_request.base.ref }}"
-            git fetch --no-tags origin "$BASE_REF"
-            BASE_SHA=$(git rev-parse "origin/$BASE_REF")
-            HEAD_SHA=$(git rev-parse "${{ github.sha }}")
-            files_changed=$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "release" ]; then
-            files_changed="manual-trigger"
-          elif git rev-parse HEAD~1 >/dev/null 2>&1; then
-            files_changed=$(git diff --name-only HEAD~1 HEAD)
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "Release run concluded '${{ github.event.workflow_run.conclusion }}'; skipping."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sha="${{ github.event.workflow_run.head_sha }}"
+            if git tag --points-at "$sha" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "Found a version tag on $sha; publishing."
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "No new version tag on $sha; nothing to publish."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+            fi
           else
-            files_changed=$(git diff-tree --no-commit-id --name-only -r HEAD)
-          fi
-
-          echo "Files changed:"
-          echo "$files_changed"
-
-          non_doc_files=$(echo "$files_changed" | grep -v -E '(\.md$|^docs/|LICENCE)' || true)
-
-          if [ "${{ github.event_name }}" = "release" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif [ -z "$non_doc_files" ]; then
-            echo "Only documentation files were changed. Skipping build and publish."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
         shell: bash
 
-  build-pr:
-    needs: changes
-    if: ${{ needs.changes.outputs.skip == 'false' && github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            image=moby/buildkit:v0.12.0
-
-      - name: Build PR image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          platforms: linux/amd64
-
   build-arch:
-    needs: changes
-    if: ${{ needs.changes.outputs.skip == 'false' && github.event_name != 'pull_request' }}
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -106,8 +83,6 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
             enabled_input: build_arm64
-    outputs:
-      tag_prefix: ${{ steps.tags.outputs.tag_prefix }}
     steps:
       - name: Determine if this architecture is selected
         id: select
@@ -125,15 +100,17 @@ jobs:
       - name: Checkout repository
         if: ${{ steps.select.outputs.enabled == 'true' }}
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Set image tags
         if: ${{ steps.select.outputs.enabled == 'true' }}
         id: tags
         run: |
-          ref_name="${GITHUB_REF_NAME//\//-}"
           image_name="$(echo "${{ github.repository_owner }}/podly-pure-podcasts" | tr '[:upper:]' '[:lower:]')"
-          echo "tag_prefix=$ref_name" >> "$GITHUB_OUTPUT"
-          echo "arch_tag=${{ env.REGISTRY }}/${image_name}:${ref_name}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+          source scripts/resolve_image_version.sh
+          echo "arch_tag=${{ env.REGISTRY }}/${image_name}:${prefix}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Set up Docker Buildx
@@ -163,9 +140,15 @@ jobs:
 
   publish-manifest:
     needs: build-arch
-    if: ${{ github.event_name != 'pull_request' && always() && needs.build-arch.result == 'success' }}
+    if: ${{ always() && needs.build-arch.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
@@ -176,31 +159,27 @@ jobs:
       - name: Publish multi-arch manifest
         id: manifest
         run: |
-          ref_name="${GITHUB_REF_NAME//\//-}"
           image_name="$(echo "${{ github.repository_owner }}/podly-pure-podcasts" | tr '[:upper:]' '[:lower:]')"
           image="${{ env.REGISTRY }}/${image_name}"
+          source scripts/resolve_image_version.sh
+
           sources=()
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.build_amd64 }}" = "true" ]; then
-            sources+=("${image}:${ref_name}-amd64")
+            sources+=("${image}:${prefix}-amd64")
           fi
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ github.event.inputs.build_arm64 }}" = "true" ]; then
-            sources+=("${image}:${ref_name}-arm64")
+            sources+=("${image}:${prefix}-arm64")
           fi
 
           # Tags applied to the multi-arch manifest.
-          tags=("${ref_name}-latest")
-
-          # On a release / version tag (vX.Y.Z), also publish the clean
-          # version (X.Y.Z) and the rolling `latest` tag.
-          version=""
-          if [ "${{ github.event_name }}" = "release" ]; then
-            version="${{ github.event.release.tag_name }}"
-          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            version="$GITHUB_REF_NAME"
-          fi
-          version="${version#v}"
-          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            tags+=("$version" "latest")
+          tags=()
+          if [ -n "$version" ]; then
+            major="${version%%.*}"
+            tags+=("$version" "${major}.x" "latest")
+          else
+            # Non-release build (e.g. manual dispatch off a branch): keep a
+            # single rolling per-ref tag.
+            tags+=("${prefix}-latest")
           fi
 
           tag_args=()
@@ -220,16 +199,20 @@ jobs:
         shell: bash
 
       - name: Attach image details to the release
-        if: ${{ github.event_name == 'release' && steps.manifest.outputs.version != '' }}
+        if: ${{ steps.manifest.outputs.version != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
+          tag="v${{ steps.manifest.outputs.version }}"
           image="${{ steps.manifest.outputs.image }}"
           version="${{ steps.manifest.outputs.version }}"
           digest="${{ steps.manifest.outputs.digest }}"
+          major="${version%%.*}"
 
-          body="$(gh release view "$tag" --json body --jq .body)"
+          if ! body="$(gh release view "$tag" --json body --jq .body 2>/dev/null)"; then
+            echo "No GitHub release found for $tag; skipping release-note update."
+            exit 0
+          fi
           if printf '%s' "$body" | grep -q '<!-- docker-image -->'; then
             echo "Release notes already contain the Docker image section; skipping."
             exit 0
@@ -242,6 +225,7 @@ jobs:
             echo
             echo '```'
             echo "docker pull ${image}:${version}"
+            echo "docker pull ${image}:${major}.x"
             echo "docker pull ${image}:latest"
             echo '```'
             echo
