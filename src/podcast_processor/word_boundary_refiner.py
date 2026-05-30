@@ -290,6 +290,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status=self._result_status(start_changed, end_changed, partial_errors),
                 response=raw_response,
                 error_message=(",".join(partial_errors) if partial_errors else None),
+                usage=usage,
             )
 
             result = WordBoundaryRefinement(
@@ -304,6 +305,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status="success",
                 response=raw_response,
                 error_message=None,
+                usage=usage,
             )
             return result
 
@@ -1275,6 +1277,12 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         error_message: str | None,
         usage: dict[str, int | None] | None = None,
     ) -> None:
+        # Forward model + tier + prompt so try_update_model_call can compute
+        # the LLM cost for success transitions. This refiner stages updates
+        # as "received_response" -> "success" against the same row, so the
+        # token usage is already on disk by the time we mark success — we
+        # just need to pass these fields through every time so the success
+        # gate in try_update_model_call has what it needs.
         try_update_model_call(
             model_call_id,
             status=status,
@@ -1283,4 +1291,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             logger=self.logger,
             log_prefix="Word boundary refine",
             usage=usage,
+            model_name=getattr(self.config, "llm_model", None),
+            service_tier=getattr(self.config, "llm_service_tier", None),
+            prompt="word_boundary_refine",
         )
