@@ -1,3 +1,10 @@
+## [2.0.2](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.1...v2.0.2) (2026-05-30)
+
+
+### Bug Fixes
+
+* **ci:** build arm64 natively and publish release images via workflow_run ([469faaf](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/469faafc822b6dc52f8ccd02c694ff9bdf2438c1))
+
 ## [2.0.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.0...v2.0.1) (2026-05-30)
 
 
