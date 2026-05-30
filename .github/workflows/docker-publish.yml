@@ -94,15 +94,17 @@ jobs:
   build-arch:
     needs: changes
     if: ${{ needs.changes.outputs.skip == 'false' && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - arch: amd64
             platform: linux/amd64
+            runner: ubuntu-latest
             enabled_input: build_amd64
           - arch: arm64
             platform: linux/arm64
+            runner: ubuntu-24.04-arm
             enabled_input: build_arm64
     outputs:
       tag_prefix: ${{ steps.tags.outputs.tag_prefix }}
@@ -158,6 +160,8 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: ${{ steps.tags.outputs.arch_tag }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
   publish-manifest:
     needs: build-arch
