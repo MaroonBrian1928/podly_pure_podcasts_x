@@ -59,7 +59,7 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     posts: Mapped[list[Post]] = relationship(
         "Post", backref="feed", lazy=True, order_by="Post.release_date.desc()"
     )
-    user_feeds: Mapped[list["UserFeed"]] = relationship(
+    user_feeds: Mapped[list[UserFeed]] = relationship(
         "UserFeed",
         back_populates="feed",
         cascade="all, delete-orphan",
