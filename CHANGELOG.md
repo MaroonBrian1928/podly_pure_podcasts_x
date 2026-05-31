@@ -1,3 +1,10 @@
+## [2.0.3](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.2...v2.0.3) (2026-05-31)
+
+
+### Bug Fixes
+
+* correct type hint for user_feeds relationship in Feed model ([035de53](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/035de5392e0681b817b8f0c2d24cdb8656669391))
+
 ## [2.0.2](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.1...v2.0.2) (2026-05-30)
 
 
