@@ -5,19 +5,21 @@ from unittest.mock import patch
 
 from podcast_processor.chapter_fallback import (
     TOPIC_CHAPTER_CAP_WINDOW_SECONDS,
+    TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS,
     TOPIC_CHAPTER_MAX_BLOCK_SECONDS,
     TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
     TOPIC_CHAPTER_SHORT_EPISODE_CAP,
     TOPIC_CHAPTER_SHORT_EPISODE_SECONDS,
     TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
+    _align_chapters_to_first_words,
     _build_topic_blocks,
     _build_topic_chapter_generation_prompt,
     _chapters_from_topic_plan,
+    _parse_topic_chapter_opening_words,
     _parse_topic_chapter_response,
     _topic_chapter_count_cap_for_duration,
     generate_chapters_from_transcript,
     generate_topic_chapters_from_transcript_with_llm,
-    refine_chapter_starts_with_llm_word_boundaries,
     refine_description_chapters_with_word_refiner,
     refine_generated_chapter_titles_with_llm,
     refine_transcript_chapters_with_word_refiner,
@@ -113,6 +115,38 @@ def test_generate_chapters_from_transcript_splits_windows_and_titles() -> None:
     ]
 
 
+def test_topic_chapter_output_token_cap_allows_long_folded_plans() -> None:
+    # Generous cap so long folded plans never truncate; reasoning is constrained
+    # separately so the headroom isn't spent on thinking.
+    assert TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS == 8192
+
+
+def test_topic_chapter_plan_constrains_reasoning() -> None:
+    from podcast_processor.chapter_fallback import _request_topic_chapter_plan
+
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"chapter_count":1,"chapters":[{"block_index":0,"title":"X"}]}'
+                )
+            )
+        ]
+    )
+    with patch("litellm.completion", return_value=response) as completion_mock:
+        _request_topic_chapter_plan(
+            llm_model="test-model",
+            prompt="prompt",
+            openai_timeout_sec=30,
+        )
+
+    kwargs = completion_mock.call_args.kwargs
+    # Mechanical extraction: reasoning is capped low so thinking models don't
+    # burn the completion budget and truncate the plan JSON.
+    assert kwargs.get("reasoning_effort") == "low"
+    assert kwargs.get("drop_params") is True
+
+
 def test_refine_description_chapters_with_word_refiner_adjusts_starts() -> None:
     config = create_standard_test_config()
     config.enable_word_level_boundary_refinder = True
@@ -152,6 +186,77 @@ def test_refine_description_chapters_with_word_refiner_adjusts_starts() -> None:
     assert [ch.start_time_ms for ch in refined] == [12_000, 318_000]
     assert [ch.end_time_ms for ch in refined] == [318_000, 650_000]
     assert [ch.title for ch in refined] == ["First story", "Second story"]
+
+
+def test_parse_topic_chapter_opening_words_salvages_complete_items() -> None:
+    content = (
+        '```json\n{"chapter_count":3,"chapters":['
+        '{"block_index":0,"title":"First story","first_word":"hello"},'
+        '{"block_index":4,"title":"Second story","first_word":"welcome"},'
+        '{"block_index":9,"title":"Cut off","first_word"'
+    )
+
+    parsed = _parse_topic_chapter_opening_words(content)
+
+    assert parsed == {0: "hello", 4: "welcome"}
+
+
+def test_align_chapters_to_first_words_uses_exact_word_timestamps() -> None:
+    config = create_standard_test_config()
+    chapters = [
+        Chapter("c0", "First story", 0, 300_000),
+        Chapter("c1", "Second story", 300_000, 600_000),
+    ]
+    blocks = [
+        {
+            "block_index": 0,
+            "start_ms": 0,
+            "end_ms": 120_000,
+            "text": "cold open first story starts",
+        },
+        {
+            "block_index": 1,
+            "start_ms": 300_000,
+            "end_ms": 420_000,
+            "text": "transition second story begins",
+        },
+    ]
+    transcript_segments = [
+        SimpleNamespace(
+            sequence_num=0,
+            start_time=0.0,
+            end_time=20.0,
+            text="cold open first story starts",
+        ),
+        SimpleNamespace(
+            sequence_num=1,
+            start_time=300.0,
+            end_time=320.0,
+            text="transition second story begins",
+        ),
+    ]
+    words_by_sequence = {
+        0: [
+            {"word": "cold", "start": 0.0, "end": 0.4},
+            {"word": "first", "start": 12.0, "end": 12.4},
+        ],
+        1: [
+            {"word": "transition", "start": 300.0, "end": 300.4},
+            {"word": "second", "start": 318.0, "end": 318.4},
+        ],
+    }
+
+    aligned = _align_chapters_to_first_words(
+        chapters,
+        blocks=blocks,
+        opening_words_by_block={0: "first", 1: "second"},
+        transcript_segments=transcript_segments,
+        words_by_sequence=words_by_sequence,
+        config=config,
+    )
+
+    assert [ch.start_time_ms for ch in aligned] == [12_000, 318_000]
+    assert aligned[0].end_time_ms == 318_000
 
 
 def test_refine_transcript_chapters_falls_back_to_original_on_collision() -> None:
@@ -349,12 +454,24 @@ def test_generate_topic_chapters_from_transcript_with_llm_uses_llm_boundaries() 
 def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_blocks() -> (
     None
 ):
+    config = create_standard_test_config()
     transcript_segments = [
         SimpleNamespace(start_time=0.0, end_time=20.0, text="Opening recap"),
-        SimpleNamespace(start_time=600.0, end_time=620.0, text="Mission setup"),
-        SimpleNamespace(start_time=1200.0, end_time=1220.0, text="Castle conflict"),
-        SimpleNamespace(start_time=1800.0, end_time=1820.0, text="Roundtable vote"),
+        SimpleNamespace(
+            sequence_num=1, start_time=600.0, end_time=620.0, text="Mission setup"
+        ),
+        SimpleNamespace(
+            sequence_num=2, start_time=1200.0, end_time=1220.0, text="Castle conflict"
+        ),
+        SimpleNamespace(
+            sequence_num=3, start_time=1800.0, end_time=1820.0, text="Roundtable vote"
+        ),
     ]
+    words_by_sequence = {
+        1: [{"word": "Mission", "start": 600.0, "end": 600.4}],
+        2: [{"word": "Castle", "start": 1212.0, "end": 1212.4}],
+        3: [{"word": "Roundtable", "start": 1813.0, "end": 1813.4}],
+    }
 
     prompts: list[str] = []
 
@@ -376,8 +493,8 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     first_response = _mock_response(
         (
             '{"chapter_count":4,"chapters":['
-            '{"block_index":0,"title":"Opening recap"},'
-            '{"block_index":1,"title":"Mission setup"},'
+            '{"block_index":0,"title":"Opening recap","first_word":"Opening"},'
+            '{"block_index":1,"title":"Mission setup","first_word":"Mission"},'
             '{"block_index":'
         ),
         finish_reason="length",
@@ -385,9 +502,9 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     second_response = _mock_response(
         (
             '{"chapter_count":3,"chapters":['
-            '{"block_index":1,"title":"Different duplicate title"},'
-            '{"block_index":2,"title":"Castle conflict"},'
-            '{"block_index":3,"title":"Roundtable vote"}'
+            '{"block_index":1,"title":"Different duplicate title","first_word":"Mission"},'
+            '{"block_index":2,"title":"Castle conflict","first_word":"Castle"},'
+            '{"block_index":3,"title":"Roundtable vote","first_word":"Roundtable"}'
             "]}"
         ),
         finish_reason="stop",
@@ -409,21 +526,25 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
             total_duration_ms=2_400_000,
             openai_timeout_sec=30,
             min_chapter_seconds=0,
+            align_word_starts=True,
+            words_by_sequence=words_by_sequence,
+            word_align_config=config,
         )
 
     assert completion_mock.call_count == 2
     assert len(prompts) == 2
     assert "Return only chapters with block_index > 1" in prompts[1]
     assert "Do not repeat existing chapter block_index values: [0, 1]" in prompts[1]
+    assert "first_word" in prompts[1]
 
     retry_payload = json.loads(prompts[1].split("Transcript blocks:\n", 1)[1])
     assert [block["block_index"] for block in retry_payload] == [1, 2, 3]
 
-    assert [c.start_time_ms for c in chapters] == [0, 600_000, 1_200_000, 1_800_000]
+    assert [c.start_time_ms for c in chapters] == [0, 600_000, 1_212_000, 1_813_000]
     assert [c.end_time_ms for c in chapters] == [
         600_000,
-        1_200_000,
-        1_800_000,
+        1_212_000,
+        1_813_000,
         2_400_000,
     ]
     assert [c.title for c in chapters] == [
@@ -460,13 +581,13 @@ def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
     # full text well over the budget, so this only passes if the truncation keeps
     # a window around the block midpoint (not just the front) — where the topic
     # signal lives.
-    lead_in = "a" * 300
+    lead_in = "a" * 500
     topic_signal = " riverfront search at 2 a.m."
     segments = [
         SimpleNamespace(
             start_time=0.0,
             end_time=45.0,
-            text=lead_in + topic_signal + (" b" * 200),
+            text=lead_in + topic_signal + (" b" * 300),
         )
     ]
 
@@ -475,7 +596,7 @@ def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
         total_duration_ms=45_000,
     )
 
-    assert TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK == 600
+    assert TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK == 1000
     assert len(blocks) == 1
     # The block must be truncated (full text exceeds the budget) yet still carry
     # the mid-text topic signal.
@@ -1060,205 +1181,3 @@ def test_segment_index_context_window() -> None:
         time_seconds=1_000.0, window_seconds=1.0
     )
     assert [s["sequence_num"] for s in selected] == [1]
-
-
-def _wb_word(word: str, start: float, end: float) -> dict[str, float | str]:
-    return {"word": word, "start": start, "end": end}
-
-
-def _chapter_word_llm_response(plan: list[dict[str, object]]) -> SimpleNamespace:
-    return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=json.dumps({"chapters": plan}))
-            )
-        ]
-    )
-
-
-def test_refine_chapter_starts_disabled_returns_unchanged(monkeypatch) -> None:
-    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "false")
-    config = create_standard_test_config()
-    config.enable_word_level_boundary_refinder = False
-
-    chapters = [Chapter("c0", "First story", 5_000, 310_000)]
-    segments = [
-        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=4.0, text="cold open"),
-    ]
-
-    with patch(
-        "litellm.completion", side_effect=AssertionError("LLM must not be called")
-    ):
-        out = refine_chapter_starts_with_llm_word_boundaries(
-            chapters,
-            segments,
-            config=config,
-            words_by_sequence=None,
-        )
-
-    assert [c.start_time_ms for c in out] == [5_000]
-
-
-def test_refine_chapter_starts_snaps_to_exact_word_time(monkeypatch) -> None:
-    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "false")
-    config = create_standard_test_config()
-    config.enable_word_level_boundary_refinder = True
-
-    chapters = [
-        Chapter("c0", "First story", 5_000, 310_000),
-        Chapter("c1", "Second story", 310_000, 650_000),
-    ]
-    segments = [
-        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=4.0, text="cold open"),
-        SimpleNamespace(
-            sequence_num=1,
-            start_time=12.0,
-            end_time=20.0,
-            text="first story starts right now",
-        ),
-        SimpleNamespace(
-            sequence_num=2,
-            start_time=300.0,
-            end_time=307.0,
-            text="a quick transition",
-        ),
-        SimpleNamespace(
-            sequence_num=3,
-            start_time=318.0,
-            end_time=328.0,
-            text="second story begins with an update",
-        ),
-    ]
-    words_by_sequence = {
-        1: [_wb_word("first", 12.0, 12.4), _wb_word("story", 12.5, 12.9)],
-        3: [_wb_word("second", 318.0, 318.4), _wb_word("story", 318.5, 318.9)],
-    }
-    response = _chapter_word_llm_response(
-        [
-            {
-                "chapter_index": 0,
-                "refined_start_segment_seq": 1,
-                "refined_start_phrase": "first story",
-            },
-            {
-                "chapter_index": 1,
-                "refined_start_segment_seq": 3,
-                "refined_start_phrase": "second story",
-            },
-        ]
-    )
-
-    with patch("litellm.completion", return_value=response):
-        out = refine_chapter_starts_with_llm_word_boundaries(
-            chapters,
-            segments,
-            config=config,
-            words_by_sequence=words_by_sequence,
-        )
-
-    assert [c.start_time_ms for c in out] == [12_000, 318_000]
-    # Each chapter's end follows the next chapter's refined start.
-    assert out[0].end_time_ms == 318_000
-
-
-def test_refine_chapter_starts_keeps_original_on_parse_failure(monkeypatch) -> None:
-    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "false")
-    config = create_standard_test_config()
-    config.enable_word_level_boundary_refinder = True
-
-    chapters = [Chapter("c0", "First story", 5_000, 310_000)]
-    segments = [
-        SimpleNamespace(
-            sequence_num=1, start_time=12.0, end_time=20.0, text="first story now"
-        ),
-    ]
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))]
-    )
-
-    with patch("litellm.completion", return_value=response):
-        out = refine_chapter_starts_with_llm_word_boundaries(
-            chapters,
-            segments,
-            config=config,
-            words_by_sequence={1: [_wb_word("first", 12.0, 12.4)]},
-        )
-
-    assert [c.start_time_ms for c in out] == [5_000]
-
-
-def test_refine_chapter_starts_respects_shift_cap(monkeypatch) -> None:
-    monkeypatch.setenv("PODLY_RUST_WORD_BOUNDARY_ENABLED", "false")
-    config = create_standard_test_config()
-    config.enable_word_level_boundary_refinder = True
-
-    # Phrase resolves ~200s away from the 5s start — beyond the 90s cap, so the
-    # original start must be kept.
-    chapters = [Chapter("c0", "Late mention", 5_000, 650_000)]
-    segments = [
-        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=4.0, text="cold open"),
-        SimpleNamespace(
-            sequence_num=1,
-            start_time=200.0,
-            end_time=210.0,
-            text="late mention appears",
-        ),
-    ]
-    response = _chapter_word_llm_response(
-        [
-            {
-                "chapter_index": 0,
-                "refined_start_segment_seq": 1,
-                "refined_start_phrase": "late mention",
-            }
-        ]
-    )
-
-    with patch("litellm.completion", return_value=response):
-        out = refine_chapter_starts_with_llm_word_boundaries(
-            chapters,
-            segments,
-            config=config,
-            words_by_sequence={
-                1: [_wb_word("late", 200.0, 200.4), _wb_word("mention", 200.5, 200.9)]
-            },
-        )
-
-    assert [c.start_time_ms for c in out] == [5_000]
-
-
-def test_refine_chapter_starts_prefers_rust_resolution() -> None:
-    config = create_standard_test_config()
-    config.enable_word_level_boundary_refinder = True
-
-    chapters = [Chapter("c0", "First story", 5_000, 310_000)]
-    segments = [
-        SimpleNamespace(
-            sequence_num=1, start_time=12.0, end_time=20.0, text="first story now"
-        ),
-    ]
-    # The Python phrase matcher would not run; Rust returns the resolved start.
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))]
-    )
-    rust_payload = {
-        "parse_status": "ok",
-        "chapters": [{"chapter_index": 0, "refined_start": 12.0}],
-    }
-
-    with (
-        patch("litellm.completion", return_value=response),
-        patch(
-            "shared.rust_sidecar.try_chapter_word_refine_from_llm",
-            return_value=rust_payload,
-        ) as rust_mock,
-    ):
-        out = refine_chapter_starts_with_llm_word_boundaries(
-            chapters,
-            segments,
-            config=config,
-            post_guid="guid-1",
-        )
-
-    assert rust_mock.called
-    assert [c.start_time_ms for c in out] == [12_000]

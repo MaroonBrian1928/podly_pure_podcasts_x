@@ -45,12 +45,13 @@ from shared.llm_utils import model_uses_max_completion_tokens
 _CHAPTER_TITLE_REFINE_RANGE = (-100, -100)
 _TOPIC_PLAN_RANGE = (-200, -200)
 _TOPIC_PLAN_CONTINUATION_RANGE = (-201, -201)
-_CHAPTER_WORD_REFINE_RANGE = (-300, -300)
 
 logger = logging.getLogger("global_logger")
 
-# Enough room for compact JSON chapter plans without inviting verbose responses.
-TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS = 4096
+# Generous output budget so long folded plans (block_index + title + first_word)
+# never truncate. The topic-plan call also constrains reasoning
+# (reasoning_effort="low"), so this headroom is rarely consumed by thinking.
+TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS = 8192
 # Aim for about 60 transcript blocks so long episodes still fit in one prompt.
 TOPIC_CHAPTER_TARGET_BLOCK_COUNT = 60
 # One-minute blocks are the minimum useful granularity before prompt size balloons.
@@ -58,15 +59,20 @@ TOPIC_CHAPTER_MIN_BLOCK_SECONDS = 60
 # Two-minute blocks are the largest window we allow before chapter starts get too coarse.
 TOPIC_CHAPTER_MAX_BLOCK_SECONDS = 2 * 60
 # Keep enough transcript from each block for specific, context-rich chapter
-# titles while keeping the single topic-plan prompt small. ~60 blocks * this
-# budget dominates the prompt size; 600 chars keeps a few sentences per block.
-TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 600
+# titles AND so the chapter-start word the LLM picks is actually present in the
+# block text it sees (it is matched back to word timestamps locally).
+TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 1000
 # For long episodes, cap chapter counts to roughly one chapter every five minutes.
 TOPIC_CHAPTER_CAP_WINDOW_SECONDS = 5 * 60
 # Treat episodes under an hour as "short" when applying the hard chapter-count cap.
 TOPIC_CHAPTER_SHORT_EPISODE_SECONDS = 60 * 60
 # Short episodes top out at 10 chapters to avoid noisy over-segmentation.
 TOPIC_CHAPTER_SHORT_EPISODE_CAP = 10
+# Word-level chapter alignment is folded into the topic-plan call: the LLM names
+# each chapter's first spoken word in the same response, and we snap the chapter
+# start to that word's timestamp locally. This caps how far that snap may move a
+# start (its block is at most ~2 min, so this is a safety net, not the limiter).
+CHAPTER_WORD_ALIGN_MAX_SHIFT_SECONDS = 180.0
 # Retry prompts keep one overlapping block so truncated responses retain local context.
 TOPIC_CHAPTER_RETRY_OVERLAP_BLOCKS = 1
 
@@ -169,12 +175,15 @@ def refine_description_chapters_with_word_refiner(
     config: Any,
     logger_override: logging.Logger | None = None,
     max_shift_seconds: float = 90.0,
+    words_by_sequence: Mapping[int, Sequence[Any]] | None = None,
 ) -> list[Chapter]:
     """
     Refine description-derived chapter start times using transcript phrase matching.
 
-    This reuses the same heuristic phrase-timing logic as the word-level boundary
-    refiner (but does not invoke any extra LLM calls).
+    This matches each chapter title against the transcript near its start and
+    snaps to the matched word's timestamp. It makes no extra LLM call; when
+    ``words_by_sequence`` is supplied it resolves to exact word-level times,
+    otherwise it falls back to segment-level interpolation.
     """
     log = logger_override or logger
     if not chapters or not transcript_segments:
@@ -182,7 +191,9 @@ def refine_description_chapters_with_word_refiner(
     if not getattr(config, "enable_word_level_boundary_refinder", False):
         return list(chapters)
 
-    all_segments = _segments_for_word_refiner(transcript_segments)
+    all_segments = _segments_for_word_refiner(
+        transcript_segments, words_by_sequence=words_by_sequence
+    )
     if not all_segments:
         return list(chapters)
 
@@ -306,461 +317,6 @@ def refine_transcript_chapters_with_word_refiner(
         log.info(
             "Refined %d transcript topic chapter boundary starts using word-level "
             "phrase matching",
-            refined_kept,
-        )
-    return adjusted
-
-
-def _load_chapter_boundary_template() -> Any:
-    from pathlib import Path
-
-    from jinja2 import Template
-
-    path = (
-        Path(__file__).resolve().parent.parent  # project src root
-        / "chapter_boundary_refinement_prompt.jinja"
-    )
-    if path.exists():
-        return Template(path.read_text())
-    # Minimal fallback keeps the feature working if the template is missing.
-    return Template(
-        "Align chapter starts to transcript phrases.\n"
-        "{% for chapter in chapters %}index={{chapter.index}} "
-        "approx_start={{chapter.approx_start_seconds}} {{chapter.title}}\n"
-        "{% endfor %}"
-        "{% for segment in context_segments %}[seq={{segment.sequence_num}} "
-        "start={{segment.start_time}} end={{segment.end_time}}] "
-        "{{segment.text}}\n{% endfor %}"
-        'Return JSON: {"chapters": [{"chapter_index": 0, '
-        '"refined_start_segment_seq": 0, "refined_start_phrase": ""}]}'
-    )
-
-
-def _build_chapter_boundary_refinement_prompt(
-    *,
-    chapters: list[dict[str, Any]],
-    context_segments: list[dict[str, Any]],
-) -> str:
-    if not chapters or not context_segments:
-        return ""
-    template = _load_chapter_boundary_template()
-    return template.render(chapters=chapters, context_segments=context_segments)
-
-
-def _parse_chapter_boundary_response(content: str) -> dict[int, tuple[int | None, str]]:
-    """Parse the batched chapter-boundary LLM response.
-
-    Returns ``{chapter_index: (start_segment_seq, start_phrase)}``. Unparseable
-    responses yield an empty mapping so the caller keeps the original starts.
-    """
-    text = (content or "").strip()
-    if not text:
-        return {}
-
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-
-    data: Any = None
-    try:
-        data = json.loads(text)
-    except Exception:  # noqa: BLE001
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except Exception:  # noqa: BLE001
-                return {}
-
-    items = data.get("chapters") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return {}
-
-    out: dict[int, tuple[int | None, str]] = {}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        try:
-            idx = int(item.get("chapter_index"))
-        except Exception:  # noqa: BLE001
-            continue
-        seq_raw = item.get("refined_start_segment_seq")
-        seq: int | None
-        try:
-            seq = int(seq_raw) if seq_raw is not None else None
-        except Exception:  # noqa: BLE001
-            seq = None
-        phrase = str(item.get("refined_start_phrase") or "").strip()
-        out[idx] = (seq, phrase)
-    return out
-
-
-def _try_rust_chapter_word_refine(
-    *,
-    content: str,
-    chapter_payloads: list[dict[str, Any]],
-    post_guid: str | None,
-    context_window_seconds: float,
-    log: logging.Logger,
-) -> dict[str, Any] | None:
-    """Bundle parse + word-level resolution into a single Rust subprocess call.
-
-    Returns the sidecar payload (``parse_status`` in {"ok", "failed"}) or None
-    to signal the caller should fall back to the Python resolution (flag off, no
-    post_guid, sidecar error, or unexpected payload).
-    """
-    if not post_guid:
-        return None
-
-    from shared.processing_paths import get_instance_dir
-    from shared.rust_sidecar import (
-        rust_word_boundary_enabled,
-        try_chapter_word_refine_from_llm,
-    )
-
-    if not rust_word_boundary_enabled():
-        return None
-
-    chapters_meta = [
-        {
-            "index": payload["index"],
-            "approx_start_seconds": payload["approx_start_seconds"],
-        }
-        for payload in chapter_payloads
-    ]
-    try:
-        db_path = get_instance_dir() / "sqlite3.db"
-        result = try_chapter_word_refine_from_llm(
-            db_path=db_path,
-            post_guid=post_guid,
-            raw_content=content or "",
-            chapters=chapters_meta,
-            context_window_seconds=float(context_window_seconds),
-        )
-    except Exception:
-        log.exception(
-            "Rust chapter word-refine bootstrap failed; falling back to Python"
-        )
-        return None
-
-    if result is None:
-        return None
-
-    log.info(
-        "Chapter word-boundary refined via Rust sidecar",
-        extra={
-            "rust_path": "chapter_word_refine_from_llm",
-            "parse_status": result.get("parse_status"),
-        },
-    )
-    return result
-
-
-def _resolve_chapter_word_starts(
-    *,
-    content: str,
-    chapter_payloads: list[dict[str, Any]],
-    all_segments: list[dict[str, Any]],
-    segment_index: _SegmentIndex,
-    refiner: WordBoundaryRefiner,
-    post_guid: str | None,
-    context_window_seconds: float,
-    log: logging.Logger,
-) -> dict[int, float] | None:
-    """Resolve each chapter's start phrase to an exact word-level time.
-
-    Prefers the bundled Rust resolver and falls back to the in-Python phrase
-    matcher. Returns ``{chapter_index: refined_start_seconds}`` for the chapters
-    that resolved, or None when the response had no parseable plan (so the
-    caller keeps the original starts).
-    """
-    rust_result = _try_rust_chapter_word_refine(
-        content=content,
-        chapter_payloads=chapter_payloads,
-        post_guid=post_guid,
-        context_window_seconds=context_window_seconds,
-        log=log,
-    )
-    if rust_result is not None:
-        if rust_result.get("parse_status") == "failed":
-            return None
-        resolved: dict[int, float] = {}
-        for item in rust_result.get("chapters", []):
-            if not isinstance(item, dict):
-                continue
-            try:
-                idx = int(item["chapter_index"])
-            except Exception:  # noqa: BLE001
-                continue
-            refined = item.get("refined_start")
-            if refined is not None:
-                resolved[idx] = float(refined)
-        return resolved
-
-    parsed = _parse_chapter_boundary_response(content)
-    if not parsed:
-        return None
-
-    approx_by_index = {
-        int(payload["index"]): float(payload["approx_start_seconds"])
-        for payload in chapter_payloads
-    }
-    resolved = {}
-    for idx, (seq, phrase) in parsed.items():
-        if not phrase:
-            continue
-        approx = approx_by_index.get(idx)
-        if approx is None:
-            continue
-        context = segment_index.context_segments_around_time(
-            time_seconds=approx,
-            window_seconds=context_window_seconds,
-        )
-        estimated_start = refiner._estimate_phrase_time(
-            all_segments=all_segments,
-            context_segments=context,
-            preferred_segment_seq=seq,
-            phrase=phrase,
-            direction="start",
-        )
-        if estimated_start is not None:
-            resolved[idx] = float(estimated_start)
-    return resolved
-
-
-def _build_chapter_word_refine_inputs(
-    sorted_chapters: list[Chapter],
-    segment_index: _SegmentIndex,
-    *,
-    context_window_seconds: float,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build the per-chapter payloads and the deduped prompt context window.
-
-    Returns ``(chapter_payloads, prompt_context)``. The prompt context omits the
-    per-word arrays (the LLM only needs text + seq); word timestamps stay on
-    ``all_segments`` for the resolution step.
-    """
-    chapter_payloads: list[dict[str, Any]] = []
-    context_by_seq: dict[int, dict[str, Any]] = {}
-    for idx, chapter in enumerate(sorted_chapters):
-        approx_seconds = float(chapter.start_time_ms) / 1000.0
-        context = segment_index.context_segments_around_time(
-            time_seconds=approx_seconds,
-            window_seconds=context_window_seconds,
-        )
-        for seg in context:
-            try:
-                context_by_seq[int(seg["sequence_num"])] = seg
-            except Exception:  # noqa: BLE001
-                continue
-        chapter_payloads.append(
-            {
-                "index": idx,
-                "title": chapter.title,
-                "approx_start_seconds": round(approx_seconds, 1),
-            }
-        )
-
-    prompt_context = [
-        {
-            "sequence_num": seg["sequence_num"],
-            "start_time": seg["start_time"],
-            "end_time": seg["end_time"],
-            "text": seg["text"],
-        }
-        for seg in (context_by_seq[k] for k in sorted(context_by_seq))
-    ]
-    return chapter_payloads, prompt_context
-
-
-def _request_chapter_boundary_plan(
-    *,
-    prompt: str,
-    llm_model: str,
-    config: Any,
-    post_id: int | None,
-    log: logging.Logger,
-) -> str | None:
-    """Run the batched chapter-boundary LLM call; return raw content or None.
-
-    Returns None (so the caller keeps the current starts) on any LLM failure.
-    """
-    completion_args: dict[str, Any] = {
-        "model": llm_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You align podcast chapter start times to transcript "
-                    "phrases and return valid JSON only."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "timeout": int(getattr(config, "openai_timeout", 300) or 300),
-        "api_key": getattr(config, "llm_api_key", None),
-        "base_url": getattr(config, "openai_base_url", None),
-    }
-    if model_uses_max_completion_tokens(llm_model):
-        completion_args["max_completion_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
-    else:
-        completion_args["max_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
-
-    tier_config = _tier_config_shim(getattr(config, "llm_service_tier", None))
-    _apply_service_tier(completion_args, tier_config)
-
-    first_seq, last_seq = _CHAPTER_WORD_REFINE_RANGE
-    model_call_id = _try_upsert_model_call(
-        post_id=post_id,
-        first_seq_num=first_seq,
-        last_seq_num=last_seq,
-        model_name=llm_model,
-        prompt=prompt,
-        logger=log,
-        log_prefix="Chapter word refine",
-    )
-    _record_service_tier_on_model_call(
-        model_call_id,
-        completion_args,
-        logger=log,
-        log_prefix="Chapter word refine",
-    )
-
-    try:
-        response = _call_litellm_with_tier_retry(
-            completion_args, config=tier_config, logger=log
-        )
-        content = extract_litellm_content(response)
-        _try_update_model_call(
-            model_call_id,
-            status="success",
-            response=content,
-            error_message=None,
-            logger=log,
-            log_prefix="Chapter word refine",
-            usage=extract_litellm_usage(response),
-            model_name=llm_model,
-            service_tier=completion_args.get("service_tier"),
-            prompt=prompt,
-        )
-        return content
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "LLM chapter word-boundary refinement failed; keeping current starts: %s",
-            exc,
-        )
-        _try_update_model_call(
-            model_call_id,
-            status="failed_permanent",
-            response=None,
-            error_message=str(exc),
-            logger=log,
-            log_prefix="Chapter word refine",
-        )
-        return None
-
-
-def refine_chapter_starts_with_llm_word_boundaries(
-    chapters: Sequence[Chapter],
-    transcript_segments: Sequence[Any],
-    *,
-    config: Any,
-    post_id: int | None = None,
-    post_guid: str | None = None,
-    words_by_sequence: Mapping[int, Sequence[Any]] | None = None,
-    logger_override: logging.Logger | None = None,
-    max_shift_seconds: float = 90.0,
-    context_window_seconds: float = 45.0,
-) -> list[Chapter]:
-    """Refine chapter START times with one batched LLM call + word-level timing.
-
-    When ``enable_word_level_boundary_refinder`` is set, this makes a single
-    additional LLM call that names the start phrase for each chapter, then
-    resolves that phrase to an exact timecode using the word-level transcript
-    (via ``WordBoundaryRefiner._estimate_phrase_time``). On any LLM/parse/timing
-    failure it returns the chapters unchanged so the caller can fall back to the
-    existing heuristic refinement.
-    """
-    log = logger_override or logger
-    if not chapters or not transcript_segments:
-        return list(chapters)
-    if not getattr(config, "enable_word_level_boundary_refinder", False):
-        return list(chapters)
-    llm_model = getattr(config, "llm_model", None)
-    if not llm_model:
-        return list(chapters)
-
-    all_segments = _segments_for_word_refiner(
-        transcript_segments, words_by_sequence=words_by_sequence
-    )
-    if not all_segments:
-        return list(chapters)
-
-    segment_index = _SegmentIndex(all_segments)
-    refiner_logger = log if isinstance(log, logging.Logger) else None
-    refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
-    max_shift_ms = max(0, int(max_shift_seconds * 1000))
-
-    sorted_chapters = sorted(list(chapters), key=lambda ch: ch.start_time_ms)
-
-    chapter_payloads, prompt_context = _build_chapter_word_refine_inputs(
-        sorted_chapters,
-        segment_index,
-        context_window_seconds=context_window_seconds,
-    )
-    prompt = _build_chapter_boundary_refinement_prompt(
-        chapters=chapter_payloads, context_segments=prompt_context
-    )
-    if not prompt:
-        return list(chapters)
-
-    content = _request_chapter_boundary_plan(
-        prompt=prompt,
-        llm_model=llm_model,
-        config=config,
-        post_id=post_id,
-        log=log,
-    )
-    if content is None:
-        return list(chapters)
-
-    estimated_by_index = _resolve_chapter_word_starts(
-        content=content,
-        chapter_payloads=chapter_payloads,
-        all_segments=all_segments,
-        segment_index=segment_index,
-        refiner=refiner,
-        post_guid=post_guid,
-        context_window_seconds=context_window_seconds,
-        log=log,
-    )
-    if estimated_by_index is None:
-        log.warning(
-            "LLM chapter word-boundary refinement returned no parseable plan; "
-            "keeping current starts. response_snippet=%r",
-            _truncate_for_log(content),
-        )
-        return list(chapters)
-
-    candidate_starts_ms: list[int] = []
-    for idx, chapter in enumerate(sorted_chapters):
-        original_start_ms = int(chapter.start_time_ms)
-        new_start_ms = original_start_ms
-
-        estimated_start = estimated_by_index.get(idx)
-        if estimated_start is not None:
-            candidate_ms = round(float(estimated_start) * 1000.0)
-            if abs(candidate_ms - original_start_ms) <= max_shift_ms:
-                new_start_ms = candidate_ms
-
-        candidate_starts_ms.append(new_start_ms)
-
-    adjusted, refined_kept = _assemble_refined_chapters(
-        sorted_chapters, candidate_starts_ms
-    )
-
-    if refined_kept > 0:
-        log.info(
-            "Refined %d chapter starts via LLM word-boundary alignment",
             refined_kept,
         )
     return adjusted
@@ -1128,6 +684,118 @@ def refine_generated_chapter_titles_with_llm(
         return chapters
 
 
+def _parse_topic_chapter_opening_words(content: str) -> dict[int, str]:
+    """Extract ``{block_index: first_word}`` from the topic-plan response.
+
+    Tolerant of minified and truncated JSON: it reads each complete flat object,
+    so a response cut off mid-array still yields the first words that arrived.
+    """
+    out: dict[int, str] = {}
+    text = (content or "").strip()
+    if not text:
+        return out
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    for candidate in re.findall(r"\{[^{}]*\}", text):
+        try:
+            obj = json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(obj, dict):
+            continue
+        try:
+            block_index = int(obj.get("block_index"))
+        except Exception:  # noqa: BLE001
+            continue
+        word = str(obj.get("first_word") or "").strip()
+        if word:
+            out[block_index] = word
+    return out
+
+
+def _align_chapters_to_first_words(
+    chapters: list[Chapter],
+    *,
+    blocks: list[dict[str, Any]],
+    opening_words_by_block: Mapping[int, str],
+    transcript_segments: Sequence[Any],
+    words_by_sequence: Mapping[int, Sequence[Any]] | None,
+    config: Any,
+    logger_override: logging.Logger | None = None,
+    max_shift_seconds: float = CHAPTER_WORD_ALIGN_MAX_SHIFT_SECONDS,
+) -> list[Chapter]:
+    """Snap each chapter start to the timestamp of the LLM-named first word.
+
+    Resolution is local (no extra LLM call): the first word is matched against
+    the word-level transcript within that chapter's own block, preferring exact
+    word timestamps. Chapters whose word can't be found keep their block start.
+    """
+    log = logger_override or logger
+    if not chapters or not opening_words_by_block or not transcript_segments:
+        return list(chapters)
+
+    all_segments = _segments_for_word_refiner(
+        transcript_segments, words_by_sequence=words_by_sequence
+    )
+    if not all_segments:
+        return list(chapters)
+
+    segment_index = _SegmentIndex(all_segments)
+    refiner_logger = log if isinstance(log, logging.Logger) else None
+    refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
+    max_shift_ms = max(0, int(max_shift_seconds * 1000))
+
+    block_map = {int(b["block_index"]): b for b in blocks}
+    start_to_block = {int(b["start_ms"]): int(b["block_index"]) for b in blocks}
+
+    sorted_chapters = sorted(list(chapters), key=lambda ch: ch.start_time_ms)
+    candidate_starts_ms: list[int] = []
+    for chapter in sorted_chapters:
+        original_start_ms = int(chapter.start_time_ms)
+        new_start_ms = original_start_ms
+
+        block_index = start_to_block.get(original_start_ms)
+        block = block_map.get(block_index) if block_index is not None else None
+        word = (
+            opening_words_by_block.get(block_index) if block_index is not None else None
+        )
+        if word and block is not None:
+            block_start_s = float(block["start_ms"]) / 1000.0
+            block_end_s = float(block["end_ms"]) / 1000.0
+            context = [
+                seg
+                for seg in all_segments
+                if seg["end_time"] >= block_start_s and seg["start_time"] <= block_end_s
+            ]
+            preferred_seq = segment_index.nearest_segment_seq_for_time(
+                original_start_ms
+            )
+            estimated_start = refiner._estimate_phrase_time(
+                all_segments=all_segments,
+                context_segments=context,
+                preferred_segment_seq=preferred_seq,
+                phrase=word,
+                direction="start",
+            )
+            if estimated_start is not None:
+                candidate_ms = round(float(estimated_start) * 1000.0)
+                if abs(candidate_ms - original_start_ms) <= max_shift_ms:
+                    new_start_ms = candidate_ms
+
+        candidate_starts_ms.append(new_start_ms)
+
+    adjusted, refined_kept = _assemble_refined_chapters(
+        sorted_chapters, candidate_starts_ms
+    )
+    if refined_kept > 0:
+        log.info(
+            "Aligned %d chapter starts to first-word timestamps "
+            "(folded into topic-plan call)",
+            refined_kept,
+        )
+    return adjusted
+
+
 def generate_topic_chapters_from_transcript_with_llm(
     transcript_segments: Sequence[Any],
     *,
@@ -1143,6 +811,9 @@ def generate_topic_chapters_from_transcript_with_llm(
     post_guid: str | None = None,
     removed_windows_ms: list[tuple[int, int]] | None = None,
     llm_service_tier: str | None = None,
+    align_word_starts: bool = False,
+    words_by_sequence: Mapping[int, Sequence[Any]] | None = None,
+    word_align_config: Any = None,
 ) -> list[Chapter]:
     """
     Generate transcript chapters with topic-based boundaries via an LLM call.
@@ -1200,6 +871,7 @@ def generate_topic_chapters_from_transcript_with_llm(
         total_duration_ms=total_duration_ms,
         target_chapter_seconds=target_chapter_seconds,
         min_chapter_seconds=min_chapter_seconds,
+        include_opening_word=align_word_starts,
     )
     if not prompt:
         return []
@@ -1231,14 +903,21 @@ def generate_topic_chapters_from_transcript_with_llm(
             )
             return []
 
-        merged_plan = _retry_incomplete_topic_chapter_plan(
+        opening_words = (
+            _parse_topic_chapter_opening_words(content)
+            if align_word_starts and word_align_config is not None
+            else {}
+        )
+        merged_plan, opening_words = _retry_incomplete_topic_chapter_plan(
             initial_plan=parsed,
+            initial_opening_words=opening_words,
             initial_expected_count=expected_count,
             initial_finish_reason=finish_reason,
             blocks=blocks,
             total_duration_ms=total_duration_ms,
             target_chapter_seconds=target_chapter_seconds,
             min_chapter_seconds=min_chapter_seconds,
+            include_opening_word=align_word_starts,
             llm_model=llm_model,
             llm_api_key=llm_api_key,
             openai_base_url=openai_base_url,
@@ -1262,6 +941,21 @@ def generate_topic_chapters_from_transcript_with_llm(
                 len(merged_plan),
             )
             return []
+
+        # Fold word-level alignment into this same call: the response already
+        # carries each chapter's first word, so snap starts to the exact word
+        # timestamp locally (no second LLM call).
+        if align_word_starts and word_align_config is not None:
+            if opening_words:
+                chapters = _align_chapters_to_first_words(
+                    chapters,
+                    blocks=blocks,
+                    opening_words_by_block=opening_words,
+                    transcript_segments=segments,
+                    words_by_sequence=words_by_sequence,
+                    config=word_align_config,
+                    logger_override=log,
+                )
 
         log.info(
             "Generated %d topic-based transcript chapters via LLM",
@@ -1699,6 +1393,7 @@ def _build_topic_chapter_generation_prompt(
     min_chapter_seconds: int,
     continuation_after_block_index: int | None = None,
     existing_chapter_starts: Sequence[int] | None = None,
+    include_opening_word: bool = False,
 ) -> str:
     if not blocks:
         return ""
@@ -1747,15 +1442,36 @@ def _build_topic_chapter_generation_prompt(
         "- First chapter must start at block_index 0\n" if not is_continuation else ""
     )
 
+    if include_opening_word:
+        format_example = (
+            '{"chapter_count":2,"chapters":['
+            '{"block_index":0,"title":"Guest backstory and origins","first_word":"so"},'
+            '{"block_index":5,"title":"Riverfront bridge search","first_word":"okay"}]}'
+        )
+        keys_rule = (
+            "- Use only keys block_index, title, and first_word for each chapter\n"
+        )
+        first_word_rule = (
+            "- first_word: the exact first word spoken where the chapter begins, "
+            "copied verbatim (lowercase, no surrounding punctuation) from that "
+            "block's text. It must appear in the block text; we use it to snap the "
+            "chapter start to that precise word.\n"
+        )
+    else:
+        format_example = (
+            '{"chapter_count":2,"chapters":['
+            '{"block_index":0,"title":"Guest backstory and origins"},'
+            '{"block_index":5,"title":"Riverfront bridge search"}]}'
+        )
+        keys_rule = "- Use only keys block_index and title for each chapter\n"
+        first_word_rule = ""
+
     return (
         "Create podcast chapters based on topic changes from transcript blocks.\n"
         "Do not split on fixed time intervals unless the topic clearly changes.\n"
         "Return minified JSON only on a single line (no markdown, no code fences, "
         "no extra text).\n"
-        "Format: "
-        '{"chapter_count":2,"chapters":['
-        '{"block_index":0,"title":"Guest backstory and origins"},'
-        '{"block_index":5,"title":"Riverfront bridge search"}]}\n'
+        f"Format: {format_example}\n"
         "Rules:\n"
         "- Put chapter_count first in the JSON object\n"
         "- chapter_count must equal the number of items in chapters\n"
@@ -1766,7 +1482,8 @@ def _build_topic_chapter_generation_prompt(
         "- The hard cap is a ceiling, not a target\n"
         f"- Avoid chapters shorter than about {min_chapter_seconds // 60} minutes "
         "unless intro/outro transitions justify it\n"
-        "- Use only keys block_index and title for each chapter\n"
+        f"{keys_rule}"
+        f"{first_word_rule}"
         "- Titles should be factual and concise (2-6 words preferred)\n"
         "- Titles must describe the actual content of the block. Do NOT use "
         "generic placeholders such as 'Intro', 'Introduction', 'Outro', "
@@ -1813,6 +1530,13 @@ def _request_topic_chapter_plan(
         completion_args["max_completion_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
     else:
         completion_args["max_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
+
+    # Picking topic boundaries from labeled blocks needs little reasoning, but
+    # thinking models otherwise spend most of the completion budget reasoning and
+    # truncate the JSON (forcing continuation retries). Cap reasoning low;
+    # `drop_params` lets providers without reasoning_effort ignore it.
+    completion_args["reasoning_effort"] = "low"
+    completion_args["drop_params"] = True
 
     tier_config = _tier_config_shim(llm_service_tier)
     _apply_service_tier(completion_args, tier_config)
@@ -1883,12 +1607,14 @@ def _request_topic_chapter_plan(
 def _retry_incomplete_topic_chapter_plan(
     *,
     initial_plan: Sequence[tuple[int, str]],
+    initial_opening_words: Mapping[int, str] | None = None,
     initial_expected_count: int | None,
     initial_finish_reason: str | None,
     blocks: list[dict[str, Any]],
     total_duration_ms: int,
     target_chapter_seconds: int,
     min_chapter_seconds: int,
+    include_opening_word: bool = False,
     llm_model: str,
     llm_api_key: str | None,
     openai_base_url: str | None,
@@ -1896,9 +1622,10 @@ def _retry_incomplete_topic_chapter_plan(
     logger_override: logging.Logger | None = None,
     llm_service_tier: str | None = None,
     post_id: int | None = None,
-) -> list[tuple[int, str]]:
+) -> tuple[list[tuple[int, str]], dict[int, str]]:
     log = logger_override or logger
     merged_plan = list(initial_plan)
+    merged_opening_words: dict[int, str] = dict(initial_opening_words or {})
 
     needs_retry = (
         initial_expected_count is not None and len(merged_plan) < initial_expected_count
@@ -1908,7 +1635,7 @@ def _retry_incomplete_topic_chapter_plan(
         # suggests the model may have more chapters to return.
         needs_retry = True
     if not needs_retry:
-        return merged_plan
+        return merged_plan, merged_opening_words
 
     retry_blocks, continuation_after_block_index = _build_topic_retry_blocks(
         blocks,
@@ -1920,7 +1647,7 @@ def _retry_incomplete_topic_chapter_plan(
             "Topic chapter continuation retry skipped: no remaining blocks after "
             "recovered chapters"
         )
-        return merged_plan
+        return merged_plan, merged_opening_words
 
     log.info(
         "Retrying topic chapter generation for remaining blocks "
@@ -1939,12 +1666,13 @@ def _retry_incomplete_topic_chapter_plan(
         min_chapter_seconds=min_chapter_seconds,
         continuation_after_block_index=continuation_after_block_index,
         existing_chapter_starts=[block_index for block_index, _ in merged_plan],
+        include_opening_word=include_opening_word,
     )
     if not retry_prompt:
         log.warning(
             "Topic chapter continuation retry skipped: failed to build retry prompt"
         )
-        return merged_plan
+        return merged_plan, merged_opening_words
 
     log.info(
         "Topic chapter continuation prompt built (chars=%d, blocks=%d)",
@@ -1972,9 +1700,18 @@ def _retry_incomplete_topic_chapter_plan(
             _truncate_for_log(retry_content),
             retry_finish_reason,
         )
-        return merged_plan
+        return merged_plan, merged_opening_words
 
     merged_plan = _merge_topic_plans_by_block_index(merged_plan, retry_parsed)
+    if include_opening_word:
+        retry_opening_words = _parse_topic_chapter_opening_words(retry_content)
+        merged_opening_words.update(
+            {
+                block_index: word
+                for block_index, word in retry_opening_words.items()
+                if block_index not in merged_opening_words
+            }
+        )
     log.info(
         "Merged topic chapter retry result (initial=%d, retry=%d, merged=%d)",
         len(initial_plan),
@@ -1988,7 +1725,7 @@ def _retry_incomplete_topic_chapter_plan(
             retry_expected,
             len(retry_parsed),
         )
-    return merged_plan
+    return merged_plan, merged_opening_words
 
 
 def _parse_topic_chapter_response(content: str) -> list[tuple[int, str]]:

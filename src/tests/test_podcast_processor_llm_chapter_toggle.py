@@ -122,15 +122,10 @@ def test_llm_description_chapters_skip_word_refiner_and_write_unmodified() -> No
         patch(
             "podcast_processor.podcast_processor.write_adjusted_chapters"
         ) as write_mock,
-        patch(
-            "podcast_processor.podcast_processor."
-            "refine_chapter_starts_with_llm_word_boundaries",
-        ) as refine_mock,
     ):
         processor._perform_llm_based_processing(post, job, "/tmp/output.mp3")
 
     resolve_mock.assert_called_once()
-    refine_mock.assert_not_called()
     assert write_mock.call_count == 1
     assert write_mock.call_args.kwargs["chapters_to_keep"] == description_chapters
     assert write_mock.call_args.kwargs["removed_segments"] == []
@@ -190,7 +185,7 @@ def test_llm_description_chapters_refined_when_word_level_enabled() -> None:
         ) as write_mock,
         patch(
             "podcast_processor.podcast_processor."
-            "refine_chapter_starts_with_llm_word_boundaries",
+            "refine_description_chapters_with_word_refiner",
             return_value=refined_chapters,
         ) as refine_mock,
     ):
@@ -765,6 +760,9 @@ def test_chapter_insert_strategy_writes_chapters_without_ad_removal() -> None:
         openai_timeout_sec=config.openai_timeout,
         logger_override=processor.logger,
         llm_service_tier=config.llm_service_tier,
+        align_word_starts=False,
+        words_by_sequence=None,
+        word_align_config=None,
     )
     copy_mock.assert_called_once_with("/tmp/input.mp3", "/tmp/output.mp3")
     write_mock.assert_called_once_with(
@@ -839,7 +837,7 @@ def test_refine_description_sourced_chapters_uses_word_refiner_when_enabled() ->
     refined = [Chapter("d0", "First", 12_000, 100_000)]
 
     with patch(
-        "podcast_processor.podcast_processor.refine_chapter_starts_with_llm_word_boundaries",
+        "podcast_processor.podcast_processor.refine_description_chapters_with_word_refiner",
         return_value=refined,
     ) as refine_mock:
         out = processor._refine_description_sourced_chapters(
@@ -867,17 +865,12 @@ def test_refine_transcript_sourced_chapters_uses_llm_word_refiner_when_enabled()
         SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0, text="hello")
     ]
     topic = [Chapter("t0", "Topic", 0, 100_000)]
-    refined = [Chapter("t0", "Topic", 12_000, 100_000)]
 
     with (
         patch(
             "podcast_processor.podcast_processor.generate_topic_chapters_from_transcript_with_llm",
             return_value=topic,
-        ),
-        patch(
-            "podcast_processor.podcast_processor.refine_chapter_starts_with_llm_word_boundaries",
-            return_value=refined,
-        ) as llm_mock,
+        ) as topic_mock,
         patch(
             "podcast_processor.podcast_processor.refine_transcript_chapters_with_word_refiner",
             side_effect=AssertionError("heuristic refiner must not run when flag on"),
@@ -890,8 +883,9 @@ def test_refine_transcript_sourced_chapters_uses_llm_word_refiner_when_enabled()
             post_guid="guid-1",
         )
 
-    assert llm_mock.called
-    assert out == refined
+    assert topic_mock.call_args.kwargs["align_word_starts"] is True
+    assert topic_mock.call_args.kwargs["word_align_config"] is config
+    assert out == topic
 
 
 def test_refine_transcript_sourced_chapters_uses_heuristic_when_disabled() -> None:
@@ -916,10 +910,6 @@ def test_refine_transcript_sourced_chapters_uses_heuristic_when_disabled() -> No
             "podcast_processor.podcast_processor.refine_transcript_chapters_with_word_refiner",
             return_value=heuristic,
         ) as heuristic_mock,
-        patch(
-            "podcast_processor.podcast_processor.refine_chapter_starts_with_llm_word_boundaries",
-            side_effect=AssertionError("LLM refiner must not run when flag off"),
-        ),
     ):
         out = processor._refine_transcript_sourced_chapters(
             chapters_for_output=chapters,

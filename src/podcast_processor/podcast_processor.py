@@ -33,7 +33,7 @@ from podcast_processor.chapter_ad_detector import (
 from podcast_processor.chapter_fallback import (
     generate_chapters_from_transcript,
     generate_topic_chapters_from_transcript_with_llm,
-    refine_chapter_starts_with_llm_word_boundaries,
+    refine_description_chapters_with_word_refiner,
     refine_generated_chapter_titles_with_llm,
     refine_transcript_chapters_with_word_refiner,
     resolve_llm_path_chapters,
@@ -1597,31 +1597,6 @@ class PodcastProcessor:
             bleep_windows=bleep_windows,
         )
 
-    def _refine_chapter_boundaries(
-        self,
-        *,
-        chapters: list[Any],
-        transcript_segments: list[Any],
-        post_id: int | None,
-        post_guid: str | None,
-        words_by_sequence: Mapping[int, list[Any]] | None,
-    ) -> list[Any]:
-        """Apply the LLM + word-level chapter start refinement.
-
-        Used for both transcript- and description-sourced chapters when the
-        intra-segment boundary refinement toggle is on. Falls back internally to
-        the unchanged chapters on any LLM/parse/timing failure.
-        """
-        return refine_chapter_starts_with_llm_word_boundaries(
-            chapters,
-            transcript_segments,
-            config=self.config,
-            post_id=post_id,
-            post_guid=post_guid,
-            words_by_sequence=words_by_sequence,
-            logger_override=self.logger,
-        )
-
     def _refine_description_sourced_chapters(
         self,
         *,
@@ -1631,19 +1606,20 @@ class PodcastProcessor:
         post_guid: str | None = None,
         words_by_sequence: Mapping[int, list[Any]] | None = None,
     ) -> list[Any]:
-        """Refine description-parsed chapter starts via the LLM word refiner.
+        """Align description-parsed chapter starts to word-level timestamps.
 
-        Only invoked when the intra-segment boundary refinement toggle is on;
-        when off, description chapters are left untouched (current behavior).
+        Uses the title-matching refiner (no extra LLM call). Only adjusts starts
+        when the intra-segment boundary toggle is on; otherwise returns the
+        chapters untouched.
         """
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
 
-        refined = self._refine_chapter_boundaries(
-            chapters=chapters_for_output,
-            transcript_segments=transcript_segments,
-            post_id=post_id,
-            post_guid=post_guid,
+        refined = refine_description_chapters_with_word_refiner(
+            chapters_for_output,
+            transcript_segments,
+            config=self.config,
+            logger_override=self.logger,
             words_by_sequence=words_by_sequence,
         )
         self.logger.info(
@@ -1665,6 +1641,10 @@ class PodcastProcessor:
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
 
+        # When the intra-segment toggle is on, the topic-plan call also returns
+        # each chapter's first word and aligns starts to exact word timestamps
+        # in the same call (no second LLM round-trip).
+        align_word_starts = self._word_level_boundary_refiner_enabled()
         topic_chapters = generate_topic_chapters_from_transcript_with_llm(
             transcript_segments,
             llm_model=getattr(self.config, "llm_model", None),
@@ -1676,20 +1656,14 @@ class PodcastProcessor:
             post_guid=post_guid,
             removed_windows_ms=removed_windows_ms,
             llm_service_tier=getattr(self.config, "llm_service_tier", None),
+            align_word_starts=align_word_starts,
+            words_by_sequence=words_by_sequence,
+            word_align_config=self.config if align_word_starts else None,
         )
         if topic_chapters:
-            # When the intra-segment toggle is on, align starts with an LLM +
-            # word-level pass instead of the title-matching heuristic.
-            if self._word_level_boundary_refiner_enabled():
-                refined_topic_chapters = self._refine_chapter_boundaries(
-                    chapters=topic_chapters,
-                    transcript_segments=transcript_segments,
-                    post_id=post_id,
-                    post_guid=post_guid,
-                    words_by_sequence=words_by_sequence,
-                )
-            else:
-                refined_topic_chapters = refine_transcript_chapters_with_word_refiner(
+            # With the toggle off, fall back to the title-matching heuristic.
+            if not align_word_starts:
+                topic_chapters = refine_transcript_chapters_with_word_refiner(
                     topic_chapters,
                     transcript_segments,
                     config=self.config,
@@ -1697,9 +1671,9 @@ class PodcastProcessor:
                 )
             self.logger.info(
                 "Using %d topic-based transcript chapters from LLM",
-                len(refined_topic_chapters),
+                len(topic_chapters),
             )
-            return refined_topic_chapters
+            return topic_chapters
 
         self.logger.warning(
             "Topic-based transcript chapter generation returned no usable plan; "

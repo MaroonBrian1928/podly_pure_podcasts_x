@@ -2250,7 +2250,6 @@ def test_segment_range_label_maps_chapter_word_boundary_sentinel() -> None:
 
     assert _format_segment_range_label(-100, -100) == "chapter titles (LLM)"
     assert _format_segment_range_label(-200, -200) == "chapter topic plan (LLM)"
-    assert _format_segment_range_label(-300, -300) == "chapter word boundaries (LLM)"
     # Real transcript ranges fall through to the raw "first-last" form.
     assert _format_segment_range_label(5, 9) == "5-9"
 
