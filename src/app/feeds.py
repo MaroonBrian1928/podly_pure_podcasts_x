@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import feedparser
 import PyRSS2Gen
@@ -779,8 +779,12 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
     base_url = _get_base_url()
 
     # Podcast clients stream enclosure URLs directly, so use the inline MP3 route
-    # rather than the attachment-style download endpoint.
-    audio_url = _append_feed_token_params(f"{base_url}/post/{post.guid}.mp3")
+    # rather than the attachment-style download endpoint. Encode the guid so that
+    # guids containing slashes / question marks (e.g. supercast URL-as-guid posts)
+    # don't break URL parsing on the client or Flask routing on the server.
+    audio_url = _append_feed_token_params(
+        f"{base_url}/post/{quote(post.guid, safe='')}.mp3"
+    )
     description = build_post_feed_description_html(post)
 
     title = post.title

@@ -144,8 +144,18 @@ def _resolve_feed_id(path: str) -> int | None:
 
     if path.startswith("/post/"):
         remainder = path[len("/post/") :]
-        guid = remainder.split("/", 1)[0]
-        guid = guid.split(".", 1)[0]
+        # Guids can be URL-shaped (e.g. supercast feeds use the episode URL as
+        # the guid), and Flask hands us a decoded path, so the guid here may
+        # contain "/" and "." characters. Mirror the route patterns
+        # ("/post/<path:guid>.mp3" and "/post/<path:guid>/original.mp3") by
+        # stripping the known suffix rather than splitting on the first
+        # delimiter, which would mangle URL-shaped guids and reject the token.
+        if remainder.endswith("/original.mp3"):
+            guid = remainder[: -len("/original.mp3")]
+        elif remainder.endswith(".mp3"):
+            guid = remainder[: -len(".mp3")]
+        else:
+            guid = remainder.split("/", 1)[0].split(".", 1)[0]
         post = Post.query.filter_by(guid=guid).first()
         return post.feed_id if post else None
 

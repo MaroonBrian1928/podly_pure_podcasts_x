@@ -6791,7 +6791,11 @@ fn push_item(
     };
     push_text_element(xml, "title", &title);
     let audio_url = append_feed_token(
-        &format!("{}/post/{}.mp3", base_url.trim_end_matches('/'), post.guid),
+        &format!(
+            "{}/post/{}.mp3",
+            base_url.trim_end_matches('/'),
+            urlencoding_simple(&post.guid)
+        ),
         feed_token,
         feed_secret,
     );
@@ -9254,6 +9258,18 @@ mod tests {
         assert_eq!(calls[2]["estimated_cost"], 0.3375);
         // ISO format mirrors Python's datetime.isoformat() (space → 'T').
         assert_eq!(calls[2]["timestamp"], "2026-05-15T12:00:01");
+    }
+
+    #[test]
+    fn urlencoding_simple_matches_python_quote_safe_empty() {
+        // Matches behavior of Python's urllib.parse.quote(s, safe='').
+        // Unreserved chars (RFC 3986: ALPHA / DIGIT / - _ . ~) pass through;
+        // everything else (including '/' and '?') becomes %XX.
+        assert_eq!(urlencoding_simple("guid-1"), "guid-1");
+        assert_eq!(
+            urlencoding_simple("https://searchengine.supercast.tech/episodes/1847512?key=abc"),
+            "https%3A%2F%2Fsearchengine.supercast.tech%2Fepisodes%2F1847512%3Fkey%3Dabc"
+        );
     }
 
     #[test]
