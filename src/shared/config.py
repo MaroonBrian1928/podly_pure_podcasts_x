@@ -129,8 +129,12 @@ class Config(BaseModel):
     enable_word_level_boundary_refinder: bool = Field(
         default=DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
         description=(
-            "Enable intra-segment ad boundary refinement. Uses saved word "
-            "timestamps when available and falls back to segment-level heuristics."
+            "Enable intra-segment boundary refinement. For ads, uses saved word "
+            "timestamps to refine cut boundaries within a segment. For chapters "
+            "(transcript- and description-sourced), makes an additional LLM call "
+            "that names each chapter's start phrase and resolves it to an exact "
+            "word-level timecode. Falls back to segment-level heuristics when "
+            "word timestamps are unavailable."
         ),
     )
     llm_service_tier: str = Field(

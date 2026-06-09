@@ -5623,7 +5623,9 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         })?;
         for row in rows {
             let (guid, completed_at) = row?;
-            let entry = latest_completed.entry(guid).or_insert_with(|| completed_at.clone());
+            let entry = latest_completed
+                .entry(guid)
+                .or_insert_with(|| completed_at.clone());
             if completed_at > *entry {
                 *entry = completed_at;
             }
@@ -5664,9 +5666,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
     let mut user_feed_map: HashMap<i64, Vec<i64>> = HashMap::new();
     {
         let mut stmt = conn.prepare("SELECT feed_id, user_id FROM feed_supporter")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         for row in rows {
             let (feed_id, user_id) = row?;
             *feed_subscriber_count.entry(feed_id).or_insert(0) += 1;
@@ -5679,11 +5679,9 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
     let mut posts_by_guid: HashMap<String, (i64, i64, f64)> = HashMap::new(); // guid -> (id, feed_id, duration)
     let mut post_ids: Vec<i64> = Vec::new();
     if !guids.is_empty() {
-        let placeholders: String =
-            (0..guids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT id, guid, feed_id, duration FROM post WHERE guid IN ({placeholders})"
-        );
+        let placeholders: String = (0..guids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql =
+            format!("SELECT id, guid, feed_id, duration FROM post WHERE guid IN ({placeholders})");
         let mut stmt = conn.prepare(&sql)?;
         let params: Vec<&dyn rusqlite::ToSql> =
             guids.iter().map(|g| g as &dyn rusqlite::ToSql).collect();
@@ -5704,8 +5702,10 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
     // --- ad time per post (sum of (end-start) where label = 'ad') ---
     let mut ad_time_by_post: HashMap<i64, f64> = HashMap::new();
     if !post_ids.is_empty() {
-        let placeholders: String =
-            (0..post_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders: String = (0..post_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT transcript_segment.post_id, \
                     SUM(transcript_segment.end_time - transcript_segment.start_time) \
@@ -5731,8 +5731,10 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
     // --- Successful model_calls per post (used for aggregation only) ---
     let mut calls_by_post: HashMap<i64, Vec<CostsModelCallRow>> = HashMap::new();
     if !post_ids.is_empty() {
-        let placeholders: String =
-            (0..post_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders: String = (0..post_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
                     service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
@@ -5769,18 +5771,12 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
     }
 
     // --- Per-feed / per-user aggregation ---
-    let mut user_costs: HashMap<i64, f64> =
-        users.iter().map(|u| (u.0, 0.0)).collect();
-    let mut feed_costs: HashMap<i64, f64> =
-        feeds.iter().map(|f| (f.0, 0.0)).collect();
-    let mut feed_llm_costs: HashMap<i64, f64> =
-        feeds.iter().map(|f| (f.0, 0.0)).collect();
-    let mut feed_whisper_costs: HashMap<i64, f64> =
-        feeds.iter().map(|f| (f.0, 0.0)).collect();
-    let mut feed_ina_costs: HashMap<i64, f64> =
-        feeds.iter().map(|f| (f.0, 0.0)).collect();
-    let mut feed_episode_counts: HashMap<i64, i64> =
-        feeds.iter().map(|f| (f.0, 0)).collect();
+    let mut user_costs: HashMap<i64, f64> = users.iter().map(|u| (u.0, 0.0)).collect();
+    let mut feed_costs: HashMap<i64, f64> = feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_llm_costs: HashMap<i64, f64> = feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_whisper_costs: HashMap<i64, f64> = feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_ina_costs: HashMap<i64, f64> = feeds.iter().map(|f| (f.0, 0.0)).collect();
+    let mut feed_episode_counts: HashMap<i64, i64> = feeds.iter().map(|f| (f.0, 0)).collect();
     let mut total_audio_hours: f64 = 0.0;
 
     for (guid, _) in latest_completed.iter() {
@@ -5790,7 +5786,11 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         };
         let ad_time = *ad_time_by_post.get(&post_id).unwrap_or(&0.0);
         let duration = cut_duration + ad_time;
-        let duration_hours = if duration > 0.0 { duration / 3600.0 } else { 0.0 };
+        let duration_hours = if duration > 0.0 {
+            duration / 3600.0
+        } else {
+            0.0
+        };
         total_audio_hours += duration_hours;
         let post_calls = calls_by_post.get(&post_id);
         let llm_cost: f64 = post_calls
@@ -5883,8 +5883,14 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         })
         .collect();
     feeds_data.sort_by(|a, b| {
-        let av = a.get("monthly_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let bv = b.get("monthly_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let av = a
+            .get("monthly_cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let bv = b
+            .get("monthly_cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -5918,8 +5924,7 @@ fn render_admin_costs_calls(args: CostsRenderCallsArgs) -> Result<Value> {
     let per_page = args.per_page.clamp(1, 200);
     let offset = (page - 1) * per_page;
 
-    let total: i64 =
-        conn.query_row("SELECT COUNT(*) FROM model_call", [], |row| row.get(0))?;
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM model_call", [], |row| row.get(0))?;
 
     let mut stmt = conn.prepare(
         "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
@@ -6791,7 +6796,11 @@ fn push_item(
     };
     push_text_element(xml, "title", &title);
     let audio_url = append_feed_token(
-        &format!("{}/post/{}.mp3", base_url.trim_end_matches('/'), post.guid),
+        &format!(
+            "{}/post/{}.mp3",
+            base_url.trim_end_matches('/'),
+            urlencoding_simple(&post.guid)
+        ),
         feed_token,
         feed_secret,
     );
@@ -8325,6 +8334,20 @@ mod tests {
     }
 
     #[test]
+    fn format_segment_range_label_maps_chapter_sentinels() {
+        assert_eq!(
+            format_segment_range_label(-100, -100),
+            "chapter titles (LLM)"
+        );
+        assert_eq!(
+            format_segment_range_label(-200, -200),
+            "chapter topic plan (LLM)"
+        );
+        // Real transcript ranges fall through to the raw "first-last" form.
+        assert_eq!(format_segment_range_label(5, 9), "5-9");
+    }
+
+    #[test]
     fn wb_refine_start_clamps_to_max_extension_floor() {
         // Phrase exists but resolves way earlier than orig_ad_start - 30.
         // Without clamp the estimated start would be 0.0; clamp must keep
@@ -9107,22 +9130,17 @@ mod tests {
              );",
         )
         .unwrap();
-        conn.execute("INSERT INTO feed VALUES (1, 'Cost Feed')", []).unwrap();
+        conn.execute("INSERT INTO feed VALUES (1, 'Cost Feed')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO users VALUES (1, 'a', 'user', 'active', NULL), (2, 'b', 'user', 'active', 'sub_x')",
             [],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO feed_supporter VALUES (1, 1, 1), (2, 1, 2)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO post VALUES (1, 1, 'cost-guid', 3600.0)",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO feed_supporter VALUES (1, 1, 1), (2, 1, 2)", [])
+            .unwrap();
+        conn.execute("INSERT INTO post VALUES (1, 1, 'cost-guid', 3600.0)", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO processing_job VALUES ('job-1', 'cost-guid', 'completed', '2026-05-15 12:00:00')",
             [],
@@ -9207,7 +9225,8 @@ mod tests {
         seed_costs_db(&db_path);
         // Drop the whisper + INA rows so only the LLM call remains.
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("DELETE FROM model_call WHERE id IN (2, 3)", []).unwrap();
+        conn.execute("DELETE FROM model_call WHERE id IN (2, 3)", [])
+            .unwrap();
         drop(conn);
         let rates_json = write_costs_rates_json(dir.path());
 
@@ -9254,6 +9273,18 @@ mod tests {
         assert_eq!(calls[2]["estimated_cost"], 0.3375);
         // ISO format mirrors Python's datetime.isoformat() (space → 'T').
         assert_eq!(calls[2]["timestamp"], "2026-05-15T12:00:01");
+    }
+
+    #[test]
+    fn urlencoding_simple_matches_python_quote_safe_empty() {
+        // Matches behavior of Python's urllib.parse.quote(s, safe='').
+        // Unreserved chars (RFC 3986: ALPHA / DIGIT / - _ . ~) pass through;
+        // everything else (including '/' and '?') becomes %XX.
+        assert_eq!(urlencoding_simple("guid-1"), "guid-1");
+        assert_eq!(
+            urlencoding_simple("https://searchengine.supercast.tech/episodes/1847512?key=abc"),
+            "https%3A%2F%2Fsearchengine.supercast.tech%2Fepisodes%2F1847512%3Fkey%3Dabc"
+        );
     }
 
     #[test]

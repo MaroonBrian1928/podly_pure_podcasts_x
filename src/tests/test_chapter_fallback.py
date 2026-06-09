@@ -5,14 +5,17 @@ from unittest.mock import patch
 
 from podcast_processor.chapter_fallback import (
     TOPIC_CHAPTER_CAP_WINDOW_SECONDS,
+    TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS,
     TOPIC_CHAPTER_MAX_BLOCK_SECONDS,
     TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK,
     TOPIC_CHAPTER_SHORT_EPISODE_CAP,
     TOPIC_CHAPTER_SHORT_EPISODE_SECONDS,
     TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
+    _align_chapters_to_first_words,
     _build_topic_blocks,
     _build_topic_chapter_generation_prompt,
     _chapters_from_topic_plan,
+    _parse_topic_chapter_opening_words,
     _parse_topic_chapter_response,
     _topic_chapter_count_cap_for_duration,
     generate_chapters_from_transcript,
@@ -112,6 +115,38 @@ def test_generate_chapters_from_transcript_splits_windows_and_titles() -> None:
     ]
 
 
+def test_topic_chapter_output_token_cap_allows_long_folded_plans() -> None:
+    # Generous cap so long folded plans never truncate; reasoning is constrained
+    # separately so the headroom isn't spent on thinking.
+    assert TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS == 8192
+
+
+def test_topic_chapter_plan_constrains_reasoning() -> None:
+    from podcast_processor.chapter_fallback import _request_topic_chapter_plan
+
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"chapter_count":1,"chapters":[{"block_index":0,"title":"X"}]}'
+                )
+            )
+        ]
+    )
+    with patch("litellm.completion", return_value=response) as completion_mock:
+        _request_topic_chapter_plan(
+            llm_model="test-model",
+            prompt="prompt",
+            openai_timeout_sec=30,
+        )
+
+    kwargs = completion_mock.call_args.kwargs
+    # Mechanical extraction: reasoning is capped low so thinking models don't
+    # burn the completion budget and truncate the plan JSON.
+    assert kwargs.get("reasoning_effort") == "low"
+    assert kwargs.get("drop_params") is True
+
+
 def test_refine_description_chapters_with_word_refiner_adjusts_starts() -> None:
     config = create_standard_test_config()
     config.enable_word_level_boundary_refinder = True
@@ -151,6 +186,77 @@ def test_refine_description_chapters_with_word_refiner_adjusts_starts() -> None:
     assert [ch.start_time_ms for ch in refined] == [12_000, 318_000]
     assert [ch.end_time_ms for ch in refined] == [318_000, 650_000]
     assert [ch.title for ch in refined] == ["First story", "Second story"]
+
+
+def test_parse_topic_chapter_opening_words_salvages_complete_items() -> None:
+    content = (
+        '```json\n{"chapter_count":3,"chapters":['
+        '{"block_index":0,"title":"First story","first_word":"hello"},'
+        '{"block_index":4,"title":"Second story","first_word":"welcome"},'
+        '{"block_index":9,"title":"Cut off","first_word"'
+    )
+
+    parsed = _parse_topic_chapter_opening_words(content)
+
+    assert parsed == {0: "hello", 4: "welcome"}
+
+
+def test_align_chapters_to_first_words_uses_exact_word_timestamps() -> None:
+    config = create_standard_test_config()
+    chapters = [
+        Chapter("c0", "First story", 0, 300_000),
+        Chapter("c1", "Second story", 300_000, 600_000),
+    ]
+    blocks = [
+        {
+            "block_index": 0,
+            "start_ms": 0,
+            "end_ms": 120_000,
+            "text": "cold open first story starts",
+        },
+        {
+            "block_index": 1,
+            "start_ms": 300_000,
+            "end_ms": 420_000,
+            "text": "transition second story begins",
+        },
+    ]
+    transcript_segments = [
+        SimpleNamespace(
+            sequence_num=0,
+            start_time=0.0,
+            end_time=20.0,
+            text="cold open first story starts",
+        ),
+        SimpleNamespace(
+            sequence_num=1,
+            start_time=300.0,
+            end_time=320.0,
+            text="transition second story begins",
+        ),
+    ]
+    words_by_sequence = {
+        0: [
+            {"word": "cold", "start": 0.0, "end": 0.4},
+            {"word": "first", "start": 12.0, "end": 12.4},
+        ],
+        1: [
+            {"word": "transition", "start": 300.0, "end": 300.4},
+            {"word": "second", "start": 318.0, "end": 318.4},
+        ],
+    }
+
+    aligned = _align_chapters_to_first_words(
+        chapters,
+        blocks=blocks,
+        opening_words_by_block={0: "first", 1: "second"},
+        transcript_segments=transcript_segments,
+        words_by_sequence=words_by_sequence,
+        config=config,
+    )
+
+    assert [ch.start_time_ms for ch in aligned] == [12_000, 318_000]
+    assert aligned[0].end_time_ms == 318_000
 
 
 def test_refine_transcript_chapters_falls_back_to_original_on_collision() -> None:
@@ -348,12 +454,24 @@ def test_generate_topic_chapters_from_transcript_with_llm_uses_llm_boundaries() 
 def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_blocks() -> (
     None
 ):
+    config = create_standard_test_config()
     transcript_segments = [
         SimpleNamespace(start_time=0.0, end_time=20.0, text="Opening recap"),
-        SimpleNamespace(start_time=600.0, end_time=620.0, text="Mission setup"),
-        SimpleNamespace(start_time=1200.0, end_time=1220.0, text="Castle conflict"),
-        SimpleNamespace(start_time=1800.0, end_time=1820.0, text="Roundtable vote"),
+        SimpleNamespace(
+            sequence_num=1, start_time=600.0, end_time=620.0, text="Mission setup"
+        ),
+        SimpleNamespace(
+            sequence_num=2, start_time=1200.0, end_time=1220.0, text="Castle conflict"
+        ),
+        SimpleNamespace(
+            sequence_num=3, start_time=1800.0, end_time=1820.0, text="Roundtable vote"
+        ),
     ]
+    words_by_sequence = {
+        1: [{"word": "Mission", "start": 600.0, "end": 600.4}],
+        2: [{"word": "Castle", "start": 1212.0, "end": 1212.4}],
+        3: [{"word": "Roundtable", "start": 1813.0, "end": 1813.4}],
+    }
 
     prompts: list[str] = []
 
@@ -375,8 +493,8 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     first_response = _mock_response(
         (
             '{"chapter_count":4,"chapters":['
-            '{"block_index":0,"title":"Opening recap"},'
-            '{"block_index":1,"title":"Mission setup"},'
+            '{"block_index":0,"title":"Opening recap","first_word":"Opening"},'
+            '{"block_index":1,"title":"Mission setup","first_word":"Mission"},'
             '{"block_index":'
         ),
         finish_reason="length",
@@ -384,9 +502,9 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     second_response = _mock_response(
         (
             '{"chapter_count":3,"chapters":['
-            '{"block_index":1,"title":"Different duplicate title"},'
-            '{"block_index":2,"title":"Castle conflict"},'
-            '{"block_index":3,"title":"Roundtable vote"}'
+            '{"block_index":1,"title":"Different duplicate title","first_word":"Mission"},'
+            '{"block_index":2,"title":"Castle conflict","first_word":"Castle"},'
+            '{"block_index":3,"title":"Roundtable vote","first_word":"Roundtable"}'
             "]}"
         ),
         finish_reason="stop",
@@ -408,21 +526,25 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
             total_duration_ms=2_400_000,
             openai_timeout_sec=30,
             min_chapter_seconds=0,
+            align_word_starts=True,
+            words_by_sequence=words_by_sequence,
+            word_align_config=config,
         )
 
     assert completion_mock.call_count == 2
     assert len(prompts) == 2
     assert "Return only chapters with block_index > 1" in prompts[1]
     assert "Do not repeat existing chapter block_index values: [0, 1]" in prompts[1]
+    assert "first_word" in prompts[1]
 
     retry_payload = json.loads(prompts[1].split("Transcript blocks:\n", 1)[1])
     assert [block["block_index"] for block in retry_payload] == [1, 2, 3]
 
-    assert [c.start_time_ms for c in chapters] == [0, 600_000, 1_200_000, 1_800_000]
+    assert [c.start_time_ms for c in chapters] == [0, 600_000, 1_212_000, 1_813_000]
     assert [c.end_time_ms for c in chapters] == [
         600_000,
-        1_200_000,
-        1_800_000,
+        1_212_000,
+        1_813_000,
         2_400_000,
     ]
     assert [c.title for c in chapters] == [
@@ -455,13 +577,17 @@ def test_build_topic_blocks_reduces_prompt_payload_for_long_transcript() -> None
 
 
 def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
-    lead_in = "a" * 700
+    # Lead-in sits past the truncation head, and the trailing filler pushes the
+    # full text well over the budget, so this only passes if the truncation keeps
+    # a window around the block midpoint (not just the front) — where the topic
+    # signal lives.
+    lead_in = "a" * 500
     topic_signal = " riverfront search at 2 a.m."
     segments = [
         SimpleNamespace(
             start_time=0.0,
             end_time=45.0,
-            text=lead_in + topic_signal + (" b" * 100),
+            text=lead_in + topic_signal + (" b" * 300),
         )
     ]
 
@@ -472,7 +598,10 @@ def test_build_topic_blocks_default_budget_preserves_expanded_context() -> None:
 
     assert TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK == 1000
     assert len(blocks) == 1
+    # The block must be truncated (full text exceeds the budget) yet still carry
+    # the mid-text topic signal.
     assert len(blocks[0]["text"]) <= TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK
+    assert len(blocks[0]["text"]) < len(segments[0].text)
     assert topic_signal.strip() in blocks[0]["text"]
 
 

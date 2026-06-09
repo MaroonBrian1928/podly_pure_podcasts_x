@@ -4,6 +4,7 @@ import logging
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 import feedparser
@@ -815,6 +816,35 @@ def test_feed_item_with_reverse_proxy(mock_post, app):
     assert enclosure.url == "http://podly.com:5001/post/test-guid.mp3"
     assert enclosure.type == "audio/mpeg"
     assert enclosure.length == mock_post._audio_len_bytes
+
+
+def test_feed_item_url_encodes_guid_with_slashes_and_query(app):
+    """Guids that are URLs (e.g. supercast) must be percent-encoded into the
+    enclosure path so the result is a single well-formed URL the podcast
+    client and Flask router can both handle."""
+    post = MockPost(guid="https://searchengine.supercast.tech/episodes/1847512?key=abc")
+
+    headers_dict = {"Host": "podly.com:5001"}
+    mock_headers = mock.MagicMock()
+    mock_headers.get.side_effect = headers_dict.get
+    mock_environ = mock.MagicMock()
+    mock_environ.get.return_value = None
+    mock_request = mock.MagicMock()
+    mock_request.headers = mock_headers
+    mock_request.environ = mock_environ
+    mock_request.is_secure = False
+
+    with app.app_context(), mock.patch("app.feeds.request", mock_request):
+        result = feed_item(cast(Post, post))
+
+    encoded = (
+        "https%3A%2F%2Fsearchengine.supercast.tech%2Fepisodes%2F1847512%3Fkey%3Dabc"
+    )
+    assert result.enclosure is not None
+    assert result.enclosure.url == f"http://podly.com:5001/post/{encoded}.mp3"
+    # The original guid must still appear verbatim in the <guid> element so
+    # existing subscriber dedupe on guid keeps matching.
+    assert result.guid == post.guid
 
 
 def test_feed_item_with_reverse_proxy_custom_port(mock_post, app):

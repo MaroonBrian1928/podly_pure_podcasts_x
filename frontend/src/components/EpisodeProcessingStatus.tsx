@@ -4,6 +4,7 @@ import { useEpisodeStatus } from '../hooks/useEpisodeStatus';
 import { buildProcessingProgressModel } from '../utils/processingProgress';
 import { computeStageDurationMs } from '../utils/jobStageDurations';
 import { JobProgressCaption, JobProgressIndicator } from './JobProgress';
+import ErrorTroubleshooter from './ErrorTroubleshooter';
 import type { JobStageEvent } from '../types';
 
 const ACTIVE_STATUSES = new Set([
@@ -87,8 +88,11 @@ export default function EpisodeProcessingStatus({
       />
 
       {(status.error || status.status === 'failed' || status.status === 'error') && (
-        <div className="text-xs text-red-600 text-center">
-          {status.error || 'Processing failed'}
+        <div>
+          <div className="text-xs text-red-600 text-center">
+            {status.error || 'Processing failed'}
+          </div>
+          <ErrorTroubleshooter episodeGuid={episodeGuid} />
         </div>
       )}
     </div>

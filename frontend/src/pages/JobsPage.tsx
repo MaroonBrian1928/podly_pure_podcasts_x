@@ -19,6 +19,7 @@ import {
 } from '../utils/datetime';
 import { computeStageDurationMs } from '../utils/jobStageDurations';
 import { buildProcessingProgressModel } from '../utils/processingProgress';
+import ErrorTroubleshooter from '../components/ErrorTroubleshooter';
 
 function getStatusColor(status: string) {
   switch (status) {
@@ -601,6 +602,12 @@ export default function JobsPage() {
                   </div>
                 ) : null}
               </div>
+
+              {(job.status === 'failed' || job.status === 'error') && job.post_guid && (
+                <div className="pt-3 border-t border-gray-200">
+                  <ErrorTroubleshooter episodeGuid={job.post_guid} jobId={job.job_id} />
+                </div>
+              )}
 
               {(job.status === 'pending' || job.status === 'running') && (
                 <div className="mt-3 pt-3 border-t border-gray-200">

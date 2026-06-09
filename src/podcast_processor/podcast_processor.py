@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from podcast_processor.chapter_ad_detector import (
 from podcast_processor.chapter_fallback import (
     generate_chapters_from_transcript,
     generate_topic_chapters_from_transcript_with_llm,
+    refine_description_chapters_with_word_refiner,
     refine_generated_chapter_titles_with_llm,
     refine_transcript_chapters_with_word_refiner,
     resolve_llm_path_chapters,
@@ -735,6 +736,37 @@ class PodcastProcessor:
             and getattr(self.config, "enable_word_level_boundary_refinder", False)
         )
 
+    def _load_words_by_sequence(
+        self,
+        post: Post | None,
+        rich_transcript_segments: list[Any] | None,
+    ) -> dict[int, list[Any]]:
+        """Build a ``{sequence_num: [WordTimestamp, ...]}`` map for chapter
+        word-boundary refinement.
+
+        Prefers the in-memory rich segments (freshest) and falls back to the
+        word timestamps persisted on the post. Returns an empty dict when no
+        word timestamps are available, in which case the LLM chapter refiner
+        degrades to its non-exact path.
+        """
+        from podcast_processor.transcribe import (
+            load_word_timestamps_by_sequence,
+            serialize_segment_word_timestamps,
+        )
+
+        if rich_transcript_segments:
+            try:
+                payload = serialize_segment_word_timestamps(rich_transcript_segments)
+            except Exception:  # noqa: BLE001
+                payload = None
+            if payload:
+                return load_word_timestamps_by_sequence(payload)
+
+        raw_payload = (
+            getattr(post, "transcript_word_timestamps", None) if post else None
+        )
+        return load_word_timestamps_by_sequence(raw_payload)
+
     def _has_saved_transcript_word_timestamps(self, post: Post | None) -> bool:
         if post is None:
             return False
@@ -1289,6 +1321,12 @@ class PodcastProcessor:
                 transcript_segments=transcript_segments,
                 logger_override=self.logger,
             )
+            word_refinement_active = self._word_level_boundary_refiner_enabled()
+            words_by_sequence = (
+                self._load_words_by_sequence(post, rich_transcript_segments)
+                if word_refinement_active
+                else None
+            )
             if chapter_source == "transcript" and chapters_for_output:
                 transcript_segments_for_chapters = (
                     self._filter_transcript_segments_for_chapters(
@@ -1312,6 +1350,19 @@ class PodcastProcessor:
                     # DB, so it needs the removed windows that produced
                     # `transcript_segments_for_chapters`.
                     removed_windows_ms=removed_segments_ms,
+                    words_by_sequence=words_by_sequence,
+                )
+            elif (
+                chapter_source == "description"
+                and chapters_for_output
+                and word_refinement_active
+            ):
+                chapters_for_output = self._refine_description_sourced_chapters(
+                    chapters_for_output=chapters_for_output,
+                    transcript_segments=transcript_segments,
+                    post_id=post.id,
+                    post_guid=post.guid,
+                    words_by_sequence=words_by_sequence,
                 )
             if chapters_for_output:
                 self.logger.info(
@@ -1404,13 +1455,26 @@ class PodcastProcessor:
         )
         self._raise_if_cancelled(job, 2, cancel_callback)
 
-        # Only transcribe if we still need transcript-based fallback chapters
-        if chapter_source == "none" or enable_profanity_bleeping:
-            fallback_label = (
-                "Transcribing audio for chapter generation"
-                if chapter_source == "none"
-                else "Transcribing audio for profanity bleeping"
-            )
+        # Word-level chapter refinement needs a transcript even when chapters
+        # came from the description, so force transcription in that case.
+        word_refinement_active = self._word_level_boundary_refiner_enabled()
+        needs_transcription_for_description = (
+            word_refinement_active and chapter_source == "description"
+        )
+
+        # Only transcribe if we still need transcript-based fallback chapters,
+        # profanity bleeping, or word-level chapter refinement.
+        if (
+            chapter_source == "none"
+            or enable_profanity_bleeping
+            or needs_transcription_for_description
+        ):
+            if chapter_source == "none":
+                fallback_label = "Transcribing audio for chapter generation"
+            elif enable_profanity_bleeping:
+                fallback_label = "Transcribing audio for profanity bleeping"
+            else:
+                fallback_label = "Transcribing audio for chapter refinement"
             self.status_manager.update_job_status(
                 job,
                 "running",
@@ -1427,7 +1491,8 @@ class PodcastProcessor:
             ) = self._transcribe_for_processing(
                 post,
                 include_word_timestamps=(
-                    enable_profanity_bleeping and not has_saved_bleep_windows
+                    (enable_profanity_bleeping and not has_saved_bleep_windows)
+                    or word_refinement_active
                 ),
                 progress_callback=fallback_progress,
             )
@@ -1446,6 +1511,11 @@ class PodcastProcessor:
             )
             self._raise_if_cancelled(job, 3, cancel_callback)
 
+        words_by_sequence = (
+            self._load_words_by_sequence(post, rich_transcript_segments)
+            if word_refinement_active
+            else None
+        )
         if (
             chapter_source == "transcript"
             and chapters_for_output
@@ -1459,6 +1529,20 @@ class PodcastProcessor:
                 # other call site uses ad-window-filtered segments that Rust
                 # cannot reconstruct from the DB alone.
                 post_guid=post.guid,
+                words_by_sequence=words_by_sequence,
+            )
+        elif (
+            chapter_source == "description"
+            and chapters_for_output
+            and transcript_segments
+            and word_refinement_active
+        ):
+            chapters_for_output = self._refine_description_sourced_chapters(
+                chapters_for_output=chapters_for_output,
+                transcript_segments=transcript_segments,
+                post_id=post.id,
+                post_guid=post.guid,
+                words_by_sequence=words_by_sequence,
             )
 
         self.status_manager.update_job_status(
@@ -1513,6 +1597,37 @@ class PodcastProcessor:
             bleep_windows=bleep_windows,
         )
 
+    def _refine_description_sourced_chapters(
+        self,
+        *,
+        chapters_for_output: list[Any],
+        transcript_segments: list[Any],
+        post_id: int | None,
+        post_guid: str | None = None,
+        words_by_sequence: Mapping[int, list[Any]] | None = None,
+    ) -> list[Any]:
+        """Align description-parsed chapter starts to word-level timestamps.
+
+        Uses the title-matching refiner (no extra LLM call). Only adjusts starts
+        when the intra-segment boundary toggle is on; otherwise returns the
+        chapters untouched.
+        """
+        if not chapters_for_output or not transcript_segments:
+            return chapters_for_output
+
+        refined = refine_description_chapters_with_word_refiner(
+            chapters_for_output,
+            transcript_segments,
+            config=self.config,
+            logger_override=self.logger,
+            words_by_sequence=words_by_sequence,
+        )
+        self.logger.info(
+            "Using %d description-sourced chapters after word-boundary refinement",
+            len(refined),
+        )
+        return refined
+
     def _refine_transcript_sourced_chapters(
         self,
         *,
@@ -1521,10 +1636,15 @@ class PodcastProcessor:
         post_id: int | None,
         post_guid: str | None = None,
         removed_windows_ms: list[tuple[int, int]] | None = None,
+        words_by_sequence: Mapping[int, list[Any]] | None = None,
     ) -> list[Any]:
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
 
+        # When the intra-segment toggle is on, the topic-plan call also returns
+        # each chapter's first word and aligns starts to exact word timestamps
+        # in the same call (no second LLM round-trip).
+        align_word_starts = self._word_level_boundary_refiner_enabled()
         topic_chapters = generate_topic_chapters_from_transcript_with_llm(
             transcript_segments,
             llm_model=getattr(self.config, "llm_model", None),
@@ -1536,19 +1656,24 @@ class PodcastProcessor:
             post_guid=post_guid,
             removed_windows_ms=removed_windows_ms,
             llm_service_tier=getattr(self.config, "llm_service_tier", None),
+            align_word_starts=align_word_starts,
+            words_by_sequence=words_by_sequence,
+            word_align_config=self.config if align_word_starts else None,
         )
         if topic_chapters:
-            refined_topic_chapters = refine_transcript_chapters_with_word_refiner(
-                topic_chapters,
-                transcript_segments,
-                config=self.config,
-                logger_override=self.logger,
-            )
+            # With the toggle off, fall back to the title-matching heuristic.
+            if not align_word_starts:
+                topic_chapters = refine_transcript_chapters_with_word_refiner(
+                    topic_chapters,
+                    transcript_segments,
+                    config=self.config,
+                    logger_override=self.logger,
+                )
             self.logger.info(
                 "Using %d topic-based transcript chapters from LLM",
-                len(refined_topic_chapters),
+                len(topic_chapters),
             )
-            return refined_topic_chapters
+            return topic_chapters
 
         self.logger.warning(
             "Topic-based transcript chapter generation returned no usable plan; "

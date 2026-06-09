@@ -123,7 +123,7 @@ export const feedsApi = {
     whitelisted: boolean,
     triggerProcessing = false
   ): Promise<{ processing_job?: { status: string; job_id?: string; message?: string } }> => {
-    const response = await api.post(`/api/posts/${guid}/whitelist`, {
+    const response = await api.post(postApiPath(guid, '/whitelist'), {
       whitelisted,
       trigger_processing: triggerProcessing,
     });
@@ -197,6 +197,14 @@ export const feedsApi = {
     guid: string
   ): Promise<{ status: string; job_id?: string; message: string; download_url?: string }> => {
     const response = await api.post(postApiPath(guid, '/reprocess/keep-transcript'));
+    return response.data;
+  },
+
+  troubleshootPost: async (
+    guid: string,
+    jobId?: string
+  ): Promise<{ ok: boolean; explanation?: string | null; message?: string; error?: string; used_traceback?: boolean }> => {
+    const response = await api.post(postApiPath(guid, '/troubleshoot'), jobId ? { job_id: jobId } : {});
     return response.data;
   },
 
