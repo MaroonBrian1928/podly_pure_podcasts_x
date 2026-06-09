@@ -291,6 +291,7 @@ _SEGMENT_RANGE_LABELS: dict[tuple[int, int], str] = {
     (-100, -100): "chapter titles (LLM)",
     (-200, -200): "chapter topic plan (LLM)",
     (-201, -201): "chapter topic plan: continuation (LLM)",
+    (-300, -300): "chapter word boundaries (LLM)",
 }
 
 

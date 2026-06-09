@@ -166,7 +166,7 @@ export default function LLMSection() {
           </Field>
           <Field
             label="Enable Intra-Segment Boundary Refinement"
-            hint="Uses saved WhisperX word timestamps for exact ad cut timing when available, and falls back to the existing heuristic estimate otherwise."
+            hint="Uses saved WhisperX word timestamps for exact ad cut timing, and adds an LLM call that aligns chapter starts (transcript- and description-sourced) to exact word-level timecodes. Falls back to the existing heuristic estimate when word timestamps are unavailable."
           >
             <input
               type="checkbox"

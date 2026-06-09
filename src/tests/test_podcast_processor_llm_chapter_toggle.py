@@ -65,7 +65,8 @@ def test_llm_chapter_fallback_tagging_disabled_skips_resolver_and_writer() -> No
 def test_llm_description_chapters_skip_word_refiner_and_write_unmodified() -> None:
     config = create_standard_test_config()
     config.enable_llm_chapter_fallback_tagging = True
-    config.enable_word_level_boundary_refinder = True
+    # Intra-segment refinement OFF -> description chapters are written verbatim.
+    config.enable_word_level_boundary_refinder = False
 
     transcription_manager = MagicMock()
     transcript_segments = [
@@ -123,8 +124,7 @@ def test_llm_description_chapters_skip_word_refiner_and_write_unmodified() -> No
         ) as write_mock,
         patch(
             "podcast_processor.podcast_processor."
-            "refine_description_chapters_with_word_refiner",
-            create=True,
+            "refine_chapter_starts_with_llm_word_boundaries",
         ) as refine_mock,
     ):
         processor._perform_llm_based_processing(post, job, "/tmp/output.mp3")
@@ -134,6 +134,70 @@ def test_llm_description_chapters_skip_word_refiner_and_write_unmodified() -> No
     assert write_mock.call_count == 1
     assert write_mock.call_args.kwargs["chapters_to_keep"] == description_chapters
     assert write_mock.call_args.kwargs["removed_segments"] == []
+
+
+def test_llm_description_chapters_refined_when_word_level_enabled() -> None:
+    config = create_standard_test_config()
+    config.enable_llm_chapter_fallback_tagging = True
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = True
+
+    transcription_manager = MagicMock()
+    transcript_segments = [
+        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=10.0, text="Intro"),
+        SimpleNamespace(sequence_num=1, start_time=10.0, end_time=20.0, text="Topic"),
+    ]
+    transcription_manager.transcribe.return_value = transcript_segments
+
+    audio_processor = MagicMock()
+    audio_processor.process_audio.return_value = []
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.transcription_manager = transcription_manager
+    processor.audio_processor = audio_processor
+    processor.status_manager = MagicMock()
+    processor._classify_ad_segments = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="00:00 Intro\n00:10 Topic",
+        unprocessed_audio_path="/tmp/input.mp3",
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+    description_chapters = [
+        Chapter("desc0", "Intro", 0, 10_000),
+        Chapter("desc1", "Topic", 10_000, 20_000),
+    ]
+    refined_chapters = [
+        Chapter("desc0", "Intro", 0, 12_000),
+        Chapter("desc1", "Topic", 12_000, 20_000),
+    ]
+
+    with (
+        patch(
+            "podcast_processor.podcast_processor.resolve_llm_path_chapters",
+            return_value=(description_chapters, "description"),
+        ),
+        patch(
+            "podcast_processor.podcast_processor.write_adjusted_chapters"
+        ) as write_mock,
+        patch(
+            "podcast_processor.podcast_processor."
+            "refine_chapter_starts_with_llm_word_boundaries",
+            return_value=refined_chapters,
+        ) as refine_mock,
+    ):
+        processor._perform_llm_based_processing(post, job, "/tmp/output.mp3")
+
+    assert refine_mock.called
+    assert write_mock.call_args.kwargs["chapters_to_keep"] == refined_chapters
 
 
 def test_llm_transcript_chapters_exclude_removed_ad_overlap_segments() -> None:
@@ -753,3 +817,116 @@ def test_chapter_insert_strategy_forces_llm_chapter_fallback_enabled() -> None:
         )
         is True
     )
+
+
+def _chapter_dispatch_processor(config) -> PodcastProcessor:
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    return processor
+
+
+def test_refine_description_sourced_chapters_uses_word_refiner_when_enabled() -> None:
+    config = create_standard_test_config()
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = True
+    processor = _chapter_dispatch_processor(config)
+
+    chapters = [Chapter("d0", "First", 5_000, 100_000)]
+    segments = [
+        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0, text="hello")
+    ]
+    refined = [Chapter("d0", "First", 12_000, 100_000)]
+
+    with patch(
+        "podcast_processor.podcast_processor.refine_chapter_starts_with_llm_word_boundaries",
+        return_value=refined,
+    ) as refine_mock:
+        out = processor._refine_description_sourced_chapters(
+            chapters_for_output=chapters,
+            transcript_segments=segments,
+            post_id=1,
+            post_guid="guid-1",
+            words_by_sequence=None,
+        )
+
+    assert refine_mock.called
+    assert out == refined
+
+
+def test_refine_transcript_sourced_chapters_uses_llm_word_refiner_when_enabled() -> (
+    None
+):
+    config = create_standard_test_config()
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = True
+    processor = _chapter_dispatch_processor(config)
+
+    chapters = [Chapter("t0", "Topic", 0, 100_000)]
+    segments = [
+        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0, text="hello")
+    ]
+    topic = [Chapter("t0", "Topic", 0, 100_000)]
+    refined = [Chapter("t0", "Topic", 12_000, 100_000)]
+
+    with (
+        patch(
+            "podcast_processor.podcast_processor.generate_topic_chapters_from_transcript_with_llm",
+            return_value=topic,
+        ),
+        patch(
+            "podcast_processor.podcast_processor.refine_chapter_starts_with_llm_word_boundaries",
+            return_value=refined,
+        ) as llm_mock,
+        patch(
+            "podcast_processor.podcast_processor.refine_transcript_chapters_with_word_refiner",
+            side_effect=AssertionError("heuristic refiner must not run when flag on"),
+        ),
+    ):
+        out = processor._refine_transcript_sourced_chapters(
+            chapters_for_output=chapters,
+            transcript_segments=segments,
+            post_id=1,
+            post_guid="guid-1",
+        )
+
+    assert llm_mock.called
+    assert out == refined
+
+
+def test_refine_transcript_sourced_chapters_uses_heuristic_when_disabled() -> None:
+    config = create_standard_test_config()
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = False
+    processor = _chapter_dispatch_processor(config)
+
+    chapters = [Chapter("t0", "Topic", 0, 100_000)]
+    segments = [
+        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0, text="hello")
+    ]
+    topic = [Chapter("t0", "Topic", 0, 100_000)]
+    heuristic = [Chapter("t0", "Topic", 8_000, 100_000)]
+
+    with (
+        patch(
+            "podcast_processor.podcast_processor.generate_topic_chapters_from_transcript_with_llm",
+            return_value=topic,
+        ),
+        patch(
+            "podcast_processor.podcast_processor.refine_transcript_chapters_with_word_refiner",
+            return_value=heuristic,
+        ) as heuristic_mock,
+        patch(
+            "podcast_processor.podcast_processor.refine_chapter_starts_with_llm_word_boundaries",
+            side_effect=AssertionError("LLM refiner must not run when flag off"),
+        ),
+    ):
+        out = processor._refine_transcript_sourced_chapters(
+            chapters_for_output=chapters,
+            transcript_segments=segments,
+            post_id=1,
+            post_guid="guid-1",
+        )
+
+    assert heuristic_mock.called
+    assert out == heuristic

@@ -457,6 +457,7 @@ enum ChaptersSubcommand {
     TopicBlocks(ChaptersTopicBlocksArgs),
     TopicPlanParse(ChaptersTopicPlanParseArgs),
     TopicPlanApply(ChaptersTopicPlanApplyArgs),
+    WordRefineFromLlm(ChaptersWordRefineFromLlmArgs),
 }
 
 #[derive(Args)]
@@ -488,7 +489,7 @@ struct ChaptersTopicBlocksArgs {
     // Keep in sync with TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK in
     // src/podcast_processor/chapter_fallback.py. The wrapper passes this
     // explicitly so the CLI default is only used by direct CLI invocations.
-    #[arg(long = "max-chars-per-block", default_value_t = 1000)]
+    #[arg(long = "max-chars-per-block", default_value_t = 600)]
     max_chars_per_block: i64,
     /// Optional override; otherwise Rust computes from max(end_time) over segments.
     #[arg(long = "total-duration-ms")]
@@ -500,6 +501,20 @@ struct ChaptersTopicBlocksArgs {
     /// instead (parity with Python).
     #[arg(long = "removed-windows-json")]
     removed_windows_json: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ChaptersWordRefineFromLlmArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    /// Path to a JSON file with
+    /// `{raw_content, context_window_seconds, chapters: [{index, approx_start_seconds}]}`.
+    /// Mirrors `refine_chapter_starts_with_llm_word_boundaries` in
+    /// `src/podcast_processor/chapter_fallback.py`.
+    #[arg(long)]
+    input: PathBuf,
 }
 
 #[derive(Args)]
@@ -826,6 +841,9 @@ fn run() -> Result<()> {
             }
             ChaptersSubcommand::TopicPlanApply(args) => {
                 print_json(&run_chapters_topic_plan_apply(args)?)
+            }
+            ChaptersSubcommand::WordRefineFromLlm(args) => {
+                print_json(&run_chapters_word_refine_from_llm(args)?)
             }
         },
     }
@@ -1998,6 +2016,194 @@ fn run_transcript_wb_refine_from_llm(args: TranscriptWbRefineFromLlmArgs) -> Res
         "end_error": end_error,
         "start_reason": payload.start_reason,
         "end_reason": payload.end_reason,
+    }))
+}
+
+/// Mirror of `_SegmentIndex.context_segments_around_time` in
+/// `src/podcast_processor/chapter_fallback.py`. `segments` MUST be sorted by
+/// `start_time` ascending (the caller sorts before calling). Returns the slice
+/// of segments whose timing overlaps `[time - window, time + window]`, falling
+/// back to the first segment when nothing overlaps (parity with Python).
+fn wb_context_segments_around_time(
+    segments: &[WbSegment],
+    time_seconds: f64,
+    window_seconds: f64,
+) -> Vec<&WbSegment> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let window = window_seconds.max(0.0);
+    let start_t = time_seconds - window;
+    let end_t = time_seconds + window;
+
+    // bisect_right(start_times, end_t): count of segments with start_time <= end_t.
+    let right = segments.partition_point(|s| s.start_time <= end_t);
+    let mut left = right;
+    while left > 0 && segments[left - 1].end_time >= start_t {
+        left -= 1;
+    }
+
+    let selected: Vec<&WbSegment> = segments[left..right].iter().collect();
+    if selected.is_empty() {
+        return vec![&segments[0]];
+    }
+    selected
+}
+
+/// Mirror of `_parse_chapter_boundary_response` in
+/// `src/podcast_processor/chapter_fallback.py`. Returns `{chapter_index:
+/// (start_segment_seq, start_phrase)}`. An empty map signals an unparseable
+/// response (the caller reports `parse_status: "failed"`).
+fn parse_chapter_boundary_response(content: &str) -> HashMap<i64, (Option<i64>, String)> {
+    let mut out: HashMap<i64, (Option<i64>, String)> = HashMap::new();
+    let text = content.trim();
+    if text.is_empty() {
+        return out;
+    }
+
+    let lead = regex::Regex::new(r"(?is)^```(?:json)?\s*").unwrap();
+    let stripped = lead.replace(text, "");
+    let trail = regex::Regex::new(r"(?s)\s*```$").unwrap();
+    let stripped = trail.replace(&stripped, "").into_owned();
+
+    let data: Option<Value> = match serde_json::from_str::<Value>(&stripped) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            let braces = regex::Regex::new(r"(?s)\{.*\}").unwrap();
+            braces
+                .find(&stripped)
+                .and_then(|m| serde_json::from_str::<Value>(m.as_str()).ok())
+        }
+    };
+
+    let data = match data {
+        Some(v) => v,
+        None => return out,
+    };
+    let items = match data.get("chapters").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return out,
+    };
+
+    for item in items {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let idx = match wb_coerce_int(obj.get("chapter_index")) {
+            Some(i) => i,
+            None => continue,
+        };
+        let seq = wb_coerce_int(obj.get("refined_start_segment_seq"));
+        let phrase = obj
+            .get("refined_start_phrase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        out.insert(idx, (seq, phrase));
+    }
+    out
+}
+
+/// DB-backed bundled chapter resolver: parse the batched LLM response, load the
+/// transcript + word timestamps, and resolve each chapter's start phrase to an
+/// exact word-level timecode. The Python caller applies the shift clamp and
+/// monotonic assembly, so this returns raw resolved starts (or null) per
+/// chapter — mirroring the per-chapter `WordBoundaryRefiner._estimate_phrase_time`
+/// calls in `refine_chapter_starts_with_llm_word_boundaries`.
+fn run_chapters_word_refine_from_llm(args: ChaptersWordRefineFromLlmArgs) -> Result<Value> {
+    let input_raw = std::fs::read_to_string(&args.input).with_context(|| {
+        format!(
+            "failed to read chapters word-refine input {}",
+            args.input.display()
+        )
+    })?;
+    let input: Value = serde_json::from_str(&input_raw)
+        .with_context(|| "failed to parse chapters word-refine input JSON")?;
+
+    let content = input
+        .get("raw_content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let window = input
+        .get("context_window_seconds")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(45.0);
+    let chapter_meta: Vec<(i64, f64)> = input
+        .get("chapters")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let idx = c.get("index").and_then(|v| v.as_i64())?;
+                    let approx = c
+                        .get("approx_start_seconds")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    Some((idx, approx))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let parsed = parse_chapter_boundary_response(content);
+    if parsed.is_empty() {
+        return Ok(json!({"parse_status": "failed", "chapters": []}));
+    }
+
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let segment_rows = query_stats_transcript_segments(&conn, post.id)?;
+    let words_by_seq = query_wb_word_timestamps_by_seq(&conn, post.id)?;
+
+    let mut segments: Vec<WbSegment> = segment_rows
+        .into_iter()
+        .map(|row| {
+            let words = words_by_seq
+                .get(&row.sequence_num)
+                .cloned()
+                .unwrap_or_default();
+            WbSegment {
+                sequence_num: row.sequence_num,
+                start_time: row.start_time,
+                end_time: row.end_time,
+                text: row.text,
+                words,
+            }
+        })
+        .collect();
+    segments.sort_by(|a, b| {
+        a.start_time
+            .partial_cmp(&b.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut out_chapters: Vec<Value> = Vec::with_capacity(chapter_meta.len());
+    for (idx, approx) in chapter_meta {
+        let (seq, phrase) = match parsed.get(&idx) {
+            Some((s, p)) => (*s, p.clone()),
+            None => (None, String::new()),
+        };
+        let mut refined_start = Value::Null;
+        if !phrase.trim().is_empty() {
+            let context = wb_context_segments_around_time(&segments, approx, window);
+            if let Some(est) =
+                wb_estimate_phrase_time(&segments, &context, seq, Some(&phrase), false)
+            {
+                refined_start = json!(est);
+            }
+        }
+        out_chapters.push(json!({
+            "chapter_index": idx,
+            "refined_start": refined_start,
+        }));
+    }
+
+    Ok(json!({
+        "parse_status": "ok",
+        "chapters": out_chapters,
     }))
 }
 
@@ -3537,6 +3743,7 @@ fn format_segment_range_label(first_seq: i64, last_seq: i64) -> String {
         (-100, -100) => "chapter titles (LLM)".to_string(),
         (-200, -200) => "chapter topic plan (LLM)".to_string(),
         (-201, -201) => "chapter topic plan: continuation (LLM)".to_string(),
+        (-300, -300) => "chapter word boundaries (LLM)".to_string(),
         _ => format!("{first_seq}-{last_seq}"),
     }
 }
@@ -8326,6 +8533,98 @@ mod tests {
         let est =
             wb_estimate_phrase_time(&segments, &[], Some(12), Some("not in the segment"), false);
         assert!(est.is_none());
+    }
+
+    #[test]
+    fn parse_chapter_boundary_response_parses_fenced_chapters_array() {
+        let content = "```json\n{\"chapters\":[\
+            {\"chapter_index\":0,\"refined_start_segment_seq\":1,\
+            \"refined_start_phrase\":\"first story\"},\
+            {\"chapter_index\":1,\"refined_start_segment_seq\":3,\
+            \"refined_start_phrase\":\"second story\"}]}\n```";
+        let parsed = parse_chapter_boundary_response(content);
+        assert_eq!(parsed.get(&0), Some(&(Some(1), "first story".to_string())));
+        assert_eq!(parsed.get(&1), Some(&(Some(3), "second story".to_string())));
+    }
+
+    #[test]
+    fn parse_chapter_boundary_response_recovers_via_brace_fallback() {
+        // Leading prose before the JSON object forces the regex fallback path.
+        let content = "Here you go: {\"chapters\":[{\"chapter_index\":2,\
+            \"refined_start_segment_seq\":null,\"refined_start_phrase\":\"hi\"}]}";
+        let parsed = parse_chapter_boundary_response(content);
+        assert_eq!(parsed.get(&2), Some(&(None, "hi".to_string())));
+    }
+
+    #[test]
+    fn parse_chapter_boundary_response_empty_on_garbage_or_missing_key() {
+        assert!(parse_chapter_boundary_response("not json at all").is_empty());
+        assert!(parse_chapter_boundary_response("{\"other\": 1}").is_empty());
+        assert!(parse_chapter_boundary_response("").is_empty());
+    }
+
+    #[test]
+    fn wb_context_segments_around_time_selects_overlapping_window() {
+        let segments = vec![
+            wb_seg_with_words(0, 0.0, 4.0, "a", Vec::new()),
+            wb_seg_with_words(1, 12.0, 20.0, "b", Vec::new()),
+            wb_seg_with_words(2, 300.0, 307.0, "c", Vec::new()),
+        ];
+        // Around 13s ±45s overlaps seq0 and seq1 but not the far-away seq2.
+        let sel = wb_context_segments_around_time(&segments, 13.0, 45.0);
+        let seqs: Vec<i64> = sel.iter().map(|s| s.sequence_num).collect();
+        assert_eq!(seqs, vec![0, 1]);
+    }
+
+    #[test]
+    fn wb_context_segments_around_time_falls_back_to_first_segment() {
+        let segments = vec![
+            wb_seg_with_words(0, 0.0, 4.0, "a", Vec::new()),
+            wb_seg_with_words(1, 12.0, 20.0, "b", Vec::new()),
+        ];
+        // A point far before everything with a tiny window selects nothing,
+        // so we fall back to the first segment (parity with Python).
+        let sel = wb_context_segments_around_time(&segments, -100.0, 1.0);
+        let seqs: Vec<i64> = sel.iter().map(|s| s.sequence_num).collect();
+        assert_eq!(seqs, vec![0]);
+    }
+
+    #[test]
+    fn chapter_word_resolve_uses_exact_word_time() {
+        let segments = vec![
+            wb_seg_with_words(0, 0.0, 4.0, "cold open", Vec::new()),
+            wb_seg_with_words(
+                1,
+                12.0,
+                20.0,
+                "first story starts right now",
+                vec![
+                    wb_word_value("first", 12.0, 12.4),
+                    wb_word_value("story", 12.5, 12.9),
+                    wb_word_value("starts", 13.0, 13.5),
+                ],
+            ),
+        ];
+        // Resolve "first story" with approx start 5s — the exact word start of
+        // "first" (12.0) must win, matching the Python resolver.
+        let context = wb_context_segments_around_time(&segments, 5.0, 45.0);
+        let est = wb_estimate_phrase_time(&segments, &context, Some(1), Some("first story"), false);
+        assert_eq!(est, Some(12.0));
+    }
+
+    #[test]
+    fn format_segment_range_label_maps_chapter_sentinels() {
+        assert_eq!(format_segment_range_label(-100, -100), "chapter titles (LLM)");
+        assert_eq!(
+            format_segment_range_label(-200, -200),
+            "chapter topic plan (LLM)"
+        );
+        assert_eq!(
+            format_segment_range_label(-300, -300),
+            "chapter word boundaries (LLM)"
+        );
+        // Real transcript ranges fall through to the raw "first-last" form.
+        assert_eq!(format_segment_range_label(5, 9), "5-9");
     }
 
     #[test]

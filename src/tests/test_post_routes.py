@@ -2245,6 +2245,16 @@ def test_post_stats_includes_chapter_llm_model_calls(app):
     assert "-100--100" not in ranges
 
 
+def test_segment_range_label_maps_chapter_word_boundary_sentinel() -> None:
+    from app.routes.post_routes import _format_segment_range_label
+
+    assert _format_segment_range_label(-100, -100) == "chapter titles (LLM)"
+    assert _format_segment_range_label(-200, -200) == "chapter topic plan (LLM)"
+    assert _format_segment_range_label(-300, -300) == "chapter word boundaries (LLM)"
+    # Real transcript ranges fall through to the raw "first-last" form.
+    assert _format_segment_range_label(5, 9) == "5-9"
+
+
 def test_post_stats_includes_debug_info_when_enabled(app, tmp_path):
     app.testing = True
     app.register_blueprint(post_bp)

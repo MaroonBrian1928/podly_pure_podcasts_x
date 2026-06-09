@@ -1062,6 +1062,75 @@ def try_wb_refine_from_llm(
     return payload
 
 
+def try_chapter_word_refine_from_llm(
+    *,
+    db_path: Path,
+    post_guid: str,
+    raw_content: str,
+    chapters: list[dict[str, Any]],
+    context_window_seconds: float,
+) -> dict[str, Any] | None:
+    """Run the bundled Rust chapter word-boundary resolver.
+
+    Mirrors the parse + per-chapter `_estimate_phrase_time` resolution in
+    `refine_chapter_starts_with_llm_word_boundaries`. ``chapters`` is a list of
+    ``{"index": int, "approx_start_seconds": float}`` describing each chapter's
+    current start. Returns the payload (``parse_status`` in {"ok", "failed"}
+    with a ``chapters`` list of ``{chapter_index, refined_start}``) or None to
+    signal the caller should fall back to the Python resolution (flag off,
+    sidecar error, or unexpected payload).
+    """
+    if not rust_word_boundary_enabled():
+        return None
+
+    payload_in = {
+        "raw_content": raw_content or "",
+        "context_window_seconds": float(context_window_seconds),
+        "chapters": chapters,
+    }
+    with _json_file(payload_in) as input_path:
+        args: list[str] = [
+            "chapters",
+            "word-refine-from-llm",
+            "--db",
+            str(db_path),
+            "--post-guid",
+            post_guid,
+            "--input",
+            str(input_path),
+        ]
+        try:
+            payload = run_podly_tools(args)
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust chapters word-refine-from-llm failed; "
+                "falling back to Python implementation"
+            )
+            return None
+
+    parse_status = payload.get("parse_status")
+    if parse_status not in {"ok", "failed"}:
+        LOGGER.error(
+            "Rust chapters word-refine returned invalid parse_status: %r", payload
+        )
+        return None
+    chapters_out = payload.get("chapters")
+    if not isinstance(chapters_out, list):
+        LOGGER.error("Rust chapters word-refine returned invalid payload: %r", payload)
+        return None
+    for item in chapters_out:
+        if not isinstance(item, dict) or "chapter_index" not in item:
+            LOGGER.error("Rust chapters word-refine returned bad item: %r", item)
+            return None
+        refined = item.get("refined_start")
+        if refined is not None and not isinstance(refined, (int, float)):
+            LOGGER.error(
+                "Rust chapters word-refine returned non-numeric start: %r", item
+            )
+            return None
+    return payload
+
+
 def try_chapter_topic_blocks(
     *,
     db_path: Path,

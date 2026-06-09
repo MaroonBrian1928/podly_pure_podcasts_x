@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace as _FlexShim
 from typing import Any
 
@@ -45,6 +45,7 @@ from shared.llm_utils import model_uses_max_completion_tokens
 _CHAPTER_TITLE_REFINE_RANGE = (-100, -100)
 _TOPIC_PLAN_RANGE = (-200, -200)
 _TOPIC_PLAN_CONTINUATION_RANGE = (-201, -201)
+_CHAPTER_WORD_REFINE_RANGE = (-300, -300)
 
 logger = logging.getLogger("global_logger")
 
@@ -56,8 +57,10 @@ TOPIC_CHAPTER_TARGET_BLOCK_COUNT = 60
 TOPIC_CHAPTER_MIN_BLOCK_SECONDS = 60
 # Two-minute blocks are the largest window we allow before chapter starts get too coarse.
 TOPIC_CHAPTER_MAX_BLOCK_SECONDS = 2 * 60
-# Keep enough transcript from each block for specific, context-rich chapter titles.
-TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 1000
+# Keep enough transcript from each block for specific, context-rich chapter
+# titles while keeping the single topic-plan prompt small. ~60 blocks * this
+# budget dominates the prompt size; 600 chars keeps a few sentences per block.
+TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK = 600
 # For long episodes, cap chapter counts to roughly one chapter every five minutes.
 TOPIC_CHAPTER_CAP_WINDOW_SECONDS = 5 * 60
 # Treat episodes under an hour as "short" when applying the hard chapter-count cap.
@@ -308,6 +311,461 @@ def refine_transcript_chapters_with_word_refiner(
     return adjusted
 
 
+def _load_chapter_boundary_template() -> Any:
+    from pathlib import Path
+
+    from jinja2 import Template
+
+    path = (
+        Path(__file__).resolve().parent.parent  # project src root
+        / "chapter_boundary_refinement_prompt.jinja"
+    )
+    if path.exists():
+        return Template(path.read_text())
+    # Minimal fallback keeps the feature working if the template is missing.
+    return Template(
+        "Align chapter starts to transcript phrases.\n"
+        "{% for chapter in chapters %}index={{chapter.index}} "
+        "approx_start={{chapter.approx_start_seconds}} {{chapter.title}}\n"
+        "{% endfor %}"
+        "{% for segment in context_segments %}[seq={{segment.sequence_num}} "
+        "start={{segment.start_time}} end={{segment.end_time}}] "
+        "{{segment.text}}\n{% endfor %}"
+        'Return JSON: {"chapters": [{"chapter_index": 0, '
+        '"refined_start_segment_seq": 0, "refined_start_phrase": ""}]}'
+    )
+
+
+def _build_chapter_boundary_refinement_prompt(
+    *,
+    chapters: list[dict[str, Any]],
+    context_segments: list[dict[str, Any]],
+) -> str:
+    if not chapters or not context_segments:
+        return ""
+    template = _load_chapter_boundary_template()
+    return template.render(chapters=chapters, context_segments=context_segments)
+
+
+def _parse_chapter_boundary_response(content: str) -> dict[int, tuple[int | None, str]]:
+    """Parse the batched chapter-boundary LLM response.
+
+    Returns ``{chapter_index: (start_segment_seq, start_phrase)}``. Unparseable
+    responses yield an empty mapping so the caller keeps the original starts.
+    """
+    text = (content or "").strip()
+    if not text:
+        return {}
+
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    data: Any = None
+    try:
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:  # noqa: BLE001
+                return {}
+
+    items = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {}
+
+    out: dict[int, tuple[int | None, str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("chapter_index"))
+        except Exception:  # noqa: BLE001
+            continue
+        seq_raw = item.get("refined_start_segment_seq")
+        seq: int | None
+        try:
+            seq = int(seq_raw) if seq_raw is not None else None
+        except Exception:  # noqa: BLE001
+            seq = None
+        phrase = str(item.get("refined_start_phrase") or "").strip()
+        out[idx] = (seq, phrase)
+    return out
+
+
+def _try_rust_chapter_word_refine(
+    *,
+    content: str,
+    chapter_payloads: list[dict[str, Any]],
+    post_guid: str | None,
+    context_window_seconds: float,
+    log: logging.Logger,
+) -> dict[str, Any] | None:
+    """Bundle parse + word-level resolution into a single Rust subprocess call.
+
+    Returns the sidecar payload (``parse_status`` in {"ok", "failed"}) or None
+    to signal the caller should fall back to the Python resolution (flag off, no
+    post_guid, sidecar error, or unexpected payload).
+    """
+    if not post_guid:
+        return None
+
+    from shared.processing_paths import get_instance_dir
+    from shared.rust_sidecar import (
+        rust_word_boundary_enabled,
+        try_chapter_word_refine_from_llm,
+    )
+
+    if not rust_word_boundary_enabled():
+        return None
+
+    chapters_meta = [
+        {
+            "index": payload["index"],
+            "approx_start_seconds": payload["approx_start_seconds"],
+        }
+        for payload in chapter_payloads
+    ]
+    try:
+        db_path = get_instance_dir() / "sqlite3.db"
+        result = try_chapter_word_refine_from_llm(
+            db_path=db_path,
+            post_guid=post_guid,
+            raw_content=content or "",
+            chapters=chapters_meta,
+            context_window_seconds=float(context_window_seconds),
+        )
+    except Exception:
+        log.exception(
+            "Rust chapter word-refine bootstrap failed; falling back to Python"
+        )
+        return None
+
+    if result is None:
+        return None
+
+    log.info(
+        "Chapter word-boundary refined via Rust sidecar",
+        extra={
+            "rust_path": "chapter_word_refine_from_llm",
+            "parse_status": result.get("parse_status"),
+        },
+    )
+    return result
+
+
+def _resolve_chapter_word_starts(
+    *,
+    content: str,
+    chapter_payloads: list[dict[str, Any]],
+    all_segments: list[dict[str, Any]],
+    segment_index: _SegmentIndex,
+    refiner: WordBoundaryRefiner,
+    post_guid: str | None,
+    context_window_seconds: float,
+    log: logging.Logger,
+) -> dict[int, float] | None:
+    """Resolve each chapter's start phrase to an exact word-level time.
+
+    Prefers the bundled Rust resolver and falls back to the in-Python phrase
+    matcher. Returns ``{chapter_index: refined_start_seconds}`` for the chapters
+    that resolved, or None when the response had no parseable plan (so the
+    caller keeps the original starts).
+    """
+    rust_result = _try_rust_chapter_word_refine(
+        content=content,
+        chapter_payloads=chapter_payloads,
+        post_guid=post_guid,
+        context_window_seconds=context_window_seconds,
+        log=log,
+    )
+    if rust_result is not None:
+        if rust_result.get("parse_status") == "failed":
+            return None
+        resolved: dict[int, float] = {}
+        for item in rust_result.get("chapters", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item["chapter_index"])
+            except Exception:  # noqa: BLE001
+                continue
+            refined = item.get("refined_start")
+            if refined is not None:
+                resolved[idx] = float(refined)
+        return resolved
+
+    parsed = _parse_chapter_boundary_response(content)
+    if not parsed:
+        return None
+
+    approx_by_index = {
+        int(payload["index"]): float(payload["approx_start_seconds"])
+        for payload in chapter_payloads
+    }
+    resolved = {}
+    for idx, (seq, phrase) in parsed.items():
+        if not phrase:
+            continue
+        approx = approx_by_index.get(idx)
+        if approx is None:
+            continue
+        context = segment_index.context_segments_around_time(
+            time_seconds=approx,
+            window_seconds=context_window_seconds,
+        )
+        estimated_start = refiner._estimate_phrase_time(
+            all_segments=all_segments,
+            context_segments=context,
+            preferred_segment_seq=seq,
+            phrase=phrase,
+            direction="start",
+        )
+        if estimated_start is not None:
+            resolved[idx] = float(estimated_start)
+    return resolved
+
+
+def _build_chapter_word_refine_inputs(
+    sorted_chapters: list[Chapter],
+    segment_index: _SegmentIndex,
+    *,
+    context_window_seconds: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build the per-chapter payloads and the deduped prompt context window.
+
+    Returns ``(chapter_payloads, prompt_context)``. The prompt context omits the
+    per-word arrays (the LLM only needs text + seq); word timestamps stay on
+    ``all_segments`` for the resolution step.
+    """
+    chapter_payloads: list[dict[str, Any]] = []
+    context_by_seq: dict[int, dict[str, Any]] = {}
+    for idx, chapter in enumerate(sorted_chapters):
+        approx_seconds = float(chapter.start_time_ms) / 1000.0
+        context = segment_index.context_segments_around_time(
+            time_seconds=approx_seconds,
+            window_seconds=context_window_seconds,
+        )
+        for seg in context:
+            try:
+                context_by_seq[int(seg["sequence_num"])] = seg
+            except Exception:  # noqa: BLE001
+                continue
+        chapter_payloads.append(
+            {
+                "index": idx,
+                "title": chapter.title,
+                "approx_start_seconds": round(approx_seconds, 1),
+            }
+        )
+
+    prompt_context = [
+        {
+            "sequence_num": seg["sequence_num"],
+            "start_time": seg["start_time"],
+            "end_time": seg["end_time"],
+            "text": seg["text"],
+        }
+        for seg in (context_by_seq[k] for k in sorted(context_by_seq))
+    ]
+    return chapter_payloads, prompt_context
+
+
+def _request_chapter_boundary_plan(
+    *,
+    prompt: str,
+    llm_model: str,
+    config: Any,
+    post_id: int | None,
+    log: logging.Logger,
+) -> str | None:
+    """Run the batched chapter-boundary LLM call; return raw content or None.
+
+    Returns None (so the caller keeps the current starts) on any LLM failure.
+    """
+    completion_args: dict[str, Any] = {
+        "model": llm_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You align podcast chapter start times to transcript "
+                    "phrases and return valid JSON only."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "timeout": int(getattr(config, "openai_timeout", 300) or 300),
+        "api_key": getattr(config, "llm_api_key", None),
+        "base_url": getattr(config, "openai_base_url", None),
+    }
+    if model_uses_max_completion_tokens(llm_model):
+        completion_args["max_completion_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
+    else:
+        completion_args["max_tokens"] = TOPIC_CHAPTER_LLM_MAX_OUTPUT_TOKENS
+
+    tier_config = _tier_config_shim(getattr(config, "llm_service_tier", None))
+    _apply_service_tier(completion_args, tier_config)
+
+    first_seq, last_seq = _CHAPTER_WORD_REFINE_RANGE
+    model_call_id = _try_upsert_model_call(
+        post_id=post_id,
+        first_seq_num=first_seq,
+        last_seq_num=last_seq,
+        model_name=llm_model,
+        prompt=prompt,
+        logger=log,
+        log_prefix="Chapter word refine",
+    )
+    _record_service_tier_on_model_call(
+        model_call_id,
+        completion_args,
+        logger=log,
+        log_prefix="Chapter word refine",
+    )
+
+    try:
+        response = _call_litellm_with_tier_retry(
+            completion_args, config=tier_config, logger=log
+        )
+        content = extract_litellm_content(response)
+        _try_update_model_call(
+            model_call_id,
+            status="success",
+            response=content,
+            error_message=None,
+            logger=log,
+            log_prefix="Chapter word refine",
+            usage=extract_litellm_usage(response),
+            model_name=llm_model,
+            service_tier=completion_args.get("service_tier"),
+            prompt=prompt,
+        )
+        return content
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "LLM chapter word-boundary refinement failed; keeping current starts: %s",
+            exc,
+        )
+        _try_update_model_call(
+            model_call_id,
+            status="failed_permanent",
+            response=None,
+            error_message=str(exc),
+            logger=log,
+            log_prefix="Chapter word refine",
+        )
+        return None
+
+
+def refine_chapter_starts_with_llm_word_boundaries(
+    chapters: Sequence[Chapter],
+    transcript_segments: Sequence[Any],
+    *,
+    config: Any,
+    post_id: int | None = None,
+    post_guid: str | None = None,
+    words_by_sequence: Mapping[int, Sequence[Any]] | None = None,
+    logger_override: logging.Logger | None = None,
+    max_shift_seconds: float = 90.0,
+    context_window_seconds: float = 45.0,
+) -> list[Chapter]:
+    """Refine chapter START times with one batched LLM call + word-level timing.
+
+    When ``enable_word_level_boundary_refinder`` is set, this makes a single
+    additional LLM call that names the start phrase for each chapter, then
+    resolves that phrase to an exact timecode using the word-level transcript
+    (via ``WordBoundaryRefiner._estimate_phrase_time``). On any LLM/parse/timing
+    failure it returns the chapters unchanged so the caller can fall back to the
+    existing heuristic refinement.
+    """
+    log = logger_override or logger
+    if not chapters or not transcript_segments:
+        return list(chapters)
+    if not getattr(config, "enable_word_level_boundary_refinder", False):
+        return list(chapters)
+    llm_model = getattr(config, "llm_model", None)
+    if not llm_model:
+        return list(chapters)
+
+    all_segments = _segments_for_word_refiner(
+        transcript_segments, words_by_sequence=words_by_sequence
+    )
+    if not all_segments:
+        return list(chapters)
+
+    segment_index = _SegmentIndex(all_segments)
+    refiner_logger = log if isinstance(log, logging.Logger) else None
+    refiner = WordBoundaryRefiner(config=config, logger=refiner_logger)
+    max_shift_ms = max(0, int(max_shift_seconds * 1000))
+
+    sorted_chapters = sorted(list(chapters), key=lambda ch: ch.start_time_ms)
+
+    chapter_payloads, prompt_context = _build_chapter_word_refine_inputs(
+        sorted_chapters,
+        segment_index,
+        context_window_seconds=context_window_seconds,
+    )
+    prompt = _build_chapter_boundary_refinement_prompt(
+        chapters=chapter_payloads, context_segments=prompt_context
+    )
+    if not prompt:
+        return list(chapters)
+
+    content = _request_chapter_boundary_plan(
+        prompt=prompt,
+        llm_model=llm_model,
+        config=config,
+        post_id=post_id,
+        log=log,
+    )
+    if content is None:
+        return list(chapters)
+
+    estimated_by_index = _resolve_chapter_word_starts(
+        content=content,
+        chapter_payloads=chapter_payloads,
+        all_segments=all_segments,
+        segment_index=segment_index,
+        refiner=refiner,
+        post_guid=post_guid,
+        context_window_seconds=context_window_seconds,
+        log=log,
+    )
+    if estimated_by_index is None:
+        log.warning(
+            "LLM chapter word-boundary refinement returned no parseable plan; "
+            "keeping current starts. response_snippet=%r",
+            _truncate_for_log(content),
+        )
+        return list(chapters)
+
+    candidate_starts_ms: list[int] = []
+    for idx, chapter in enumerate(sorted_chapters):
+        original_start_ms = int(chapter.start_time_ms)
+        new_start_ms = original_start_ms
+
+        estimated_start = estimated_by_index.get(idx)
+        if estimated_start is not None:
+            candidate_ms = round(float(estimated_start) * 1000.0)
+            if abs(candidate_ms - original_start_ms) <= max_shift_ms:
+                new_start_ms = candidate_ms
+
+        candidate_starts_ms.append(new_start_ms)
+
+    adjusted, refined_kept = _assemble_refined_chapters(
+        sorted_chapters, candidate_starts_ms
+    )
+
+    if refined_kept > 0:
+        log.info(
+            "Refined %d chapter starts via LLM word-boundary alignment",
+            refined_kept,
+        )
+    return adjusted
+
+
 def generate_chapters_from_transcript(
     transcript_segments: Sequence[Any],
     *,
@@ -405,11 +863,19 @@ def _segments_for_word_refiner(
     transcript_segments: Sequence[Any],
     *,
     pre_sorted: bool = False,
+    words_by_sequence: Mapping[int, Sequence[Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize raw transcript-segment objects into refiner-friendly dicts.
 
     ``pre_sorted=True`` lets callers that already sorted by ``start_time``
     skip the redundant resort.
+
+    When ``words_by_sequence`` is provided (or the source segment carries a
+    ``words`` attribute), the per-word timestamps are attached under the
+    ``words`` key so ``WordBoundaryRefiner`` can resolve phrases to exact
+    intra-segment timecodes instead of interpolating linearly. The word entries
+    may be dicts or objects exposing ``word``/``start``/``end`` — both shapes are
+    understood by ``WordBoundaryRefiner._segment_word_entries``.
     """
     iterable = (
         transcript_segments
@@ -419,14 +885,20 @@ def _segments_for_word_refiner(
     segments: list[dict[str, Any]] = []
     for idx, seg in enumerate(iterable):
         sequence_num, start_time, end_time = _safe_coerce_segment_times(seg, idx)
-        segments.append(
-            {
-                "sequence_num": sequence_num,
-                "start_time": start_time,
-                "end_time": end_time,
-                "text": str(getattr(seg, "text", "") or ""),
-            }
-        )
+        entry: dict[str, Any] = {
+            "sequence_num": sequence_num,
+            "start_time": start_time,
+            "end_time": end_time,
+            "text": str(getattr(seg, "text", "") or ""),
+        }
+        words: Any = None
+        if words_by_sequence is not None:
+            words = words_by_sequence.get(sequence_num)
+        if not words:
+            words = getattr(seg, "words", None)
+        if words:
+            entry["words"] = list(words)
+        segments.append(entry)
     return segments
 
 
