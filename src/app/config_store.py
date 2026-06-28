@@ -107,6 +107,7 @@ def ensure_defaults() -> None:
             "enable_boundary_refinement": DEFAULTS.ENABLE_BOUNDARY_REFINEMENT,
             "enable_word_level_boundary_refinder": DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
             "enable_llm_chapter_fallback_tagging": DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
+            "chapter_full_block_text": DEFAULTS.CHAPTER_FULL_BLOCK_TEXT,
             "llm_service_tier": DEFAULTS.LLM_SERVICE_TIER,
         },
     )
@@ -223,6 +224,7 @@ def read_combined() -> dict[str, Any]:
             "enable_boundary_refinement": llm.enable_boundary_refinement,
             "enable_word_level_boundary_refinder": llm.enable_word_level_boundary_refinder,
             "enable_llm_chapter_fallback_tagging": llm.enable_llm_chapter_fallback_tagging,
+            "chapter_full_block_text": llm.chapter_full_block_text,
             "llm_service_tier": llm.llm_service_tier,
         },
         "whisper": whisper_payload,
@@ -270,6 +272,7 @@ def _update_section_llm(data: dict[str, Any]) -> None:
         "enable_boundary_refinement",
         "enable_word_level_boundary_refinder",
         "enable_llm_chapter_fallback_tagging",
+        "chapter_full_block_text",
         "llm_service_tier",
     ]:
         if key in data:
@@ -560,6 +563,12 @@ def to_pydantic_config() -> PydanticConfig:
             data["llm"].get(
                 "enable_llm_chapter_fallback_tagging",
                 DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
+            )
+        ),
+        chapter_full_block_text=bool(
+            data["llm"].get(
+                "chapter_full_block_text",
+                DEFAULTS.CHAPTER_FULL_BLOCK_TEXT,
             )
         ),
         llm_service_tier=str(

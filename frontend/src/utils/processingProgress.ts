@@ -38,6 +38,7 @@ const LLM_STAGES: StageDefinition[] = [
   { label: 'Transcribing audio', shortLabel: 'Transcribe' },
   { label: 'Identifying ads', shortLabel: 'Identify' },
   { label: 'Processing audio', shortLabel: 'Process' },
+  { label: 'Generating chapters', shortLabel: 'Chapters' },
 ];
 
 const CHAPTER_STAGES: StageDefinition[] = [
@@ -66,6 +67,7 @@ const GENERIC_STAGES: StageDefinition[] = [
   { label: 'Transcribing audio', shortLabel: 'Transcribe' },
   { label: 'Identifying ads', shortLabel: 'Identify' },
   { label: 'Processing audio', shortLabel: 'Process' },
+  { label: 'Generating chapters', shortLabel: 'Chapters' },
 ];
 
 const PIPELINE_MAP: Record<ProcessingPipelineVariant, StageDefinition[]> = {
@@ -83,7 +85,7 @@ function normalizeStep(step: number | null | undefined): number {
   if (typeof step !== 'number' || !Number.isFinite(step)) {
     return 0;
   }
-  return clamp(Math.round(step), 0, 4);
+  return clamp(Math.round(step), 0, 5);
 }
 
 function normalizeProgress(
@@ -128,7 +130,11 @@ function inferPipelineVariant(
     return 'chapter';
   }
 
-  if (raw.includes('transcribing audio') || raw.includes('identifying ads')) {
+  if (
+    raw.includes('transcribing audio') ||
+    raw.includes('identifying ads') ||
+    raw.includes('generating chapters')
+  ) {
     return 'llm';
   }
 
@@ -164,6 +170,7 @@ export function buildProcessingProgressModel(
       : 4;
   const variant = inferPipelineVariant(input.stepName);
   const stages = PIPELINE_MAP[variant];
+  const railStep = Math.min(currentStep, stages.length - 1);
 
   const completedAll = status === 'completed' || status === 'skipped';
   const failedLike = status === 'failed' || status === 'cancelled' || status === 'error';
@@ -172,12 +179,12 @@ export function buildProcessingProgressModel(
     let state: ProcessingStageState['state'] = 'pending';
     if (completedAll) {
       state = 'completed';
-    } else if (failedLike && index === currentStep) {
+    } else if (failedLike && index === railStep) {
       state = 'failed';
-    } else if (index < currentStep) {
+    } else if (index < railStep) {
       state = 'completed';
     } else if (
-      index === currentStep &&
+      index === railStep &&
       (status === 'running' || status === 'pending' || status === 'starting' || status === 'processing')
     ) {
       state = 'active';
@@ -200,7 +207,7 @@ export function buildProcessingProgressModel(
       input.progressPercentage
     ),
     currentStep,
-    currentStageLabel: currentStageLabel(input.stepName, stages, currentStep),
+    currentStageLabel: currentStageLabel(input.stepName, stages, railStep),
     stages: stageStates,
   };
 }

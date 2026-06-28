@@ -136,6 +136,11 @@ def _hydrate_llm_config(data: dict[str, Any]) -> None:
         "enable_llm_chapter_fallback_tagging",
         llm.get("enable_llm_chapter_fallback_tagging"),
     )
+    llm["chapter_full_block_text"] = getattr(
+        runtime_config,
+        "chapter_full_block_text",
+        llm.get("chapter_full_block_text"),
+    )
     llm["llm_service_tier"] = getattr(
         runtime_config,
         "llm_service_tier",

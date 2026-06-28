@@ -54,6 +54,9 @@ def _summarize_service_tiers_for_posts(
             ModelCall.service_tier,
             ModelCall.status,
             ModelCall.retry_attempts,
+            ModelCall.next_retry_at,
+            ModelCall.first_segment_sequence_num,
+            ModelCall.last_segment_sequence_num,
             ModelCall.timestamp,
         )
         .filter(
@@ -65,7 +68,16 @@ def _summarize_service_tiers_for_posts(
     )
     max_retries = _resolve_max_retries()
     per_post: dict[int, dict[str, Any]] = {}
-    for post_id, tier, status, retry_attempts, _ts in rows:
+    for (
+        post_id,
+        tier,
+        status,
+        retry_attempts,
+        next_retry_at,
+        first_seq,
+        last_seq,
+        _ts,
+    ) in rows:
         bucket = per_post.setdefault(
             post_id,
             {
@@ -73,6 +85,8 @@ def _summarize_service_tiers_for_posts(
                 "latest": tier,
                 "latest_status": status,
                 "latest_attempt": retry_attempts or 0,
+                "latest_next_retry_at": next_retry_at,
+                "latest_call_label": _in_flight_call_label(first_seq, last_seq),
                 "tiers": set(),
             },
         )
@@ -92,6 +106,26 @@ def _summarize_service_tier_for_post(post_id: int) -> dict[str, Any] | None:
     return summary.get(post_id)
 
 
+def _in_flight_call_label(first_seq: Any, last_seq: Any) -> str | None:
+    """Short human label for what kind of LLM call is in flight.
+
+    Chapter-phase calls use sentinel segment ranges (see chapter_fallback.py);
+    naming them keeps the jobs caption sensible when an LLM call is awaiting a
+    response during a stage like "Processing audio" (chapters are generated
+    inside that stage). Real segment ranges are classification/boundary calls
+    where the stage label already says what's happening, so return None.
+    """
+    try:
+        key = (int(first_seq), int(last_seq))
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        (-100, -100): "chapter titles",
+        (-200, -200): "chapter topic plan",
+        (-201, -201): "chapter topic plan",
+    }.get(key)
+
+
 def _build_tier_summary(
     bucket: dict[str, Any], max_retries: int | None
 ) -> dict[str, Any]:
@@ -104,10 +138,22 @@ def _build_tier_summary(
     if latest_status in _TIER_IN_FLIGHT_STATUSES:
         in_flight: dict[str, Any] = {
             "status": latest_status,
-            "attempt": int(bucket["latest_attempt"] or 0),
+            # retry_attempts is 0 until the first attempt's bump lands (and some
+            # call paths only set it on completion), but a pending/retrying row
+            # always means an attempt is underway — never show "attempt 0".
+            "attempt": max(1, int(bucket["latest_attempt"] or 0)),
         }
         if max_retries is not None:
             in_flight["max_retries"] = max_retries
+        next_retry_at = bucket.get("latest_next_retry_at")
+        if latest_status == "retrying" and next_retry_at is not None:
+            # Naive UTC in the DB; mark it explicitly so the frontend's Date
+            # parse doesn't reinterpret it in the browser's local zone.
+            iso = next_retry_at.isoformat()
+            in_flight["backoff_until"] = iso if iso.endswith("Z") else f"{iso}Z"
+        call_label = bucket.get("latest_call_label")
+        if call_label:
+            in_flight["call_label"] = call_label
         summary["in_flight"] = in_flight
     return summary
 

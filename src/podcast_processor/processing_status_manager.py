@@ -70,11 +70,18 @@ class ProcessingStatusManager:
         step: int,
         step_name: str,
         progress: float | None = None,
+        total_steps: int | None = None,
     ) -> None:
-        """Update job status in database."""
+        """Update job status in database.
+
+        ``total_steps`` lets a pipeline declare its own step count (the LLM
+        path has a dedicated chapter-generation step, so it uses 5 where the
+        other strategies keep the default 4).
+        """
         # Cache job attributes before any operations that might expire the object
         job_id = job.id
-        total_steps = job.total_steps
+        if total_steps is None:
+            total_steps = job.total_steps
         is_bound = object_session(job) is not None
 
         self.logger.info(
@@ -97,6 +104,7 @@ class ProcessingStatusManager:
                 "step": step,
                 "step_name": step_name,
                 "progress": progress,
+                "total_steps": total_steps,
             },
             wait=True,
         )

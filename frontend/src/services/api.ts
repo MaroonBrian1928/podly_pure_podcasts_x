@@ -225,6 +225,8 @@ export const feedsApi = {
         status: 'pending' | 'retrying';
         attempt: number;
         max_retries?: number;
+        backoff_until?: string;
+        call_label?: string;
       };
     };
     stage_history?: JobStageEvent[];
@@ -519,6 +521,8 @@ export const feedsApi = {
         status: 'pending' | 'retrying';
         attempt: number;
         max_retries?: number;
+        backoff_until?: string;
+        call_label?: string;
       };
     };
     stage_history?: JobStageEvent[];

@@ -154,6 +154,14 @@ class Config(BaseModel):
             "generate fallback chapter tags from description/transcript."
         ),
     )
+    chapter_full_block_text: bool = Field(
+        default=DEFAULTS.CHAPTER_FULL_BLOCK_TEXT,
+        description=(
+            "Send the full transcript text of each topic block to the chapter "
+            "LLM instead of the truncated head+middle sample (~2-3x prompt "
+            "tokens). Per-feed override available in feed settings."
+        ),
+    )
     developer_mode: bool = Field(
         default=False,
         description="Enable developer mode features like test feeds",

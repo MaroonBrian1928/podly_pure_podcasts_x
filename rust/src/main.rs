@@ -333,6 +333,24 @@ enum TranscriptSubcommand {
     WbResolve(TranscriptWbResolveArgs),
     WbJsonParse(TranscriptWbJsonParseArgs),
     WbRefineFromLlm(TranscriptWbRefineFromLlmArgs),
+    RepeatAdCandidates(TranscriptRepeatAdCandidatesArgs),
+}
+
+#[derive(Args)]
+struct TranscriptRepeatAdCandidatesArgs {
+    #[arg(long)]
+    db: PathBuf,
+    #[arg(long = "post-guid")]
+    post_guid: String,
+    #[arg(long = "target-first-seq")]
+    target_first_seq: i64,
+    #[arg(long = "target-last-seq")]
+    target_last_seq: i64,
+    #[arg(long = "similarity-threshold")]
+    similarity_threshold: f64,
+    /// Path to a JSON file: {"exclude_ranges": [[first, last], ...]}.
+    #[arg(long)]
+    input: PathBuf,
 }
 
 #[derive(Args)]
@@ -490,6 +508,15 @@ struct ChaptersTopicBlocksArgs {
     // explicitly so the CLI default is only used by direct CLI invocations.
     #[arg(long = "max-chars-per-block", default_value_t = 1000)]
     max_chars_per_block: i64,
+    /// Prefix each segment's text with an inline `[sNNN]` marker so the LLM can
+    /// name a precise chapter start anchor. Mirrors `include_segment_markers`
+    /// in `_build_topic_blocks`.
+    #[arg(
+        long = "include-segment-markers",
+        action = ArgAction::Set,
+        default_value_t = false
+    )]
+    include_segment_markers: bool,
     /// Optional override; otherwise Rust computes from max(end_time) over segments.
     #[arg(long = "total-duration-ms")]
     total_duration_ms: Option<i64>,
@@ -815,6 +842,9 @@ fn run() -> Result<()> {
             TranscriptSubcommand::WbRefineFromLlm(args) => {
                 print_json(&run_transcript_wb_refine_from_llm(args)?)
             }
+            TranscriptSubcommand::RepeatAdCandidates(args) => {
+                print_json(&run_transcript_repeat_ad_candidates(args)?)
+            }
         },
         Commands::Chapters(chapters) => match chapters.command {
             ChaptersSubcommand::Read(args) => print_json(&read_chapters(args)?),
@@ -917,6 +947,198 @@ fn run_transcript_wb_context(args: TranscriptWbContextArgs) -> Result<Value> {
         })
         .collect();
     Ok(json!({ "context_segments": context_segments }))
+}
+
+// === Repeat-ad candidate finder: deterministic token-LCS matcher ported from
+// `src/podcast_processor/repeat_ad_finder.py`. The LLM confirm call stays in
+// Python; this finds spans whose text matches an already-detected ad. Parity
+// matters — divergence would leave repeated ads uncut or cut the wrong span.
+
+const REPEAT_AD_ANCHOR_SIMILARITY_THRESHOLD: f64 = 0.70;
+const REPEAT_AD_MIN_TARGET_TOKENS: usize = 6;
+const REPEAT_AD_MAX_WINDOW_SEGMENT_SLACK: usize = 2;
+
+#[derive(Deserialize)]
+struct RepeatAdCandidatesRequest {
+    #[serde(default)]
+    exclude_ranges: Vec<(i64, i64)>,
+}
+
+struct RepeatAdCandidateRow {
+    first_seq: i64,
+    last_seq: i64,
+    start_time: f64,
+    end_time: f64,
+    similarity: f64,
+}
+
+fn repeat_ad_tokenize(text: &str) -> Vec<String> {
+    // Same normalization as `repeat_ad_finder.tokenize` (lowercase + strip
+    // edge punctuation, keep internal apostrophes).
+    wb_split_words_lower(text)
+}
+
+fn repeat_ad_lcs_length(a: &[String], b: &[String]) -> usize {
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    for token_a in a {
+        let mut cur = vec![0usize; b.len() + 1];
+        for (j, token_b) in b.iter().enumerate() {
+            cur[j + 1] = if token_a == token_b {
+                prev[j] + 1
+            } else {
+                prev[j + 1].max(cur[j])
+            };
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+fn repeat_ad_similarity(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let lcs = repeat_ad_lcs_length(a, b) as f64;
+    (2.0 * lcs) / ((a.len() + b.len()) as f64)
+}
+
+fn find_repeat_ad_candidates(
+    segments: &[StatsTranscriptSegmentRow],
+    target_first_seq: i64,
+    target_last_seq: i64,
+    exclude_ranges: &[(i64, i64)],
+    similarity_threshold: f64,
+) -> Vec<RepeatAdCandidateRow> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let target_segs: Vec<&StatsTranscriptSegmentRow> = segments
+        .iter()
+        .filter(|s| s.sequence_num >= target_first_seq && s.sequence_num <= target_last_seq)
+        .collect();
+    if target_segs.is_empty() {
+        return Vec::new();
+    }
+
+    let target_text = target_segs
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let target_tokens = repeat_ad_tokenize(&target_text);
+    if target_tokens.len() < REPEAT_AD_MIN_TARGET_TOKENS {
+        return Vec::new();
+    }
+    let target_first_tokens = repeat_ad_tokenize(&target_segs[0].text);
+    let max_window_segments = target_segs.len() + REPEAT_AD_MAX_WINDOW_SEGMENT_SLACK;
+
+    let mut excluded: HashSet<i64> = (target_first_seq..=target_last_seq).collect();
+    for (a, b) in exclude_ranges {
+        for seq in *a..=*b {
+            excluded.insert(seq);
+        }
+    }
+
+    let mut candidates: Vec<RepeatAdCandidateRow> = Vec::new();
+    let mut i = 0usize;
+    while i < segments.len() {
+        let seg = &segments[i];
+        if excluded.contains(&seg.sequence_num) {
+            i += 1;
+            continue;
+        }
+
+        let anchor_tokens = repeat_ad_tokenize(&seg.text);
+        if repeat_ad_similarity(&anchor_tokens, &target_first_tokens)
+            < REPEAT_AD_ANCHOR_SIMILARITY_THRESHOLD
+        {
+            i += 1;
+            continue;
+        }
+
+        let mut window: Vec<&StatsTranscriptSegmentRow> = Vec::new();
+        let mut acc_tokens: Vec<String> = Vec::new();
+        let mut j = i;
+        while j < segments.len() && (j - i) < max_window_segments {
+            let seg_j = &segments[j];
+            if excluded.contains(&seg_j.sequence_num) {
+                break;
+            }
+            window.push(seg_j);
+            acc_tokens.extend(repeat_ad_tokenize(&seg_j.text));
+            j += 1;
+            if acc_tokens.len() >= target_tokens.len() {
+                break;
+            }
+        }
+
+        let window_similarity = repeat_ad_similarity(&acc_tokens, &target_tokens);
+        if !window.is_empty() && window_similarity >= similarity_threshold {
+            let first = window[0];
+            let last = window[window.len() - 1];
+            candidates.push(RepeatAdCandidateRow {
+                first_seq: first.sequence_num,
+                last_seq: last.sequence_num,
+                start_time: first.start_time,
+                end_time: last.end_time,
+                similarity: window_similarity,
+            });
+            for matched in &window {
+                excluded.insert(matched.sequence_num);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    candidates
+}
+
+fn run_transcript_repeat_ad_candidates(args: TranscriptRepeatAdCandidatesArgs) -> Result<Value> {
+    let raw = std::fs::read_to_string(&args.input).with_context(|| {
+        format!(
+            "failed to read repeat-ad-candidates input {}",
+            args.input.display()
+        )
+    })?;
+    let request: RepeatAdCandidatesRequest =
+        serde_json::from_str(&raw).context("failed to parse repeat-ad-candidates input as JSON")?;
+
+    let conn = open_readonly_sqlite(&args.db)?;
+    let post = query_stats_post(&conn, &args.post_guid)?
+        .ok_or_else(|| anyhow!("post not found for guid {}", args.post_guid))?;
+    let mut segments = query_stats_transcript_segments(&conn, post.id)?;
+    segments.sort_by_key(|s| s.sequence_num);
+
+    let candidates = find_repeat_ad_candidates(
+        &segments,
+        args.target_first_seq,
+        args.target_last_seq,
+        &request.exclude_ranges,
+        args.similarity_threshold,
+    );
+
+    let out: Vec<Value> = candidates
+        .iter()
+        .map(|c| {
+            json!({
+                "first_seq": c.first_seq,
+                "last_seq": c.last_seq,
+                "start_time": c.start_time,
+                "end_time": c.end_time,
+                "similarity": c.similarity,
+            })
+        })
+        .collect();
+    Ok(json!({ "candidates": out }))
 }
 
 /// Mirror of `WordBoundaryRefiner._get_context` in
@@ -2206,6 +2428,7 @@ fn chapter_build_topic_blocks(
     min_block_seconds: i64,
     max_block_seconds: i64,
     max_chars_per_block: i64,
+    include_segment_markers: bool,
 ) -> Vec<Value> {
     if segments.is_empty() {
         return Vec::new();
@@ -2266,7 +2489,13 @@ fn chapter_build_topic_blocks(
         // chapter_truncate_block_text). This mirrors the Python helper in
         // src/podcast_processor/chapter_fallback.py::_truncate_block_text.
         let block = current.as_mut().unwrap();
-        block.text_parts.push(seg_text);
+        if include_segment_markers {
+            block
+                .text_parts
+                .push(format!("[s{}] {}", seg.sequence_num, seg_text));
+        } else {
+            block.text_parts.push(seg_text);
+        }
     }
 
     flush(&mut current, &mut blocks);
@@ -2292,8 +2521,14 @@ fn chapter_build_topic_blocks(
 
     for (new_idx, &orig_idx) in keep_indices.iter().enumerate() {
         let b = &blocks[orig_idx];
-        let joined = b.text_parts.join(" ").trim().to_string();
-        let text = chapter_truncate_block_text(&joined, max_chars);
+        let text = if include_segment_markers {
+            // Part-granular truncation keeps every [sNNN] marker intact so the
+            // LLM can name any surviving segment as a chapter start anchor.
+            chapter_truncate_block_parts(&b.text_parts, max_chars)
+        } else {
+            let joined = b.text_parts.join(" ").trim().to_string();
+            chapter_truncate_block_text(&joined, max_chars)
+        };
         out.push(json!({
             "block_index": new_idx as i64,
             "start_ms": b.start_ms,
@@ -2303,6 +2538,59 @@ fn chapter_build_topic_blocks(
         }));
     }
     out
+}
+
+/// Part-granular variant of `chapter_truncate_block_text` for marker mode.
+/// Keeps whole per-segment parts (so inline `[sNNN]` markers are never cut
+/// mid-token): a run from the block head plus a run around the midpoint,
+/// joined by " ... ". `max_chars == 0` means no truncation. Mirrors
+/// `_truncate_block_parts` in `src/podcast_processor/chapter_fallback.py`.
+fn chapter_truncate_block_parts(parts: &[String], max_chars: usize) -> String {
+    let joined = parts.join(" ").trim().to_string();
+    if max_chars == 0 || joined.chars().count() <= max_chars {
+        return joined;
+    }
+
+    let sep = " ... ";
+    let sep_len = sep.chars().count();
+    let available = max_chars.saturating_sub(sep_len);
+    let head_budget = available / 2;
+    let mid_budget = available - head_budget;
+
+    let take_run = |start: usize, budget: usize| -> Vec<String> {
+        let mut taken: Vec<String> = Vec::new();
+        let mut used: usize = 0;
+        for part in &parts[start..] {
+            let part_len = part.chars().count();
+            let cost = part_len + usize::from(!taken.is_empty());
+            if !taken.is_empty() && used + cost > budget {
+                break;
+            }
+            taken.push(part.clone());
+            used += cost;
+        }
+        // Always keep at least the first part; char-clip it if it alone
+        // overflows the budget.
+        if taken.len() == 1 && used > budget {
+            taken[0] = taken[0].chars().take(budget).collect();
+        }
+        taken
+    };
+
+    let head_parts = take_run(0, head_budget);
+    let mid_anchor = head_parts.len().max(parts.len() / 2);
+    let mid_parts = if mid_anchor < parts.len() {
+        take_run(mid_anchor, mid_budget)
+    } else {
+        Vec::new()
+    };
+
+    let head = head_parts.join(" ");
+    let middle = mid_parts.join(" ");
+    if middle.is_empty() {
+        return head.chars().take(max_chars).collect();
+    }
+    format!("{head}{sep}{middle}")
 }
 
 /// Fit `text` into `max_chars` by keeping the block's opening AND a window
@@ -2449,6 +2737,7 @@ fn run_chapters_topic_blocks(args: ChaptersTopicBlocksArgs) -> Result<Value> {
         args.min_block_seconds,
         args.max_block_seconds,
         args.max_chars_per_block,
+        args.include_segment_markers,
     );
     Ok(json!({"blocks": blocks}))
 }
@@ -3245,7 +3534,21 @@ struct TierBucket {
     latest: String,
     latest_status: String,
     latest_attempt: i64,
+    latest_next_retry_at: Option<String>,
+    latest_call_label: Option<String>,
     tiers: HashSet<String>,
+}
+
+// Short human label for what kind of LLM call is in flight. Mirrors
+// `_in_flight_call_label` in app/jobs_manager.py: chapter-phase calls use
+// sentinel segment ranges, and naming them keeps the jobs caption sensible
+// when an LLM call runs inside a stage like "Processing audio".
+fn in_flight_call_label(first_seq: i64, last_seq: i64) -> Option<String> {
+    match (first_seq, last_seq) {
+        (-100, -100) => Some("chapter titles".to_string()),
+        (-200, -200) | (-201, -201) => Some("chapter topic plan".to_string()),
+        _ => None,
+    }
 }
 
 fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<HashMap<i64, Value>> {
@@ -3258,7 +3561,8 @@ fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<Hash
     // `latest` correctly even though we keep walking to detect mixed.
     let placeholders: Vec<String> = (1..=post_ids.len()).map(|i| format!("?{}", i)).collect();
     let sql = format!(
-        "SELECT post_id, service_tier, status, retry_attempts
+        "SELECT post_id, service_tier, status, retry_attempts, next_retry_at,
+                first_segment_sequence_num, last_segment_sequence_num
          FROM model_call
          WHERE service_tier IS NOT NULL AND post_id IN ({})
          ORDER BY timestamp DESC",
@@ -3271,16 +3575,21 @@ fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<Hash
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
         ))
     })?;
 
     let mut per_post: HashMap<i64, TierBucket> = HashMap::new();
     for r in rows {
-        let (pid, tier, status, retry_attempts) = r?;
+        let (pid, tier, status, retry_attempts, next_retry_at, first_seq, last_seq) = r?;
         let entry = per_post.entry(pid).or_insert_with(|| TierBucket {
             latest: tier.clone(),
             latest_status: status,
             latest_attempt: retry_attempts,
+            latest_next_retry_at: next_retry_at,
+            latest_call_label: in_flight_call_label(first_seq, last_seq),
             tiers: HashSet::new(),
         });
         entry.tiers.insert(tier);
@@ -3305,12 +3614,29 @@ fn build_tier_summary(bucket: &TierBucket, max_retries: Option<i64>) -> Value {
             "status".to_string(),
             Value::String(bucket.latest_status.clone()),
         );
+        // retry_attempts is 0 until the first attempt's bump lands (and some
+        // call paths only set it on completion), but a pending/retrying row
+        // always means an attempt is underway -- never show "attempt 0".
         in_flight.insert(
             "attempt".to_string(),
-            Value::Number(bucket.latest_attempt.into()),
+            Value::Number(bucket.latest_attempt.max(1).into()),
         );
         if let Some(max) = max_retries {
             in_flight.insert("max_retries".to_string(), Value::Number(max.into()));
+        }
+        if bucket.latest_status == "retrying" {
+            if let Some(raw) = bucket.latest_next_retry_at.as_deref() {
+                // Naive UTC text from SQLAlchemy ("YYYY-MM-DD HH:MM:SS[.ffffff]");
+                // normalize to the ISO-with-Z shape Python emits.
+                let mut iso = raw.replacen(' ', "T", 1);
+                if !iso.ends_with('Z') {
+                    iso.push('Z');
+                }
+                in_flight.insert("backoff_until".to_string(), Value::String(iso));
+            }
+        }
+        if let Some(label) = bucket.latest_call_label.as_deref() {
+            in_flight.insert("call_label".to_string(), Value::String(label.to_string()));
         }
         summary.insert("in_flight".to_string(), Value::Object(in_flight));
     }
@@ -7607,7 +7933,7 @@ mod tests {
                 id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, first_segment_sequence_num INTEGER NOT NULL,
                 last_segment_sequence_num INTEGER NOT NULL, model_name TEXT NOT NULL, prompt TEXT NOT NULL,
                 response TEXT, timestamp TEXT, status TEXT NOT NULL, error_message TEXT, retry_attempts INTEGER,
-                service_tier TEXT, prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
+                next_retry_at TEXT, service_tier TEXT, prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
                 completion_tokens INTEGER, total_tokens INTEGER
             );
             CREATE TABLE transcript_segment (
@@ -7644,8 +7970,8 @@ mod tests {
         // for the chapter row so it sorts after [0] and doesn't break the
         // existing assertion that [0] is the primary classifier row.
         conn.execute(
-            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2, 'flex', 100, 25, 50, 150),
-                                            (2, 1, -100, -100, 'model-b', 'chap prompt', 'chap response', '2026-05-08 12:00:02.000000', 'success', NULL, 1, NULL, NULL, NULL, NULL, NULL)",
+            "INSERT INTO model_call VALUES (1, 1, 0, 1, 'model-a', 'prompt', 'response', '2026-05-08 12:00:01.000000', 'success', NULL, 2, NULL, 'flex', 100, 25, 50, 150),
+                                            (2, 1, -100, -100, 'model-b', 'chap prompt', 'chap response', '2026-05-08 12:00:02.000000', 'success', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL)",
             [],
         )
         .unwrap();
@@ -7921,7 +8247,7 @@ mod tests {
                 model_name TEXT NOT NULL, prompt TEXT NOT NULL,
                 response TEXT, timestamp TEXT NOT NULL, status TEXT NOT NULL,
                 error_message TEXT, retry_attempts INTEGER NOT NULL DEFAULT 0,
-                service_tier TEXT
+                next_retry_at TEXT, service_tier TEXT
             );
             INSERT INTO feed VALUES (1, 'Feed');
             INSERT INTO post VALUES (1, 1, 'guid-1', 'Episode 1');
@@ -7940,9 +8266,9 @@ mod tests {
             -- report latest='default' and mixed=true.
             INSERT INTO model_call VALUES
                 (1, 1, 0, 100, 'gemini/gemini-3-flash-preview', 'p', 'r',
-                    '2026-05-08 11:00:00', 'success', NULL, 1, 'flex'),
+                    '2026-05-08 11:00:00', 'success', NULL, 1, NULL, 'flex'),
                 (2, 1, 101, 110, 'gemini/gemini-3-flash-preview', 'p', 'r',
-                    '2026-05-08 11:30:00', 'success', NULL, 1, 'default');",
+                    '2026-05-08 11:30:00', 'success', NULL, 1, NULL, 'default');",
         )
         .unwrap();
         drop(conn);
@@ -8555,7 +8881,7 @@ mod tests {
             chapter_seg(3, 360.0, 470.0, "delta block"),
             chapter_seg(4, 480.0, 590.0, "epsilon block"),
         ];
-        let blocks = chapter_build_topic_blocks(&segments, 600_000, 5, 60, 120, 220);
+        let blocks = chapter_build_topic_blocks(&segments, 600_000, 5, 60, 120, 220, false);
         let block_indices: Vec<i64> = blocks
             .iter()
             .map(|b| b["block_index"].as_i64().unwrap())
@@ -8578,7 +8904,7 @@ mod tests {
             chapter_seg(3, 30.0, 35.0, "fourth"),
             chapter_seg(4, 40.0, 50.0, "fifth"),
         ];
-        let blocks = chapter_build_topic_blocks(&segments, 50_000, 60, 60, 120, 220);
+        let blocks = chapter_build_topic_blocks(&segments, 50_000, 60, 60, 120, 220, false);
         // All segments fit within the 60s floor → one block.
         assert_eq!(blocks.len(), 1);
         assert_eq!(
@@ -8594,7 +8920,7 @@ mod tests {
         let segments: Vec<StatsTranscriptSegmentRow> = (0..10)
             .map(|i| chapter_seg(i, (i as f64) * 60.0, (i as f64) * 60.0 + 50.0, "x"))
             .collect();
-        let blocks = chapter_build_topic_blocks(&segments, 6 * 3600 * 1000, 1, 60, 120, 220);
+        let blocks = chapter_build_topic_blocks(&segments, 6 * 3600 * 1000, 1, 60, 120, 220, false);
         // With block_window clamped to 120s and segments spaced 60s, we should
         // end up grouping 2 segments per block roughly. The key assertion: more
         // than one block (cap took effect) and < total segments.
@@ -8611,7 +8937,7 @@ mod tests {
             chapter_seg(0, 0.0, 1.0, &"a".repeat(500)),
             chapter_seg(1, 1.0, 2.0, &"b".repeat(500)),
         ];
-        let blocks = chapter_build_topic_blocks(&segments, 2_000, 60, 60, 120, 220);
+        let blocks = chapter_build_topic_blocks(&segments, 2_000, 60, 60, 120, 220, false);
         assert_eq!(blocks.len(), 1);
         let text = blocks[0]["text"].as_str().unwrap();
         // Head+middle split: the head is 'a's from the front, and the middle
@@ -8649,14 +8975,51 @@ mod tests {
     #[test]
     fn chapter_topic_blocks_normalizes_internal_whitespace() {
         let segments = vec![chapter_seg(0, 0.0, 10.0, "hello    world\n\nthere")];
-        let blocks = chapter_build_topic_blocks(&segments, 10_000, 60, 60, 120, 220);
+        let blocks = chapter_build_topic_blocks(&segments, 10_000, 60, 60, 120, 220, false);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["text"].as_str().unwrap(), "hello world there");
     }
 
     #[test]
+    fn chapter_topic_blocks_include_segment_markers() {
+        let segments = vec![
+            chapter_seg(7, 0.0, 20.0, "Intro and setup"),
+            chapter_seg(8, 21.0, 40.0, "More intro"),
+        ];
+        let blocks = chapter_build_topic_blocks(&segments, 60_000, 60, 60, 120, 220, true);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0]["text"].as_str().unwrap(),
+            "[s7] Intro and setup [s8] More intro"
+        );
+    }
+
+    #[test]
+    fn chapter_truncate_block_parts_keeps_markers_intact() {
+        let parts: Vec<String> = (0..40)
+            .map(|i| format!("[s{i}] segment number {i} text body"))
+            .collect();
+        let out = chapter_truncate_block_parts(&parts, 200);
+        assert!(out.chars().count() <= 200);
+        assert!(out.contains(" ... "));
+        assert!(out.starts_with("[s0] "));
+        // No partially-cut markers: every '[' must close before the string ends.
+        let dangling = regex::Regex::new(r"\[[^\]]*$").unwrap();
+        assert!(dangling.find(&out).is_none());
+    }
+
+    #[test]
+    fn chapter_truncate_block_parts_zero_budget_means_full_text() {
+        let parts: Vec<String> = (0..10)
+            .map(|i| format!("[s{i}] words and more words"))
+            .collect();
+        let joined = parts.join(" ");
+        assert_eq!(chapter_truncate_block_parts(&parts, 0), joined);
+    }
+
+    #[test]
     fn chapter_topic_blocks_returns_empty_on_empty_segments() {
-        assert!(chapter_build_topic_blocks(&[], 60_000, 60, 60, 120, 220).is_empty());
+        assert!(chapter_build_topic_blocks(&[], 60_000, 60, 60, 120, 220, false).is_empty());
     }
 
     #[test]
@@ -9124,7 +9487,7 @@ mod tests {
                 last_segment_sequence_num INTEGER NOT NULL,
                 model_name TEXT NOT NULL, prompt TEXT NOT NULL, response TEXT,
                 timestamp TEXT, status TEXT NOT NULL, error_message TEXT,
-                retry_attempts INTEGER, service_tier TEXT,
+                retry_attempts INTEGER, next_retry_at TEXT, service_tier TEXT,
                 prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
                 completion_tokens INTEGER, total_tokens INTEGER
              );",
@@ -9148,9 +9511,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO model_call VALUES
-                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, 1000000, 500000, 250000, 1750000),
-                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL),
-                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL)",
+                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1750000),
+                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL),
+                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)",
             [],
         )
         .unwrap();
@@ -9296,5 +9659,87 @@ mod tests {
         // Time overlap: seg 0 overlaps → window [max(0,-2)..min(3,3)] = [0..3]
         let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
         assert_eq!(seq_nums, vec![0, 1, 2]);
+    }
+
+    fn rseg(seq: i64, start: f64, text: &str) -> StatsTranscriptSegmentRow {
+        StatsTranscriptSegmentRow {
+            id: seq,
+            sequence_num: seq,
+            start_time: start,
+            end_time: start + 4.0,
+            text: text.to_string(),
+            speaker_label: None,
+        }
+    }
+
+    const RAD_AD: [&str; 4] = [
+        "Elevate your gaming performance with Alienware deals.",
+        "Buy any Alienware PC and get fifty percent off.",
+        "Head over to alienware dot com slash deals today.",
+        "Back to the show.",
+    ];
+
+    fn repeat_ad_transcript() -> Vec<StatsTranscriptSegmentRow> {
+        let mut segments = Vec::new();
+        for (offset, text) in RAD_AD.iter().enumerate() {
+            segments.push(rseg(10 + offset as i64, 100.0 + offset as f64 * 4.0, text));
+        }
+        for seq in 14..30 {
+            segments.push(rseg(
+                seq,
+                200.0 + seq as f64,
+                "Just regular show talk here.",
+            ));
+        }
+        for (offset, text) in RAD_AD.iter().enumerate() {
+            segments.push(rseg(30 + offset as i64, 500.0 + offset as f64 * 4.0, text));
+        }
+        segments
+    }
+
+    #[test]
+    fn repeat_ad_similarity_bounds() {
+        let a = repeat_ad_tokenize("alpha beta gamma");
+        assert_eq!(repeat_ad_similarity(&a, &a), 1.0);
+        let b = repeat_ad_tokenize("totally different words");
+        assert_eq!(repeat_ad_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn repeat_ad_finds_verbatim_repeat() {
+        let segments = repeat_ad_transcript();
+        let candidates = find_repeat_ad_candidates(&segments, 10, 13, &[], 0.85);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].first_seq, 30);
+        assert_eq!(candidates[0].last_seq, 33);
+        assert!(candidates[0].similarity >= 0.85);
+    }
+
+    #[test]
+    fn repeat_ad_excludes_provided_ranges() {
+        let segments = repeat_ad_transcript();
+        let candidates = find_repeat_ad_candidates(&segments, 10, 13, &[(30, 33)], 0.85);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn repeat_ad_rejects_unrelated_text() {
+        let mut segments = repeat_ad_transcript();
+        for seg in segments.iter_mut().filter(|s| s.sequence_num >= 30) {
+            seg.text = "And now back to the show with our guest today.".to_string();
+        }
+        let candidates = find_repeat_ad_candidates(&segments, 10, 13, &[], 0.85);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn repeat_ad_ignores_trivially_short_ads() {
+        let segments = vec![
+            rseg(1, 0.0, "buy now"),
+            rseg(2, 5.0, "unrelated"),
+            rseg(3, 10.0, "buy now"),
+        ];
+        let candidates = find_repeat_ad_candidates(&segments, 1, 1, &[], 0.85);
+        assert!(candidates.is_empty());
     }
 }
