@@ -1,3 +1,10 @@
+## [2.1.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.1.0...v2.1.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **frontend:** resolve eslint errors blocking a lint gate ([37b13da](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/37b13dac2ee31630de05dc476d3cbd62ce16bc73))
+
 # [2.1.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.3...v2.1.0) (2026-06-09)
 
 
