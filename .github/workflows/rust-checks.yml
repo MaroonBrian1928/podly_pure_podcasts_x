@@ -7,9 +7,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust-checks.yml"
 
 defaults:
   run:
@@ -23,24 +20,43 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # This job always runs so `fmt-clippy-build-test` can be a required status
+      # check without deadlocking PRs that don't touch rust/. When no rust files
+      # changed, the heavy steps below are skipped and the job reports success.
+      - name: Detect rust changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            rust:
+              - 'rust/**'
+              - '.github/workflows/rust-checks.yml'
+
       - name: Set up Rust toolchain
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
       - name: Check formatting
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
         run: cargo fmt --check
 
       - name: Run clippy
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
         run: cargo build --locked
 
       - name: Run tests
+        if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
         run: cargo test --locked
