@@ -69,7 +69,6 @@ interface FeedListProps {
 
 export default function FeedList({
   feeds,
-  onFeedDeleted: _onFeedDeleted,
   onFeedSelected,
   selectedFeedId,
   sortBy,
