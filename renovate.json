@@ -21,9 +21,23 @@
       "groupName": "github-actions"
     },
     {
-      "description": "Group dev dependencies across ecosystems",
-      "matchDepTypes": ["devDependencies", "dev-dependencies"],
+      "description": "Group dev/CI-only dependencies across ecosystems (no release)",
+      "matchDepTypes": [
+        "devDependencies",
+        "dev-dependencies",
+        "project.optional-dependencies"
+      ],
       "groupName": "dev dependencies"
+    },
+    {
+      "description": "Runtime deps ship in the artifact -> patch release (fix:)",
+      "matchDepTypes": ["dependencies", "project.dependencies"],
+      "semanticCommitType": "fix"
+    },
+    {
+      "description": "Docker base images ship in the image -> patch release (fix:)",
+      "matchManagers": ["dockerfile"],
+      "semanticCommitType": "fix"
     },
     {
       "description": "Python is gated by full CI (ty/ruff/pytest) — automerge low-risk bumps",
