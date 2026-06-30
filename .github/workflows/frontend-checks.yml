@@ -7,9 +7,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "frontend/**"
-      - ".github/workflows/frontend-checks.yml"
 
 defaults:
   run:
@@ -23,7 +20,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # This job always runs so `lint-build` can be a required status check
+      # without deadlocking PRs that don't touch the frontend. When no frontend
+      # files changed, the heavy steps below are skipped and the job reports
+      # success — so runner time stays low while the gate stays enforced.
+      - name: Detect frontend changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/frontend-checks.yml'
+
       - name: Set up Node
+        if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -31,10 +43,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
+        if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
         run: npm ci
 
       - name: Run eslint
+        if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
         run: npm run lint
 
       - name: Type check and build
+        if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
         run: npm run build
