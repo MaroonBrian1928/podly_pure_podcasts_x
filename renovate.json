@@ -1,0 +1,59 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "America/New_York",
+  "schedule": ["before 6am on monday"],
+  "semanticCommits": "enabled",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 12,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions bumps into one PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group dev/CI-only dependencies across ecosystems (no release)",
+      "matchDepTypes": [
+        "devDependencies",
+        "dev-dependencies",
+        "project.optional-dependencies"
+      ],
+      "groupName": "dev dependencies"
+    },
+    {
+      "description": "Runtime deps ship in the artifact -> patch release (fix:)",
+      "matchDepTypes": ["dependencies", "project.dependencies"],
+      "semanticCommitType": "fix"
+    },
+    {
+      "description": "Docker base images ship in the image -> patch release (fix:)",
+      "matchManagers": ["dockerfile"],
+      "semanticCommitType": "fix"
+    },
+    {
+      "description": "Python is gated by full CI (ty/ruff/pytest) — automerge low-risk bumps",
+      "matchManagers": ["pep621"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Frontend and Rust have lint/build/test gates but no deep test coverage yet — review by hand",
+      "matchManagers": ["npm", "cargo"],
+      "automerge": false
+    },
+    {
+      "description": "Docker base image — review by hand, no pinned-digest churn",
+      "matchManagers": ["dockerfile"],
+      "automerge": false
+    }
+  ]
+}
