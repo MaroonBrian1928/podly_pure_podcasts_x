@@ -15,6 +15,7 @@ from app.extensions import db
 from app.models import (
     AppSettings,
     LLMSettings,
+    NotificationSettings,
     OutputSettings,
     ProcessingSettings,
     WhisperSettings,
@@ -85,6 +86,15 @@ def _create_default_settings() -> None:
             enable_public_landing_page=DEFAULTS.APP_ENABLE_PUBLIC_LANDING_PAGE,
             user_limit_total=DEFAULTS.APP_USER_LIMIT_TOTAL,
             autoprocess_on_download=DEFAULTS.APP_AUTOPROCESS_ON_DOWNLOAD,
+        )
+    )
+    db.session.add(
+        NotificationSettings(
+            id=1,
+            enabled=DEFAULTS.NOTIFY_ENABLED,
+            apprise_urls=None,
+            notify_on_failure=DEFAULTS.NOTIFY_ON_FAILURE,
+            include_llm_explanation=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
         )
     )
     db.session.commit()

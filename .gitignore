@@ -47,6 +47,7 @@ srv/**/*.mp3
 *.pickle
 .env
 .env.local
+compose.override.yml
 config/config.yml
 *.db
 *.sqlite

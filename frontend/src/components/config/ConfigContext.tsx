@@ -1,7 +1,13 @@
 import { createContext, useContext } from 'react';
 import type { UseConfigStateReturn } from '../../hooks/useConfigState';
 
-export type ConfigTabId = 'default' | 'advanced' | 'users' | 'discord' | 'costs';
+export type ConfigTabId =
+  | 'default'
+  | 'advanced'
+  | 'users'
+  | 'discord'
+  | 'costs'
+  | 'notifications';
 export type AdvancedSubtab = 'llm' | 'whisper' | 'processing' | 'output' | 'app';
 
 export interface ConfigContextValue extends UseConfigStateReturn {

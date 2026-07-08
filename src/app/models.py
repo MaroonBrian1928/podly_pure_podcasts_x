@@ -691,3 +691,21 @@ class ChapterFilterSettings(db.Model):  # type: ignore[name-defined, misc]
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+
+
+class NotificationSettings(db.Model):  # type: ignore[name-defined, misc]
+    __tablename__ = "notification_settings"
+
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    enabled = db.Column(db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ENABLED)
+    # Newline-separated Apprise target URLs (may contain secrets/tokens).
+    apprise_urls = db.Column(db.Text, nullable=True)
+    notify_on_failure = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_FAILURE
+    )
+    include_llm_explanation = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION
+    )
+
+    created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+    updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

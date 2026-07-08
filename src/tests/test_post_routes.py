@@ -1612,7 +1612,7 @@ def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):
 
     client = app.test_client()
 
-    with mock.patch("app.routes.post_routes._get_app_log_path", return_value=log_file):
+    with mock.patch("app.routes.post_routes.get_app_log_path", return_value=log_file):
         response = client.get(f"/api/posts/{guid}/stats")
 
     assert response.status_code == 200

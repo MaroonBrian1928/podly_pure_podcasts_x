@@ -59,6 +59,29 @@ class OutputConfig(BaseModel):
         self.min_ad_segement_separation_seconds = value
 
 
+class NotificationConfig(BaseModel):
+    enabled: bool = Field(
+        default=DEFAULTS.NOTIFY_ENABLED,
+        description="Master switch for Apprise notifications.",
+    )
+    apprise_urls: list[str] = Field(
+        default_factory=lambda: list(DEFAULTS.NOTIFY_APPRISE_URLS),
+        description="Apprise notification target URLs (Discord, Telegram, ntfy, email, ...).",
+    )
+    notify_on_failure: bool = Field(
+        default=DEFAULTS.NOTIFY_ON_FAILURE,
+        description="Send a notification when an episode fails to process.",
+    )
+    include_llm_explanation: bool = Field(
+        default=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
+        description=(
+            "Include the LLM-generated plain-English root cause (the same "
+            "analysis as the Troubleshoot button) in failure notifications. "
+            "Costs one additional LLM call per failure."
+        ),
+    )
+
+
 WhisperConfigTypes = Literal["remote", "test", "groq"]
 
 
@@ -199,6 +222,7 @@ class Config(BaseModel):
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
     whisper_cost_rate_per_hour: float = DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
     ina_cost_rate_per_hour: float = DEFAULTS.APP_INA_COST_RATE_PER_HOUR
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)
 
     @model_validator(mode="before")
     @classmethod

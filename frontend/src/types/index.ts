@@ -210,12 +210,20 @@ export interface AppConfigUI {
   ina_cost_rate_per_hour: number;
 }
 
+export interface NotificationConfigUI {
+  enabled: boolean;
+  apprise_urls: string[];
+  notify_on_failure: boolean;
+  include_llm_explanation: boolean;
+}
+
 export interface CombinedConfig {
   llm: LLMConfig;
   whisper: WhisperConfig;
   processing: ProcessingConfigUI;
   output: OutputConfigUI;
   app: AppConfigUI;
+  notifications: NotificationConfigUI;
 }
 
 export interface EnvOverrideEntry {

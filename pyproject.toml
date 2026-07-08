@@ -29,6 +29,7 @@ dependencies = [
     "bcrypt",
     "stripe",
     "mutagen",
+    "apprise",
 ]
 
 [project.optional-dependencies]

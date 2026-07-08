@@ -850,6 +850,12 @@ export const configApi = {
     const response = await api.post('/api/config/test-whisper', payload ?? {});
     return response.data;
   },
+  testNotification: async (
+    payload: Partial<{ notifications: { apprise_urls?: string[] } }>
+  ): Promise<{ ok: boolean; message?: string; error?: string }> => {
+    const response = await api.post('/api/config/test-notification', payload ?? {});
+    return response.data;
+  },
 };
 
 export const billingApi = {

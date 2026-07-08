@@ -47,6 +47,11 @@ def _sanitize_config_for_client(cfg: dict[str, Any]) -> dict[str, Any]:
         if whisper_api_key:
             whisper["api_key_preview"] = _mask_secret(whisper_api_key)
 
+        # Apprise URLs are an editable list the admin manages directly, so they
+        # are returned as-is (this endpoint is already admin-only, like the
+        # Discord client_id / redirect_uri fields). Masking them would make the
+        # textarea impossible to edit without wiping existing entries.
+
         data["llm"] = llm
         data["whisper"] = whisper
         return data
@@ -84,6 +89,26 @@ def _hydrate_runtime_config(data: dict[str, Any]) -> None:
     _hydrate_llm_config(data)
     _hydrate_whisper_config(data)
     _hydrate_app_config(data)
+    _hydrate_notifications_config(data)
+
+
+def _hydrate_notifications_config(data: dict[str, Any]) -> None:
+    data.setdefault("notifications", {})
+    notif = data["notifications"]
+    rt_notif = getattr(runtime_config, "notifications", None)
+    if rt_notif is None:
+        return
+    notif["enabled"] = _get_attr_or_value(rt_notif, "enabled", notif.get("enabled"))
+    notif["apprise_urls"] = list(
+        _get_attr_or_value(rt_notif, "apprise_urls", notif.get("apprise_urls") or [])
+        or []
+    )
+    notif["notify_on_failure"] = _get_attr_or_value(
+        rt_notif, "notify_on_failure", notif.get("notify_on_failure")
+    )
+    notif["include_llm_explanation"] = _get_attr_or_value(
+        rt_notif, "include_llm_explanation", notif.get("include_llm_explanation")
+    )
 
 
 def _hydrate_llm_config(data: dict[str, Any]) -> None:
@@ -577,6 +602,31 @@ def api_put_config() -> flask.Response:
         return flask.make_response(
             jsonify({"error": "Failed to update configuration", "details": str(e)}), 400
         )
+
+
+@config_bp.route("/api/config/test-notification", methods=["POST"])
+def api_test_notification() -> flask.Response:
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+
+    from app.notifications import notification_service
+
+    payload: dict[str, Any] = request.get_json(silent=True) or {}
+    notif: dict[str, Any] = dict(payload.get("notifications", {}))
+
+    raw_urls = notif.get("apprise_urls")
+    urls: list[str] | None = None
+    if isinstance(raw_urls, list):
+        cleaned = [u.strip() for u in raw_urls if isinstance(u, str) and u.strip()]
+        urls = cleaned or None
+
+    ok, error = notification_service.send_test(urls)
+    if ok:
+        return flask.jsonify({"ok": True, "message": "Test notification sent"})
+    return flask.make_response(
+        jsonify({"ok": False, "error": error or "Failed to send notification"}), 400
+    )
 
 
 @config_bp.route("/api/config/test-llm", methods=["POST"])

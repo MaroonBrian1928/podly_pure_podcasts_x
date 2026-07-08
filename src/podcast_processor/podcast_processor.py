@@ -231,6 +231,7 @@ class PodcastProcessor:
         # Cache job and post attributes early to avoid ORM access after expire_all()
         # This includes relationship access like post.feed.title
         cached_post_guid = post.guid
+        cached_post_id = post.id
         cached_post_title = post.title
         cached_feed_title = post.feed.title
         cached_job_id = job.id
@@ -377,6 +378,8 @@ class PodcastProcessor:
         except ProcessorException as e:
             error_msg = str(e)
             if "Processing job in progress" in error_msg:
+                # Not a genuine failure (a concurrent run holds the lock); update
+                # status but don't notify -- it's noise.
                 self.status_manager.update_job_status(
                     job,
                     "failed",
@@ -386,6 +389,15 @@ class PodcastProcessor:
             else:
                 self.status_manager.update_job_status(
                     job, "failed", cached_current_step, error_msg
+                )
+                self._notify_processing_failed(
+                    post_guid=cached_post_guid,
+                    post_id=cached_post_id,
+                    post_title=cached_post_title,
+                    feed_title=cached_feed_title,
+                    step_name=self._step_label(cached_current_step),
+                    error_message=error_msg,
+                    job_id=cached_job_id,
                 )
             raise
 
@@ -399,7 +411,59 @@ class PodcastProcessor:
             self.status_manager.update_job_status(
                 job, "failed", cached_current_step, f"Unexpected error: {e!s}"
             )
+            self._notify_processing_failed(
+                post_guid=cached_post_guid,
+                post_id=cached_post_id,
+                post_title=cached_post_title,
+                feed_title=cached_feed_title,
+                step_name=self._step_label(cached_current_step),
+                error_message=f"Unexpected error: {e!s}",
+                job_id=cached_job_id,
+            )
             raise
+
+    @staticmethod
+    def _step_label(step: int | None) -> str | None:
+        labels = {
+            0: "Queued",
+            1: "Downloading episode",
+            2: "Transcribing audio",
+            3: "Identifying ads",
+            4: "Processing audio",
+        }
+        if step is None:
+            return None
+        return labels.get(step)
+
+    def _notify_processing_failed(
+        self,
+        *,
+        post_guid: str,
+        post_id: int | None,
+        post_title: str | None,
+        feed_title: str | None,
+        step_name: str | None,
+        error_message: str,
+        job_id: str | None,
+    ) -> None:
+        """Best-effort failure notification via Apprise. Never raises."""
+        try:
+            from app.notifications import notification_service
+
+            notification_service.notify_processing_failed(
+                post_guid=post_guid,
+                post_id=post_id,
+                post_title=post_title,
+                feed_title=feed_title,
+                step_name=step_name,
+                error_message=error_message,
+                job_id=job_id,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to dispatch processing-failed notification for post %s",
+                post_guid,
+            )
 
     def _acquire_processing_lock(
         self,

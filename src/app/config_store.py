@@ -12,6 +12,7 @@ from app.extensions import db, scheduler
 from app.models import (
     AppSettings,
     LLMSettings,
+    NotificationSettings,
     OutputSettings,
     ProcessingSettings,
     WhisperSettings,
@@ -21,6 +22,7 @@ from shared import defaults as DEFAULTS
 from shared.config import Config as PydanticConfig
 from shared.config import (
     GroqWhisperConfig,
+    NotificationConfig,
     RemoteWhisperConfig,
     TestWhisperConfig,
 )
@@ -164,6 +166,23 @@ def ensure_defaults() -> None:
         },
     )
 
+    _ensure_row(
+        NotificationSettings,
+        {
+            "enabled": DEFAULTS.NOTIFY_ENABLED,
+            "apprise_urls": None,
+            "notify_on_failure": DEFAULTS.NOTIFY_ON_FAILURE,
+            "include_llm_explanation": DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
+        },
+    )
+
+
+def _apprise_urls_to_list(raw: str | None) -> list[str]:
+    """Split the stored newline-separated Apprise URLs into a clean list."""
+    if not raw:
+        return []
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
 
 def read_combined() -> dict[str, Any]:
     ensure_defaults()
@@ -173,8 +192,9 @@ def read_combined() -> dict[str, Any]:
     processing = db.session.get(ProcessingSettings, 1)
     output = db.session.get(OutputSettings, 1)
     app_s = db.session.get(AppSettings, 1)
+    notifications = db.session.get(NotificationSettings, 1)
 
-    assert llm and whisper and processing and output and app_s
+    assert llm and whisper and processing and output and app_s and notifications
 
     whisper_payload: dict[str, Any] = {"whisper_type": whisper.whisper_type}
     if whisper.whisper_type == "local":
@@ -249,6 +269,12 @@ def read_combined() -> dict[str, Any]:
             "cost_rate_per_hour": app_s.cost_rate_per_hour,
             "whisper_cost_rate_per_hour": app_s.whisper_cost_rate_per_hour,
             "ina_cost_rate_per_hour": app_s.ina_cost_rate_per_hour,
+        },
+        "notifications": {
+            "enabled": notifications.enabled,
+            "apprise_urls": _apprise_urls_to_list(notifications.apprise_urls),
+            "notify_on_failure": notifications.notify_on_failure,
+            "include_llm_explanation": notifications.include_llm_explanation,
         },
     }
 
@@ -401,6 +427,32 @@ def _update_section_app(data: dict[str, Any]) -> tuple[int | None, int | None]:
     return old_interval, old_retention
 
 
+def _update_section_notifications(data: dict[str, Any]) -> None:
+    row = db.session.get(NotificationSettings, 1)
+    assert row is not None
+    if "enabled" in data:
+        row.enabled = bool(data["enabled"])
+    if "notify_on_failure" in data:
+        row.notify_on_failure = bool(data["notify_on_failure"])
+    if "include_llm_explanation" in data:
+        row.include_llm_explanation = bool(data["include_llm_explanation"])
+    if "apprise_urls" in data:
+        urls = data["apprise_urls"]
+        if isinstance(urls, str):
+            url_list = _apprise_urls_to_list(urls)
+        elif isinstance(urls, list):
+            url_list = [str(u).strip() for u in urls if str(u).strip()]
+        else:
+            url_list = []
+        row.apprise_urls = "\n".join(url_list) if url_list else None
+    safe_commit(
+        db.session,
+        must_succeed=True,
+        context="update_notification_settings",
+        logger_obj=logger,
+    )
+
+
 def _maybe_reschedule_refresh_job(
     old_interval: int | None, new_interval: int | None
 ) -> None:
@@ -464,6 +516,8 @@ def update_combined(payload: dict[str, Any]) -> dict[str, Any]:
                 old_interval, app_s.background_update_interval_minute
             )
             _maybe_disable_cleanup_job(old_retention, app_s.post_cleanup_retention_days)
+    if "notifications" in payload:
+        _update_section_notifications(payload["notifications"] or {})
 
     return read_combined()
 
@@ -621,6 +675,21 @@ def to_pydantic_config() -> PydanticConfig:
                 "ina_cost_rate_per_hour",
                 DEFAULTS.APP_INA_COST_RATE_PER_HOUR,
             )
+        ),
+        notifications=NotificationConfig(
+            enabled=bool(data["notifications"].get("enabled", DEFAULTS.NOTIFY_ENABLED)),
+            apprise_urls=list(data["notifications"].get("apprise_urls", []) or []),
+            notify_on_failure=bool(
+                data["notifications"].get(
+                    "notify_on_failure", DEFAULTS.NOTIFY_ON_FAILURE
+                )
+            ),
+            include_llm_explanation=bool(
+                data["notifications"].get(
+                    "include_llm_explanation",
+                    DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
+                )
+            ),
         ),
     )
 
