@@ -7,9 +7,6 @@ import { Navigate } from 'react-router-dom';
 
 export default function BillingPage() {
   const { user } = useAuth();
-  if (user?.role === 'admin') {
-    return <Navigate to="/" replace />;
-  }
   const { data, refetch, isLoading } = useQuery({
     queryKey: ['billing', 'summary'],
     queryFn: billingApi.getSummary,
@@ -58,6 +55,11 @@ export default function BillingPage() {
       toast.error('Unable to open billing portal');
     },
   });
+
+  // Hooks above run unconditionally; early returns must come after them.
+  if (user?.role === 'admin') {
+    return <Navigate to="/" replace />;
+  }
 
   if (isLoading || !data) {
     return (
