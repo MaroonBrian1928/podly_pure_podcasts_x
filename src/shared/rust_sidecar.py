@@ -26,6 +26,7 @@ RUST_FEED_POSTS_ENABLED_ENV = "PODLY_RUST_FEED_POSTS_ENABLED"
 RUST_WORD_BOUNDARY_ENABLED_ENV = "PODLY_RUST_WORD_BOUNDARY_ENABLED"
 RUST_CHAPTER_FALLBACK_ENABLED_ENV = "PODLY_RUST_CHAPTER_FALLBACK_ENABLED"
 RUST_COSTS_ENABLED_ENV = "PODLY_RUST_COSTS_ENABLED"
+RUST_REPEAT_AD_ENABLED_ENV = "PODLY_RUST_REPEAT_AD_ENABLED"
 
 
 class RustSidecarError(RuntimeError):
@@ -105,6 +106,10 @@ def rust_chapter_fallback_enabled() -> bool:
 
 def rust_costs_enabled() -> bool:
     return env_flag_enabled(RUST_COSTS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
+
+
+def rust_repeat_ad_enabled() -> bool:
+    return env_flag_enabled(RUST_REPEAT_AD_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
@@ -1062,6 +1067,68 @@ def try_wb_refine_from_llm(
     return payload
 
 
+def try_repeat_ad_candidates(
+    *,
+    db_path: Path,
+    post_guid: str,
+    target_first_seq: int,
+    target_last_seq: int,
+    exclude_ranges: list[tuple[int, int]],
+    similarity_threshold: float,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust deterministic repeat-ad candidate finder.
+
+    Mirrors ``repeat_ad_finder.find_repeat_candidates`` in Python: given a
+    detected ad's seq range, returns spans elsewhere in the transcript whose
+    text matches within ``similarity_threshold`` (token-LCS ratio). Returns
+    None on flag-off / sidecar error / bad payload so the caller falls back to
+    the Python implementation.
+    """
+    if not rust_repeat_ad_enabled():
+        return None
+
+    request_payload = {
+        "exclude_ranges": [[int(a), int(b)] for a, b in exclude_ranges],
+    }
+    with _json_file(request_payload) as input_path:
+        args = [
+            "transcript",
+            "repeat-ad-candidates",
+            "--db",
+            str(db_path),
+            "--post-guid",
+            post_guid,
+            "--target-first-seq",
+            str(int(target_first_seq)),
+            "--target-last-seq",
+            str(int(target_last_seq)),
+            "--similarity-threshold",
+            repr(float(similarity_threshold)),
+            "--input",
+            str(input_path),
+        ]
+        try:
+            payload = run_podly_tools(args)
+        except RustSidecarError:
+            LOGGER.exception(
+                "Rust repeat-ad-candidates failed; falling back to Python"
+            )
+            return None
+
+    raw = payload.get("candidates")
+    if not isinstance(raw, list):
+        LOGGER.error("Rust repeat-ad-candidates returned invalid payload: %r", payload)
+        return None
+
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            LOGGER.error("Rust repeat-ad-candidates returned non-dict: %r", item)
+            return None
+        result.append(item)
+    return result
+
+
 def try_chapter_topic_blocks(
     *,
     db_path: Path,
@@ -1072,6 +1139,7 @@ def try_chapter_topic_blocks(
     max_block_seconds: int = 120,
     max_chars_per_block: int = 1000,
     removed_windows_ms: list[tuple[int, int]] | None = None,
+    include_segment_markers: bool = False,
 ) -> list[dict[str, Any]] | None:
     """Run the Rust chapter topic-block builder.
 
@@ -1103,6 +1171,8 @@ def try_chapter_topic_blocks(
         str(int(max_block_seconds)),
         "--max-chars-per-block",
         str(int(max_chars_per_block)),
+        "--include-segment-markers",
+        "true" if include_segment_markers else "false",
     ]
     if total_duration_ms is not None:
         base_args += ["--total-duration-ms", str(int(total_duration_ms))]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +44,13 @@ from podcast_processor.prompt import (
     build_speaker_context_for_prompt,
     transcript_excerpt_for_prompt,
 )
+from podcast_processor.repeat_ad_finder import (
+    RepeatAdCandidate,
+    find_repeat_candidates_with_fallback,
+    repeat_ad_detection_enabled,
+    tokenize,
+)
+from podcast_processor.repeat_ad_refiner import RepeatAdRefiner
 from podcast_processor.token_rate_limiter import (
     TokenRateLimiter,
     configure_rate_limiter_for_model,
@@ -146,6 +153,14 @@ class AdClassifier:
         else:
             self.logger.info("Boundary refinement disabled via config")
 
+        # Repeat-ad detection (opt-in via ENABLE_REPEAT_AD_DETECTION). Catches
+        # dynamically-inserted ads the classifier missed by matching detected
+        # ads against the rest of the transcript and confirming with the LLM.
+        self.repeat_ad_refiner: RepeatAdRefiner | None = None
+        if repeat_ad_detection_enabled():
+            self.repeat_ad_refiner = RepeatAdRefiner(config, self.logger)
+            self.logger.info("Repeat-ad detection enabled")
+
     def classify(
         self,
         *,
@@ -238,6 +253,12 @@ class AdClassifier:
                     self.logger.info(
                         f"Created {created} neighbor identifications via bulk ops"
                     )
+
+            # Pass 1.5: Detect repeated (dynamically-inserted) ads the
+            # classifier missed. Runs before boundary refinement so the new ad
+            # blocks get refined and persisted alongside the original ones.
+            if self.repeat_ad_refiner is not None:
+                self._detect_repeat_ads(transcript_segments, post)
 
             # Pass 2: Refine boundaries
             if self.boundary_refiner:
@@ -1204,6 +1225,9 @@ class AdClassifier:
                             "status": "pending",
                             "retry_attempts": retry_attempts_value,
                             "service_tier": attempt_service_tier,
+                            # The backoff (if any) is over; this attempt is in
+                            # flight, not waiting.
+                            "next_retry_at": None,
                         },
                         wait=True,
                     )
@@ -1222,12 +1246,14 @@ class AdClassifier:
                             completion_args,
                             config=self.config,
                             logger=self.logger,
+                            model_call_id=model_call_obj.id,
                         )
                 else:
                     response = call_litellm_with_tier_retry(
                         completion_args,
                         config=self.config,
                         logger=self.logger,
+                        model_call_id=model_call_obj.id,
                     )
 
                 response_first_choice = response.choices[0]
@@ -1320,19 +1346,9 @@ class AdClassifier:
         )
         retry_count = getattr(self.config, "llm_max_retry_attempts", 3)
         error_message = f"Retrying ({current_attempt_num}/{retry_count}): {error}"
-        res = writer_client.update(
-            "ModelCall",
-            model_call_obj.id,
-            {"status": "retrying", "error_message": error_message},
-            wait=True,
-        )
-        if not res or not res.success:
-            raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
-        # Update local object to reflect database state
-        model_call_obj.status = "retrying"
-        model_call_obj.error_message = error_message
 
-        # Use longer backoff for rate limiting errors
+        # Compute the backoff before flipping the row so the retrying update can
+        # carry the deadline — the jobs UI uses it to show "retrying in Ns".
         error_str = str(error).lower()
         if any(
             term in error_str
@@ -1349,6 +1365,25 @@ class AdClassifier:
             self.logger.info(
                 f"Waiting {wait_time}s before next retry for ModelCall {model_call_obj.id}."
             )
+        next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(
+            seconds=wait_time
+        )
+
+        res = writer_client.update(
+            "ModelCall",
+            model_call_obj.id,
+            {
+                "status": "retrying",
+                "error_message": error_message,
+                "next_retry_at": next_retry_at,
+            },
+            wait=True,
+        )
+        if not res or not res.success:
+            raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
+        # Update local object to reflect database state
+        model_call_obj.status = "retrying"
+        model_call_obj.error_message = error_message
 
         time.sleep(wait_time)
 
@@ -1597,6 +1632,162 @@ class AdClassifier:
         if is_self_promo:
             confidence = max(0.5, confidence - 0.25)
         return confidence
+
+    def _detect_repeat_ads(
+        self, transcript_segments: list[TranscriptSegment], post: Post
+    ) -> None:
+        """Find and confirm dynamically-inserted repeats of detected ads.
+
+        For each distinct ad already detected, deterministically locate matching
+        spans elsewhere in the transcript, ask the LLM to confirm each candidate
+        is advertisement content, and write ad identifications for confirmations
+        that clear the output confidence threshold. Boundary tightening of the
+        new blocks is left to the ``_refine_boundaries`` pass that runs next.
+        """
+        if self.repeat_ad_refiner is None:
+            return
+
+        identifications = (
+            self.db_session.query(Identification)
+            .join(TranscriptSegment)
+            .filter(TranscriptSegment.post_id == post.id, Identification.label == "ad")
+            .all()
+        )
+        blocks = self._group_into_blocks(identifications)
+        if not blocks:
+            return
+
+        min_confidence = float(self.config.output.min_confidence)
+        seg_payloads = [
+            {
+                "sequence_num": s.sequence_num,
+                "start_time": s.start_time,
+                "end_time": s.end_time,
+                "text": s.text,
+            }
+            for s in transcript_segments
+        ]
+        seg_by_seq = {int(s.sequence_num): s for s in transcript_segments}
+
+        block_meta: list[dict[str, Any]] = []
+        detected_ranges: list[tuple[int, int]] = []
+        for block in blocks:
+            segs = [
+                i.transcript_segment
+                for i in block["identifications"]
+                if i.transcript_segment is not None
+            ]
+            if not segs:
+                continue
+            seqs = [int(s.sequence_num) for s in segs]
+            first_seq, last_seq = min(seqs), max(seqs)
+            detected_ranges.append((first_seq, last_seq))
+            text = " ".join(
+                s.text or "" for s in sorted(segs, key=lambda x: x.sequence_num)
+            )
+            block_meta.append(
+                {
+                    "first_seq": first_seq,
+                    "last_seq": last_seq,
+                    "text": text,
+                    "confidence": float(block.get("confidence", 0.0) or 0.0),
+                }
+            )
+
+        # Dedupe by normalized text so an ad inserted N times is searched once.
+        seen_signatures: set[str] = set()
+        found_seqs: set[int] = set()
+        new_identifications: list[dict[str, Any]] = []
+
+        for meta in block_meta:
+            if meta["confidence"] < min_confidence:
+                continue
+            signature = " ".join(tokenize(meta["text"]))
+            if not signature or signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+
+            candidates = find_repeat_candidates_with_fallback(
+                seg_payloads,
+                post_guid=getattr(post, "guid", None),
+                target_first_seq=meta["first_seq"],
+                target_last_seq=meta["last_seq"],
+                exclude_ranges=detected_ranges,
+                logger=self.logger,
+            )
+
+            for cand in candidates:
+                cand_seqs = range(cand.first_seq, cand.last_seq + 1)
+                if any(seq in found_seqs for seq in cand_seqs):
+                    continue
+                rows = self._confirm_and_record_repeat(
+                    candidate=cand,
+                    reference_text=meta["text"],
+                    confidence_hint=meta["confidence"],
+                    seg_by_seq=seg_by_seq,
+                    post=post,
+                    min_confidence=min_confidence,
+                )
+                if rows:
+                    found_seqs.update(cand_seqs)
+                    new_identifications.extend(rows)
+
+        if new_identifications:
+            created = self._create_identifications_bulk(new_identifications)
+            self.logger.info(
+                "Repeat-ad detection created %s identifications across %s "
+                "confirmed repeat segments for post %s",
+                created,
+                len(found_seqs),
+                post.id,
+            )
+
+    def _confirm_and_record_repeat(
+        self,
+        *,
+        candidate: RepeatAdCandidate,
+        reference_text: str,
+        confidence_hint: float,
+        seg_by_seq: dict[int, TranscriptSegment],
+        post: Post,
+        min_confidence: float,
+    ) -> list[dict[str, Any]]:
+        """Confirm one candidate with the LLM; return identification rows if accepted."""
+        assert self.repeat_ad_refiner is not None
+        window_segs = [
+            seg_by_seq[seq]
+            for seq in range(candidate.first_seq, candidate.last_seq + 1)
+            if seq in seg_by_seq
+        ]
+        if not window_segs:
+            return []
+
+        candidate_payload = [
+            {"start_time": s.start_time, "text": s.text} for s in window_segs
+        ]
+        confirmation = self.repeat_ad_refiner.confirm(
+            reference_text=reference_text,
+            candidate_segments=candidate_payload,
+            candidate_first_seq=candidate.first_seq,
+            confidence_hint=confidence_hint,
+            post_id=post.id,
+        )
+        if (
+            not confirmation.is_ad
+            or confirmation.model_call_id is None
+            or confirmation.confidence < min_confidence
+        ):
+            return []
+
+        return [
+            {
+                "transcript_segment_id": s.id,
+                "model_call_id": confirmation.model_call_id,
+                "label": "ad",
+                "confidence": confirmation.confidence,
+            }
+            for s in window_segs
+        ]
 
     def _refine_boundaries(
         self, transcript_segments: list[TranscriptSegment], post: Post

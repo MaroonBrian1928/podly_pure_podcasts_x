@@ -15,6 +15,10 @@ LLM_MAX_INPUT_TOKENS_PER_MINUTE: int | None = None
 ENABLE_BOUNDARY_REFINEMENT = True
 ENABLE_WORD_LEVEL_BOUNDARY_REFINDER = False
 ENABLE_LLM_CHAPTER_FALLBACK_TAGGING = False
+# Send the FULL transcript text of each topic block to the chapter LLM instead
+# of the truncated head+middle sample. ~2-3x the prompt tokens of the default,
+# but the model sees every topic transition. Per-feed override available.
+CHAPTER_FULL_BLOCK_TEXT = False
 # litellm `service_tier` kwarg forwarded to providers that support it
 # (currently OpenAI and Google Gemini). "flex" trades latency for ~50% lower
 # cost and surfaces 429/503 under load; "priority" trades cost for speed;

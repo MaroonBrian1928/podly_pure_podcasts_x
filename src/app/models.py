@@ -47,6 +47,9 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     chapter_filter_strings = db.Column(db.Text, nullable=True)
     # Per-feed override for LLM chapter fallback tagging, null = use global config
     enable_llm_chapter_fallback_tagging = db.Column(db.Boolean, nullable=True)
+    # Per-feed override for the global LLMSettings.chapter_full_block_text
+    # toggle; NULL means inherit the global setting.
+    chapter_full_block_text = db.Column(db.Boolean, nullable=True)
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
     enable_profanity_bleeping = db.Column(db.Boolean, nullable=False, default=False)
     confirm_whisperx_endpoint = db.Column(db.Boolean, nullable=False, default=False)
@@ -261,6 +264,12 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     status = db.Column(db.String, nullable=False, default="pending")
     error_message = db.Column(db.Text, nullable=True)
     retry_attempts = db.Column(db.Integer, nullable=False, default=0)
+    # When status == "retrying", the naive-UTC moment the backoff sleep ends and
+    # the next attempt fires. Written alongside the retrying transition (both the
+    # classifier retry loop and the flex-tier wrapper) and cleared when the next
+    # attempt starts, so the jobs UI can show "backoff, retrying in Ns" instead
+    # of an opaque in-flight state. NULL outside backoff windows.
+    next_retry_at = db.Column(db.DateTime, nullable=True)
     # litellm `service_tier` value sent on the last attempt of this call (e.g.
     # "flex", "priority"). NULL when the call was made at the provider's
     # default tier or against a provider that doesn't accept service_tier
@@ -488,6 +497,11 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Boolean,
         nullable=False,
         default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
+    )
+    chapter_full_block_text = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.CHAPTER_FULL_BLOCK_TEXT,
     )
     llm_service_tier = db.Column(
         db.Text,

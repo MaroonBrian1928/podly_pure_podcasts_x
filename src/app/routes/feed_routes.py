@@ -232,6 +232,7 @@ def _build_feed_settings_updates(
 
     for field_name, allow_null in (
         ("enable_llm_chapter_fallback_tagging", True),
+        ("chapter_full_block_text", True),
         ("auto_whitelist_new_episodes_override", True),
         ("enable_profanity_bleeping", False),
         ("confirm_whisperx_endpoint", False),
@@ -1252,6 +1253,7 @@ def _serialize_feed(
         "enable_llm_chapter_fallback_tagging": getattr(
             feed, "enable_llm_chapter_fallback_tagging", None
         ),
+        "chapter_full_block_text": getattr(feed, "chapter_full_block_text", None),
         "enable_profanity_bleeping": bool(
             getattr(feed, "enable_profanity_bleeping", False)
         ),

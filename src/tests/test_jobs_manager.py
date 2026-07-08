@@ -385,3 +385,63 @@ def test_process_job_trims_web_memory_after_worker_exit(app, monkeypatch) -> Non
     manager._process_job(job_id, "trim-guid")
 
     assert trim_contexts == [f"web supervisor after processing job {job_id}"]
+
+
+def test_build_tier_summary_never_reports_attempt_zero() -> None:
+    summary = jobs_manager_module._build_tier_summary(
+        {
+            "label": "flex",
+            "latest": "flex",
+            "latest_status": "pending",
+            "latest_attempt": 0,
+            "latest_next_retry_at": None,
+            "tiers": {"flex"},
+        },
+        5,
+    )
+    in_flight = summary["in_flight"]
+    # A pending row means an attempt is underway; never render "attempt 0".
+    assert in_flight["attempt"] == 1
+    assert in_flight["status"] == "pending"
+    assert "backoff_until" not in in_flight
+
+
+def test_build_tier_summary_includes_backoff_deadline_when_retrying() -> None:
+    from datetime import datetime
+
+    summary = jobs_manager_module._build_tier_summary(
+        {
+            "label": "flex",
+            "latest": "flex",
+            "latest_status": "retrying",
+            "latest_attempt": 2,
+            "latest_next_retry_at": datetime(2026, 6, 10, 12, 0, 30),
+            "tiers": {"flex"},
+        },
+        5,
+    )
+    in_flight = summary["in_flight"]
+    assert in_flight["status"] == "retrying"
+    assert in_flight["attempt"] == 2
+    assert in_flight["backoff_until"] == "2026-06-10T12:00:30Z"
+
+
+def test_build_tier_summary_names_chapter_calls() -> None:
+    summary = jobs_manager_module._build_tier_summary(
+        {
+            "label": "flex",
+            "latest": "flex",
+            "latest_status": "pending",
+            "latest_attempt": 1,
+            "latest_next_retry_at": None,
+            "latest_call_label": jobs_manager_module._in_flight_call_label(-200, -200),
+            "tiers": {"flex"},
+        },
+        5,
+    )
+    assert summary["in_flight"]["call_label"] == "chapter topic plan"
+
+    # Real segment ranges (classification/boundary calls) get no label — the
+    # stage caption already says what's happening.
+    assert jobs_manager_module._in_flight_call_label(0, 1890) is None
+    assert jobs_manager_module._in_flight_call_label(-100, -100) == "chapter titles"

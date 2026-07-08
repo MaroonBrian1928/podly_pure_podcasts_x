@@ -171,7 +171,12 @@ def _seed_fixture(db_path: Path) -> None:
             status TEXT NOT NULL,
             error_message TEXT,
             retry_attempts INTEGER,
-            service_tier TEXT
+            next_retry_at TEXT,
+            service_tier TEXT,
+            prompt_tokens INTEGER,
+            cached_prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER
         );
         CREATE TABLE transcript_segment (
             id INTEGER PRIMARY KEY,
@@ -220,14 +225,17 @@ def _seed_fixture(db_path: Path) -> None:
         INSERT INTO model_call VALUES
             (1, 1, 0, 2363, 'gemini/gemini-3-flash-preview',
                 'classify prompt', 'classify response',
-                '2026-05-26 12:00:45', 'success', NULL, 1, 'flex'),
+                '2026-05-26 12:00:45', 'success', NULL, 1, NULL, 'flex',
+                NULL, NULL, NULL, NULL),
             (2, 1, -100, -100, 'gemini/gemini-3-flash-preview',
                 'chapters prompt', 'chapters response',
-                '2026-05-26 12:00:30', 'success', NULL, 1, NULL),
+                '2026-05-26 12:00:30', 'success', NULL, 1, NULL, NULL,
+                NULL, NULL, NULL, NULL),
             (3, 1, 2400, 2500, 'gemini/gemini-3-flash-preview',
                 'refine prompt', NULL,
                 '2026-05-26 12:01:00', 'retrying',
-                'Retrying (2/5): 503 service unavailable', 2, 'flex');
+                'Retrying (2/5): 503 service unavailable', 2,
+                '2026-05-26 12:02:00', 'flex', NULL, NULL, NULL, NULL);
 
         -- llm_settings singleton so the Rust max_retries lookup hits.
         CREATE TABLE llm_settings (
@@ -356,6 +364,9 @@ def test_rust_jobs_list_surfaces_in_flight_attempt_info(
     assert in_flight["status"] == "retrying"
     assert in_flight["attempt"] == 2
     assert in_flight["max_retries"] == 5
+    # Retrying rows carry the persisted backoff deadline so the UI can render
+    # "backoff, retrying in Ns" instead of an opaque in-flight state.
+    assert in_flight["backoff_until"] == "2026-05-26T12:02:00Z"
 
 
 def test_rust_stats_uses_sentinel_segment_range_labels(

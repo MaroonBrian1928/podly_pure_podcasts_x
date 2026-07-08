@@ -142,7 +142,10 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 log_prefix="Boundary refine",
             )
             response = call_litellm_with_tier_retry(
-                completion_args, config=self.config, logger=self.logger
+                completion_args,
+                config=self.config,
+                logger=self.logger,
+                model_call_id=model_call_id,
             )
             usage = extract_litellm_usage(response)
 

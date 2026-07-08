@@ -763,6 +763,7 @@ def test_chapter_insert_strategy_writes_chapters_without_ad_removal() -> None:
         align_word_starts=False,
         words_by_sequence=None,
         word_align_config=None,
+        full_block_text=False,
     )
     copy_mock.assert_called_once_with("/tmp/input.mp3", "/tmp/output.mp3")
     write_mock.assert_called_once_with(
@@ -920,3 +921,105 @@ def test_refine_transcript_sourced_chapters_uses_heuristic_when_disabled() -> No
 
     assert heuristic_mock.called
     assert out == heuristic
+
+
+def test_resolve_chapter_full_block_text_prefers_feed_override() -> None:
+    config = create_standard_test_config()
+    config.chapter_full_block_text = False
+    processor = _chapter_dispatch_processor(config)
+
+    # No feed / no override -> global setting.
+    assert processor._resolve_chapter_full_block_text(None) is False
+    inherit = SimpleNamespace(chapter_full_block_text=None)
+    assert processor._resolve_chapter_full_block_text(inherit) is False
+
+    # Feed override wins in both directions.
+    on = SimpleNamespace(chapter_full_block_text=True)
+    assert processor._resolve_chapter_full_block_text(on) is True
+    config.chapter_full_block_text = True
+    off = SimpleNamespace(chapter_full_block_text=False)
+    assert processor._resolve_chapter_full_block_text(off) is False
+    assert processor._resolve_chapter_full_block_text(inherit) is True
+
+
+def test_transcript_chapters_thread_full_block_text_from_feed() -> None:
+    config = create_standard_test_config()
+    config.enable_boundary_refinement = True
+    config.enable_word_level_boundary_refinder = True
+    processor = _chapter_dispatch_processor(config)
+
+    chapters = [Chapter("t0", "Topic", 0, 100_000)]
+    segments = [
+        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0, text="hello")
+    ]
+
+    with patch(
+        "podcast_processor.podcast_processor."
+        "generate_topic_chapters_from_transcript_with_llm",
+        return_value=[Chapter("t0", "Topic", 0, 100_000)],
+    ) as topic_mock:
+        processor._refine_transcript_sourced_chapters(
+            chapters_for_output=chapters,
+            transcript_segments=segments,
+            post_id=1,
+            post_guid="guid-1",
+            full_block_text=True,
+        )
+
+    assert topic_mock.call_args.kwargs["full_block_text"] is True
+
+
+def test_llm_path_declares_chapter_generation_stage() -> None:
+    """The LLM pipeline reports 5 steps and a dedicated 'Generating chapters'
+    stage — chapter LLM calls must not masquerade as audio processing."""
+    config = create_standard_test_config()
+    config.enable_llm_chapter_fallback_tagging = True
+
+    transcription_manager = MagicMock()
+    transcript_segments = [
+        SimpleNamespace(sequence_num=0, start_time=0.0, end_time=10.0, text="Intro"),
+    ]
+    transcription_manager.transcribe.return_value = transcript_segments
+
+    audio_processor = MagicMock()
+    audio_processor.process_audio.return_value = []
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.transcription_manager = transcription_manager
+    processor.audio_processor = audio_processor
+    processor.status_manager = MagicMock()
+    processor._classify_ad_segments = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="00:00 Intro",
+        unprocessed_audio_path="/tmp/input.mp3",
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    with (
+        patch(
+            "podcast_processor.podcast_processor.resolve_llm_path_chapters",
+            return_value=([Chapter("d0", "Intro", 0, 10_000)], "description"),
+        ),
+        patch("podcast_processor.podcast_processor.write_adjusted_chapters"),
+    ):
+        processor._perform_llm_based_processing(post, job, "/tmp/output.mp3")
+
+    calls = processor.status_manager.update_job_status.call_args_list
+    # Transcribe step declares the 5-step pipeline.
+    transcribe_call = next(c for c in calls if c.args[2] == 2)
+    assert transcribe_call.kwargs.get("total_steps") == 5
+    # Chapter generation runs as its own step 5, after audio processing (4).
+    step_sequence = [c.args[2] for c in calls]
+    assert 4 in step_sequence and 5 in step_sequence
+    assert step_sequence.index(5) > step_sequence.index(4)
+    chapters_call = next(c for c in calls if c.args[2] == 5)
+    assert chapters_call.args[3] == "Generating chapters"

@@ -11,12 +11,12 @@ from podcast_processor.chapter_fallback import (
     TOPIC_CHAPTER_SHORT_EPISODE_CAP,
     TOPIC_CHAPTER_SHORT_EPISODE_SECONDS,
     TOPIC_CHAPTER_TARGET_BLOCK_COUNT,
-    _align_chapters_to_first_words,
+    _align_chapters_to_start_anchors,
     _build_topic_blocks,
     _build_topic_chapter_generation_prompt,
     _chapters_from_topic_plan,
-    _parse_topic_chapter_opening_words,
     _parse_topic_chapter_response,
+    _parse_topic_chapter_start_anchors,
     _topic_chapter_count_cap_for_duration,
     generate_chapters_from_transcript,
     generate_topic_chapters_from_transcript_with_llm,
@@ -188,20 +188,37 @@ def test_refine_description_chapters_with_word_refiner_adjusts_starts() -> None:
     assert [ch.title for ch in refined] == ["First story", "Second story"]
 
 
-def test_parse_topic_chapter_opening_words_salvages_complete_items() -> None:
+def test_parse_topic_chapter_start_anchors_salvages_complete_items() -> None:
     content = (
         '```json\n{"chapter_count":3,"chapters":['
-        '{"block_index":0,"title":"First story","first_word":"hello"},'
-        '{"block_index":4,"title":"Second story","first_word":"welcome"},'
-        '{"block_index":9,"title":"Cut off","first_word"'
+        '{"block_index":0,"title":"First story","start_seq":0,'
+        '"start_phrase":"hello and welcome back"},'
+        '{"block_index":4,"title":"Second story","start_seq":41,'
+        '"start_phrase":"welcome to part two"},'
+        '{"block_index":9,"title":"Cut off","start_seq"'
     )
 
-    parsed = _parse_topic_chapter_opening_words(content)
+    parsed = _parse_topic_chapter_start_anchors(content)
 
-    assert parsed == {0: "hello", 4: "welcome"}
+    assert parsed == {
+        0: (0, "hello and welcome back"),
+        4: (41, "welcome to part two"),
+    }
 
 
-def test_align_chapters_to_first_words_uses_exact_word_timestamps() -> None:
+def test_parse_topic_chapter_start_anchors_accepts_seq_only_and_phrase_only() -> None:
+    content = (
+        '{"chapter_count":2,"chapters":['
+        '{"block_index":0,"title":"A","start_seq":7,"start_phrase":null},'
+        '{"block_index":3,"title":"B","start_phrase":"okay moving on now"}]}'
+    )
+
+    parsed = _parse_topic_chapter_start_anchors(content)
+
+    assert parsed == {0: (7, ""), 3: (None, "okay moving on now")}
+
+
+def _anchor_alignment_fixture() -> tuple[object, list[Chapter], list[dict], list, dict]:
     config = create_standard_test_config()
     chapters = [
         Chapter("c0", "First story", 0, 300_000),
@@ -212,13 +229,13 @@ def test_align_chapters_to_first_words_uses_exact_word_timestamps() -> None:
             "block_index": 0,
             "start_ms": 0,
             "end_ms": 120_000,
-            "text": "cold open first story starts",
+            "text": "[s0] cold open first story starts",
         },
         {
             "block_index": 1,
             "start_ms": 300_000,
             "end_ms": 420_000,
-            "text": "transition second story begins",
+            "text": "[s1] transition second story begins",
         },
     ]
     transcript_segments = [
@@ -239,17 +256,26 @@ def test_align_chapters_to_first_words_uses_exact_word_timestamps() -> None:
         0: [
             {"word": "cold", "start": 0.0, "end": 0.4},
             {"word": "first", "start": 12.0, "end": 12.4},
+            {"word": "story", "start": 12.5, "end": 12.9},
         ],
         1: [
             {"word": "transition", "start": 300.0, "end": 300.4},
             {"word": "second", "start": 318.0, "end": 318.4},
+            {"word": "story", "start": 318.5, "end": 318.9},
         ],
     }
+    return config, chapters, blocks, transcript_segments, words_by_sequence
 
-    aligned = _align_chapters_to_first_words(
+
+def test_align_chapters_to_start_anchors_uses_exact_word_timestamps() -> None:
+    config, chapters, blocks, transcript_segments, words_by_sequence = (
+        _anchor_alignment_fixture()
+    )
+
+    aligned = _align_chapters_to_start_anchors(
         chapters,
         blocks=blocks,
-        opening_words_by_block={0: "first", 1: "second"},
+        anchors_by_block={0: (0, "first story"), 1: (1, "second story")},
         transcript_segments=transcript_segments,
         words_by_sequence=words_by_sequence,
         config=config,
@@ -257,6 +283,28 @@ def test_align_chapters_to_first_words_uses_exact_word_timestamps() -> None:
 
     assert [ch.start_time_ms for ch in aligned] == [12_000, 318_000]
     assert aligned[0].end_time_ms == 318_000
+
+
+def test_align_chapters_to_start_anchors_falls_back_to_marked_segment_start() -> None:
+    """When the phrase is missing or unmatched, the [sNNN] marker the model
+    named is still an exact anchor: use that segment's start time."""
+    config, chapters, blocks, transcript_segments, words_by_sequence = (
+        _anchor_alignment_fixture()
+    )
+
+    aligned = _align_chapters_to_start_anchors(
+        chapters,
+        blocks=blocks,
+        # No phrase for block 0; unmatchable phrase for block 1.
+        anchors_by_block={0: (0, ""), 1: (1, "totally absent words")},
+        transcript_segments=transcript_segments,
+        words_by_sequence=words_by_sequence,
+        config=config,
+    )
+
+    # Block 0: seq 0 starts at 0.0 -> unchanged start. Block 1: phrase missed,
+    # falls back to seq 1's segment start (300s) -> unchanged start.
+    assert [ch.start_time_ms for ch in aligned] == [0, 300_000]
 
 
 def test_refine_transcript_chapters_falls_back_to_original_on_collision() -> None:
@@ -493,8 +541,10 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     first_response = _mock_response(
         (
             '{"chapter_count":4,"chapters":['
-            '{"block_index":0,"title":"Opening recap","first_word":"Opening"},'
-            '{"block_index":1,"title":"Mission setup","first_word":"Mission"},'
+            '{"block_index":0,"title":"Opening recap","start_seq":0,'
+            '"start_phrase":"Opening"},'
+            '{"block_index":1,"title":"Mission setup","start_seq":1,'
+            '"start_phrase":"Mission"},'
             '{"block_index":'
         ),
         finish_reason="length",
@@ -502,9 +552,12 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     second_response = _mock_response(
         (
             '{"chapter_count":3,"chapters":['
-            '{"block_index":1,"title":"Different duplicate title","first_word":"Mission"},'
-            '{"block_index":2,"title":"Castle conflict","first_word":"Castle"},'
-            '{"block_index":3,"title":"Roundtable vote","first_word":"Roundtable"}'
+            '{"block_index":1,"title":"Different duplicate title",'
+            '"start_seq":1,"start_phrase":"Mission"},'
+            '{"block_index":2,"title":"Castle conflict","start_seq":2,'
+            '"start_phrase":"Castle"},'
+            '{"block_index":3,"title":"Roundtable vote","start_seq":3,'
+            '"start_phrase":"Roundtable"}'
             "]}"
         ),
         finish_reason="stop",
@@ -535,7 +588,8 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
     assert len(prompts) == 2
     assert "Return only chapters with block_index > 1" in prompts[1]
     assert "Do not repeat existing chapter block_index values: [0, 1]" in prompts[1]
-    assert "first_word" in prompts[1]
+    assert "start_phrase" in prompts[1]
+    assert "start_seq" in prompts[1]
 
     retry_payload = json.loads(prompts[1].split("Transcript blocks:\n", 1)[1])
     assert [block["block_index"] for block in retry_payload] == [1, 2, 3]
@@ -1181,3 +1235,67 @@ def test_segment_index_context_window() -> None:
         time_seconds=1_000.0, window_seconds=1.0
     )
     assert [s["sequence_num"] for s in selected] == [1]
+
+
+def test_build_topic_blocks_includes_segment_markers_when_enabled() -> None:
+    segments = [
+        SimpleNamespace(
+            sequence_num=7, start_time=0.0, end_time=20.0, text="Intro and setup"
+        ),
+        SimpleNamespace(
+            sequence_num=8, start_time=21.0, end_time=40.0, text="More intro"
+        ),
+    ]
+
+    blocks = _build_topic_blocks(
+        segments,
+        total_duration_ms=60_000,
+        include_segment_markers=True,
+    )
+
+    assert len(blocks) == 1
+    assert blocks[0]["text"] == "[s7] Intro and setup [s8] More intro"
+
+
+def test_build_topic_blocks_marker_truncation_keeps_markers_intact() -> None:
+    from podcast_processor.chapter_fallback import _truncate_block_parts
+
+    # Many short marked parts well over a small budget: every surviving token
+    # run must still contain complete [sNNN] markers.
+    parts = [f"[s{i}] segment number {i} text body" for i in range(40)]
+    out = _truncate_block_parts(parts, 200)
+
+    assert len(out) <= 200
+    assert " ... " in out
+    # No partially-cut markers: every '[' opens a full [sNNN] marker.
+    import re as _re
+
+    assert _re.findall(r"\[[^\]]*$", out) == []
+    for marker in _re.findall(r"\[s\d+\]", out):
+        assert marker.startswith("[s") and marker.endswith("]")
+    # Head retains the first part and the middle window comes from mid-list.
+    assert out.startswith("[s0] ")
+
+
+def test_full_block_text_setting_disables_truncation() -> None:
+    from podcast_processor.chapter_fallback import _effective_max_chars_per_block
+
+    assert _effective_max_chars_per_block(False) == TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK
+    assert _effective_max_chars_per_block(True) == 0
+
+    # 0 budget means the builder keeps full text (no " ... " elision).
+    long_text = "word " * 600
+    segments = [
+        SimpleNamespace(
+            sequence_num=0, start_time=0.0, end_time=20.0, text=long_text.strip()
+        ),
+    ]
+    blocks = _build_topic_blocks(
+        segments,
+        total_duration_ms=60_000,
+        max_chars_per_block=0,
+        include_segment_markers=True,
+    )
+    assert len(blocks) == 1
+    assert " ... " not in blocks[0]["text"]
+    assert len(blocks[0]["text"]) > TOPIC_CHAPTER_MAX_CHARS_PER_BLOCK

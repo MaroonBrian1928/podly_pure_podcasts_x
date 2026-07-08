@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.writer.client import writer_client
@@ -96,6 +97,63 @@ def _is_tier_retryable(exc: Exception) -> bool:
     return False
 
 
+def _mark_model_call_backoff(
+    model_call_id: int | None,
+    *,
+    wait_seconds: float,
+    error: Exception,
+    attempt_num: int,
+    max_attempts: int,
+    logger: logging.Logger,
+) -> None:
+    """Best-effort: flip the row to `retrying` with the backoff deadline.
+
+    Without this, a flex-tier backoff leaves the row sitting at `pending` for
+    the whole sleep and the jobs UI can't tell "waiting on the provider" from
+    "sleeping before a retry"."""
+    if model_call_id is None:
+        return
+    next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(
+        seconds=wait_seconds
+    )
+    try:
+        writer_client.update(
+            "ModelCall",
+            int(model_call_id),
+            {
+                "status": "retrying",
+                "error_message": (
+                    f"Flex tier busy (attempt {attempt_num}/{max_attempts}): {error}"
+                ),
+                "next_retry_at": next_retry_at,
+            },
+            wait=True,
+        )
+    except Exception as exc:  # best-effort  # noqa: BLE001
+        logger.warning(
+            "Failed to record flex backoff on ModelCall %s: %s", model_call_id, exc
+        )
+
+
+def _mark_model_call_attempt_started(
+    model_call_id: int | None, *, logger: logging.Logger
+) -> None:
+    """Best-effort: back to `pending` (request in flight), clearing the deadline."""
+    if model_call_id is None:
+        return
+    try:
+        writer_client.update(
+            "ModelCall",
+            int(model_call_id),
+            {"status": "pending", "next_retry_at": None},
+            wait=True,
+        )
+    except Exception as exc:  # best-effort  # noqa: BLE001
+        logger.warning(
+            "Failed to clear flex backoff on ModelCall %s: %s", model_call_id, exc
+        )
+
+
 def call_litellm_with_tier_retry(
     completion_args: dict[str, Any],
     *,
@@ -104,6 +162,7 @@ def call_litellm_with_tier_retry(
     max_retries: int | None = None,
     base_delay: float | None = None,
     sleep: Any = time.sleep,
+    model_call_id: int | None = None,
 ) -> Any:
     """Run `litellm.completion(**args)` with Flex-aware retry + fallback.
 
@@ -112,6 +171,11 @@ def call_litellm_with_tier_retry(
     kwarg so the call retries at the standard tier instead of failing. For
     'priority' / 'auto' / 'default' (or when the kwarg isn't set), this is a
     single straight-through `litellm.completion` invocation.
+
+    When ``model_call_id`` is supplied, backoff windows are persisted on the
+    ModelCall row (`status="retrying"` + `next_retry_at`) so the jobs UI can
+    show the live backoff state; the row returns to `pending` as each retry
+    attempt goes out. All such writes are best-effort.
     """
     import litellm  # local import to keep top-level imports cheap
 
@@ -150,6 +214,7 @@ def call_litellm_with_tier_retry(
                     retries,
                     exc,
                 )
+                _mark_model_call_attempt_started(model_call_id, logger=logger)
                 fallback_args = dict(completion_args)
                 fallback_args.pop("service_tier", None)
                 return litellm.completion(**fallback_args)
@@ -161,7 +226,16 @@ def call_litellm_with_tier_retry(
                 attempt + 1,
                 retries,
             )
+            _mark_model_call_backoff(
+                model_call_id,
+                wait_seconds=float(wait),
+                error=exc,
+                attempt_num=attempt + 1,
+                max_attempts=retries,
+                logger=logger,
+            )
             sleep(wait)
+            _mark_model_call_attempt_started(model_call_id, logger=logger)
 
     assert last_err is not None
     raise last_err

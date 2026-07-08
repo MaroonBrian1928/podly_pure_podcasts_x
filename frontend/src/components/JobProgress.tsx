@@ -79,8 +79,11 @@ interface JobStageRailProps {
 }
 
 export function JobStageRail({ stages, stageDurationsMs, className = '' }: JobStageRailProps) {
+  // Tailwind needs literal class names; the LLM pipeline has 6 stages, the
+  // chapter pipelines 5.
+  const cols = stages.length === 6 ? 'grid-cols-6' : 'grid-cols-5';
   return (
-    <div className={`grid grid-cols-5 gap-1 text-[10px] text-gray-600 ${className}`}>
+    <div className={`grid ${cols} gap-1 text-[10px] text-gray-600 ${className}`}>
       {stages.map((stage) => {
         const ms = stageDurationsMs?.[stage.index];
         const hasDuration =
@@ -180,6 +183,13 @@ export interface ServiceTierSummary {
     status: 'pending' | 'retrying';
     attempt: number;
     max_retries?: number;
+    // ISO UTC deadline of the current backoff sleep; present only while
+    // status === 'retrying' and the worker persisted a deadline.
+    backoff_until?: string;
+    // Short label for what kind of LLM call is in flight (e.g. "chapter
+    // topic plan"); present for chapter-phase calls so the caption makes
+    // sense when they run inside the audio-processing stage.
+    call_label?: string;
   };
 }
 
@@ -254,11 +264,37 @@ function formatTierInFlight(inFlight: {
   status: 'pending' | 'retrying';
   attempt: number;
   max_retries?: number;
+  backoff_until?: string;
+  call_label?: string;
 }): string {
-  const verb = inFlight.status === 'retrying' ? 'retrying' : 'attempt';
   const count =
     inFlight.max_retries && inFlight.max_retries > 0
       ? `${inFlight.attempt}/${inFlight.max_retries}`
       : `${inFlight.attempt}`;
-  return `(${verb} ${count})`;
+  // Name the call when we know it (chapter-phase calls run inside the
+  // audio-processing stage, where a bare "awaiting provider" reads oddly).
+  const subject = inFlight.call_label ? `${inFlight.call_label}: ` : '';
+  if (inFlight.status === 'retrying') {
+    const remaining = backoffRemainingSeconds(inFlight.backoff_until);
+    if (remaining !== null && remaining > 0) {
+      return `(${subject}attempt ${count} — backoff, retrying in ${formatSeconds(remaining)})`;
+    }
+    return `(${subject}retrying ${count})`;
+  }
+  // pending = the request is out; we're waiting on the provider's response.
+  return `(${subject}attempt ${count} — awaiting provider)`;
+}
+
+function backoffRemainingSeconds(backoffUntil?: string): number | null {
+  if (!backoffUntil) return null;
+  const deadline = Date.parse(backoffUntil);
+  if (Number.isNaN(deadline)) return null;
+  return Math.round((deadline - Date.now()) / 1000);
+}
+
+function formatSeconds(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }

@@ -1,0 +1,28 @@
+You are verifying a suspected REPEATED advertisement in a podcast transcript.
+
+Dynamically-inserted ads are stitched into an episode multiple times, usually
+with the IDENTICAL sponsor read. Our ad detector already confirmed the ad copy
+below as advertisement content earlier in this same episode. A deterministic
+text match then found the candidate segments below, which look like another
+insertion of that same ad. Your job is to confirm whether the candidate is
+genuinely advertisement content (sponsor read, promo, CTA) and not ordinary
+show content that merely shares a phrase.
+
+CONFIRMED AD COPY (detected elsewhere in this episode):
+{{ reference_text }}
+
+CANDIDATE SEGMENTS (verify these):
+{% for seg in candidate_segments %}[{{ seg.start_time }}] {{ seg.text }}
+{% endfor %}
+GUIDANCE:
+- Confirm (is_ad=true) when the candidate clearly carries the same sponsor /
+  promotional intent as the confirmed ad copy: brand names, URLs/domains, promo
+  or discount language, prices, or "brought to you by" framing.
+- Reject (is_ad=false) when the candidate is ordinary show content, narration,
+  or conversation that only coincidentally overlaps a common phrase (e.g.
+  "back to the show") without sponsor/promotional content.
+- Confidence reflects how certain you are that the candidate is advertisement
+  content: 0.0 (definitely content) to 1.0 (definitely the ad).
+
+Return ONLY one JSON object (no markdown, no code fences, no extra prose):
+{"is_ad": true, "confidence": 0.0, "reason": ""}
