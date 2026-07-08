@@ -717,6 +717,12 @@ class NotificationSettings(db.Model):  # type: ignore[name-defined, misc]
     notify_on_failure = db.Column(
         db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_FAILURE
     )
+    notify_on_success = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_SUCCESS
+    )
+    notify_on_rust_fallback = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_RUST_FALLBACK
+    )
     include_llm_explanation = db.Column(
         db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION
     )

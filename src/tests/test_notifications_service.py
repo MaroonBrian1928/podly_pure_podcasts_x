@@ -10,6 +10,8 @@ def _settings(**overrides):
         "enabled": True,
         "apprise_urls": ["json://localhost"],
         "notify_on_failure": True,
+        "notify_on_success": True,
+        "notify_on_rust_fallback": True,
         "include_llm_explanation": True,
     }
     base.update(overrides)
@@ -151,6 +153,66 @@ def test_notify_failure_swallows_explainer_errors():
     _, kwargs = fake_apprise.notify.call_args
     assert "raw error" in kwargs["body"]
     assert "Likely cause" not in kwargs["body"]
+
+
+def test_notify_success_sends_when_enabled():
+    service = NotificationService(config=_config(_settings()))
+    fake = mock.MagicMock()
+    fake.add.return_value = True
+    fake.notify.return_value = True
+    with mock.patch("apprise.Apprise", return_value=fake):
+        service.notify_processing_succeeded(
+            post_guid="g",
+            post_title="Ep 1",
+            feed_title="Feed",
+            ad_windows_count=3,
+        )
+    _, kwargs = fake.notify.call_args
+    assert "Ep 1" in kwargs["title"]
+    assert "Ad segments removed: 3" in kwargs["body"]
+
+
+def test_notify_success_skipped_when_toggle_off():
+    service = NotificationService(config=_config(_settings(notify_on_success=False)))
+    with mock.patch("apprise.Apprise") as apprise_cls:
+        service.notify_processing_succeeded(
+            post_guid="g", post_title="t", feed_title="f", ad_windows_count=None
+        )
+    apprise_cls.assert_not_called()
+
+
+def test_notify_rust_fallback_sends_and_throttles():
+    import app.notifications as notif_mod
+
+    # Reset throttle state so this test is deterministic.
+    with notif_mod._throttle_lock:
+        notif_mod._last_sent_at.clear()
+
+    service = NotificationService(config=_config(_settings()))
+    fake = mock.MagicMock()
+    fake.add.return_value = True
+    fake.notify.return_value = True
+    with mock.patch("apprise.Apprise", return_value=fake):
+        service.notify_rust_fallback(operation="stats render", error="boom")
+        service.notify_rust_fallback(operation="stats render", error="boom again")
+        service.notify_rust_fallback(operation="audio probe", error="different op")
+
+    # Same operation is throttled (1 send), a different operation is not.
+    titles = [c.kwargs["title"] for c in fake.notify.call_args_list]
+    assert len(titles) == 2  # stats render (once) + audio probe (once)
+
+
+def test_notify_rust_fallback_skipped_when_toggle_off():
+    import app.notifications as notif_mod
+
+    with notif_mod._throttle_lock:
+        notif_mod._last_sent_at.clear()
+    service = NotificationService(
+        config=_config(_settings(notify_on_rust_fallback=False))
+    )
+    with mock.patch("apprise.Apprise") as apprise_cls:
+        service.notify_rust_fallback(operation="stats render", error="boom")
+    apprise_cls.assert_not_called()
 
 
 def test_send_test_reports_no_urls():

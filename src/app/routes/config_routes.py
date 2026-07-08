@@ -106,6 +106,12 @@ def _hydrate_notifications_config(data: dict[str, Any]) -> None:
     notif["notify_on_failure"] = _get_attr_or_value(
         rt_notif, "notify_on_failure", notif.get("notify_on_failure")
     )
+    notif["notify_on_success"] = _get_attr_or_value(
+        rt_notif, "notify_on_success", notif.get("notify_on_success")
+    )
+    notif["notify_on_rust_fallback"] = _get_attr_or_value(
+        rt_notif, "notify_on_rust_fallback", notif.get("notify_on_rust_fallback")
+    )
     notif["include_llm_explanation"] = _get_attr_or_value(
         rt_notif, "include_llm_explanation", notif.get("include_llm_explanation")
     )

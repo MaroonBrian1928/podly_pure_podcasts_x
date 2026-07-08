@@ -112,36 +112,61 @@ def rust_repeat_ad_enabled() -> bool:
     return env_flag_enabled(RUST_REPEAT_AD_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
+def _notify_rust_fallback(operation: str, error: str) -> None:
+    """Best-effort 'rust fell back to Python' notification.
+
+    Lazy-imports the app-layer notification service so this shared module keeps
+    no hard dependency on the app package, and never raises.
+    """
+    try:
+        from app.notifications import notification_service
+
+        notification_service.notify_rust_fallback(operation=operation, error=error)
+    except Exception:  # noqa: BLE001 - notifications must never affect the sidecar
+        LOGGER.debug("rust-fallback notification dispatch failed", exc_info=True)
+
+
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
     command = [str(rust_tools_bin()), *args]
+    # e.g. "audio probe", "stats render" -- identifies the failing operation and
+    # keys the notification throttle.
+    operation = " ".join(str(a) for a in args[:2]) or "podly_tools"
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=timeout_sec,
-        )
-    except OSError as exc:
-        raise RustSidecarError(f"failed to start podly_tools: {exc}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RustSidecarError(f"podly_tools timed out after {timeout_sec}s") from exc
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except OSError as exc:
+            raise RustSidecarError(f"failed to start podly_tools: {exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RustSidecarError(
+                f"podly_tools timed out after {timeout_sec}s"
+            ) from exc
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RustSidecarError(
-            f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
-        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            raise RustSidecarError(
+                f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
+            )
 
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RustSidecarError("podly_tools returned invalid JSON") from exc
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RustSidecarError("podly_tools returned invalid JSON") from exc
 
-    if not isinstance(payload, dict):
-        raise RustSidecarError("podly_tools returned a non-object JSON payload")
+        if not isinstance(payload, dict):
+            raise RustSidecarError("podly_tools returned a non-object JSON payload")
 
-    return payload
+        return payload
+    except RustSidecarError as exc:
+        # Every RustSidecarError leads a caller to fall back to Python; notify
+        # here (once, centrally) rather than at each of the ~15 call sites.
+        _notify_rust_fallback(operation, str(exc))
+        raise
 
 
 def try_probe_audio_duration_ms(input_path: Path) -> int | None:
@@ -1110,9 +1135,7 @@ def try_repeat_ad_candidates(
         try:
             payload = run_podly_tools(args)
         except RustSidecarError:
-            LOGGER.exception(
-                "Rust repeat-ad-candidates failed; falling back to Python"
-            )
+            LOGGER.exception("Rust repeat-ad-candidates failed; falling back to Python")
             return None
 
     raw = payload.get("candidates")
