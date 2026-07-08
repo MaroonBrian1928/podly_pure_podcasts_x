@@ -217,6 +217,8 @@ export interface NotificationConfigUI {
   enabled: boolean;
   apprise_urls: string[];
   notify_on_failure: boolean;
+  notify_on_success: boolean;
+  notify_on_rust_fallback: boolean;
   include_llm_explanation: boolean;
 }
 

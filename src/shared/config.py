@@ -72,6 +72,17 @@ class NotificationConfig(BaseModel):
         default=DEFAULTS.NOTIFY_ON_FAILURE,
         description="Send a notification when an episode fails to process.",
     )
+    notify_on_success: bool = Field(
+        default=DEFAULTS.NOTIFY_ON_SUCCESS,
+        description="Send a notification when an episode finishes processing successfully.",
+    )
+    notify_on_rust_fallback: bool = Field(
+        default=DEFAULTS.NOTIFY_ON_RUST_FALLBACK,
+        description=(
+            "Send a notification when the Rust sidecar fails and Podly falls "
+            "back to the Python implementation (throttled per operation)."
+        ),
+    )
     include_llm_explanation: bool = Field(
         default=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
         description=(

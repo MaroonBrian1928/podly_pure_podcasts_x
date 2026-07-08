@@ -10,11 +10,33 @@ swallows and logs its own exceptions.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 from app.runtime_config import config as runtime_config
+from shared import defaults as DEFAULTS
 
 logger = logging.getLogger("global_logger")
+
+# Per-process throttle for high-frequency events (keyed by event+operation).
+_throttle_lock = threading.Lock()
+_last_sent_at: dict[str, float] = {}
+
+
+def _throttled(key: str, min_interval_sec: float) -> bool:
+    """Return True if a notification for ``key`` was sent within the window.
+
+    Records ``now`` as the last-sent time when it returns False (i.e. when the
+    caller is cleared to send).
+    """
+    now = time.monotonic()
+    with _throttle_lock:
+        last = _last_sent_at.get(key)
+        if last is not None and (now - last) < min_interval_sec:
+            return True
+        _last_sent_at[key] = now
+        return False
 
 
 def _resolve_config(config: Any | None) -> Any:
@@ -175,6 +197,86 @@ class NotificationService:
                 "Failed to build LLM failure explanation for post %s", post_guid
             )
             return None
+
+    def notify_processing_succeeded(
+        self,
+        *,
+        post_guid: str,
+        post_title: str | None,
+        feed_title: str | None,
+        ad_windows_count: int | None = None,
+    ) -> None:
+        """Notify that an episode finished processing successfully. Best-effort."""
+        try:
+            settings = _notification_settings(self._config)
+            if settings is None or not getattr(settings, "enabled", False):
+                return
+            if not getattr(settings, "notify_on_success", False):
+                return
+
+            urls = list(getattr(settings, "apprise_urls", []) or [])
+            if not urls:
+                return
+
+            episode = post_title or post_guid
+            feed = feed_title or "Unknown feed"
+            title = f'✅ Podly: "{episode}" processed'
+            body_lines = [f"Feed: {feed}", f"Episode: {episode}"]
+            if ad_windows_count is not None:
+                body_lines.append(f"Ad segments removed: {ad_windows_count}")
+
+            ok, error = _dispatch(urls, title=title, body="\n".join(body_lines))
+            if not ok:
+                logger.warning(
+                    "Failed to send processing-succeeded notification for post %s: %s",
+                    post_guid,
+                    error,
+                )
+        except Exception:
+            logger.exception(
+                "Unexpected error while sending success notification for post %s",
+                post_guid,
+            )
+
+    def notify_rust_fallback(self, *, operation: str, error: str) -> None:
+        """Notify that the Rust sidecar failed and Podly fell back to Python.
+
+        Throttled per operation because this can fire very frequently (e.g. a
+        broken binary hit on every request). Best-effort.
+        """
+        try:
+            settings = _notification_settings(self._config)
+            if settings is None or not getattr(settings, "enabled", False):
+                return
+            if not getattr(settings, "notify_on_rust_fallback", False):
+                return
+
+            urls = list(getattr(settings, "apprise_urls", []) or [])
+            if not urls:
+                return
+
+            if _throttled(
+                f"rust_fallback:{operation}",
+                DEFAULTS.NOTIFY_RUST_FALLBACK_THROTTLE_SEC,
+            ):
+                return
+
+            title = "⚠️ Podly: Rust sidecar fell back to Python"
+            body = (
+                f"Operation: {operation}\n"
+                f"Error: {error}\n\n"
+                "Podly automatically used the Python implementation, so "
+                "processing still works, but the faster Rust path is failing. "
+                "Check the sidecar binary/logs. (Further alerts for this "
+                "operation are throttled.)"
+            )
+            ok, err = _dispatch(urls, title=title, body=body)
+            if not ok:
+                logger.warning("Failed to send rust-fallback notification: %s", err)
+        except Exception:
+            logger.exception(
+                "Unexpected error while sending rust-fallback notification"
+            )
 
     # -- Test send -------------------------------------------------------------
 

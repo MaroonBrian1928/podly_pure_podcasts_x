@@ -367,6 +367,12 @@ class PodcastProcessor:
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
+                self._notify_processing_succeeded(
+                    post_guid=cached_post_guid,
+                    post_title=cached_post_title,
+                    feed_title=cached_feed_title,
+                    ad_windows_count=getattr(job, "ad_windows_count", None),
+                )
                 return processed_audio_path
             finally:
                 # Release lock using cached GUID without touching ORM state after potential rollback
@@ -466,6 +472,30 @@ class PodcastProcessor:
         except Exception:
             self.logger.exception(
                 "Failed to dispatch processing-failed notification for post %s",
+                post_guid,
+            )
+
+    def _notify_processing_succeeded(
+        self,
+        *,
+        post_guid: str,
+        post_title: str | None,
+        feed_title: str | None,
+        ad_windows_count: int | None,
+    ) -> None:
+        """Best-effort success notification via Apprise. Never raises."""
+        try:
+            from app.notifications import notification_service
+
+            notification_service.notify_processing_succeeded(
+                post_guid=post_guid,
+                post_title=post_title,
+                feed_title=feed_title,
+                ad_windows_count=ad_windows_count,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to dispatch processing-succeeded notification for post %s",
                 post_guid,
             )
 

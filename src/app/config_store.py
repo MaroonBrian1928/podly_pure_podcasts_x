@@ -173,6 +173,8 @@ def ensure_defaults() -> None:
             "enabled": DEFAULTS.NOTIFY_ENABLED,
             "apprise_urls": None,
             "notify_on_failure": DEFAULTS.NOTIFY_ON_FAILURE,
+            "notify_on_success": DEFAULTS.NOTIFY_ON_SUCCESS,
+            "notify_on_rust_fallback": DEFAULTS.NOTIFY_ON_RUST_FALLBACK,
             "include_llm_explanation": DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
         },
     )
@@ -276,6 +278,8 @@ def read_combined() -> dict[str, Any]:
             "enabled": notifications.enabled,
             "apprise_urls": _apprise_urls_to_list(notifications.apprise_urls),
             "notify_on_failure": notifications.notify_on_failure,
+            "notify_on_success": notifications.notify_on_success,
+            "notify_on_rust_fallback": notifications.notify_on_rust_fallback,
             "include_llm_explanation": notifications.include_llm_explanation,
         },
     }
@@ -437,6 +441,10 @@ def _update_section_notifications(data: dict[str, Any]) -> None:
         row.enabled = bool(data["enabled"])
     if "notify_on_failure" in data:
         row.notify_on_failure = bool(data["notify_on_failure"])
+    if "notify_on_success" in data:
+        row.notify_on_success = bool(data["notify_on_success"])
+    if "notify_on_rust_fallback" in data:
+        row.notify_on_rust_fallback = bool(data["notify_on_rust_fallback"])
     if "include_llm_explanation" in data:
         row.include_llm_explanation = bool(data["include_llm_explanation"])
     if "apprise_urls" in data:
@@ -691,6 +699,16 @@ def to_pydantic_config() -> PydanticConfig:
             notify_on_failure=bool(
                 data["notifications"].get(
                     "notify_on_failure", DEFAULTS.NOTIFY_ON_FAILURE
+                )
+            ),
+            notify_on_success=bool(
+                data["notifications"].get(
+                    "notify_on_success", DEFAULTS.NOTIFY_ON_SUCCESS
+                )
+            ),
+            notify_on_rust_fallback=bool(
+                data["notifications"].get(
+                    "notify_on_rust_fallback", DEFAULTS.NOTIFY_ON_RUST_FALLBACK
                 )
             ),
             include_llm_explanation=bool(

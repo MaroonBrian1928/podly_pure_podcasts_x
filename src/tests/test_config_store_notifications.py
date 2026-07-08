@@ -37,6 +37,8 @@ def test_notifications_update_roundtrip(app: Any) -> None:
                         "json://localhost",
                     ],
                     "notify_on_failure": True,
+                    "notify_on_success": True,
+                    "notify_on_rust_fallback": True,
                     "include_llm_explanation": False,
                 }
             }
@@ -65,6 +67,8 @@ def test_notifications_update_roundtrip(app: Any) -> None:
         "ntfy://ntfy.sh/topic",
         "json://localhost",
     ]
+    assert cfg.notifications.notify_on_success is True
+    assert cfg.notifications.notify_on_rust_fallback is True
     assert cfg.notifications.include_llm_explanation is False
 
 

@@ -14,6 +14,8 @@ export default function NotificationsTab() {
     enabled: false,
     apprise_urls: [],
     notify_on_failure: true,
+    notify_on_success: false,
+    notify_on_rust_fallback: false,
     include_llm_explanation: true,
   };
 
@@ -83,28 +85,90 @@ export default function NotificationsTab() {
           />
         </Field>
 
-        <Field label="Notify when processing fails">
-          <input
-            type="checkbox"
-            checked={!!notifications.notify_on_failure}
-            onChange={(e) =>
-              setField(['notifications', 'notify_on_failure'], e.target.checked)
-            }
-          />
-        </Field>
+        <div className="pt-2">
+          <span className="block text-sm font-medium text-gray-800 mb-2">
+            Notify me when&hellip;
+          </span>
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={!!notifications.notify_on_failure}
+                onChange={(e) =>
+                  setField(['notifications', 'notify_on_failure'], e.target.checked)
+                }
+              />
+              <span>
+                An episode <strong>fails</strong> to process
+                <span className="block text-xs text-gray-500">
+                  Includes the episode/feed, failing step, and the error.
+                </span>
+              </span>
+            </label>
 
-        <Field
-          label="Include AI root-cause analysis in failure alerts"
-          hint="Runs the same LLM 'Troubleshoot' analysis and adds a plain-English cause to the alert. Costs one extra LLM call per failure."
-        >
-          <input
-            type="checkbox"
-            checked={!!notifications.include_llm_explanation}
-            onChange={(e) =>
-              setField(['notifications', 'include_llm_explanation'], e.target.checked)
-            }
-          />
-        </Field>
+            {notifications.notify_on_failure && (
+              <label className="flex items-start gap-2 text-sm text-gray-700 pl-6">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!!notifications.include_llm_explanation}
+                  onChange={(e) =>
+                    setField(
+                      ['notifications', 'include_llm_explanation'],
+                      e.target.checked
+                    )
+                  }
+                />
+                <span>
+                  &hellip;and include an <strong>AI root-cause analysis</strong>
+                  <span className="block text-xs text-gray-500">
+                    Runs the same LLM &ldquo;Troubleshoot&rdquo; analysis; costs one
+                    extra LLM call per failure.
+                  </span>
+                </span>
+              </label>
+            )}
+
+            <label className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={!!notifications.notify_on_success}
+                onChange={(e) =>
+                  setField(['notifications', 'notify_on_success'], e.target.checked)
+                }
+              />
+              <span>
+                An episode finishes processing <strong>successfully</strong>
+                <span className="block text-xs text-gray-500">
+                  Higher volume &mdash; one alert per completed episode.
+                </span>
+              </span>
+            </label>
+
+            <label className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={!!notifications.notify_on_rust_fallback}
+                onChange={(e) =>
+                  setField(
+                    ['notifications', 'notify_on_rust_fallback'],
+                    e.target.checked
+                  )
+                }
+              />
+              <span>
+                The <strong>Rust sidecar</strong> fails and falls back to Python
+                <span className="block text-xs text-gray-500">
+                  Processing still works via Python; throttled per operation so it
+                  won&rsquo;t spam.
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
 
         <div className="flex items-center justify-between gap-3">
           <button

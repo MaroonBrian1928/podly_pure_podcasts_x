@@ -75,8 +75,14 @@ APP_INA_COST_RATE_PER_HOUR = 0.0
 # Notification (Apprise) defaults
 NOTIFY_ENABLED = False
 NOTIFY_APPRISE_URLS: list[str] = []
-NOTIFY_ON_FAILURE = True
 NOTIFY_INCLUDE_LLM_EXPLANATION = True
+# Per-event toggles (the UI renders these as a checklist).
+NOTIFY_ON_FAILURE = True
+NOTIFY_ON_SUCCESS = False
+NOTIFY_ON_RUST_FALLBACK = False
+# Minimum seconds between rust-fallback notifications for the same operation
+# (this event can otherwise fire very frequently).
+NOTIFY_RUST_FALLBACK_THROTTLE_SEC = 900
 
 # Credits defaults
 MINUTES_PER_CREDIT = 60
