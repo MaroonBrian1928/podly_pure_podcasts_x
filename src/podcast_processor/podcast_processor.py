@@ -301,7 +301,7 @@ class PodcastProcessor:
             # Check if processed audio already exists (database or disk)
             if self._check_existing_processed_audio(post):
                 self.status_manager.update_job_status(
-                    job, "completed", 4, "Processing complete", 100.0
+                    job, "completed", job.total_steps or 4, "Processing complete", 100.0
                 )
                 return str(post.processed_audio_path)
 
@@ -346,7 +346,11 @@ class PodcastProcessor:
                             getattr(result, "error", "Failed to update post")
                         )
                     self.status_manager.update_job_status(
-                        job, "completed", 4, "Processing complete", 100.0
+                        job,
+                        "completed",
+                        job.total_steps or 4,
+                        "Processing complete",
+                        100.0,
                     )
                     return processed_audio_path
 
@@ -793,6 +797,15 @@ class PodcastProcessor:
         if feed is None:
             return False
         return bool(getattr(feed, "enable_profanity_bleeping", False))
+
+    def _resolve_chapter_full_block_text(self, feed: Any | None) -> bool:
+        """Per-feed override wins when set; otherwise the global setting."""
+        feed_override = (
+            getattr(feed, "chapter_full_block_text", None) if feed is not None else None
+        )
+        if feed_override is not None:
+            return bool(feed_override)
+        return bool(getattr(self.config, "chapter_full_block_text", False))
 
     def _word_level_boundary_refiner_enabled(self) -> bool:
         return bool(
@@ -1261,9 +1274,11 @@ class PodcastProcessor:
         has_saved_bleep_windows, saved_bleep_windows_ms = (
             self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
         )
-        # Step 2: Transcribe audio
+        # Step 2: Transcribe audio. The LLM pipeline has a dedicated
+        # chapter-generation step (5), so declare the larger step count up
+        # front — other strategies keep the default 4.
         self.status_manager.update_job_status(
-            job, "running", 2, "Transcribing audio", 50.0
+            job, "running", 2, "Transcribing audio", 50.0, total_steps=5
         )
         transcribe_progress = self._make_transcribe_progress_callback(
             job, step=2, label="Transcribing audio", progress_base=50.0
@@ -1379,6 +1394,12 @@ class PodcastProcessor:
             )
         )
         if chapter_fallback_enabled:
+            # Step 5: chapter generation is its own stage — it runs LLM calls
+            # (topic plan, title refinement) and must not masquerade as the
+            # audio-processing step it used to be buried in.
+            self.status_manager.update_job_status(
+                job, "running", 5, "Generating chapters", 95.0
+            )
             chapters_for_output, chapter_source = resolve_llm_path_chapters(
                 unprocessed_audio_path=unprocessed_audio_path,
                 description=post_description,
@@ -1415,6 +1436,9 @@ class PodcastProcessor:
                     # `transcript_segments_for_chapters`.
                     removed_windows_ms=removed_segments_ms,
                     words_by_sequence=words_by_sequence,
+                    full_block_text=self._resolve_chapter_full_block_text(
+                        getattr(post, "feed", None)
+                    ),
                 )
             elif (
                 chapter_source == "description"
@@ -1594,6 +1618,9 @@ class PodcastProcessor:
                 # cannot reconstruct from the DB alone.
                 post_guid=post.guid,
                 words_by_sequence=words_by_sequence,
+                full_block_text=self._resolve_chapter_full_block_text(
+                    getattr(post, "feed", None)
+                ),
             )
         elif (
             chapter_source == "description"
@@ -1701,6 +1728,7 @@ class PodcastProcessor:
         post_guid: str | None = None,
         removed_windows_ms: list[tuple[int, int]] | None = None,
         words_by_sequence: Mapping[int, list[Any]] | None = None,
+        full_block_text: bool = False,
     ) -> list[Any]:
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
@@ -1723,6 +1751,7 @@ class PodcastProcessor:
             align_word_starts=align_word_starts,
             words_by_sequence=words_by_sequence,
             word_align_config=self.config if align_word_starts else None,
+            full_block_text=full_block_text,
         )
         if topic_chapters:
             # With the toggle off, fall back to the title-matching heuristic.
@@ -1969,7 +1998,7 @@ class PodcastProcessor:
 
         # Mark job complete
         self.status_manager.update_job_status(
-            job, "completed", 4, "Processing complete", 100.0
+            job, "completed", job.total_steps or 4, "Processing complete", 100.0
         )
 
     def _raise_if_cancelled(
@@ -2082,7 +2111,7 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job,
             "completed",
-            4,
+            job.total_steps or 4,
             "Processing complete (developer mode)",
             100.0,
         )

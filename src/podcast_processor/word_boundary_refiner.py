@@ -122,7 +122,10 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 log_prefix="Word boundary refine",
             )
             response = call_litellm_with_tier_retry(
-                completion_args, config=self.config, logger=self.logger
+                completion_args,
+                config=self.config,
+                logger=self.logger,
+                model_call_id=model_call_id,
             )
 
             content = extract_litellm_content(response)

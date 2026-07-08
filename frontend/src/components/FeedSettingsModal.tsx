@@ -10,6 +10,7 @@ interface FeedSettingsModalProps {
   onClose: () => void;
   autoWhitelistGlobalDefault?: boolean;
   llmChapterFallbackGlobalDefault?: boolean;
+  chapterFullBlockTextGlobalDefault?: boolean;
   whisperType?: WhisperConfig['whisper_type'];
   episodeDescriptionView?: 'source' | 'podly';
   onEpisodeDescriptionViewChange?: (view: 'source' | 'podly') => void;
@@ -23,6 +24,7 @@ export default function FeedSettingsModal({
   onClose,
   autoWhitelistGlobalDefault,
   llmChapterFallbackGlobalDefault,
+  chapterFullBlockTextGlobalDefault,
   whisperType,
   episodeDescriptionView = 'source',
   onEpisodeDescriptionViewChange,
@@ -41,6 +43,15 @@ export default function FeedSettingsModal({
     feed.enable_llm_chapter_fallback_tagging === true
       ? 'on'
       : feed.enable_llm_chapter_fallback_tagging === false
+        ? 'off'
+        : 'inherit'
+  );
+  const [fullBlockTextOverride, setFullBlockTextOverride] = useState<
+    'inherit' | 'on' | 'off'
+  >(
+    feed.chapter_full_block_text === true
+      ? 'on'
+      : feed.chapter_full_block_text === false
         ? 'off'
         : 'inherit'
   );
@@ -65,6 +76,13 @@ export default function FeedSettingsModal({
       feed.enable_llm_chapter_fallback_tagging === true
         ? 'on'
         : feed.enable_llm_chapter_fallback_tagging === false
+          ? 'off'
+          : 'inherit'
+    );
+    setFullBlockTextOverride(
+      feed.chapter_full_block_text === true
+        ? 'on'
+        : feed.chapter_full_block_text === false
           ? 'off'
           : 'inherit'
     );
@@ -94,6 +112,12 @@ export default function FeedSettingsModal({
     feed.enable_llm_chapter_fallback_tagging === true
       ? 'on'
       : feed.enable_llm_chapter_fallback_tagging === false
+        ? 'off'
+        : 'inherit';
+  const currentFullBlockTextOverride =
+    feed.chapter_full_block_text === true
+      ? 'on'
+      : feed.chapter_full_block_text === false
         ? 'off'
         : 'inherit';
   const currentAutoWhitelistOverride =
@@ -141,6 +165,11 @@ export default function FeedSettingsModal({
           : chapterFallbackOverride === 'on';
     }
 
+    if (fullBlockTextOverride !== currentFullBlockTextOverride) {
+      settings.chapter_full_block_text =
+        fullBlockTextOverride === 'inherit' ? null : fullBlockTextOverride === 'on';
+    }
+
     if (autoWhitelistOverride !== currentAutoWhitelistOverride) {
       settings.auto_whitelist_new_episodes_override =
         autoWhitelistOverride === 'inherit' ? null : autoWhitelistOverride === 'on';
@@ -172,6 +201,12 @@ export default function FeedSettingsModal({
     llmChapterFallbackGlobalDefault === undefined
       ? 'Unknown'
       : llmChapterFallbackGlobalDefault
+        ? 'On'
+        : 'Off';
+  const fullBlockTextGlobalDefaultLabel =
+    chapterFullBlockTextGlobalDefault === undefined
+      ? 'Unknown'
+      : chapterFullBlockTextGlobalDefault
         ? 'On'
         : 'Off';
   const isChapterFallbackLocked = strategy === 'chapter_insert';
@@ -348,6 +383,30 @@ export default function FeedSettingsModal({
                 this setting is locked on.
               </p>
             )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Full chapter transcript context
+            </label>
+            <select
+              value={fullBlockTextOverride}
+              onChange={(e) =>
+                setFullBlockTextOverride(e.target.value as 'inherit' | 'on' | 'off')
+              }
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+            >
+              <option value="inherit">
+                Use global setting ({fullBlockTextGlobalDefaultLabel})
+              </option>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Sends each topic block's full transcript text to the chapter LLM
+              instead of a truncated sample. More accurate chapter boundaries at
+              roughly 2-3x the prompt tokens.
+            </p>
           </div>
 
           <div className="border-t border-gray-200" />

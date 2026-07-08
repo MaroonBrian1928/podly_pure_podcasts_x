@@ -216,6 +216,9 @@ def update_job_status_action(params: dict[str, Any]) -> dict[str, Any]:
     job.step_name = step_name
     if progress is not None:
         job.progress_percentage = progress
+    total_steps = params.get("total_steps")
+    if total_steps is not None:
+        job.total_steps = int(total_steps)
 
     if error_message:
         job.error_message = error_message
