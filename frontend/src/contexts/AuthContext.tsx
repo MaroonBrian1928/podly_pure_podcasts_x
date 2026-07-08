@@ -72,7 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           showDiscordIntegration,
           showReportIssueButton,
         });
-      } catch (error) {
+      } catch {
         setState({
           status: 'ready',
           requireAuth: true,

@@ -1,3 +1,25 @@
+## [2.1.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.1.0...v2.1.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **frontend:** resolve eslint errors blocking a lint gate ([37b13da](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/37b13dac2ee31630de05dc476d3cbd62ce16bc73))
+
+# [2.1.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.3...v2.1.0) (2026-06-09)
+
+
+### Features
+
+* Add an admin-only troubleshoot endpoint for failed posts that gathers the raw ([429733d](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/429733d0034539a4bd14ca3c98a148dabddf4d76))
+* Implement word-level chapter refinement using LLM ([1db7a68](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/1db7a6869ce9e827b4ba93d19e2798efe0a92108))
+
+## [2.0.3](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.2...v2.0.3) (2026-05-31)
+
+
+### Bug Fixes
+
+* correct type hint for user_feeds relationship in Feed model ([035de53](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/035de5392e0681b817b8f0c2d24cdb8656669391))
+
 ## [2.0.2](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.0.1...v2.0.2) (2026-05-30)
 
 
