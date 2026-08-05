@@ -232,13 +232,38 @@ def build_troubleshoot_context(
     return text or None
 
 
-def explain_failure(context_text: str, config: Any) -> str:
-    """Run a single LLM completion that explains the failure in plain English.
+RUST_FALLBACK_SYSTEM_PROMPT = (
+    "You are a support assistant for Podly, a self-hosted app that removes ads "
+    "from podcasts. Podly has an optional Rust 'sidecar' binary (podly_tools) "
+    "for faster audio/data operations; on any error it automatically falls back "
+    "to the slower Python implementation, so processing still works. You are "
+    "given the sidecar operation that failed and its error output (usually a "
+    "nonzero exit with stderr, a timeout, or bad output). Explain, in plain "
+    "non-technical English, the most likely ROOT cause and a concrete next "
+    "step. Be specific: name the operation, quote/paraphrase the underlying "
+    "error (e.g. 'ffmpeg filter graph too large', 'argument list too long / "
+    "E2BIG', 'timed out', 'missing input file', 'out of memory'), and suggest "
+    "what to check or change. Keep it to 2-4 sentences. If the error genuinely "
+    "doesn't identify a cause, say so."
+)
+
+
+def explain_failure(
+    context_text: str,
+    config: Any,
+    *,
+    system_prompt: str | None = None,
+    user_preamble: str | None = None,
+) -> str:
+    """Run a single LLM completion that explains a failure in plain English.
 
     Mirrors the lightweight probe pattern in ``api_test_llm``: configure
-    litellm for this call, send the raw log window, and return the text
-    content. The transcription (Whisper) model cannot reason about text, so
-    this deliberately uses the chat model (``llm_model``).
+    litellm for this call, send the context, and return the text content. The
+    transcription (Whisper) model cannot reason about text, so this deliberately
+    uses the chat model (``llm_model``).
+
+    ``system_prompt`` / ``user_preamble`` let callers reuse this for non-episode
+    failures (e.g. Rust sidecar fallbacks) with an appropriate framing.
     """
     import litellm
 
@@ -258,15 +283,12 @@ def explain_failure(context_text: str, config: Any) -> str:
     if base_url:
         litellm.api_base = base_url
 
+    preamble = user_preamble or (
+        "Here is the raw application log around the failure for this episode:"
+    )
     messages = [
-        {"role": "system", "content": TROUBLESHOOT_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                "Here is the raw application log around the failure for this "
-                f"episode:\n\n{context_text}"
-            ),
-        },
+        {"role": "system", "content": system_prompt or TROUBLESHOOT_SYSTEM_PROMPT},
+        {"role": "user", "content": f"{preamble}\n\n{context_text}"},
     ]
 
     completion_kwargs: dict[str, Any] = {
@@ -281,3 +303,17 @@ def explain_failure(context_text: str, config: Any) -> str:
 
     response = litellm.completion(**completion_kwargs)
     return extract_litellm_content(response).strip()
+
+
+def explain_rust_fallback(operation: str, error: str, config: Any) -> str:
+    """LLM explanation for a Rust sidecar fallback. Returns '' on empty output."""
+    context = f"Sidecar operation: {operation}\nError output:\n{error}"
+    return explain_failure(
+        context,
+        config,
+        system_prompt=RUST_FALLBACK_SYSTEM_PROMPT,
+        user_preamble=(
+            "The Rust sidecar operation below failed and Podly fell back to "
+            "Python. Explain the likely root cause and fix:"
+        ),
+    )

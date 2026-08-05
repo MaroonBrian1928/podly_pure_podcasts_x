@@ -23,7 +23,7 @@ dependencies = [
     "flask-migrate",
     "Flask-APScheduler",
     "ffmpeg-python",
-    "litellm>=1.86.1",
+    "litellm>=1.95.0",
     "groq",
     "flask-cors",
     "bcrypt",

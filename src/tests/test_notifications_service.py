@@ -181,32 +181,41 @@ def test_notify_success_skipped_when_toggle_off():
     apprise_cls.assert_not_called()
 
 
-def test_notify_rust_fallback_sends_and_throttles():
-    import app.notifications as notif_mod
-
-    # Reset throttle state so this test is deterministic.
-    with notif_mod._throttle_lock:
-        notif_mod._last_sent_at.clear()
-
-    service = NotificationService(config=_config(_settings()))
+def test_notify_rust_fallback_sends_every_time_no_suppression():
+    # No throttling: repeat fallbacks for the same operation all notify.
+    service = NotificationService(config=_config(_settings(), llm_api_key=None))
     fake = mock.MagicMock()
     fake.add.return_value = True
     fake.notify.return_value = True
     with mock.patch("apprise.Apprise", return_value=fake):
-        service.notify_rust_fallback(operation="stats render", error="boom")
-        service.notify_rust_fallback(operation="stats render", error="boom again")
-        service.notify_rust_fallback(operation="audio probe", error="different op")
+        service.notify_rust_fallback(operation="audio bleep", error="boom")
+        service.notify_rust_fallback(operation="audio bleep", error="boom again")
+        service.notify_rust_fallback(operation="audio bleep", error="third")
 
-    # Same operation is throttled (1 send), a different operation is not.
-    titles = [c.kwargs["title"] for c in fake.notify.call_args_list]
-    assert len(titles) == 2  # stats render (once) + audio probe (once)
+    assert fake.notify.call_count == 3
+    _, kwargs = fake.notify.call_args
+    assert "audio bleep" in kwargs["body"]
+
+
+def test_notify_rust_fallback_includes_llm_explanation():
+    service = NotificationService(config=_config(_settings()))
+    fake = mock.MagicMock()
+    fake.add.return_value = True
+    fake.notify.return_value = True
+    with (
+        mock.patch("apprise.Apprise", return_value=fake),
+        mock.patch(
+            "app.failure_explainer.explain_rust_fallback",
+            return_value="ffmpeg's filter graph was too large; use a script file.",
+        ),
+    ):
+        service.notify_rust_fallback(operation="audio bleep", error="E2BIG")
+
+    _, kwargs = fake.notify.call_args
+    assert "filter graph was too large" in kwargs["body"]
 
 
 def test_notify_rust_fallback_skipped_when_toggle_off():
-    import app.notifications as notif_mod
-
-    with notif_mod._throttle_lock:
-        notif_mod._last_sent_at.clear()
     service = NotificationService(
         config=_config(_settings(notify_on_rust_fallback=False))
     )

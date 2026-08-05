@@ -226,6 +226,60 @@ def test_try_probe_audio_duration_falls_back_on_bad_payload(
     assert rust_sidecar.try_probe_audio_duration_ms(Path("x.mp3")) is None
 
 
+def test_rust_audio_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", raising=False)
+    assert (
+        rust_sidecar.rust_audio_timeout_sec()
+        == rust_sidecar.DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    )
+
+
+def test_rust_audio_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", "120")
+    assert rust_sidecar.rust_audio_timeout_sec() == 120
+
+
+def test_rust_audio_timeout_invalid_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", "not-a-number")
+    assert (
+        rust_sidecar.rust_audio_timeout_sec()
+        == rust_sidecar.DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    )
+
+
+def test_bleep_audio_uses_long_audio_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Regression: the bleep sidecar command must run with the generous audio
+    # timeout, not the 300s default -- long bleep jobs were timing out and
+    # falling back to Python.
+    monkeypatch.setenv("PODLY_RUST_AUDIO_ENABLED", "true")
+    monkeypatch.setenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", "1800")
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
+        captured["timeout_sec"] = timeout_sec
+        return {"ok": True}
+
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    ok = rust_sidecar.try_bleep_audio(
+        windows_ms=[(1000, 2000)],
+        input_path=tmp_path / "in.mp3",
+        output_path=tmp_path / "out.mp3",
+        beep_frequency_hz=1000,
+        beep_volume=0.5,
+        duck_volume=0.0,
+        encoding="cbr",
+        cbr_bitrate_bps=128000,
+    )
+
+    assert ok is True
+    assert captured["timeout_sec"] == 1800
+
+
 def test_try_render_feed_xml_uses_rust_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

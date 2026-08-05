@@ -80,9 +80,6 @@ NOTIFY_INCLUDE_LLM_EXPLANATION = True
 NOTIFY_ON_FAILURE = True
 NOTIFY_ON_SUCCESS = False
 NOTIFY_ON_RUST_FALLBACK = False
-# Minimum seconds between rust-fallback notifications for the same operation
-# (this event can otherwise fire very frequently).
-NOTIFY_RUST_FALLBACK_THROTTLE_SEC = 900
 
 # Credits defaults
 MINUTES_PER_CREDIT = 60
