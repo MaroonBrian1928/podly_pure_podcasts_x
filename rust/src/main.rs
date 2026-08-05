@@ -4020,7 +4020,9 @@ fn get_numeric_json_value(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Resu
 
 fn round_to(value: f64, places: i32) -> f64 {
     let factor = 10_f64.powi(places);
-    (value * factor).round() / factor
+    // Python's round() uses ties-to-even; keep sidecar JSON parity at exact
+    // half-way values such as a per-subscriber cost of 0.16125.
+    (value * factor).round_ties_even() / factor
 }
 
 fn sqlite_datetime_to_iso(value: &str) -> String {
@@ -5897,7 +5899,9 @@ fn model_call_cost(call: &CostsModelCallRow, rates: &HashMap<String, ModelRate>)
         Some(r) => r,
         None => return 0.0,
     };
-    prompt_tokens * rate.input
+    // OpenAI reports cached tokens as a subset of prompt_tokens.
+    let uncached_prompt_tokens = (prompt_tokens - cached_prompt_tokens).max(0.0);
+    uncached_prompt_tokens * rate.input
         + cached_prompt_tokens * rate.cached_input
         + completion_tokens * rate.output
 }
@@ -9511,7 +9515,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO model_call VALUES
-                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1750000),
+                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1250000),
                 (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL),
                 (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)",
             [],
@@ -9521,7 +9525,8 @@ mod tests {
 
     fn write_costs_rates_json(dir: &Path) -> PathBuf {
         // 1.5e-7 input, 7.5e-8 cached, 6e-7 output → matches the Python parity
-        // test that exercises gpt-4o-mini with 1M/500k/250k tokens to 0.3375.
+        // test that exercises gpt-4o-mini with 1M prompt tokens (500k cached)
+        // and 250k completion tokens to 0.2625.
         let path = dir.join("rates.json");
         fs::write(
             &path,
@@ -9557,25 +9562,25 @@ mod tests {
         assert_eq!(payload["month"], 5);
         assert_eq!(payload["whisper_cost_rate_per_hour"], 0.04);
         assert_eq!(payload["ina_cost_rate_per_hour"], 0.02);
-        assert_eq!(payload["total_llm_cost"], 0.3375);
+        assert_eq!(payload["total_llm_cost"], 0.2625);
         assert_eq!(payload["total_whisper_cost"], 0.04);
         assert_eq!(payload["total_ina_cost"], 0.02);
-        assert_eq!(payload["total_cost"], 0.3975);
+        assert_eq!(payload["total_cost"], 0.3225);
         // Post duration 3600s = 1 audio hour. No ad time in the fixture, so
         // the total equals the cut duration.
         assert_eq!(payload["total_audio_hours"], 1.0);
         let feeds = payload["feeds"].as_array().unwrap();
         assert_eq!(feeds.len(), 1);
-        assert_eq!(feeds[0]["llm_cost"], 0.3375);
+        assert_eq!(feeds[0]["llm_cost"], 0.2625);
         assert_eq!(feeds[0]["whisper_cost"], 0.04);
         assert_eq!(feeds[0]["ina_cost"], 0.02);
         assert_eq!(feeds[0]["episodes_this_month"], 1);
         assert_eq!(feeds[0]["subscriber_count"], 2);
         let users = payload["users"].as_array().unwrap();
         assert_eq!(users.len(), 2);
-        // 0.3975 / 2 subscribers → 0.19875 → rounded to 0.1988
-        assert_eq!(users[0]["monthly_cost"], 0.1988);
-        assert_eq!(users[1]["monthly_cost"], 0.1988);
+        // 0.3225 / 2 subscribers → 0.16125 → Python-compatible ties-to-even.
+        assert_eq!(users[0]["monthly_cost"], 0.1612);
+        assert_eq!(users[1]["monthly_cost"], 0.1612);
         // Stripe enrichment is left to the Python wrapper; sidecar returns null.
         assert_eq!(users[1]["stripe_subscription_id"], "sub_x");
         assert_eq!(users[1]["subscription_amount_cents"], Value::Null);
@@ -9603,7 +9608,7 @@ mod tests {
 
         assert_eq!(payload["total_whisper_cost"], 0.0);
         assert_eq!(payload["total_ina_cost"], 0.0);
-        assert_eq!(payload["total_llm_cost"], 0.3375);
+        assert_eq!(payload["total_llm_cost"], 0.2625);
     }
 
     #[test]
@@ -9633,7 +9638,7 @@ mod tests {
         assert_eq!(calls[1]["model_name"], "whisper-large-v3-turbo");
         assert_eq!(calls[1]["estimated_cost"], 0.0);
         assert_eq!(calls[2]["model_name"], "gpt-4o-mini");
-        assert_eq!(calls[2]["estimated_cost"], 0.3375);
+        assert_eq!(calls[2]["estimated_cost"], 0.2625);
         // ISO format mirrors Python's datetime.isoformat() (space → 'T').
         assert_eq!(calls[2]["timestamp"], "2026-05-15T12:00:01");
     }

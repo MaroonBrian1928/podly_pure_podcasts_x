@@ -7,6 +7,7 @@ are applied as runtime overlays only - they are never persisted to the database.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -178,6 +179,55 @@ class TestEnvVarAuthority:
 
             # The runtime config model should be from DEFAULTS (since no env override)
             assert runtime_config.llm_model == DEFAULTS.LLM_DEFAULT_MODEL
+
+    def test_put_config_reapplies_env_model_before_processor_reset(
+        self, app: Any, monkeypatch: Any
+    ) -> None:
+        """A token-only save must not replace the env-selected model."""
+        monkeypatch.setenv("LLM_MODEL", "env-selected-model")
+
+        with app.app_context():
+            from app.routes import config_routes
+            from app.runtime_config import config as runtime_config
+
+            _create_default_settings()
+            db_llm = db.session.get(LLMSettings, 1)
+            assert db_llm is not None
+            db_llm.llm_model = "stale-db-model"
+            db.session.commit()
+
+            monkeypatch.setattr(
+                config_routes.writer_client,
+                "action",
+                lambda *_args, **_kwargs: SimpleNamespace(
+                    success=True,
+                    data={
+                        "llm": {
+                            "llm_model": "stale-db-model",
+                            "openai_max_tokens": 8192,
+                        }
+                    },
+                ),
+            )
+            monkeypatch.setattr(config_routes, "require_admin", lambda: (None, None))
+            monkeypatch.setattr(
+                config_routes, "_reset_processor_if_loaded", lambda: None
+            )
+
+            with app.test_request_context(
+                "/api/config",
+                method="PUT",
+                json={
+                    "llm": {
+                        "llm_model": "stale-db-model",
+                        "openai_max_tokens": 8192,
+                    }
+                },
+            ):
+                response = config_routes.api_put_config()
+
+            assert runtime_config.llm_model == "env-selected-model"
+            assert response.get_json()["llm"]["llm_model"] == "env-selected-model"
 
 
 class TestEnvOverrideMetadata:

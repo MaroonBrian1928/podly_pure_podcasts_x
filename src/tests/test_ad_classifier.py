@@ -220,6 +220,75 @@ def test_call_model_retry_on_internal_error(test_config: Config, app: Flask) -> 
             assert refreshed.retry_attempts == 2
 
 
+def test_prepare_api_call_caps_openai_output_tokens(
+    test_config: Config, app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        test_config.llm_model = "gpt-5.6-luna"
+        test_config.openai_max_tokens = 948_576
+        classifier = AdClassifier(config=test_config)
+        model_call = ModelCall(model_name=test_config.llm_model, prompt="classify")
+
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: {"max_output_tokens": 128_000},
+        )
+
+        args = classifier._prepare_api_call(model_call, "system")
+
+        assert args is not None
+        assert args["max_completion_tokens"] == 128_000
+        assert "max_tokens" not in args
+
+
+def test_exhausted_flex_cycle_uses_gradually_increasing_outer_backoff(
+    test_config: Config, app: Flask
+) -> None:
+    with app.app_context():
+        test_config.llm_model = "gpt-5.6-luna"
+        test_config.llm_service_tier = "flex"
+        classifier = AdClassifier(config=test_config, db_session=db.session)
+        model_call = ModelCall(
+            post_id=0,
+            model_name=test_config.llm_model,
+            prompt="test prompt",
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            status="pending",
+        )
+        db.session.add(model_call)
+        db.session.commit()
+
+        with (
+            patch.object(
+                classifier,
+                "_prepare_api_call",
+                return_value={
+                    "model": test_config.llm_model,
+                    "service_tier": "flex",
+                },
+            ),
+            patch(
+                "podcast_processor.ad_classifier.call_litellm_with_tier_retry",
+                side_effect=RuntimeError("429 resource unavailable"),
+            ) as retry_mock,
+            patch("time.sleep") as sleep_mock,
+        ):
+            with pytest.raises(RuntimeError, match="429 resource unavailable"):
+                classifier._call_model(model_call, "system", max_retries=5)
+
+        assert retry_mock.call_count == 5
+        assert [call.args[0] for call in sleep_mock.call_args_list] == [
+            30,
+            60,
+            120,
+            240,
+        ]
+        db.session.refresh(model_call)
+        assert model_call.status == "failed_retries"
+        assert model_call.retry_attempts == 5
+
+
 def test_call_model_marks_retrying_during_backoff(
     test_config: Config, app: Flask
 ) -> None:

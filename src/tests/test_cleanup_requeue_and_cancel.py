@@ -236,6 +236,76 @@ class TestCancelExistingJobsCleansOrphanedModelCalls:
             assert existing.retry_attempts == 0
             assert existing.error_message is None
 
+    def test_upsert_resets_failed_permanent_row_for_a_later_job(self, app):
+        """A corrected configuration must get a fresh provider attempt."""
+        with app.app_context():
+            post = self._create_post("failed-permanent-then-reupsert-guid")
+            existing = ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=24,
+                model_name="gpt-5.6-luna",
+                prompt="old prompt",
+                status="failed_permanent",
+                error_message="max_tokens is too large: 948576",
+                response=None,
+                retry_attempts=1,
+            )
+            db.session.add(existing)
+            db.session.commit()
+
+            result = upsert_model_call_action(
+                {
+                    "post_id": post.id,
+                    "model_name": "gpt-5.6-luna",
+                    "first_segment_sequence_num": 0,
+                    "last_segment_sequence_num": 24,
+                    "prompt": "fresh prompt",
+                }
+            )
+            db.session.commit()
+
+            assert result == {"model_call_id": existing.id}
+            db.session.refresh(existing)
+            assert existing.status == "pending"
+            assert existing.prompt == "fresh prompt"
+            assert existing.retry_attempts == 0
+            assert existing.error_message is None
+            assert existing.response is None
+
+    def test_upsert_keeps_successful_row_reusable(self, app):
+        with app.app_context():
+            post = self._create_post("successful-then-reupsert-guid")
+            existing = ModelCall(
+                post_id=post.id,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=24,
+                model_name="gpt-5.6-luna",
+                prompt="successful prompt",
+                status="success",
+                response='{"ads": []}',
+                retry_attempts=1,
+            )
+            db.session.add(existing)
+            db.session.commit()
+
+            result = upsert_model_call_action(
+                {
+                    "post_id": post.id,
+                    "model_name": "gpt-5.6-luna",
+                    "first_segment_sequence_num": 0,
+                    "last_segment_sequence_num": 24,
+                    "prompt": "new prompt that should not replace cached success",
+                }
+            )
+            db.session.commit()
+
+            assert result == {"model_call_id": existing.id}
+            db.session.refresh(existing)
+            assert existing.status == "success"
+            assert existing.prompt == "successful prompt"
+            assert existing.response == '{"ads": []}'
+
 
 class TestDeleteModelCallsByPostAndModelName:
     """The INA re-run path depends on this action to wipe rows whose segment

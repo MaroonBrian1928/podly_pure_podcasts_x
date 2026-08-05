@@ -23,6 +23,7 @@ from podcast_processor.llm_model_call_utils import (
     try_update_model_call,
 )
 from shared.config import Config
+from shared.llm_utils import normalize_completion_args_for_model
 
 # Keep the same internal bounds as the existing BoundaryRefiner.
 MAX_START_EXTENSION_SECONDS = 30.0
@@ -114,6 +115,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 "api_key": self.config.llm_api_key,
                 "base_url": self.config.openai_base_url,
             }
+            normalize_completion_args_for_model(completion_args)
             apply_service_tier(completion_args, self.config)
             record_service_tier_on_model_call(
                 model_call_id,
@@ -127,6 +129,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 logger=self.logger,
                 model_call_id=model_call_id,
             )
+            effective_service_tier = completion_args.get("service_tier")
 
             content = extract_litellm_content(response)
             finish_reason = extract_litellm_finish_reason(response)
@@ -151,6 +154,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=None,
                 usage=usage,
+                service_tier=effective_service_tier,
             )
 
             rust_result = self._try_rust_refine_from_llm(
@@ -294,6 +298,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=(",".join(partial_errors) if partial_errors else None),
                 usage=usage,
+                service_tier=effective_service_tier,
             )
 
             result = WordBoundaryRefinement(
@@ -309,6 +314,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=None,
                 usage=usage,
+                service_tier=effective_service_tier,
             )
             return result
 
@@ -1279,6 +1285,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         response: str | None,
         error_message: str | None,
         usage: dict[str, int | None] | None = None,
+        service_tier: str | None = None,
     ) -> None:
         # Forward model + tier + prompt so try_update_model_call can compute
         # the LLM cost for success transitions. This refiner stages updates
@@ -1295,6 +1302,6 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             log_prefix="Word boundary refine",
             usage=usage,
             model_name=getattr(self.config, "llm_model", None),
-            service_tier=getattr(self.config, "llm_service_tier", None),
+            service_tier=service_tier,
             prompt="word_boundary_refine",
         )

@@ -15,7 +15,6 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import object_session
 
 from app.extensions import db
-from app.model_call_utils import whisper_model_call_filter
 from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
@@ -1334,9 +1333,10 @@ class PodcastProcessor:
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
 
-        # Fail the job if every LLM classification call failed (e.g. rate limit /
-        # service unavailable). Whisper transcription calls are excluded — only
-        # LLM ad-classification calls count. Without at least one successful
+        # Fail the job if every LLM classification call failed. Only calls for
+        # the configured classifier model count; Whisper, INA, and later
+        # chapter/refinement calls are not classification attempts. Without a
+        # successful
         # classification call there are no identifications, so the episode would
         # be "completed" with zero ads removed — silently wrong.
         call_counts = self._get_llm_classification_model_call_counts(int(post.id))
@@ -1353,9 +1353,15 @@ class PodcastProcessor:
                 post.id,
             )
         elif call_counts.successful == 0:
+            latest_error = self._get_latest_llm_classification_error(int(post.id))
+            error_suffix = (
+                f" Latest provider error: {latest_error}"
+                if latest_error
+                else " Check the model-call details for the provider error."
+            )
             raise ProcessorException(
                 f"LLM classification failed: all {call_counts.total} model call(s) were "
-                "unsuccessful (rate limit or service unavailable). Reprocess to retry."
+                f"unsuccessful.{error_suffix}"
             )
 
         # Step 4: Process audio (remove ad segments)
@@ -1520,6 +1526,7 @@ class PodcastProcessor:
         session = getattr(self, "db_session", None)
         if session is None:
             return None
+        classifier_model = str(getattr(self.config, "llm_model", "") or "")
 
         return (
             session.query(
@@ -1530,10 +1537,30 @@ class PodcastProcessor:
             )
             .filter(
                 ModelCall.post_id == post_id,
-                ~whisper_model_call_filter(),
+                ModelCall.model_name == classifier_model,
             )
             .one()
         )
+
+    def _get_latest_llm_classification_error(self, post_id: int) -> str | None:
+        session = getattr(self, "db_session", None)
+        if session is None:
+            return None
+        classifier_model = str(getattr(self.config, "llm_model", "") or "")
+        row = (
+            session.query(ModelCall.error_message)
+            .filter(
+                ModelCall.post_id == post_id,
+                ModelCall.model_name == classifier_model,
+                ModelCall.status != "success",
+                ModelCall.error_message.isnot(None),
+            )
+            .order_by(ModelCall.timestamp.desc(), ModelCall.id.desc())
+            .first()
+        )
+        if row is None or not row[0]:
+            return None
+        return str(row[0])
 
     def _perform_chapter_insertion_only_processing(
         self,

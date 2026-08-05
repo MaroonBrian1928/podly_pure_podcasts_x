@@ -180,7 +180,7 @@ class TestAdClassifierRateLimiting:
             classifier._handle_retryable_error(
                 model_call_obj=model_call, error=error, attempt=0, current_attempt_num=1
             )
-            mock_sleep.assert_called_with(60)  # 60 * (2^0) = 60 seconds
+            mock_sleep.assert_called_with(30)  # 30 * (2^0) = 30 seconds
 
     def test_rate_limiter_model_specific_configs(self):
         """Test that different models get appropriate rate limits."""

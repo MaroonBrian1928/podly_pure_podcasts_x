@@ -21,6 +21,7 @@ from podcast_processor.llm_model_call_utils import (
     try_update_model_call,
 )
 from shared.config import Config
+from shared.llm_utils import normalize_completion_args_for_model
 
 # Internal defaults for boundary expansion; not user-configurable.
 MAX_START_EXTENSION_SECONDS = 30.0
@@ -134,6 +135,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 "api_key": self.config.llm_api_key,
                 "base_url": self.config.openai_base_url,
             }
+            normalize_completion_args_for_model(completion_args)
             apply_service_tier(completion_args, self.config)
             record_service_tier_on_model_call(
                 model_call_id,
@@ -147,6 +149,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 logger=self.logger,
                 model_call_id=model_call_id,
             )
+            effective_service_tier = completion_args.get("service_tier")
             usage = extract_litellm_usage(response)
 
             choice = response.choices[0] if response.choices else None
@@ -195,6 +198,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 error_message=None,
                 usage=usage,
                 prompt=prompt,
+                service_tier=effective_service_tier,
             )
             # Parse JSON (strip markdown fences). Log parse diagnostics so failures are actionable.
             cleaned = re.sub(r"```json|```", "", content.strip())
@@ -233,6 +237,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                     error_message=None,
                     usage=usage,
                     prompt=prompt,
+                    service_tier=effective_service_tier,
                 )
                 self.logger.info(
                     "LLM refinement applied",
@@ -293,6 +298,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
         error_message: str | None,
         usage: dict[str, int | None] | None = None,
         prompt: str | None = None,
+        service_tier: str | None = None,
     ) -> None:
         """Best-effort ModelCall updater; no-op if call creation failed.
 
@@ -313,7 +319,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 log_prefix="Boundary refine",
                 usage=usage,
                 model_name=getattr(self.config, "llm_model", None),
-                service_tier=getattr(self.config, "llm_service_tier", None),
+                service_tier=service_tier,
                 prompt=prompt,
             )
         except Exception as exc:  # best-effort; do not block refinement  # noqa: BLE001
