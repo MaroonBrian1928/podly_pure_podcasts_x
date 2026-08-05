@@ -28,6 +28,14 @@ RUST_CHAPTER_FALLBACK_ENABLED_ENV = "PODLY_RUST_CHAPTER_FALLBACK_ENABLED"
 RUST_COSTS_ENABLED_ENV = "PODLY_RUST_COSTS_ENABLED"
 RUST_REPEAT_AD_ENABLED_ENV = "PODLY_RUST_REPEAT_AD_ENABLED"
 
+# Audio operations (cut/bleep/split) re-encode the full episode and, for
+# profanity bleeping, run one ffmpeg pass per 96-window chunk serially -- an
+# episode with many profanity windows can take well over the default 300s
+# sidecar timeout, which would (wrongly) look like a Rust failure and fall back
+# to the slower Python path. Give audio ops a much larger, env-tunable timeout.
+RUST_AUDIO_TIMEOUT_SEC_ENV = "PODLY_RUST_AUDIO_TIMEOUT_SEC"
+DEFAULT_RUST_AUDIO_TIMEOUT_SEC = 3600
+
 
 class RustSidecarError(RuntimeError):
     """Raised when the Rust helper exits unsuccessfully or returns bad JSON."""
@@ -58,6 +66,24 @@ def rust_tools_bin() -> Path:
 
 def rust_audio_enabled() -> bool:
     return env_flag_enabled(RUST_AUDIO_ENABLED_ENV, RUST_DEFAULT_ENABLED)
+
+
+def rust_audio_timeout_sec() -> int:
+    """Timeout (seconds) for audio sidecar commands (cut/bleep/split)."""
+    raw = os.environ.get(RUST_AUDIO_TIMEOUT_SEC_ENV)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    try:
+        parsed = int(raw)
+    except ValueError:
+        LOGGER.warning(
+            "Invalid %s=%r; using default %ss",
+            RUST_AUDIO_TIMEOUT_SEC_ENV,
+            raw,
+            DEFAULT_RUST_AUDIO_TIMEOUT_SEC,
+        )
+        return DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    return max(1, parsed)
 
 
 def rust_feed_xml_enabled() -> bool:
@@ -294,7 +320,8 @@ def try_split_audio(
                 str(output_dir),
                 "--chunk-size-bytes",
                 str(chunk_size_bytes),
-            ]
+            ],
+            timeout_sec=rust_audio_timeout_sec(),
         )
     except RustSidecarError:
         LOGGER.exception("Rust audio split failed; falling back to Python behavior")
@@ -721,7 +748,7 @@ def _chapters_are_monotonic(chapters: list[dict[str, Any]]) -> bool:
 
 def _try_audio_command(args: list[str], label: str) -> bool:
     try:
-        payload = run_podly_tools(args)
+        payload = run_podly_tools(args, timeout_sec=rust_audio_timeout_sec())
     except RustSidecarError:
         LOGGER.exception("Rust audio %s failed; falling back to Python behavior", label)
         return False

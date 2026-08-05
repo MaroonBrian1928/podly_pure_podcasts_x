@@ -10,33 +10,22 @@ swallows and logs its own exceptions.
 from __future__ import annotations
 
 import logging
-import threading
-import time
+from datetime import UTC, datetime
 from typing import Any
 
 from app.runtime_config import config as runtime_config
-from shared import defaults as DEFAULTS
 
 logger = logging.getLogger("global_logger")
 
-# Per-process throttle for high-frequency events (keyed by event+operation).
-_throttle_lock = threading.Lock()
-_last_sent_at: dict[str, float] = {}
 
+def _event_timestamp() -> str:
+    """Human-readable UTC timestamp embedded in every notification body.
 
-def _throttled(key: str, min_interval_sec: float) -> bool:
-    """Return True if a notification for ``key`` was sent within the window.
-
-    Records ``now`` as the last-sent time when it returns False (i.e. when the
-    caller is cleared to send).
+    ntfy only caches message bodies for a short window and its info-level logs
+    don't retain bodies, so stamping the event time into the message itself
+    keeps alerts debuggable after the fact and easy to correlate with app.log.
     """
-    now = time.monotonic()
-    with _throttle_lock:
-        last = _last_sent_at.get(key)
-        if last is not None and (now - last) < min_interval_sec:
-            return True
-        _last_sent_at[key] = now
-        return False
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _resolve_config(config: Any | None) -> Any:
@@ -74,6 +63,10 @@ def _dispatch(urls: list[str], *, title: str, body: str) -> tuple[bool, str | No
 
     if added == 0:
         return False, "No valid Apprise URLs could be added"
+
+    # Stamp the event time into every message body so alerts stay debuggable
+    # after ntfy's short cache window expires.
+    body = f"{body}\n\n🕐 {_event_timestamp()}"
 
     ok = bool(apobj.notify(title=title, body=body))
     if not ok:
@@ -255,28 +248,47 @@ class NotificationService:
             if not urls:
                 return
 
-            if _throttled(
-                f"rust_fallback:{operation}",
-                DEFAULTS.NOTIFY_RUST_FALLBACK_THROTTLE_SEC,
-            ):
-                return
-
-            title = "⚠️ Podly: Rust sidecar fell back to Python"
-            body = (
-                f"Operation: {operation}\n"
-                f"Error: {error}\n\n"
+            body_lines = [
+                f"Operation: {operation}",
+                f"Error: {error}",
+                "",
                 "Podly automatically used the Python implementation, so "
                 "processing still works, but the faster Rust path is failing. "
-                "Check the sidecar binary/logs. (Further alerts for this "
-                "operation are throttled.)"
+                "Check the sidecar binary/logs.",
+            ]
+
+            explanation = None
+            if getattr(settings, "include_llm_explanation", False):
+                explanation = self._explain_rust_fallback(operation, error)
+            if explanation:
+                body_lines.append("")
+                body_lines.append("Likely cause (AI):")
+                body_lines.append(explanation)
+
+            ok, err = _dispatch(
+                urls,
+                title="⚠️ Podly: Rust sidecar fell back to Python",
+                body="\n".join(body_lines),
             )
-            ok, err = _dispatch(urls, title=title, body=body)
             if not ok:
                 logger.warning("Failed to send rust-fallback notification: %s", err)
         except Exception:
             logger.exception(
                 "Unexpected error while sending rust-fallback notification"
             )
+
+    def _explain_rust_fallback(self, operation: str, error: str) -> str | None:
+        """LLM root-cause analysis for a rust fallback; None on any problem."""
+        try:
+            from app.failure_explainer import explain_rust_fallback
+
+            cfg = _resolve_config(self._config)
+            if not getattr(cfg, "llm_api_key", None):
+                return None
+            return explain_rust_fallback(operation, error, cfg) or None
+        except Exception:
+            logger.exception("Failed to build rust-fallback LLM explanation")
+            return None
 
     # -- Test send -------------------------------------------------------------
 
