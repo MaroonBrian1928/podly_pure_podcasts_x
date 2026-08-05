@@ -32,6 +32,7 @@ from podcast_processor.llm_model_call_utils import (
     try_update_model_call,
 )
 from shared.config import Config
+from shared.llm_utils import normalize_completion_args_for_model
 
 # Sentinel ``first_segment_sequence_num`` for the confirm ModelCall. The
 # ModelCall unique index is (post_id, first_seq, last_seq, model_name). Using a
@@ -106,6 +107,7 @@ Return only JSON: {"is_ad": true, "confidence": 0.0, "reason": ""}"""
                 "api_key": self.config.llm_api_key,
                 "base_url": self.config.openai_base_url,
             }
+            normalize_completion_args_for_model(completion_args)
             apply_service_tier(completion_args, self.config)
             record_service_tier_on_model_call(
                 model_call_id,
@@ -119,6 +121,7 @@ Return only JSON: {"is_ad": true, "confidence": 0.0, "reason": ""}"""
                 logger=self.logger,
                 model_call_id=model_call_id,
             )
+            effective_service_tier = completion_args.get("service_tier")
             usage = extract_litellm_usage(response)
 
             choice = response.choices[0] if response.choices else None
@@ -138,6 +141,7 @@ Return only JSON: {"is_ad": true, "confidence": 0.0, "reason": ""}"""
                 error_message=None,
                 usage=usage,
                 prompt=prompt,
+                service_tier=effective_service_tier,
             )
 
             parsed = self._parse_json(content)
@@ -154,6 +158,7 @@ Return only JSON: {"is_ad": true, "confidence": 0.0, "reason": ""}"""
                     error_message=None,
                     usage=usage,
                     prompt=prompt,
+                    service_tier=effective_service_tier,
                 )
                 self.logger.info(
                     "Repeat ad confirm: is_ad=%s confidence=%.2f",
@@ -253,6 +258,7 @@ Return only JSON: {"is_ad": true, "confidence": 0.0, "reason": ""}"""
         error_message: str | None,
         usage: dict[str, int | None] | None = None,
         prompt: str | None = None,
+        service_tier: str | None = None,
     ) -> None:
         if model_call_id is None:
             return
@@ -266,7 +272,7 @@ Return only JSON: {"is_ad": true, "confidence": 0.0, "reason": ""}"""
                 log_prefix="Repeat ad confirm",
                 usage=usage,
                 model_name=getattr(self.config, "llm_model", None),
-                service_tier=getattr(self.config, "llm_service_tier", None),
+                service_tier=service_tier,
                 prompt=prompt,
             )
         except Exception as exc:  # noqa: BLE001

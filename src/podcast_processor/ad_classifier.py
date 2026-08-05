@@ -58,7 +58,10 @@ from podcast_processor.token_rate_limiter import (
 from podcast_processor.transcribe import Segment, load_word_timestamps_by_sequence
 from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 from shared.config import Config, TestWhisperConfig
-from shared.llm_utils import model_uses_max_completion_tokens
+from shared.llm_utils import (
+    model_uses_max_completion_tokens,
+    normalize_completion_args_for_model,
+)
 
 
 class ClassifyParams:
@@ -709,6 +712,7 @@ class AdClassifier:
 
         completion_args["response_format"] = {"type": "json_object"}
 
+        normalize_completion_args_for_model(completion_args)
         apply_service_tier(completion_args, self.config)
         return completion_args
 
@@ -1139,6 +1143,7 @@ class AdClassifier:
             "status": "success",
             "error_message": None,
             "retry_attempts": retry_attempts_value,
+            "service_tier": attempt_service_tier,
         }
         for field in (
             "prompt_tokens",
@@ -1176,7 +1181,7 @@ class AdClassifier:
             payload["estimated_cost_usd"] = cost
         return payload
 
-    def _call_model(
+    def _call_model(  # noqa: PLR0912
         self,
         model_call_obj: ModelCall,
         system_prompt: str,
@@ -1201,7 +1206,6 @@ class AdClassifier:
         for attempt in range(retry_count):
             retry_attempts_value = original_retry_attempts + attempt + 1
             current_attempt_num = attempt + 1
-
             self.logger.info(
                 f"Calling model {model_call_obj.model_name} for ModelCall {model_call_obj.id} (attempt {current_attempt_num}/{retry_count})"
             )
@@ -1214,7 +1218,7 @@ class AdClassifier:
                 if completion_args is None:
                     return None  # Token limit exceeded
 
-                attempt_service_tier = completion_args.get("service_tier")
+                requested_service_tier = completion_args.get("service_tier")
 
                 # Persist retry attempt + pending status (+ tier) via writer
                 if model_call_obj.id is not None:
@@ -1224,7 +1228,7 @@ class AdClassifier:
                         {
                             "status": "pending",
                             "retry_attempts": retry_attempts_value,
-                            "service_tier": attempt_service_tier,
+                            "service_tier": requested_service_tier,
                             # The backoff (if any) is over; this attempt is in
                             # flight, not waiting.
                             "next_retry_at": None,
@@ -1235,7 +1239,7 @@ class AdClassifier:
                         raise RuntimeError(
                             getattr(pending_res, "error", "Failed to update ModelCall")
                         )
-                    model_call_obj.service_tier = attempt_service_tier
+                    model_call_obj.service_tier = requested_service_tier
 
                 from litellm.types.utils import Choices
 
@@ -1255,6 +1259,10 @@ class AdClassifier:
                         logger=self.logger,
                         model_call_id=model_call_obj.id,
                     )
+
+                # The helper removes Flex after an exhausted-tier fallback and
+                # also honors OpenAI's response-reported tier.
+                attempt_service_tier = completion_args.get("service_tier")
 
                 response_first_choice = response.choices[0]
                 assert isinstance(response_first_choice, Choices)
@@ -1291,13 +1299,17 @@ class AdClassifier:
             except Exception as e:
                 last_error = e
                 if self._is_retryable_error(e):
+                    # Preserve the classifier's gradual retry backoff after an
+                    # exhausted Flex-to-standard cycle. Do not sleep after the
+                    # final configured attempt.
+                    if attempt == retry_count - 1:
+                        break
                     self._handle_retryable_error(
                         model_call_obj=model_call_obj,
                         error=e,
                         attempt=attempt,
                         current_attempt_num=current_attempt_num,
                     )
-                    # Continue to next retry
                 else:
                     self.logger.error(
                         f"Non-retryable LLM error for ModelCall {model_call_obj.id} (attempt {current_attempt_num}): {e}",
@@ -1354,8 +1366,8 @@ class AdClassifier:
             term in error_str
             for term in ["rate_limit_error", "ratelimiterror", "429", "rate limit"]
         ):
-            # For rate limiting, use longer backoff: 60, 120, 240 seconds
-            wait_time = 60 * (2**attempt)
+            # For rate limiting, use a gradual backoff starting at 30 seconds.
+            wait_time = 30 * (2**attempt)
             self.logger.info(
                 f"Rate limit detected. Waiting {wait_time}s before retry for ModelCall {model_call_obj.id}."
             )

@@ -3,7 +3,7 @@ services:
     container_name: podly-pure-podcasts
     ports:
       - "5001:5001"
-    image: ghcr.io/podly-pure-podcasts/podly-pure-podcasts:${BRANCH:-main-latest}
+    # image: ghcr.io/podly-pure-podcasts/podly-pure-podcasts:${BRANCH:-main-latest}
     build:
       context: .
       dockerfile: Dockerfile

@@ -11,13 +11,40 @@ from shared import defaults as DEFAULTS
 # Providers that accept the OpenAI-style `service_tier` kwarg via litellm.
 # Anthropic, Groq, xAI, etc. do not, so we skip the kwarg for those.
 _SERVICE_TIER_MODEL_PREFIXES = ("gemini/", "openai/")
+_OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4")
 _VALID_SERVICE_TIERS = {"default", "flex", "priority", "auto"}
 
 
 def model_supports_service_tier(model_name: str | None) -> bool:
     if not model_name:
         return False
-    return model_name.startswith(_SERVICE_TIER_MODEL_PREFIXES)
+    if model_name.startswith(_SERVICE_TIER_MODEL_PREFIXES):
+        return True
+    return "/" not in model_name and model_name.startswith(_OPENAI_MODEL_PREFIXES)
+
+
+def _model_supports_flex_tier(model_name: str | None) -> bool:
+    if not model_name:
+        return False
+    if model_name.startswith("gemini/"):
+        return True
+    if not (
+        model_name.startswith("openai/")
+        or ("/" not in model_name and model_name.startswith(_OPENAI_MODEL_PREFIXES))
+    ):
+        return False
+
+    # OpenAI Flex has limited model availability. LiteLLM's price table tracks
+    # that support with explicit Flex rates, which avoids sending a tier that
+    # OpenAI will reject while staying current as LiteLLM adds models.
+    import litellm
+
+    normalized_name = model_name.removeprefix("openai/")
+    cost_entry = litellm.model_cost.get(normalized_name, {})
+    return all(
+        key in cost_entry
+        for key in ("input_cost_per_token_flex", "output_cost_per_token_flex")
+    )
 
 
 def _resolved_tier(config: Any) -> str:
@@ -80,8 +107,34 @@ def apply_service_tier(
         return completion_args
     if not model_supports_service_tier(completion_args.get("model")):
         return completion_args
+    if tier == "flex" and not _model_supports_flex_tier(completion_args.get("model")):
+        return completion_args
     completion_args["service_tier"] = tier
     return completion_args
+
+
+def _record_effective_service_tier(
+    response: Any,
+    completion_args: dict[str, Any],
+    *,
+    model_call_id: int | None,
+    logger: logging.Logger,
+) -> Any:
+    """Keep request state and ModelCall pricing aligned with the served tier."""
+    response_tier = getattr(response, "service_tier", None)
+    if response_tier is None and isinstance(response, dict):
+        response_tier = response.get("service_tier")
+    normalized_tier = str(response_tier or "").strip().lower()
+    if normalized_tier in {"flex", "priority"}:
+        completion_args["service_tier"] = normalized_tier
+    elif normalized_tier in {"default", "auto"}:
+        completion_args.pop("service_tier", None)
+    record_service_tier_on_model_call(
+        model_call_id,
+        completion_args,
+        logger=logger,
+    )
+    return response
 
 
 def _is_tier_retryable(exc: Exception) -> bool:
@@ -185,7 +238,13 @@ def call_litellm_with_tier_retry(
 
     flex_active = completion_args.get("service_tier") == "flex"
     if not flex_active:
-        return litellm.completion(**completion_args)
+        response = litellm.completion(**completion_args)
+        return _record_effective_service_tier(
+            response,
+            completion_args,
+            model_call_id=model_call_id,
+            logger=logger,
+        )
 
     retries = (
         max_retries
@@ -201,7 +260,13 @@ def call_litellm_with_tier_retry(
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            return litellm.completion(**completion_args)
+            response = litellm.completion(**completion_args)
+            return _record_effective_service_tier(
+                response,
+                completion_args,
+                model_call_id=model_call_id,
+                logger=logger,
+            )
         except Exception as exc:
             last_err = exc
             if not _is_tier_retryable(exc):
@@ -215,9 +280,14 @@ def call_litellm_with_tier_retry(
                     exc,
                 )
                 _mark_model_call_attempt_started(model_call_id, logger=logger)
-                fallback_args = dict(completion_args)
-                fallback_args.pop("service_tier", None)
-                return litellm.completion(**fallback_args)
+                completion_args.pop("service_tier", None)
+                response = litellm.completion(**completion_args)
+                return _record_effective_service_tier(
+                    response,
+                    completion_args,
+                    model_call_id=model_call_id,
+                    logger=logger,
+                )
             wait = delay * (2**attempt)
             logger.info(
                 "Flex tier busy (%s); retrying in %.1fs (attempt %d/%d)",

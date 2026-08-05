@@ -7,7 +7,11 @@ import flask
 from flask import Blueprint, jsonify, request
 
 from app.auth.guards import require_admin
-from app.config_store import read_combined, to_pydantic_config
+from app.config_store import (
+    hydrate_runtime_config_inplace,
+    read_combined,
+    to_pydantic_config,
+)
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
 from shared.llm_utils import model_uses_max_completion_tokens
@@ -603,10 +607,15 @@ def api_put_config() -> flask.Response:
                 400,
             )
 
-        for field_name in runtime_config.__class__.model_fields.keys():
-            setattr(runtime_config, field_name, getattr(db_cfg, field_name))
+        # The database is only the base configuration. Reapply environment
+        # overlays before resetting the processor so a token-only save cannot
+        # replace an env-selected model with the stale database value.
+        hydrate_runtime_config_inplace(db_cfg)
         _reset_processor_if_loaded()
 
+        # The writer returns database values. Return effective runtime values
+        # so the UI does not appear to revert environment-managed fields.
+        _hydrate_runtime_config(data)
         return flask.jsonify(_sanitize_config_for_client(data))
     except Exception as e:  # noqa: BLE001
         logger.error(f"Failed to update configuration: {e}")

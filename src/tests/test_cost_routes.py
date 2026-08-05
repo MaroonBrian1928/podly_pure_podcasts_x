@@ -65,7 +65,7 @@ def test_admin_costs_uses_litellm_tokens_and_configured_audio_rates(
                     prompt_tokens=1_000_000,
                     cached_prompt_tokens=500_000,
                     completion_tokens=250_000,
-                    total_tokens=1_750_000,
+                    total_tokens=1_250_000,
                 ),
                 ModelCall(
                     post_id=post.id,
@@ -91,15 +91,15 @@ def test_admin_costs_uses_litellm_tokens_and_configured_audio_rates(
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["total_llm_cost"] == 0.3375
+    assert payload["total_llm_cost"] == 0.2625
     assert payload["total_whisper_cost"] == 0.04
     assert payload["total_ina_cost"] == 0.02
-    assert payload["total_cost"] == 0.3975
-    assert payload["feeds"][0]["llm_cost"] == 0.3375
+    assert payload["total_cost"] == 0.3225
+    assert payload["feeds"][0]["llm_cost"] == 0.2625
     assert payload["feeds"][0]["whisper_cost"] == 0.04
     assert payload["feeds"][0]["ina_cost"] == 0.02
-    assert payload["users"][0]["monthly_cost"] == 0.1988
-    assert payload["users"][1]["monthly_cost"] == 0.1988
+    assert payload["users"][0]["monthly_cost"] == 0.1612
+    assert payload["users"][1]["monthly_cost"] == 0.1612
 
 
 def test_admin_costs_skips_whisper_and_ina_when_no_matching_model_calls(
@@ -300,7 +300,22 @@ def test_model_call_cost_prices_gemini_flex_at_half_base_rate() -> None:
     # LiteLLM's Gemini 3 Flash Preview table has base rates
     # input=0.50/M, cache-read=0.05/M, output=3.00/M. It does not currently
     # expose *_flex keys, so Podly applies the documented Flex 50% discount.
-    assert _model_call_cost(call) == 0.6375
+    assert _model_call_cost(call) == 0.5125
+
+
+def test_model_call_cost_uses_openai_flex_rates_without_double_counting_cache() -> None:
+    call = ModelCall(
+        model_name="openai/gpt-5-mini",
+        service_tier="flex",
+        prompt_tokens=1_000_000,
+        cached_prompt_tokens=500_000,
+        completion_tokens=250_000,
+    )
+
+    # LiteLLM 1.95.0 provides OpenAI's explicit Flex rates. OpenAI includes
+    # cached tokens inside prompt_tokens, so only the uncached half gets the
+    # regular Flex input rate.
+    assert _model_call_cost(call) == 0.31875
 
 
 def test_backfill_model_call_token_usage_dry_run_leaves_rows_unchanged(

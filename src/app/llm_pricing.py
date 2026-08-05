@@ -95,9 +95,12 @@ def compute_model_call_cost(call: ModelCallLike) -> float:
     output_rate = rate_from_litellm(
         call.model_name, "output_cost_per_token", call.service_tier
     )
+    # OpenAI includes cached tokens in prompt_tokens. Charge that subset at
+    # the cache-read rate instead of charging it once at each input rate.
+    uncached_prompt_tokens = max(prompt_tokens - cached_prompt_tokens, 0)
 
     return (
-        prompt_tokens * input_rate
+        uncached_prompt_tokens * input_rate
         + cached_prompt_tokens * cached_input_rate
         + completion_tokens * output_rate
     )
