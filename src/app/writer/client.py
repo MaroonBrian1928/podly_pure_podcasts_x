@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from queue import Empty, Queue
@@ -13,6 +14,38 @@ from app.writer.model_ops import execute_model_command
 from app.writer.protocol import WriteCommand, WriteCommandType, WriteResult
 
 logger = logging.getLogger("global_logger")
+
+DEFAULT_SUBMIT_TIMEOUT_SECONDS = 30
+
+
+def _default_submit_timeout() -> int:
+    """Seconds to wait for a writer reply, overridable per deployment.
+
+    The writer executes one command at a time, so this bounds how long a
+    caller can be blocked behind somebody else's slow command as well as by
+    its own. Raise it if a deployment has an unavoidably slow action; the
+    right fix for a slow action is normally to make it fast.
+    """
+    raw = os.environ.get("PODLY_WRITER_TIMEOUT_SECONDS")
+    if not raw:
+        return DEFAULT_SUBMIT_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-integer PODLY_WRITER_TIMEOUT_SECONDS=%r; using %s",
+            raw,
+            DEFAULT_SUBMIT_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_SUBMIT_TIMEOUT_SECONDS
+    if value <= 0:
+        logger.warning(
+            "Ignoring non-positive PODLY_WRITER_TIMEOUT_SECONDS=%r; using %s",
+            raw,
+            DEFAULT_SUBMIT_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_SUBMIT_TIMEOUT_SECONDS
+    return value
 
 
 class WriterClient:
@@ -157,8 +190,10 @@ class WriterClient:
         return drained
 
     def submit(
-        self, cmd: WriteCommand, wait: bool = False, timeout: int = 10
+        self, cmd: WriteCommand, wait: bool = False, timeout: int | None = None
     ) -> WriteResult | None:
+        if timeout is None:
+            timeout = _default_submit_timeout()
         reply_q: Queue[Any] | None = None
         if not self.queue:
             try:
@@ -186,26 +221,44 @@ class WriterClient:
         if wait:
             if reply_q is None:
                 raise RuntimeError("Reply queue was not initialized")
+            return self._await_reply(reply_q, cmd, timeout)
+        return None
+
+    @staticmethod
+    def _await_reply(
+        reply_q: Queue[Any], cmd: WriteCommand, timeout: int
+    ) -> WriteResult:
+        """Wait for this command's reply, discarding replies to abandoned ones.
+
+        The reply queue is thread-local and this thread's submits are
+        serialized, so any reply that is not ours belongs to an earlier
+        command this thread already gave up on -- the writer answered it after
+        we stopped waiting. Those must be *dropped*, not returned and not
+        counted against our own wait: returning one hands the caller another
+        command's result, and consuming our slot for it leaves the queue
+        permanently one reply behind, so a single slow command used to poison
+        every subsequent write on the thread.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Writer service did not respond")
             try:
-                result = cast(WriteResult, reply_q.get(timeout=timeout))
+                result = cast(WriteResult, reply_q.get(timeout=remaining))
             except Empty as exc:
                 raise TimeoutError("Writer service did not respond") from exc
-            # Thread-local queue means this thread's submits are serialized,
-            # so the next reply must be ours. Verify defensively.
+
             result_cmd_id = getattr(result, "command_id", None)
-            if result_cmd_id != cmd.id:
-                logger.error(
-                    "WriterClient: reply id mismatch (expected=%s got=%s); "
-                    "discarding and retrying",
-                    cmd.id,
-                    result_cmd_id,
-                )
-                try:
-                    result = cast(WriteResult, reply_q.get(timeout=timeout))
-                except Empty as exc:
-                    raise TimeoutError("Writer service did not respond") from exc
-            return result
-        return None
+            if result_cmd_id == cmd.id:
+                return result
+
+            logger.warning(
+                "WriterClient: discarding late reply for abandoned command "
+                "id=%s while waiting for id=%s",
+                result_cmd_id,
+                cmd.id,
+            )
 
     def create(
         self, model: str, data: dict[str, Any], wait: bool = True
