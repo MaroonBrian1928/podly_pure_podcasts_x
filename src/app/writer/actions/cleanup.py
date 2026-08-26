@@ -4,12 +4,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import load_only
+
 from app.extensions import db
 from app.job_stage_history import initial_stage_history
 from app.jobs_manager_run_service import recalculate_run_counts
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
     AudioSegment,
+    Feed,
     Identification,
     ModelCall,
     Post,
@@ -25,13 +28,40 @@ logger = logging.getLogger("writer")
 
 
 def cleanup_missing_audio_paths_action(params: dict[str, Any]) -> int:
-    inconsistent_posts = Post.query.filter(
-        Post.whitelisted,
-        (
-            (Post.unprocessed_audio_path.isnot(None))
-            | (Post.processed_audio_path.isnot(None))
-        ),
-    ).all()
+    # Load only the columns this scan touches. A bare ``Post.query...all()``
+    # hydrates every column, including ``transcript_word_timestamps`` — hundreds
+    # of MB of JSON across the whitelisted set — and the JSON deserialization
+    # alone took ~10s, pushing this action past the writer client's reply
+    # timeout. The writer runs one command at a time, so that failed unrelated
+    # writes queued behind it too.
+    inconsistent_posts = (
+        Post.query.options(
+            load_only(
+                Post.id,
+                Post.guid,
+                Post.title,
+                Post.feed_id,
+                Post.unprocessed_audio_path,
+                Post.processed_audio_path,
+            )
+        )
+        .filter(
+            Post.whitelisted,
+            (
+                (Post.unprocessed_audio_path.isnot(None))
+                | (Post.processed_audio_path.isnot(None))
+            ),
+        )
+        .all()
+    )
+
+    # Resolve feed titles in one query rather than lazy-loading (and fully
+    # hydrating) a Feed per post.
+    feed_titles: dict[int, str | None] = dict(
+        db.session.query(Feed.id, Feed.title)
+        .filter(Feed.id.in_({post.feed_id for post in inconsistent_posts}))
+        .all()
+    )
 
     count = 0
     for post in inconsistent_posts:
@@ -39,7 +69,7 @@ def cleanup_missing_audio_paths_action(params: dict[str, Any]) -> int:
         existing_processed_path = find_existing_processed_audio_path(
             processed_audio_path=post.processed_audio_path,
             unprocessed_audio_path=post.unprocessed_audio_path,
-            feed_title=getattr(post.feed, "title", None),
+            feed_title=feed_titles.get(post.feed_id),
             post_title=post.title,
         )
         if existing_processed_path:
