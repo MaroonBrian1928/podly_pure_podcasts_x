@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # This job always runs so `fmt-clippy-build-test` can be a required status
       # check without deadlocking PRs that don't touch rust/. When no rust files
@@ -26,7 +26,7 @@ jobs:
       - name: Detect rust changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
             rust:
@@ -35,13 +35,13 @@ jobs:
 
       - name: Set up Rust toolchain
         if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
         if: github.event_name == 'push' || steps.filter.outputs.rust == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: rust
 
