@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # This job always runs so `lint-build` can be a required status check
       # without deadlocking PRs that don't touch the frontend. When no frontend
@@ -27,7 +27,7 @@ jobs:
       - name: Detect frontend changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
             frontend:
@@ -36,7 +36,7 @@ jobs:
 
       - name: Set up Node
         if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
