@@ -20,7 +20,7 @@ COPY rust/src/ ./src/
 RUN cargo build --release --locked
 
 FROM python:3.14-slim AS backend
-COPY --from=ghcr.io/astral-sh/uv:0.11.26 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /uvx /bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
