@@ -5,20 +5,48 @@ Importing them does NOT import litellm — every call site imports lazily so
 processes that never run cost math don't pay the ~160 MiB ``import litellm``
 cost.
 
-The writer process calls ``compute_model_call_cost`` whenever it persists a
-finalized ModelCall, storing the result on ``ModelCall.estimated_cost_usd``.
-The web process reads the stored column and never imports litellm.
+Processing workers calculate persisted costs in-process. Web and writer apps
+resolve rates in a short-lived subprocess and retain only a bounded rate cache.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Protocol
+
+from flask import current_app, has_app_context
 
 if TYPE_CHECKING:
     from app.models import ModelCall
 
 logger = logging.getLogger("global_logger")
+RATE_KEYS = (
+    "input_cost_per_token",
+    "cache_read_input_token_cost",
+    "output_cost_per_token",
+)
+
+
+def model_rates(
+    models: Iterable[tuple[str, str | None]],
+) -> dict[tuple[str, str | None], tuple[float, float, float]]:
+    pairs = list(dict.fromkeys(models))
+    if has_app_context() and current_app.config.get("PODLY_APP_ROLE") in {
+        "web",
+        "writer",
+    }:
+        from app.pricing_client import lookup_model_rates
+
+        return lookup_model_rates(pairs)
+    return {
+        pair: (
+            rate_from_litellm(pair[0], RATE_KEYS[0], pair[1]),
+            rate_from_litellm(pair[0], RATE_KEYS[1], pair[1]),
+            rate_from_litellm(pair[0], RATE_KEYS[2], pair[1]),
+        )
+        for pair in pairs
+    }
 
 
 class ModelCallLike(Protocol):
@@ -45,6 +73,13 @@ def rate_from_litellm(model_name: str, key: str, service_tier: str | None) -> fl
     The Flex tier gets a 0.5x discount applied here so callers can treat the
     returned rate as the effective per-token rate.
     """
+    if has_app_context() and current_app.config.get("PODLY_APP_ROLE") in {
+        "web",
+        "writer",
+    }:
+        rates = model_rates([(model_name, service_tier)])
+        return rates[(model_name, service_tier)][RATE_KEYS.index(key)]
+
     try:
         import litellm
 

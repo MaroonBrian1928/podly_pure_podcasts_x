@@ -175,6 +175,9 @@ impl EncodingOptions {
 
 #[derive(Args)]
 struct FeedCommand {
+    /// Emit RSS directly instead of wrapping it in a JSON string.
+    #[arg(long, global = true)]
+    raw_xml: bool,
     #[command(subcommand)]
     command: FeedSubcommand,
 }
@@ -808,8 +811,10 @@ fn run() -> Result<()> {
             CostsSubcommand::RenderCalls(args) => print_json(&render_admin_costs_calls(args)?),
         },
         Commands::Feed(feed) => match feed.command {
-            FeedSubcommand::Render(args) => print_json(&render_feed(args)?),
-            FeedSubcommand::RenderAggregate(args) => print_json(&render_aggregate_feed(args)?),
+            FeedSubcommand::Render(args) => print_feed(&render_feed(args)?, feed.raw_xml),
+            FeedSubcommand::RenderAggregate(args) => {
+                print_feed(&render_aggregate_feed(args)?, feed.raw_xml)
+            }
             FeedSubcommand::RefreshPlan(args) => print_json(&plan_feed_refresh(args)?),
         },
         Commands::Jobs(jobs) => match jobs.command {
@@ -7348,6 +7353,21 @@ fn value_to_string(value: &Value) -> Option<String> {
     }
 }
 
+fn print_feed(response: &XmlResponse, raw_xml: bool) -> Result<()> {
+    let mut output = BufWriter::new(std::io::stdout().lock());
+    write_feed(&mut output, response, raw_xml)
+}
+
+fn write_feed(output: &mut impl Write, response: &XmlResponse, raw_xml: bool) -> Result<()> {
+    if raw_xml {
+        output.write_all(response.xml.as_bytes())?;
+        output.flush()?;
+        Ok(())
+    } else {
+        write_json(output, response)
+    }
+}
+
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
     // Stream through a bounded buffer instead of allocating another copy of
     // the complete response. Lock stdout once and propagate write/flush errors.
@@ -7366,6 +7386,46 @@ fn write_json<T: Serialize>(output: &mut impl Write, value: &T) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn feed_output_preserves_raw_xml_and_legacy_json() {
+        let response = XmlResponse {
+            xml: "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<rss><title>Café &amp; tea</title></rss>\n".into(),
+        };
+        let mut raw = Vec::new();
+        write_feed(&mut raw, &response, true).unwrap();
+        assert_eq!(raw, response.xml.as_bytes());
+        let mut legacy = Vec::new();
+        write_feed(&mut legacy, &response, false).unwrap();
+        let decoded: Value = serde_json::from_slice(&legacy).unwrap();
+        assert_eq!(decoded["xml"], response.xml);
+    }
+
+    #[test]
+    fn feed_raw_xml_flag_parses_for_both_renderers() {
+        for renderer in ["render", "render-aggregate"] {
+            let mut args = vec![
+                "podly_tools",
+                "feed",
+                renderer,
+                "--db",
+                "db.sqlite",
+                "--base-url",
+                "https://podly.test",
+                "--raw-xml",
+            ];
+            if renderer == "render" {
+                args.extend(["--feed-id", "1"]);
+            } else {
+                args.extend(["--user-id", "1", "--limit-per-feed", "3"]);
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Feed(feed) = cli.command else {
+                panic!("expected feed command")
+            };
+            assert!(feed.raw_xml);
+        }
+    }
 
     #[test]
     fn streamed_json_preserves_wire_format() {

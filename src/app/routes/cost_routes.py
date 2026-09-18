@@ -27,9 +27,7 @@ from app.llm_pricing import (
 from app.llm_pricing import (
     is_whisper_call as _is_whisper_call_by_name,
 )
-from app.llm_pricing import (
-    rate_from_litellm as _rate_from_litellm,
-)
+from app.llm_pricing import model_rates
 from app.model_call_token_backfill import backfill_model_call_token_usage
 from app.models import (
     Feed,
@@ -154,13 +152,14 @@ def _build_rust_rates_payload(app_config: dict[str, Any]) -> dict[str, Any]:
 
     Returns a dict keyed by ``"{model_name}|{normalized_service_tier}"`` with
     {input, cached_input, output} effective per-token rates. The Flex 0.5x
-    discount is baked into ``_rate_from_litellm``; the cached_input→input
+    discount is baked into the resolved rates; the cached_input→input
     fallback for legacy rows (LiteLLM has no cache_read price) is applied
     here so the sidecar can just multiply tokens * rate.
     """
     distinct: list[tuple[str | None, str | None]] = (
         db.session.query(ModelCall.model_name, ModelCall.service_tier).distinct().all()
     )
+    resolved = model_rates([(name, tier) for name, tier in distinct if name])
     rates: dict[str, dict[str, float]] = {}
     for model_name, service_tier in distinct:
         if not model_name:
@@ -169,15 +168,7 @@ def _build_rust_rates_payload(app_config: dict[str, Any]) -> dict[str, Any]:
         key = f"{model_name}|{tier_key}"
         if key in rates:
             continue
-        input_rate = _rate_from_litellm(
-            model_name, "input_cost_per_token", service_tier
-        )
-        cached_rate = _rate_from_litellm(
-            model_name, "cache_read_input_token_cost", service_tier
-        )
-        output_rate = _rate_from_litellm(
-            model_name, "output_cost_per_token", service_tier
-        )
+        input_rate, cached_rate, output_rate = resolved[(model_name, service_tier)]
         effective_cached = cached_rate if cached_rate else input_rate
         rates[key] = {
             "input": float(input_rate),
@@ -485,9 +476,8 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
 
     New ModelCalls are populated by the writer at finalize time. Rows that
     predate the column will have ``estimated_cost_usd IS NULL`` — running
-    this endpoint pays the one-time ``import litellm`` cost in the web
-    process (only persisted while this process is alive; restart to reset)
-    and writes the computed value back via the writer.
+    this endpoint resolves prices in a disposable helper and writes the
+    computed value back via the writer.
 
     POST body (all optional):
       apply: bool (default False — dry run when false)

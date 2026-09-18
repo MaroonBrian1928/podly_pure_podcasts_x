@@ -10,8 +10,10 @@ from unittest import mock
 import feedparser
 import PyRSS2Gen
 import pytest
+from sqlalchemy import event, inspect
 
 from app.feeds import (
+    _build_refresh_feed_payload,
     _feed_item_duration_seconds,
     _get_base_url,
     _should_auto_whitelist_new_posts,
@@ -467,7 +469,9 @@ def test_refresh_feed_backfills_existing_unprocessed_post_duration(
         duration=None,
     )
     existing_post.processed_audio_path = None
-    mock_feed.posts = [existing_post]
+    mock_db_session.query.return_value.filter.return_value.options.return_value.all.return_value = [
+        existing_post
+    ]
 
     mock_fetch_feed.return_value = mock_feed_data
     mock_should_auto_whitelist.return_value = True
@@ -505,7 +509,9 @@ def test_refresh_feed_updates_existing_post_description(
         image_url=mock_feed.image_url,
     )
     existing_post.processed_audio_path = "/tmp/processed.mp3"
-    mock_feed.posts = [existing_post]
+    mock_db_session.query.return_value.filter.return_value.options.return_value.all.return_value = [
+        existing_post
+    ]
 
     mock_feed_data.entries[0].content = [
         {"type": "text/html", "value": "<p>Rich source description</p>"}
@@ -558,7 +564,9 @@ def test_refresh_feed_repairs_legacy_uuid5_guid_via_url_match(
     existing_post.processed_audio_path = "/tmp/processed.mp3"
 
     mock_feed_data.entries = mock_feed_data.entries[:1]
-    mock_feed.posts = [existing_post]
+    mock_db_session.query.return_value.filter.return_value.options.return_value.all.return_value = [
+        existing_post
+    ]
 
     mock_fetch_feed.return_value = mock_feed_data
     mock_should_auto_whitelist.return_value = True
@@ -1781,3 +1789,66 @@ def test_get_base_url_fallback_http_without_sts():
 
     # Should use HTTP when no HTTPS indicators present
     assert result == "http://insecure.example.com"
+
+
+def test_python_refresh_does_not_load_archive_processing_documents(app):
+    """Refreshing source metadata must not deserialize stored transcript JSON."""
+    with app.app_context():
+        feed = Feed(title="Lean refresh", rss_url="https://example.com/lean.xml")
+        db.session.add(feed)
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="lean-guid",
+            title="Original",
+            description="Original description",
+            download_url="https://example.com/lean.mp3",
+            transcript_word_timestamps=[{"word": "x" * 10000}],
+            bleep_windows=[[1, 2]],
+            refined_ad_boundaries=[[1, 2]],
+            release_date=datetime.datetime(2025, 1, 1),
+        )
+        db.session.add(post)
+        db.session.commit()
+        feed_id = feed.id
+        db.session.expunge_all()
+        feed = db.session.get(Feed, feed_id)
+        assert feed is not None
+        data = feedparser.FeedParserDict(
+            feed={},
+            entries=[
+                feedparser.FeedParserDict(
+                    id="lean-guid",
+                    title="Updated",
+                    description="Updated description",
+                    links=[
+                        {"type": "audio/mpeg", "href": "https://example.com/lean.mp3"}
+                    ],
+                    itunes_duration="120",
+                )
+            ],
+        )
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _many):
+            statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            _, new_posts, updated = _build_refresh_feed_payload(feed, data)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+        assert new_posts == []
+        assert updated[0]["title"] == "Updated"
+        assert updated[0]["description"] == "Updated description"
+        assert updated[0]["duration"] == 120
+        state = inspect(feed)
+        assert state is not None
+        assert "posts" in state.unloaded
+        assert len(statements) == 1
+        for column in (
+            "transcript_word_timestamps",
+            "bleep_windows",
+            "refined_ad_boundaries",
+        ):
+            assert column not in statements[0]
