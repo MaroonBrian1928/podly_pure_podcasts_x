@@ -9,6 +9,8 @@ from typing import Any
 import flask
 from flask import Blueprint, g, jsonify, request, send_file
 from flask.typing import ResponseReturnValue
+from sqlalchemy import func
+from sqlalchemy.orm import defer
 
 from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
@@ -825,7 +827,12 @@ def _resolve_original_duration_seconds(
 @post_bp.route("/api/posts/<path:p_guid>/stats", methods=["GET"])
 def api_post_stats(p_guid: str) -> flask.Response:
     """Get processing statistics for a post in JSON format."""
-    post = Post.query.filter_by(guid=p_guid).first()
+    # Word-level transcripts can be megabytes and are not part of stats output.
+    post = (
+        Post.query.options(defer(Post.transcript_word_timestamps))
+        .filter_by(guid=p_guid)
+        .first()
+    )
     if post is None:
         return flask.make_response(flask.jsonify({"error": "Post not found"}), 404)
 
@@ -1217,7 +1224,17 @@ def api_toggle_whitelist_all(feed_id: int) -> ResponseReturnValue:
     if error:
         return error
 
-    if not feed.posts:
+    # Count in SQLite rather than materializing the entire archive (including
+    # large transcript JSON) in a long-lived request worker.
+    total, whitelisted = (
+        db.session.query(
+            func.count(Post.id),
+            func.count(Post.id).filter(Post.whitelisted.is_(True)),
+        )
+        .filter(Post.feed_id == feed.id)
+        .one()
+    )
+    if not total:
         return flask.jsonify(
             {
                 "message": "No posts found in this feed",
@@ -1226,7 +1243,7 @@ def api_toggle_whitelist_all(feed_id: int) -> ResponseReturnValue:
             }
         )
 
-    all_whitelisted = all(post.whitelisted for post in feed.posts)
+    all_whitelisted = whitelisted == total
     new_status = not all_whitelisted
 
     try:
