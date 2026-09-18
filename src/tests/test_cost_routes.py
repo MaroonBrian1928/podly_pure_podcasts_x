@@ -1,3 +1,5 @@
+import json
+import subprocess
 from datetime import datetime
 from typing import Any
 
@@ -6,6 +8,58 @@ from app.model_call_token_backfill import backfill_model_call_token_usage
 from app.models import Feed, ModelCall, Post, ProcessingJob, User, UserFeed
 from app.routes import cost_routes
 from app.routes.cost_routes import _model_call_cost, costs_bp
+
+
+def test_web_cost_rates_batch_helper_and_preserve_rust_contract(app, monkeypatch):
+    from app import pricing_client
+
+    monkeypatch.setattr(pricing_client, "_cache", pricing_client.OrderedDict())
+    requests = []
+
+    def lookup(command, **kwargs):
+        requests.append(json.loads(kwargs["input"]))
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps([[0.000001, 0.0, 0.000002]])
+        )
+
+    monkeypatch.setattr(pricing_client.subprocess, "run", lookup)
+    with app.app_context():
+        feed = Feed(title="Rate Feed", rss_url="https://example.com/rates.xml")
+        db.session.add(feed)
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="rate-post",
+            title="Rates",
+            download_url="https://example.com/audio.mp3",
+        )
+        db.session.add(post)
+        db.session.flush()
+        call = ModelCall(
+            post_id=post.id,
+            model_name="test-model",
+            service_tier="flex",
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=1,
+            prompt="classify",
+            status="success",
+            prompt_tokens=100,
+            cached_prompt_tokens=50,
+            completion_tokens=10,
+        )
+        db.session.add(call)
+        db.session.commit()
+        app.config["PODLY_APP_ROLE"] = "web"
+        payload = cost_routes._build_rust_rates_payload({})
+        assert payload["rates"] == {
+            "test-model|flex": {
+                "input": 0.000001,
+                "cached_input": 0.000001,
+                "output": 0.000002,
+            }
+        }
+        assert round(_model_call_cost(call), 8) == 0.00012
+    assert requests == [[["test-model", "flex"]]]
 
 
 def test_admin_costs_uses_litellm_tokens_and_configured_audio_rates(
@@ -288,7 +342,22 @@ def test_admin_costs_calls_uses_rust_sidecar_response_when_available(
     assert payload["calls"][0]["id"] == 7
 
 
-def test_model_call_cost_prices_gemini_flex_at_half_base_rate() -> None:
+def test_model_call_cost_prices_gemini_flex_at_half_base_rate(monkeypatch) -> None:
+    import litellm
+
+    # Pin the rate fixture: vendor pricing changes must not change this test
+    # of the fallback discount and cached-token arithmetic.
+    monkeypatch.setattr(
+        litellm,
+        "model_cost",
+        {
+            "gemini/gemini-3-flash-preview": {
+                "input_cost_per_token": 0.50 / 1_000_000,
+                "cache_read_input_token_cost": 0.05 / 1_000_000,
+                "output_cost_per_token": 3.00 / 1_000_000,
+            }
+        },
+    )
     call = ModelCall(
         model_name="gemini/gemini-3-flash-preview",
         service_tier="flex",
@@ -297,13 +366,26 @@ def test_model_call_cost_prices_gemini_flex_at_half_base_rate() -> None:
         completion_tokens=250_000,
     )
 
-    # LiteLLM's Gemini 3 Flash Preview table has base rates
-    # input=0.50/M, cache-read=0.05/M, output=3.00/M. It does not currently
-    # expose *_flex keys, so Podly applies the documented Flex 50% discount.
+    # With no explicit *_flex keys, apply the Flex 50% discount.
     assert _model_call_cost(call) == 0.5125
 
 
-def test_model_call_cost_uses_openai_flex_rates_without_double_counting_cache() -> None:
+def test_model_call_cost_uses_openai_flex_rates_without_double_counting_cache(
+    monkeypatch,
+) -> None:
+    import litellm
+
+    monkeypatch.setattr(
+        litellm,
+        "model_cost",
+        {
+            "openai/gpt-5-mini": {
+                "input_cost_per_token_flex": 0.125 / 1_000_000,
+                "cache_read_input_token_cost_flex": 0.0125 / 1_000_000,
+                "output_cost_per_token_flex": 1.0 / 1_000_000,
+            }
+        },
+    )
     call = ModelCall(
         model_name="openai/gpt-5-mini",
         service_tier="flex",
@@ -312,7 +394,7 @@ def test_model_call_cost_uses_openai_flex_rates_without_double_counting_cache() 
         completion_tokens=250_000,
     )
 
-    # LiteLLM 1.95.0 provides OpenAI's explicit Flex rates. OpenAI includes
+    # This fixture provides explicit Flex rates. OpenAI includes
     # cached tokens inside prompt_tokens, so only the uncached half gets the
     # regular Flex input rate.
     assert _model_call_cost(call) == 0.31875

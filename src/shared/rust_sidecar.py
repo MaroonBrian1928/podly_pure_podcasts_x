@@ -762,17 +762,29 @@ def _try_audio_command(args: list[str], label: str) -> bool:
 
 
 def _try_feed_xml_command(args: list[str], label: str) -> bytes | None:
+    # Keep RSS as bytes end-to-end: a JSON envelope required Python to hold
+    # subprocess text, decoded JSON/XML text, and UTF-8 output simultaneously.
     try:
-        payload = run_podly_tools(args)
-    except RustSidecarError:
+        result = subprocess.run(
+            [str(rust_tools_bin()), *args, "--raw-xml"],
+            capture_output=True,
+            check=False,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RustSidecarError(
+                f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
+            )
+        xml = result.stdout
+        # Validate the renderer's framing without decoding/parsing the archive.
+        if not xml.startswith(b"<?xml ") or not xml.endswith(b"</rss>\n"):
+            raise RustSidecarError("podly_tools returned invalid raw RSS framing")
+    except (OSError, subprocess.TimeoutExpired, RustSidecarError) as exc:
+        _notify_rust_fallback(label, str(exc))
         LOGGER.exception("Rust %s failed; falling back to Python behavior", label)
         return None
-
-    xml = payload.get("xml")
-    if not isinstance(xml, str):
-        LOGGER.error("Rust %s returned invalid xml payload: %r", label, payload)
-        return None
-    return xml.encode("utf-8")
+    return xml
 
 
 class _windows_json_file:

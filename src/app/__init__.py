@@ -167,6 +167,7 @@ def create_web_app() -> Flask:
         app_role="web",
         run_startup=False,
         start_scheduler=True,
+        initialize_migrations=False,
     )
 
 
@@ -194,6 +195,7 @@ def create_processing_app() -> Flask:
         run_startup=False,
         start_scheduler=False,
         register_http=False,
+        initialize_migrations=False,
     )
 
 
@@ -203,6 +205,7 @@ def _create_configured_app(
     run_startup: bool,
     start_scheduler: bool,
     register_http: bool = True,
+    initialize_migrations: bool = True,
 ) -> Flask:
     # Setup directories early but only when actually creating the app (not during migrations)
     if not is_test:
@@ -218,7 +221,7 @@ def _create_configured_app(
     _configure_scheduler(app)
     _configure_database(app)
     _configure_external_loggers()
-    _initialize_extensions(app)
+    _initialize_extensions(app, initialize_migrations=initialize_migrations)
     if register_http:
         _register_routes_and_middleware(app)
 
@@ -468,9 +471,13 @@ def _configure_readonly_sessions(app: Flask) -> None:
             )
 
 
-def _initialize_extensions(app: Flask) -> None:
+def _initialize_extensions(app: Flask, *, initialize_migrations: bool = True) -> None:
     db.init_app(app)
-    migrate.init_app(app, db)
+    # Production readers do not run migrations. Keep Alembic and its CLI
+    # dependencies out of their resident imports; create_app still registers
+    # the migration CLI even when startup is disabled.
+    if initialize_migrations:
+        migrate.init_app(app, db)
 
     # Configure read-only mode for web/API and processing Flask apps to prevent database locks
     # Only the writer service should acquire write locks

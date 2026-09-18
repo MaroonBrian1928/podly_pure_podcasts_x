@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from unittest import mock
 
+import pytest
 from werkzeug.http import http_date
 
 from app.extensions import db
@@ -165,7 +166,8 @@ def test_get_feed_emits_etag_and_last_modified_headers(app):
     assert resp.headers.get("Last-Modified")
 
 
-def test_get_feed_returns_304_when_etag_matches(app):
+@pytest.mark.parametrize("weak", [False, True])
+def test_get_feed_returns_304_when_etag_matches(app, weak):
     app.testing = True
     _register_feed_routes(app)
 
@@ -186,7 +188,8 @@ def test_get_feed_returns_304_when_etag_matches(app):
         first = client.get(f"/feed/{feed_id}")
         etag = first.headers["ETag"]
 
-        second = client.get(f"/feed/{feed_id}", headers={"If-None-Match": etag})
+        validator = f"W/{etag}" if weak else etag
+        second = client.get(f"/feed/{feed_id}", headers={"If-None-Match": validator})
 
     assert second.status_code == 304
     # the body of a 304 must be empty
@@ -361,3 +364,25 @@ def test_get_user_aggregate_feed_returns_304_when_etag_matches(app):
     assert second.status_code == 304
     # XML must not be regenerated on the 304 path
     assert mock_gen.call_count == 1
+
+
+def test_stale_etag_takes_precedence_over_current_last_modified(app):
+    _register_feed_routes(app)
+    with app.app_context():
+        feed_id = _make_feed_with_post()
+    with (
+        mock.patch("app.routes.feed_routes._spawn_async_refresh"),
+        mock.patch(
+            "app.routes.feed_routes.generate_feed_xml", return_value=b"<rss/>"
+        ) as render,
+    ):
+        response = app.test_client().get(
+            f"/feed/{feed_id}",
+            headers={
+                "If-None-Match": '"stale"',
+                "If-Modified-Since": http_date(dt.datetime(2099, 1, 1, tzinfo=dt.UTC)),
+            },
+        )
+    assert response.status_code == 200
+    assert response.data == b"<rss/>"
+    render.assert_called_once()

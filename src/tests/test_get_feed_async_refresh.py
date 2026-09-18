@@ -12,6 +12,8 @@ from __future__ import annotations
 import datetime as dt
 from unittest import mock
 
+import pytest
+
 from app.extensions import db
 from app.models import Feed, Post
 from app.routes import feed_routes
@@ -43,6 +45,7 @@ def _register_feed_routes(app) -> None:
 def _reset_kickoff_state() -> None:
     with feed_routes._BACKGROUND_REFRESH_LOCK:
         feed_routes._BACKGROUND_REFRESH_LAST_KICKOFF.clear()
+        feed_routes._BACKGROUND_REFRESH_IN_FLIGHT.clear()
 
 
 def test_get_feed_does_not_call_refresh_feed_synchronously(app):
@@ -184,3 +187,95 @@ def test_get_feed_returns_xml_when_kickoff_skipped(app):
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.data == b"<rss/>cached</rss/>"
+
+
+def test_automatic_refresh_bounds_threads_and_releases_completed_slots(app):
+    _reset_kickoff_state()
+    try:
+        with mock.patch("app.routes.feed_routes.Thread") as thread:
+            feed_routes._spawn_async_refresh(app, 1)
+            feed_routes._spawn_async_refresh(app, 2)
+            feed_routes._spawn_async_refresh(app, 3)
+            feed_routes._spawn_async_refresh(app, 1)
+            assert thread.call_count == 2
+            with mock.patch("app.routes.feed_routes._refresh_feed_background"):
+                thread.call_args_list[0].kwargs["target"]()
+            feed_routes._spawn_async_refresh(app, 3)
+            assert thread.call_count == 3
+    finally:
+        _reset_kickoff_state()
+
+
+def test_automatic_refresh_blocks_active_feed_after_cooldown(app):
+    _reset_kickoff_state()
+    try:
+        with mock.patch("app.routes.feed_routes.Thread"):
+            with mock.patch("app.routes.feed_routes.time.monotonic", return_value=1):
+                assert feed_routes._should_kickoff_async_refresh(1)
+                feed_routes._spawn_async_refresh(app, 1)
+            with mock.patch("app.routes.feed_routes.time.monotonic", return_value=1000):
+                assert not feed_routes._should_kickoff_async_refresh(1)
+    finally:
+        _reset_kickoff_state()
+
+
+def test_automatic_refresh_releases_slot_on_background_failure(app):
+    _reset_kickoff_state()
+    with mock.patch("app.routes.feed_routes.Thread") as thread:
+        feed_routes._spawn_async_refresh(app, 1)
+    with mock.patch(
+        "app.routes.feed_routes._refresh_feed_background", side_effect=RuntimeError
+    ):
+        with pytest.raises(RuntimeError):
+            thread.call_args.kwargs["target"]()
+    assert not feed_routes._BACKGROUND_REFRESH_IN_FLIGHT
+
+
+def test_automatic_refresh_start_failure_allows_retry(app):
+    _reset_kickoff_state()
+    assert feed_routes._should_kickoff_async_refresh(1)
+    with mock.patch("app.routes.feed_routes.Thread") as thread:
+        thread.return_value.start.side_effect = RuntimeError("no thread")
+        feed_routes._spawn_async_refresh(app, 1)
+    assert not feed_routes._BACKGROUND_REFRESH_IN_FLIGHT
+    assert feed_routes._should_kickoff_async_refresh(1)
+    _reset_kickoff_state()
+
+
+def test_get_feed_still_renders_when_automatic_refresh_is_saturated(app):
+    _register_feed_routes(app)
+    _reset_kickoff_state()
+    with app.app_context():
+        feed_id = _make_feed_with_post()
+    try:
+        with mock.patch("app.routes.feed_routes.Thread"):
+            feed_routes._spawn_async_refresh(app, feed_id + 1)
+            feed_routes._spawn_async_refresh(app, feed_id + 2)
+        with (
+            mock.patch("app.routes.feed_routes._spawn_async_refresh") as spawn,
+            mock.patch(
+                "app.routes.feed_routes.generate_feed_xml", return_value=b"<rss/>"
+            ),
+        ):
+            response = app.test_client().get(f"/feed/{feed_id}")
+        assert response.status_code == 200
+        assert response.data == b"<rss/>"
+        spawn.assert_not_called()
+    finally:
+        _reset_kickoff_state()
+
+
+def test_automatic_refresh_saturation_race_does_not_consume_cooldown(app):
+    _reset_kickoff_state()
+    try:
+        assert feed_routes._should_kickoff_async_refresh(3)
+        with mock.patch("app.routes.feed_routes.Thread"):
+            feed_routes._spawn_async_refresh(app, 1)
+            feed_routes._spawn_async_refresh(app, 2)
+            feed_routes._spawn_async_refresh(app, 3)
+        assert 3 not in feed_routes._BACKGROUND_REFRESH_LAST_KICKOFF
+        with feed_routes._BACKGROUND_REFRESH_LOCK:
+            feed_routes._BACKGROUND_REFRESH_IN_FLIGHT.remove(1)
+        assert feed_routes._should_kickoff_async_refresh(3)
+    finally:
+        _reset_kickoff_state()
