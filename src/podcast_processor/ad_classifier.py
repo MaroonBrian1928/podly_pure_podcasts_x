@@ -31,6 +31,7 @@ from podcast_processor.llm_concurrency_limiter import (
     get_concurrency_limiter,
 )
 from podcast_processor.llm_model_call_utils import (
+    LLMRequestTooLargeError,
     apply_service_tier,
     call_litellm_with_tier_retry,
     extract_litellm_usage,
@@ -139,6 +140,7 @@ class AdClassifier:
         # this after classification finishes to decide whether to auto-retry
         # zero-ad runs (see PodcastProcessor zero-ads guard).
         self.had_parse_error = False
+        self._adaptive_input_token_limit: int | None = None
 
         # Initialize cue detector for neighbor expansion
         self.cue_detector = CueDetector()
@@ -281,47 +283,81 @@ class AdClassifier:
         overlap_segments = self._apply_overlap_cap(prev_overlap_segments)
         remaining_segments = transcript_segments[current_index:]
 
-        (
-            chunk_segments,
-            user_prompt_str,
-            consumed_segments,
-            token_limit_trimmed,
-        ) = self._build_chunk_payload(
-            overlap_segments=overlap_segments,
-            remaining_segments=remaining_segments,
-            total_segments=transcript_segments,
-            post=classify_params.post,
-            system_prompt=classify_params.system_prompt,
-            user_prompt_template=classify_params.user_prompt_template,
-            max_new_segments=classify_params.num_segments_per_prompt,
-        )
+        max_new_segments = classify_params.num_segments_per_prompt
 
-        if not chunk_segments or consumed_segments <= 0:
-            self.logger.error(
-                "No progress made while building classification chunk for post %s. "
-                "Stopping to avoid infinite loop.",
-                classify_params.post.id,
-            )
-            raise ClassifyException(
-                "No progress made while building classification chunk."
-            )
-
-        if token_limit_trimmed:
-            self.logger.debug(
-                "Token limit trimming applied for post %s at transcript index %s. "
-                "Processing chunk with %s new segments across %s total segments.",
-                classify_params.post.id,
-                current_index,
+        while True:
+            (
+                chunk_segments,
+                user_prompt_str,
                 consumed_segments,
-                len(chunk_segments),
+                token_limit_trimmed,
+            ) = self._build_chunk_payload(
+                overlap_segments=overlap_segments,
+                remaining_segments=remaining_segments,
+                total_segments=transcript_segments,
+                post=classify_params.post,
+                system_prompt=classify_params.system_prompt,
+                user_prompt_template=classify_params.user_prompt_template,
+                max_new_segments=max_new_segments,
             )
 
-        identified_segments = self._process_chunk(
-            chunk_segments=chunk_segments,
-            system_prompt=classify_params.system_prompt,
-            user_prompt_str=user_prompt_str,
-            post=classify_params.post,
-        )
+            if not chunk_segments or consumed_segments <= 0:
+                self.logger.error(
+                    "No progress made while building classification chunk for post %s. "
+                    "Stopping to avoid infinite loop.",
+                    classify_params.post.id,
+                )
+                raise ClassifyException(
+                    "No progress made while building classification chunk."
+                )
+
+            if token_limit_trimmed:
+                self.logger.debug(
+                    "Token limit trimming applied for post %s at transcript index %s. "
+                    "Processing chunk with %s new segments across %s total segments.",
+                    classify_params.post.id,
+                    current_index,
+                    consumed_segments,
+                    len(chunk_segments),
+                )
+
+            try:
+                identified_segments = self._process_chunk(
+                    chunk_segments=chunk_segments,
+                    system_prompt=classify_params.system_prompt,
+                    user_prompt_str=user_prompt_str,
+                    post=classify_params.post,
+                )
+                break
+            except LLMRequestTooLargeError as exc:
+                if consumed_segments <= 1:
+                    raise
+                learned_limit = max(1, int(exc.limit * 0.9))
+                if self._adaptive_input_token_limit is None:
+                    self._adaptive_input_token_limit = learned_limit
+                else:
+                    self._adaptive_input_token_limit = min(
+                        self._adaptive_input_token_limit,
+                        learned_limit,
+                    )
+                max_new_segments = max(
+                    1,
+                    min(
+                        consumed_segments - 1,
+                        int(consumed_segments * learned_limit / exc.requested),
+                    ),
+                )
+                self.logger.warning(
+                    "Provider rejected %s input segments for post %s (%s tokens "
+                    "requested, TPM limit %s); rebuilding the chunk with at "
+                    "most %s new segments and a %s-token input ceiling",
+                    consumed_segments,
+                    classify_params.post.id,
+                    exc.requested,
+                    exc.limit,
+                    max_new_segments,
+                    self._adaptive_input_token_limit,
+                )
 
         next_overlap_segments = self._compute_next_overlap_segments(
             chunk_segments=chunk_segments,
@@ -374,6 +410,12 @@ class AdClassifier:
                 model_call=model_call,
                 system_prompt=system_prompt,
             )
+        else:
+            oversized_error = LLMRequestTooLargeError.from_message(
+                model_call.error_message
+            )
+            if oversized_error is not None:
+                raise oversized_error
 
         if model_call.status == "success" and model_call.response:
             return self._process_successful_response(
@@ -437,8 +479,8 @@ class AdClassifier:
 
             if (
                 self.config.llm_max_input_tokens_per_call is not None
-                and not self._validate_token_limit(user_prompt_str, system_prompt)
-            ):
+                or self._adaptive_input_token_limit is not None
+            ) and not self._validate_token_limit(user_prompt_str, system_prompt):
                 token_limit_trimmed = True
                 if new_segment_count == 1:
                     self.logger.warning(
@@ -606,8 +648,15 @@ class AdClassifier:
 
     def _validate_token_limit(self, user_prompt_str: str, system_prompt: str) -> bool:
         """Validate that the prompt doesn't exceed the configured token limit."""
-        if self.config.llm_max_input_tokens_per_call is None:
+        configured_limit = self.config.llm_max_input_tokens_per_call
+        limits = [
+            limit
+            for limit in (configured_limit, self._adaptive_input_token_limit)
+            if limit is not None
+        ]
+        if not limits:
             return True
+        effective_limit = min(limits)
 
         # Create messages as they would be sent to the API
         messages = [
@@ -625,15 +674,15 @@ class AdClassifier:
             total_chars = len(system_prompt) + len(user_prompt_str)
             token_count = total_chars // 4  # ~4 characters per token
 
-        is_valid = token_count <= self.config.llm_max_input_tokens_per_call
+        is_valid = token_count <= effective_limit
 
         if not is_valid:
             self.logger.debug(
-                f"Prompt exceeds token limit: {token_count} > {self.config.llm_max_input_tokens_per_call}"
+                f"Prompt exceeds token limit: {token_count} > {effective_limit}"
             )
         else:
             self.logger.debug(
-                f"Prompt within token limit: {token_count} <= {self.config.llm_max_input_tokens_per_call}"
+                f"Prompt within token limit: {token_count} <= {effective_limit}"
             )
 
         return is_valid
@@ -660,11 +709,23 @@ class AdClassifier:
             )
 
         # Final validation: Check per-call token limit before making API call
-        if self.config.llm_max_input_tokens_per_call is not None:
+        if (
+            self.config.llm_max_input_tokens_per_call is not None
+            or self._adaptive_input_token_limit is not None
+        ):
             if not self._validate_token_limit(model_call_obj.prompt, system_prompt):
+                limits = [
+                    limit
+                    for limit in (
+                        self.config.llm_max_input_tokens_per_call,
+                        self._adaptive_input_token_limit,
+                    )
+                    if limit is not None
+                ]
+                effective_limit = min(limits)
                 error_msg = (
                     f"Prompt for ModelCall {model_call_obj.id} exceeds configured "
-                    f"token limit of {self.config.llm_max_input_tokens_per_call}. "
+                    f"token limit of {effective_limit}. "
                     f"Consider reducing num_segments_to_input_to_prompt."
                 )
                 self.logger.error(error_msg)
@@ -1297,6 +1358,24 @@ class AdClassifier:
                 return raw_response_content
 
             except Exception as e:
+                if isinstance(e, LLMRequestTooLargeError):
+                    error_message = str(e)
+                    fail_res = writer_client.update(
+                        "ModelCall",
+                        model_call_obj.id,
+                        {
+                            "status": "failed_permanent",
+                            "error_message": error_message,
+                        },
+                        wait=True,
+                    )
+                    if not fail_res or not fail_res.success:
+                        raise RuntimeError(
+                            getattr(fail_res, "error", "Failed to update ModelCall")
+                        ) from e
+                    model_call_obj.status = "failed_permanent"
+                    model_call_obj.error_message = error_message
+                    raise
                 last_error = e
                 if self._is_retryable_error(e):
                     # Preserve the classifier's gradual retry backoff after an

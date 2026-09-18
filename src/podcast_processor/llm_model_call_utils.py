@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +14,35 @@ from shared import defaults as DEFAULTS
 _SERVICE_TIER_MODEL_PREFIXES = ("gemini/", "openai/")
 _OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4")
 _VALID_SERVICE_TIERS = {"default", "flex", "priority", "auto"}
+_TPM_REQUEST_LIMIT_RE = re.compile(
+    r"tokens per min(?:ute)?[^\n]*?limit\s*:?\s*([\d,]+)"
+    r"[^\n]*?requested\s*:?\s*([\d,]+)",
+    re.IGNORECASE,
+)
+
+
+class LLMRequestTooLargeError(Exception):
+    """A provider rejected one request because it exceeds the TPM ceiling."""
+
+    def __init__(self, *, limit: int, requested: int) -> None:
+        self.limit = limit
+        self.requested = requested
+        super().__init__(
+            "LLM request too large on tokens per minute (TPM): "
+            f"Limit {limit}, Requested {requested}"
+        )
+
+    @classmethod
+    def from_message(cls, message: str | None) -> LLMRequestTooLargeError | None:
+        if not message:
+            return None
+        match = _TPM_REQUEST_LIMIT_RE.search(message)
+        if match is None:
+            return None
+        return cls(
+            limit=int(match.group(1).replace(",", "")),
+            requested=int(match.group(2).replace(",", "")),
+        )
 
 
 def model_supports_service_tier(model_name: str | None) -> bool:
@@ -150,6 +180,89 @@ def _is_tier_retryable(exc: Exception) -> bool:
     return False
 
 
+def _call_with_tpm_adjustment(
+    completion: Any,
+    completion_args: dict[str, Any],
+    *,
+    logger: logging.Logger,
+) -> Any:
+    """Retry once with a smaller output allowance after a per-request TPM error.
+
+    OpenAI's reservation can be driven by either the estimated input or the
+    requested maximum output. The account-specific ceiling is not present in
+    LiteLLM's model metadata, so the first response is the only authoritative
+    place to learn it. Keep a small margin below the reported limit to avoid
+    token-estimation rounding on the retry.
+    """
+    try:
+        return completion(**completion_args)
+    except Exception as exc:
+        match = _TPM_REQUEST_LIMIT_RE.search(str(exc))
+        if match is None:
+            raise
+
+        limit = int(match.group(1).replace(",", ""))
+        requested = int(match.group(2).replace(",", ""))
+        overage = requested - limit
+        token_key = next(
+            (
+                key
+                for key in ("max_completion_tokens", "max_tokens")
+                if completion_args.get(key) is not None
+            ),
+            None,
+        )
+        if overage <= 0:
+            raise
+        if token_key is None:
+            raise LLMRequestTooLargeError(
+                limit=limit,
+                requested=requested,
+            ) from exc
+
+        try:
+            old_output_limit = int(completion_args[token_key])
+        except TypeError, ValueError:
+            raise exc from None
+
+        # OpenAI calculates this reservation as the greater of the estimated
+        # input and requested output. If Requested is already above the output
+        # allowance, shrinking output cannot change the rejected reservation;
+        # the caller must split the input instead.
+        if requested > old_output_limit:
+            raise LLMRequestTooLargeError(
+                limit=limit,
+                requested=requested,
+            ) from exc
+
+        safety_margin = max(1_000, limit // 100)
+        new_output_limit = old_output_limit - overage - safety_margin
+        if new_output_limit <= 0:
+            raise
+
+        completion_args[token_key] = new_output_limit
+        logger.warning(
+            "LLM request exceeded the provider's per-request TPM allowance "
+            "(%s requested, %s allowed); reducing %s from %s to %s and "
+            "retrying once",
+            requested,
+            limit,
+            token_key,
+            old_output_limit,
+            new_output_limit,
+        )
+        try:
+            return completion(**completion_args)
+        except Exception as retry_exc:
+            retry_match = _TPM_REQUEST_LIMIT_RE.search(str(retry_exc))
+            if retry_match is None:
+                raise
+            raise LLMRequestTooLargeError(
+                limit=int(retry_match.group(1).replace(",", "")),
+                requested=int(retry_match.group(2).replace(",", "")),
+            ) from retry_exc
+
+
 def _mark_model_call_backoff(
     model_call_id: int | None,
     *,
@@ -238,7 +351,11 @@ def call_litellm_with_tier_retry(
 
     flex_active = completion_args.get("service_tier") == "flex"
     if not flex_active:
-        response = litellm.completion(**completion_args)
+        response = _call_with_tpm_adjustment(
+            litellm.completion,
+            completion_args,
+            logger=logger,
+        )
         return _record_effective_service_tier(
             response,
             completion_args,
@@ -260,7 +377,11 @@ def call_litellm_with_tier_retry(
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            response = litellm.completion(**completion_args)
+            response = _call_with_tpm_adjustment(
+                litellm.completion,
+                completion_args,
+                logger=logger,
+            )
             return _record_effective_service_tier(
                 response,
                 completion_args,
@@ -281,7 +402,11 @@ def call_litellm_with_tier_retry(
                 )
                 _mark_model_call_attempt_started(model_call_id, logger=logger)
                 completion_args.pop("service_tier", None)
-                response = litellm.completion(**completion_args)
+                response = _call_with_tpm_adjustment(
+                    litellm.completion,
+                    completion_args,
+                    logger=logger,
+                )
                 return _record_effective_service_tier(
                     response,
                     completion_args,

@@ -1,6 +1,6 @@
 from collections.abc import Generator
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,7 +12,8 @@ from litellm.types.utils import Choices
 from app.extensions import db
 from app.models import AudioSegment, Feed, ModelCall, Post, TranscriptSegment
 from app.writer.client import writer_client
-from podcast_processor.ad_classifier import AdClassifier
+from podcast_processor.ad_classifier import AdClassifier, ClassifyParams
+from podcast_processor.llm_model_call_utils import LLMRequestTooLargeError
 from podcast_processor.model_output import (
     AdSegmentPrediction,
     AdSegmentPredictionList,
@@ -805,3 +806,125 @@ def test_build_chunk_payload_trims_for_token_limit(
     assert len(chunk_segments) >= consumed
     assert mock_validator.call_count == 2
     assert user_prompt
+
+
+def test_step_splits_chunk_after_provider_reports_oversized_input(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    segments = [
+        TranscriptSegment(
+            id=i + 1,
+            post_id=1,
+            sequence_num=i,
+            start_time=float(i),
+            end_time=float(i + 1),
+            text=f"Segment {i}",
+        )
+        for i in range(10)
+    ]
+    params = ClassifyParams(
+        system_prompt="system",
+        user_prompt_template=Template("{{ transcript }}"),
+        post=Post(id=1, title="Test"),
+        num_segments_per_prompt=10,
+        max_overlap_segments=0,
+    )
+
+    with (
+        patch.object(
+            classifier,
+            "_process_chunk",
+            side_effect=[
+                LLMRequestTooLargeError(limit=200_000, requested=212_037),
+                [],
+            ],
+        ) as process_chunk,
+        patch.object(
+            classifier,
+            "_compute_next_overlap_segments",
+            return_value=[],
+        ),
+    ):
+        consumed, overlap = classifier._step(params, [], 0, segments)
+
+    assert consumed == 8
+    assert overlap == []
+    assert process_chunk.call_count == 2
+    assert classifier._adaptive_input_token_limit == 180_000
+
+
+def test_adaptive_chunk_splitting_covers_every_segment_with_overlap(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    segments = [
+        TranscriptSegment(
+            id=i + 1,
+            post_id=1,
+            sequence_num=i,
+            start_time=float(i),
+            end_time=float(i + 1),
+            text=f"Segment {i}",
+        )
+        for i in range(20)
+    ]
+    params = ClassifyParams(
+        system_prompt="",
+        user_prompt_template=Template("{{ transcript }}"),
+        post=Post(id=1, title="Test"),
+        num_segments_per_prompt=10,
+        max_overlap_segments=2,
+    )
+    accepted_chunks: list[list[int]] = []
+    call_count = 0
+
+    def process_chunk(**kwargs: Any) -> list[TranscriptSegment]:
+        nonlocal call_count
+        call_count += 1
+        chunk_segments = cast(list[TranscriptSegment], kwargs["chunk_segments"])
+        if call_count == 1:
+            raise LLMRequestTooLargeError(limit=100, requested=125)
+        accepted_chunks.append([segment.sequence_num for segment in chunk_segments])
+        return []
+
+    def prompt_for_chunk(**kwargs: Any) -> str:
+        chunk_segments = cast(
+            list[TranscriptSegment], kwargs["current_chunk_db_segments"]
+        )
+        # The classifier's fallback estimator treats four characters as one
+        # token, so each segment contributes exactly ten estimated tokens.
+        return "x" * (len(chunk_segments) * 40)
+
+    current_index = 0
+    overlap: list[TranscriptSegment] = []
+    consumed_ranges: list[int] = []
+    with (
+        patch.object(classifier, "_process_chunk", side_effect=process_chunk),
+        patch.object(
+            classifier,
+            "_generate_user_prompt",
+            side_effect=prompt_for_chunk,
+        ),
+    ):
+        while current_index < len(segments):
+            consumed, overlap = classifier._step(
+                params,
+                overlap,
+                current_index,
+                segments,
+            )
+            assert consumed > 0
+            consumed_ranges.extend(range(current_index, current_index + consumed))
+            current_index += consumed
+
+    assert current_index == len(segments)
+    assert consumed_ranges == list(range(len(segments)))
+    assert set().union(*(set(chunk) for chunk in accepted_chunks)) == set(
+        range(len(segments))
+    )
+    assert accepted_chunks == [
+        list(range(0, 7)),
+        list(range(5, 14)),
+        list(range(12, 20)),
+    ]

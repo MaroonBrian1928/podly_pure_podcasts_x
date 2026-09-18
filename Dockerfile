@@ -40,7 +40,9 @@ RUN apt-get update && \
     sqlite3 && \
     apt-get remove -y python3-blinker 2>/dev/null || true && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    ffmpeg -version >/dev/null && \
+    ffprobe -version >/dev/null
 
 # Preload jemalloc to replace glibc's ptmalloc allocator. jemalloc has
 # better fragmentation behavior for long-running multi-threaded Python
