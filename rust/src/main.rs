@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -2765,11 +2765,10 @@ fn topic_plan_coerce_count(value: &Value) -> Option<i64> {
         n
     } else if let Some(s) = value.as_str() {
         s.parse::<i64>().ok()?
-    } else if let Some(f) = value.as_f64() {
+    } else {
+        let f = value.as_f64()?;
         // Match Python's int(value) coercion for floats: truncate toward zero.
         f as i64
-    } else {
-        return None;
     };
     if parsed < 0 {
         None
@@ -5718,17 +5717,22 @@ fn render_feed_posts(args: PostsFeedListArgs) -> Result<Value> {
         "WHERE feed_id = ?1"
     };
 
-    let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM post {where_clause}"),
-        [args.feed_id],
-        |row| row.get(0),
-    )?;
-
     let whitelisted_total: i64 = conn.query_row(
         "SELECT COUNT(*) FROM post WHERE feed_id = ?1 AND whitelisted = 1",
         [args.feed_id],
         |row| row.get(0),
     )?;
+    // Reuse the filtered count rather than running the identical query twice.
+    // Keep separate indexed counts for the unfiltered case.
+    let total: i64 = if args.whitelisted_only {
+        whitelisted_total
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM post WHERE feed_id = ?1",
+            [args.feed_id],
+            |row| row.get(0),
+        )?
+    };
 
     // Explicit column list — never SELECT *. transcript_word_timestamps,
     // bleep_windows, and refined_ad_boundaries are NOT in this list, which
@@ -5762,16 +5766,16 @@ fn render_feed_posts(args: PostsFeedListArgs) -> Result<Value> {
             chapter_data: row.get(12)?,
         })
     })?;
-    let rows: Vec<PostListRow> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-
+    // Consume one row at a time instead of retaining the whole source page
+    // alongside the response, especially descriptions and chapter JSON.
     let items: Vec<Value> = rows
-        .into_iter()
         .map(|post| {
+            let post = post?;
             let podly_html = build_post_list_description_html(
                 post.description.as_deref(),
                 post.chapter_data.as_deref(),
             );
-            json!({
+            Ok(json!({
                 "id": post.id,
                 "guid": post.guid,
                 "title": post.title,
@@ -5785,9 +5789,9 @@ fn render_feed_posts(args: PostsFeedListArgs) -> Result<Value> {
                 "download_url": post.download_url,
                 "image_url": post.image_url,
                 "download_count": post.download_count,
-            })
+            }))
         })
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
 
     let total_pages = if total > 0 {
         (total + page_size - 1) / page_size
@@ -5795,14 +5799,17 @@ fn render_feed_posts(args: PostsFeedListArgs) -> Result<Value> {
         0
     };
 
-    Ok(json!({
-        "items": items,
+    let mut envelope = json!({
         "page": page,
         "page_size": page_size,
         "total": total,
         "total_pages": total_pages,
         "whitelisted_total": whitelisted_total,
-    }))
+    });
+    // json! borrows its expressions; insert the array by value to avoid
+    // cloning the entire page into the envelope.
+    envelope["items"] = Value::Array(items);
+    Ok(envelope)
 }
 
 // ===== Admin costs endpoints =====
@@ -6109,7 +6116,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
     let mut feed_episode_counts: HashMap<i64, i64> = feeds.iter().map(|f| (f.0, 0)).collect();
     let mut total_audio_hours: f64 = 0.0;
 
-    for (guid, _) in latest_completed.iter() {
+    for guid in latest_completed.keys() {
         let (post_id, feed_id, cut_duration) = match posts_by_guid.get(guid) {
             Some(v) => *v,
             None => continue,
@@ -6553,17 +6560,17 @@ fn render_aggregate_feed(args: FeedRenderAggregateArgs) -> Result<XmlResponse> {
     };
 
     let mut posts = Vec::new();
+    let mut post_stmt = conn.prepare(
+        "SELECT feed.title, post.title, post.guid, post.processed_audio_path, post.description, post.release_date, post.duration, post.image_url, post.chapter_data \
+         FROM post JOIN feed ON feed.id = post.feed_id \
+         WHERE post.feed_id = ?1 AND post.whitelisted = 1 AND post.processed_audio_path IS NOT NULL \
+         ORDER BY post.release_date DESC, post.id DESC LIMIT ?2",
+    )?;
     for feed_id in feed_ids {
-        let mut feed_posts = query_posts_with_limit(
-            &conn,
-            "SELECT feed.title, post.title, post.guid, post.processed_audio_path, post.description, post.release_date, post.duration, post.image_url, post.chapter_data \
-             FROM post JOIN feed ON feed.id = post.feed_id \
-             WHERE post.feed_id = ?1 AND post.whitelisted = 1 AND post.processed_audio_path IS NOT NULL \
-             ORDER BY post.release_date DESC, post.id DESC LIMIT ?2",
-            feed_id,
-            args.limit_per_feed as i64,
-        )?;
-        posts.append(&mut feed_posts);
+        let rows = post_stmt.query_map((feed_id, args.limit_per_feed as i64), post_from_row)?;
+        for row in rows {
+            posts.push(row?);
+        }
     }
     posts.sort_by(|a, b| b.release_date.cmp(&a.release_date));
 
@@ -7050,17 +7057,6 @@ fn query_posts(conn: &Connection, sql: &str, feed_id: [i64; 1]) -> Result<Vec<Po
     Ok(rows.collect::<std::result::Result<Vec<PostRow>, _>>()?)
 }
 
-fn query_posts_with_limit(
-    conn: &Connection,
-    sql: &str,
-    feed_id: i64,
-    limit: i64,
-) -> Result<Vec<PostRow>> {
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map((feed_id, limit), post_from_row)?;
-    Ok(rows.collect::<std::result::Result<Vec<PostRow>, _>>()?)
-}
-
 fn post_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PostRow> {
     Ok(PostRow {
         feed_title: row.get(0)?,
@@ -7353,7 +7349,16 @@ fn value_to_string(value: &Value) -> Option<String> {
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
-    println!("{}", serde_json::to_string(value)?);
+    // Stream through a bounded buffer instead of allocating another copy of
+    // the complete response. Lock stdout once and propagate write/flush errors.
+    let mut output = BufWriter::new(std::io::stdout().lock());
+    write_json(&mut output, value)
+}
+
+fn write_json<T: Serialize>(output: &mut impl Write, value: &T) -> Result<()> {
+    serde_json::to_writer(&mut *output, value)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
     Ok(())
 }
 
@@ -7361,6 +7366,47 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn streamed_json_preserves_wire_format() {
+        let payload = json!({
+            "items": [{"title": "Café \"quoted\"\n", "duration": 1800.5}],
+            "raw": serde_json::value::RawValue::from_string("{\"count\":1}".into()).unwrap(),
+        });
+        let mut output = Vec::new();
+        write_json(&mut output, &payload).unwrap();
+        let mut expected = serde_json::to_vec(&payload).unwrap();
+        expected.push(b'\n');
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn streamed_json_propagates_output_errors() {
+        struct FailingOutput {
+            fail_write: bool,
+        }
+        impl Write for FailingOutput {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.fail_write {
+                    Err(std::io::Error::other("write failed"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("flush failed"))
+            }
+        }
+        for fail_write in [true, false] {
+            let error =
+                write_json(&mut FailingOutput { fail_write }, &json!({"ok": true})).unwrap_err();
+            assert!(error.to_string().contains(if fail_write {
+                "write failed"
+            } else {
+                "flush failed"
+            }));
+        }
+    }
 
     #[test]
     fn merge_windows_sorts_and_coalesces_overlaps() {
@@ -7813,6 +7859,65 @@ mod tests {
     }
 
     #[test]
+    fn posts_feed_list_handles_empty_and_out_of_range_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_posts_listing_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute("INSERT INTO feed (id, title) VALUES (2, 'Empty')", [])
+            .unwrap();
+        for whitelisted_only in [false, true] {
+            for feed_id in [1, 2] {
+                let payload = render_feed_posts(PostsFeedListArgs {
+                    db: db_path.clone(),
+                    feed_id,
+                    page: 100,
+                    page_size: 2,
+                    whitelisted_only,
+                })
+                .unwrap();
+                let total = if feed_id == 2 {
+                    0
+                } else if whitelisted_only {
+                    2
+                } else {
+                    3
+                };
+                assert_eq!(payload["items"], json!([]));
+                assert_eq!(payload["total"], total);
+                assert_eq!(
+                    payload["whitelisted_total"],
+                    if feed_id == 2 { 0 } else { 2 }
+                );
+                assert_eq!(payload["total_pages"], (total + 1) / 2);
+            }
+        }
+    }
+
+    #[test]
+    fn posts_feed_list_propagates_row_decode_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_posts_listing_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        // SQLite permits text in INTEGER columns. Do not silently omit a bad
+        // row while consuming the cursor; the wrapper must get an error.
+        conn.execute(
+            "UPDATE post SET download_count = 'invalid' WHERE guid = 'g-2'",
+            [],
+        )
+        .unwrap();
+        assert!(render_feed_posts(PostsFeedListArgs {
+            db: db_path,
+            feed_id: 1,
+            page: 1,
+            page_size: 25,
+            whitelisted_only: false,
+        })
+        .is_err());
+    }
+
+    #[test]
     fn chapters_write_replaces_chap_and_ctoc_frames() {
         let dir = tempfile::tempdir().unwrap();
         let audio = dir.path().join("audio.mp3");
@@ -8187,14 +8292,28 @@ mod tests {
             );
             INSERT INTO feed VALUES
                 (1, 'Subscribed Feed', '2026-05-08 12:00:00'),
-                (2, 'Other Feed', '2026-05-09 12:00:00');
+                (2, 'Other Feed', '2026-05-09 12:00:00'),
+                (3, 'Second Subscribed Feed', '2026-05-10 12:00:00');
             INSERT INTO post VALUES
                 (1, 1, 'Subscribed Episode', 'sub-guid', '/tmp/sub.mp3', 'sub desc',
                     '2026-05-08 12:00:00', 60, NULL, NULL, 1),
                 (2, 2, 'Other Episode', 'other-guid', '/tmp/other.mp3', 'other desc',
-                    '2026-05-09 12:00:00', 60, NULL, NULL, 1);
+                    '2026-05-09 12:00:00', 60, NULL, NULL, 1),
+                (3, 1, 'Older Episode', 'older-guid', '/tmp/older.mp3', NULL,
+                    '2026-05-01 12:00:00', 60, NULL, NULL, 1),
+                (4, 1, 'Unlisted Episode', 'unlisted-guid', '/tmp/unlisted.mp3', NULL,
+                    '2026-05-12 12:00:00', 60, NULL, NULL, 0),
+                (5, 1, 'Unprocessed Episode', 'unprocessed-guid', NULL, NULL,
+                    '2026-05-12 12:00:00', 60, NULL, NULL, 1),
+                (6, 1, 'Same Date Episode', 'same-date-guid', '/tmp/tie.mp3', NULL,
+                    '2026-05-08 12:00:00', 60, NULL, NULL, 1),
+                (7, 3, 'Newest Episode', 'newest-guid', '/tmp/newest.mp3', NULL,
+                    '2026-05-10 12:00:00', 60.5, NULL, NULL, 1),
+                (8, 3, 'Undated Episode', 'undated-guid', '/tmp/undated.mp3', NULL,
+                    NULL, 60, NULL, NULL, 1);
             INSERT INTO feed_supporter VALUES
-                (1, 1, 42, '2026-05-08 12:00:00');
+                (1, 1, 42, '2026-05-08 12:00:00'),
+                (2, 3, 42, '2026-05-08 12:00:00');
             INSERT INTO users VALUES
                 (42, 'listener');",
         )
@@ -8202,11 +8321,11 @@ mod tests {
         drop(conn);
 
         let response = render_aggregate_feed(FeedRenderAggregateArgs {
-            db: db_path,
+            db: db_path.clone(),
             user_id: 42,
             base_url: "https://podly.test".to_string(),
             require_auth: true,
-            limit_per_feed: 3,
+            limit_per_feed: 2,
             feed_token: None,
             feed_secret: None,
         })
@@ -8224,6 +8343,38 @@ mod tests {
         assert!(response.xml.contains("sub-guid"));
         assert!(!response.xml.contains("Other Episode"));
         assert!(!response.xml.contains("other-guid"));
+        assert_eq!(response.xml.matches("<item>").count(), 4);
+        assert!(!response.xml.contains("older-guid"));
+        assert!(!response.xml.contains("unlisted-guid"));
+        assert!(!response.xml.contains("unprocessed-guid"));
+        let newest = response.xml.find("newest-guid").unwrap();
+        let same_date = response.xml.find("same-date-guid").unwrap();
+        let subscribed = response.xml.find("sub-guid").unwrap();
+        let undated = response.xml.find("undated-guid").unwrap();
+        assert!(newest < same_date && same_date < subscribed && subscribed < undated);
+
+        let public_response = render_aggregate_feed(FeedRenderAggregateArgs {
+            db: db_path,
+            user_id: 42,
+            base_url: "https://podly.test".to_string(),
+            require_auth: false,
+            limit_per_feed: 2,
+            feed_token: None,
+            feed_secret: None,
+        })
+        .unwrap();
+        assert_eq!(public_response.xml.matches("<item>").count(), 5);
+        assert!(!public_response.xml.contains("older-guid"));
+        assert!(!public_response.xml.contains("unlisted-guid"));
+        assert!(!public_response.xml.contains("unprocessed-guid"));
+        let newest = public_response.xml.find("newest-guid").unwrap();
+        let other = public_response.xml.find("other-guid").unwrap();
+        let same_date = public_response.xml.find("same-date-guid").unwrap();
+        let subscribed = public_response.xml.find("sub-guid").unwrap();
+        let undated = public_response.xml.find("undated-guid").unwrap();
+        assert!(
+            newest < other && other < same_date && same_date < subscribed && subscribed < undated
+        );
     }
 
     #[test]
