@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -59,6 +60,8 @@ def test_try_render_feed_posts_returns_not_found_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    notify = Mock()
+    monkeypatch.setattr(rust_sidecar, "_notify_rust_fallback", notify)
 
     def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(
@@ -75,6 +78,7 @@ def test_try_render_feed_posts_returns_not_found_sentinel(
         whitelisted_only=False,
     )
     assert result is rust_sidecar.FEED_POSTS_NOT_FOUND
+    notify.assert_not_called()
 
 
 def test_try_render_feed_posts_rejects_payload_without_items_prefix(
@@ -105,6 +109,8 @@ def test_try_render_feed_posts_returns_raw_bytes_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    notify = Mock()
+    monkeypatch.setattr(rust_sidecar, "_notify_rust_fallback", notify)
     seen: list[list[str]] = []
     raw = (
         b'{"items":[{"id":1,"guid":"g","title":"t"}],'
@@ -127,6 +133,7 @@ def test_try_render_feed_posts_returns_raw_bytes_unchanged(
     # The wrapper must hand back the raw bytes unchanged (modulo trailing
     # newline) so Flask streams them directly without re-serializing.
     assert payload == raw
+    notify.assert_not_called()
     cmd = seen[0]
     assert "posts" in cmd and "feed-list" in cmd
     assert "--feed-id" in cmd and "7" in cmd
@@ -155,6 +162,62 @@ def test_try_render_feed_posts_falls_back_on_nonzero_exit(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        (OSError("missing binary"), "failed to start podly_tools: missing binary"),
+        (
+            subprocess.TimeoutExpired("podly_tools", 300),
+            "podly_tools timed out after 300s",
+        ),
+        (
+            subprocess.CompletedProcess([], 2, stdout=b"", stderr=b"db locked\n"),
+            "podly_tools exited with 2: db locked",
+        ),
+        (
+            subprocess.CompletedProcess([], 1, stdout=b"", stderr=b""),
+            "podly_tools exited with 1: <no stderr>",
+        ),
+        (
+            subprocess.CompletedProcess([], 0, stdout=b"not JSON", stderr=b""),
+            "podly_tools returned an unexpected payload prefix",
+        ),
+        (
+            subprocess.CompletedProcess([], 0, stdout=b"{}", stderr=b""),
+            "podly_tools returned an unexpected payload prefix",
+        ),
+    ],
+)
+def test_try_render_feed_posts_notifies_and_logs_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: Exception | subprocess.CompletedProcess[bytes],
+    expected_error: str,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    notify = Mock()
+    monkeypatch.setattr(rust_sidecar, "_notify_rust_fallback", notify)
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert (
+        rust_sidecar.try_render_feed_posts(
+            db_path=Path("/tmp/x.sqlite"),
+            feed_id=1,
+            page=1,
+            page_size=25,
+            whitelisted_only=False,
+        )
+        is None
+    )
+    notify.assert_called_once_with("posts feed-list", expected_error)
+    assert "falling back to Python" in caplog.text
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])

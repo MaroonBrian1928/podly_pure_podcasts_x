@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import current_app
 from sqlalchemy import func
-from sqlalchemy.orm import Query
+from sqlalchemy.orm import Query, load_only
 
 from app.db_guard import db_guard, reset_session
 from app.extensions import db, scheduler
@@ -21,7 +21,9 @@ from shared import defaults as DEFAULTS
 logger = logging.getLogger("global_logger")
 
 
-def _get_most_recent_posts_per_feed(post_guids: Sequence[str]) -> set[str]:
+def _get_most_recent_posts_per_feed(
+    posts: Sequence[Post], latest_completed: dict[str, datetime | None]
+) -> set[str]:
     """Return GUIDs of the most recent post for each feed.
 
     For feeds with multiple posts in the candidate list, returns only the
@@ -29,14 +31,8 @@ def _get_most_recent_posts_per_feed(post_guids: Sequence[str]) -> set[str]:
     These posts should never be cleaned up to ensure each feed has at least
     one processed episode available.
     """
-    if not post_guids:
+    if not posts:
         return set()
-
-    # Get posts with their feed_id and processed timestamp info
-    posts = Post.query.filter(Post.guid.in_(post_guids)).all()
-
-    # Build map of completion timestamps
-    latest_completed = _load_latest_completed_map(post_guids)
 
     # Group by feed and find most recent per feed
     feed_posts: dict[int, tuple[str, datetime | None, int]] = {}
@@ -93,9 +89,18 @@ def _build_cleanup_query(
         .exists()
     )
 
-    posts_query = Post.query.filter(Post.processed_audio_path.isnot(None)).filter(
-        ~active_jobs_exists
-    )
+    # Retention scans only need artifact paths and identity metadata. In particular,
+    # never deserialize the potentially large word-timestamp JSON for every post.
+    posts_query = Post.query.options(
+        load_only(
+            Post.id,
+            Post.guid,
+            Post.feed_id,
+            Post.title,
+            Post.processed_audio_path,
+            Post.unprocessed_audio_path,
+        )
+    ).filter(Post.processed_audio_path.isnot(None), ~active_jobs_exists)
 
     return posts_query, cutoff
 
@@ -111,7 +116,7 @@ def count_cleanup_candidates(
     posts = posts_query.all()
     post_guids = [post.guid for post in posts]
     latest_completed = _load_latest_completed_map(post_guids)
-    most_recent_per_feed = _get_most_recent_posts_per_feed(post_guids)
+    most_recent_per_feed = _get_most_recent_posts_per_feed(posts, latest_completed)
 
     count = sum(
         1
@@ -142,7 +147,7 @@ def cleanup_processed_posts(retention_days: int | None) -> int:
         posts: Sequence[Post] = posts_query.all()
         post_guids = [post.guid for post in posts]
         latest_completed = _load_latest_completed_map(post_guids)
-        most_recent_per_feed = _get_most_recent_posts_per_feed(post_guids)
+        most_recent_per_feed = _get_most_recent_posts_per_feed(posts, latest_completed)
 
         if not posts:
             return 0
