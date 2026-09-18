@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from podcast_processor.llm_model_call_utils import (
+    LLMRequestTooLargeError,
     apply_service_tier,
     call_litellm_with_tier_retry,
     extract_litellm_finish_reason,
@@ -426,6 +427,81 @@ def test_tier_retry_passthrough_when_no_service_tier(
     assert result == "ok"
     assert len(fake.calls) == 1
     assert "service_tier" not in fake.calls[0]
+
+
+def test_tpm_input_too_large_requests_chunk_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(
+        [
+            RuntimeError(
+                "RateLimitError: Request too large for gpt-5.6-luna on tokens "
+                "per min (TPM): Limit 200000, Requested 212037."
+            ),
+        ]
+    )
+    _patch_litellm(monkeypatch, fake)
+    args = {
+        "model": "gpt-5.6-luna",
+        "max_completion_tokens": 128_000,
+    }
+
+    with pytest.raises(LLMRequestTooLargeError) as raised:
+        call_litellm_with_tier_retry(
+            args,
+            config=SimpleNamespace(llm_service_tier="default"),
+            logger=logging.getLogger("test"),
+        )
+
+    assert raised.value.limit == 200_000
+    assert raised.value.requested == 212_037
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["max_completion_tokens"] == 128_000
+    assert args["max_completion_tokens"] == 128_000
+
+
+def test_tpm_output_reservation_reduces_output_limit_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(
+        [
+            RuntimeError("tokens per min (TPM): Limit 200000, Requested 212037"),
+            "ok",
+        ]
+    )
+    _patch_litellm(monkeypatch, fake)
+    args = {"model": "gpt-5.6-luna", "max_completion_tokens": 250_000}
+
+    result = call_litellm_with_tier_retry(
+        args,
+        config=SimpleNamespace(llm_service_tier="default"),
+        logger=logging.getLogger("test"),
+    )
+
+    assert result == "ok"
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["max_completion_tokens"] == 235_963
+
+
+def test_tpm_request_too_large_without_output_limit_requests_chunk_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = RuntimeError(
+        "RateLimitError: tokens per minute: Limit: 200,000, Requested: 212,037"
+    )
+    fake = _FakeCompletion([error])
+    _patch_litellm(monkeypatch, fake)
+
+    with pytest.raises(LLMRequestTooLargeError) as raised:
+        call_litellm_with_tier_retry(
+            {"model": "gpt-5.6-luna"},
+            config=SimpleNamespace(llm_service_tier="default"),
+            logger=logging.getLogger("test"),
+        )
+
+    assert raised.value.limit == 200_000
+    assert raised.value.requested == 212_037
+    assert len(fake.calls) == 1
 
 
 def test_tier_retry_succeeds_on_first_attempt(
