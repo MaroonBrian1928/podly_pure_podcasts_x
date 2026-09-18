@@ -1438,17 +1438,28 @@ def try_render_feed_posts(
             check=False,
             timeout=300,
         )
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        error = (
+            "podly_tools timed out after 300s"
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else f"failed to start podly_tools: {exc}"
+        )
+        _notify_rust_fallback("posts feed-list", error)
         LOGGER.exception(
             "Rust feed-posts subprocess failed; falling back to Python implementation"
         )
         return None
 
     if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        error = (
+            f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
+        )
+        _notify_rust_fallback("posts feed-list", error)
         LOGGER.error(
-            "Rust feed-posts exited with %s: %s",
+            "Rust feed-posts exited with %s: %s; falling back to Python implementation",
             result.returncode,
-            result.stderr.decode("utf-8", errors="replace").strip() or "<no stderr>",
+            stderr or "<no stderr>",
         )
         return None
 
@@ -1465,8 +1476,12 @@ def try_render_feed_posts(
     # always starts with this prefix. If it doesn't, fall back rather than
     # forward garbage to the HTTP client.
     if not stripped.startswith(b'{"items":'):
+        _notify_rust_fallback(
+            "posts feed-list", "podly_tools returned an unexpected payload prefix"
+        )
         LOGGER.error(
-            "Rust feed-posts returned unexpected payload prefix: %r",
+            "Rust feed-posts returned unexpected payload prefix: %r; "
+            "falling back to Python implementation",
             stripped[:80],
         )
         return None

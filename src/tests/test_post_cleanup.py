@@ -4,6 +4,9 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+from sqlalchemy import event
+
 from app.extensions import db
 from app.models import (
     Feed,
@@ -14,6 +17,7 @@ from app.models import (
     TranscriptSegment,
 )
 from app.post_cleanup import cleanup_processed_posts, count_cleanup_candidates
+from app.writer.client import writer_client
 
 
 def _utc_now() -> datetime:
@@ -545,3 +549,56 @@ def test_cleanup_with_single_old_post_per_feed(app, tmp_path) -> None:
         post_after = Post.query.filter_by(guid="only-post").first()
         assert post_after is not None
         assert post_after.processed_audio_path is not None
+
+
+@pytest.mark.parametrize("execute_cleanup", [False, True])
+def test_cleanup_scan_avoids_transcripts_and_duplicate_queries(
+    app, tmp_path, monkeypatch, execute_cleanup
+) -> None:
+    """Both preview and scheduled cleanup scan metadata once, without large JSON."""
+    with app.app_context():
+        feed = _create_feed()
+        paths = []
+        for index, age in enumerate([20, 10]):
+            post = _create_post(
+                feed, f"scan-{index}", f"https://example.com/{index}.mp3"
+            )
+            path = tmp_path / f"scan-{index}.mp3"
+            path.write_text("audio")
+            _set_file_mtime(path, _utc_now() - timedelta(days=age))
+            post.processed_audio_path = str(path)
+            post.transcript_word_timestamps = [{"word": "unused", "start": 0.0}]
+            paths.append(path)
+        db.session.commit()
+        db.session.expunge_all()
+
+        writes = []
+        monkeypatch.setattr(
+            writer_client,
+            "action",
+            lambda action, params, wait: writes.append((action, params)),
+        )
+        statements = []
+
+        def record_sql(_conn, _cursor, statement, _params, _context, _many):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", record_sql)
+        try:
+            count = (
+                cleanup_processed_posts(5)
+                if execute_cleanup
+                else count_cleanup_candidates(5)[0]
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", record_sql)
+
+        assert count == 1
+        assert len(statements) == 2
+        assert all("transcript_word_timestamps" not in sql for sql in statements)
+        assert paths[1].exists()
+        assert paths[0].exists() is not execute_cleanup
+        assert len(writes) == int(execute_cleanup)
+        if execute_cleanup:
+            assert writes[0][0] == "cleanup_processed_post_files_only"

@@ -5,11 +5,15 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
+
+import pytest
+from sqlalchemy import event
 
 import app.jobs_manager as jobs_manager_module
 from app.extensions import db
 from app.jobs_manager import JobsManager
-from app.models import Feed, Post, ProcessingJob
+from app.models import Feed, JobsManagerRun, Post, ProcessingJob
 
 
 def _create_feed() -> Feed:
@@ -224,6 +228,71 @@ def _manager() -> tuple[JobsManager, FakeStatusManager]:
     manager = JobsManager.__new__(JobsManager)
     manager._status_manager = status_manager
     return manager, status_manager
+
+
+def test_ensure_jobs_reads_only_scheduling_fields(app, monkeypatch, tmp_path):
+    processed = tmp_path / "processed.mp3"
+    processed.write_bytes(b"audio")
+    feed = _create_feed()
+    _create_post(
+        feed_id=feed.id,
+        guid="lightweight-schedule",
+        download_url="https://example.com/audio.mp3",
+        whitelisted=True,
+        processed_audio_path=str(processed),
+    )
+    db.session.remove()
+    statements = []
+
+    def capture_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+
+    engine = db.engine
+    event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        manager, _ = _manager()
+        assert manager._ensure_jobs_for_all_posts(None) == 0
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert len(statements) == 1  # Includes the feed title; no lazy Feed query.
+    assert "transcript_word_timestamps" not in statements[0]
+    assert "description" not in statements[0]
+
+
+@pytest.mark.parametrize("pending_count", [0, 3])
+def test_cleanup_counts_pending_jobs_without_loading_entities(
+    app, monkeypatch, pending_count
+):
+    for index in range(pending_count):
+        _create_job(f"pending-{index}", status="pending")
+    _create_job("completed", status="completed")
+    db.session.remove()
+    manager, _ = _manager()
+    monkeypatch.setattr(manager, "_ensure_jobs_for_all_posts", lambda run_id: 2)
+    action = Mock()
+    monkeypatch.setattr(jobs_manager_module.writer_client, "action", action)
+    loaded = []
+
+    def on_load(job, context):
+        loaded.append(job.id)
+
+    event.listen(ProcessingJob, "load", on_load)
+    try:
+        assert manager._cleanup_and_process_new_posts(JobsManagerRun(id="run-id")) == (
+            2,
+            pending_count,
+        )
+    finally:
+        event.remove(ProcessingJob, "load", on_load)
+
+    assert loaded == []
+    if pending_count:
+        action.assert_called_once_with(
+            "reassign_pending_jobs", {"run_id": "run-id"}, wait=True
+        )
+    else:
+        action.assert_not_called()
 
 
 def test_dequeue_next_job_enters_app_context_for_writer_call(app, monkeypatch) -> None:
