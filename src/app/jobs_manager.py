@@ -16,7 +16,7 @@ from app.extensions import db as _db
 from app.extensions import scheduler
 from app.feeds import refresh_feed
 from app.job_manager import JobManager as SingleJobManager
-from app.memory_pressure import collect_incremental, release_memory_to_os
+from app.memory_pressure import release_memory_to_os
 from app.models import Feed, JobsManagerRun, ModelCall, Post, ProcessingJob
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
@@ -783,10 +783,8 @@ class JobsManager:
                         exc,
                         exc_info=True,
                     )
-                collect_incremental(f"scheduled feed refresh feed_id={feed_id}", logger)
-                release_memory_to_os(
-                    f"scheduled feed refresh context feed_id={feed_id}", logger
-                )
+                # refresh_feed requests one trim at app-context teardown, once
+                # both its payloads and this session have been released.
 
     def _cleanup_inconsistent_posts(self) -> None:
         """Clean up posts with missing audio files."""
