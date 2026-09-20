@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from app.writer import executor, service
 from app.writer.protocol import WriteCommand, WriteCommandType
 
@@ -28,6 +30,33 @@ def test_memory_trim_context_ignores_polling_actions() -> None:
     )
 
     assert service._memory_trim_context_for_command(cmd) is None
+
+
+@pytest.mark.parametrize(
+    "action", ["touch_feed_access_token", "update_user_last_active"]
+)
+def test_memory_trim_context_defers_timestamp_actions(action: str) -> None:
+    cmd = WriteCommand(
+        id="cmd-1",
+        type=WriteCommandType.ACTION,
+        model=None,
+        data={"action": action, "params": {}},
+    )
+
+    assert service._memory_trim_context_for_command(cmd) is None
+
+
+def test_memory_trim_context_preserves_cleanup_for_unknown_actions() -> None:
+    cmd = WriteCommand(
+        id="cmd-1",
+        type=WriteCommandType.ACTION,
+        model=None,
+        data={"action": "future_action", "params": {}},
+    )
+
+    assert (
+        service._memory_trim_context_for_command(cmd) == "writer action future_action"
+    )
 
 
 def test_memory_trim_context_detects_other_writer_actions() -> None:

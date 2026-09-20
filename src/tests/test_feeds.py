@@ -1852,3 +1852,41 @@ def test_python_refresh_does_not_load_archive_processing_documents(app):
             "refined_ad_boundaries",
         ):
             assert column not in statements[0]
+
+
+@pytest.mark.parametrize("planner_fails", [False, True])
+def test_refresh_trims_once_after_context_session_cleanup(monkeypatch, planner_fails):
+    from flask import Flask
+
+    import app as app_module
+    from app import _register_memory_cleanup, memory_pressure
+
+    events = []
+    test_app = Flask(__name__)
+    monkeypatch.setattr("shared.rust_sidecar.rust_feed_refresh_enabled", lambda: True)
+    monkeypatch.setattr("app.feeds._fetch_raw_feed_bytes", lambda url: (b"<rss/>", url))
+
+    def plan(feed, xml):
+        if planner_fails:
+            raise ValueError("planner failed")
+        return {"updates": {}, "new_posts": [], "existing_post_updates": []}
+
+    monkeypatch.setattr("app.feeds._try_build_rust_refresh_feed_payload_from_xml", plan)
+    monkeypatch.setattr(
+        app_module.db.session, "remove", lambda: events.append("session removed")
+    )
+    monkeypatch.setattr(
+        memory_pressure, "release_memory_to_os", lambda *args: events.append("trim")
+    )
+    monkeypatch.setattr(
+        "app.feeds.release_memory_to_os", lambda *args: events.append("early trim")
+    )
+    _register_memory_cleanup(test_app)
+    with test_app.app_context():
+        if planner_fails:
+            with pytest.raises(ValueError, match="planner failed"):
+                refresh_feed(Feed(id=7, rss_url="https://example.com/rss"))
+        else:
+            refresh_feed(Feed(id=7, rss_url="https://example.com/rss"))
+        assert events == []
+    assert events == ["session removed", "trim"]

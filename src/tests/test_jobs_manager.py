@@ -152,7 +152,6 @@ def test_start_refresh_all_feeds_refreshes_each_feed_in_short_session(
 
     monkeypatch.setattr(jobs_manager_module, "_scheduler_app_context", app.app_context)
     monkeypatch.setattr(jobs_manager_module, "refresh_feed", fake_refresh_feed)
-    monkeypatch.setattr(jobs_manager_module, "collect_incremental", lambda *_args: None)
     monkeypatch.setattr(
         jobs_manager_module, "release_memory_to_os", lambda *_args: None
     )
