@@ -149,7 +149,7 @@ impl ActionRegistry {
                 .iter()
                 .map(|command| self.execute_transaction_command(transaction, command))
                 .collect::<Result<Vec<_>, _>>()
-                .map(Value::Array),
+                .map(|results| json!({ "results": results })),
             Operation::Update { model, id, data } => {
                 execute_model_update(transaction, model, id, data)
             }
@@ -223,12 +223,70 @@ impl ActionRegistry {
         transaction: &Transaction<'_>,
         command: &TransactionCommand,
     ) -> Result<Value, RpcError> {
-        self.execute(transaction, &command.operation).map(
-            |result| json!({ "command_id": command.command_id, "success": true, "result": result }),
-        ).map_err(|failure| error(
-            "transaction_failed",
-            &format!("transaction failed at {}: {}", command.command_id, failure.message),
-        ))
+        self.execute(transaction, &command.operation)
+            .map(|data| {
+                json!({
+                    "command_id": command.command_id,
+                    "success": true,
+                    "data": data,
+                    "error": Value::Null,
+                })
+            })
+            .map_err(|failure| {
+                error(
+                    "transaction_failed",
+                    &format!(
+                        "transaction failed at {}: {}",
+                        command.command_id, failure.message
+                    ),
+                )
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_update_result_matches_python_write_result_shape() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE post(id INTEGER PRIMARY KEY, duration REAL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO post(id, duration) VALUES (1, 10)", [])
+            .unwrap();
+
+        let transaction = connection.unchecked_transaction().unwrap();
+        let registry = ActionRegistry::default();
+        let operation = Operation::Transaction {
+            commands: vec![TransactionCommand {
+                command_id: "update-post".to_owned(),
+                operation: Operation::Update {
+                    model: "Post".to_owned(),
+                    id: json!(1),
+                    data: serde_json::Map::from_iter([("duration".to_owned(), json!(12.5))]),
+                },
+            }],
+        };
+
+        let result = registry.execute(&transaction, &operation).unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "results": [{
+                    "command_id": "update-post",
+                    "success": true,
+                    "data": null,
+                    "error": null
+                }]
+            })
+        );
+        transaction.rollback().unwrap();
     }
 }
 

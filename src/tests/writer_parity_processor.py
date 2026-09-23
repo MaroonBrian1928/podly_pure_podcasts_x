@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 from collections.abc import Callable
@@ -427,23 +428,18 @@ def writer_processor_environment(
 ) -> dict[str, dict[str, str]]:
     if case_id != "processor_finish_transcription_replace_from_large_artifact":
         return {"python": {}, "rust": {}}
+    rust_tools_bin = os.environ.get("PODLY_RUST_TOOLS_BIN")
+    python_environment = {
+        "PODLY_INSTANCE_DIR": str(pair.python.instance_dir),
+        "PODLY_PODCAST_DATA_DIR": str(pair.python.instance_dir / "data"),
+    }
+    if rust_tools_bin:
+        python_environment["PODLY_RUST_TOOLS_BIN"] = rust_tools_bin
     return {
         backend.name: {
             "PODLY_INSTANCE_DIR": str(backend.instance_dir),
             "PODLY_PODCAST_DATA_DIR": str(backend.instance_dir / "data"),
-            **(
-                {
-                    "PODLY_RUST_TOOLS_BIN": str(
-                        Path(__file__).resolve().parents[2]
-                        / "rust"
-                        / "target"
-                        / "debug"
-                        / "podly_tools"
-                    )
-                }
-                if backend.name == "python"
-                else {}
-            ),
+            **(python_environment if backend.name == "python" else {}),
         }
         for backend in (pair.python, pair.rust)
     }
@@ -553,7 +549,7 @@ def _assert_transcript_segment_order(
             (post_id,),
         ).fetchall()
     assert len(actual) >= len(expected)
-    assert actual[-len(expected) :] == [
+    expected_rows = [
         (
             item["sequence_num"],
             float(item["start_time"]),
@@ -563,6 +559,43 @@ def _assert_transcript_segment_order(
         )
         for item in expected
     ]
+    actual_rows = actual[-len(expected) :]
+    assert actual_rows == expected_rows, (
+        "transcript segment rows differ; numeric (sequence,start,end) samples: "
+        f"actual first={[row[:3] for row in actual_rows[:2]]!r}, "
+        f"expected first={[row[:3] for row in expected_rows[:2]]!r}; "
+        f"actual last={[row[:3] for row in actual_rows[-2:]]!r}, "
+        f"expected last={[row[:3] for row in expected_rows[-2:]]!r}"
+    )
+
+
+def _processor_projection_differences(
+    left: dict[str, list[tuple[Any, ...]]],
+    right: dict[str, list[tuple[Any, ...]]],
+    columns: dict[str, list[str]],
+) -> str:
+    """Describe exact table/column deltas without normalizing their values."""
+    differences = []
+    for table in sorted(left.keys() | right.keys()):
+        left_rows = left.get(table, [])
+        right_rows = right.get(table, [])
+        if left_rows == right_rows:
+            continue
+        names = columns.get(table, [])
+        differing_columns = set()
+        for left_row, right_row in zip(left_rows, right_rows, strict=False):
+            differing_columns.update(
+                name
+                for name, left_value, right_value in zip(
+                    names, left_row, right_row, strict=False
+                )
+                if left_value != right_value
+            )
+        differences.append(
+            f"{table}: rows python={len(left_rows)} rust={len(right_rows)}, "
+            f"columns={sorted(differing_columns)!r}"
+        )
+    return "; ".join(differences) or "no table-level delta found"
 
 
 def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
@@ -651,5 +684,6 @@ def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
         observation["rust_rows"], columns, created_model_call_id=created_model_call_id
     )
     assert python_normalized == rust_normalized, (
-        f"processor DB state differs for {case_id}"
+        f"processor DB state differs for {case_id}: "
+        + _processor_projection_differences(python_normalized, rust_normalized, columns)
     )

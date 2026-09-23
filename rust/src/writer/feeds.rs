@@ -951,14 +951,15 @@ fn datetime_scalar(value: &Value) -> Result<SqlValue, RpcError> {
     let Value::String(value) = value else {
         return sql_scalar(value);
     };
-    let valid = DateTime::parse_from_rfc3339(value).is_ok()
-        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
-        || NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").is_ok()
-        || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok();
-    if !valid {
-        return Err(error("invalid_params", "Invalid isoformat string"));
-    }
-    Ok(SqlValue::Text(value.replace('T', " ")))
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f"))
+        .or_else(|_| DateTime::parse_from_rfc3339(value).map(|date| date.naive_local()))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map(|date| date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+        })
+        .map_err(|_| error("invalid_params", "Invalid isoformat string"))?;
+    Ok(SqlValue::Text(format_database_time(parsed)))
 }
 
 fn json_scalar(value: &Value) -> Result<SqlValue, RpcError> {
@@ -1045,7 +1046,11 @@ fn database_now() -> String {
 }
 
 fn format_database_time(timestamp: NaiveDateTime) -> String {
-    timestamp.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+    format!(
+        "{}.{:06}",
+        timestamp.format("%Y-%m-%d %H:%M:%S"),
+        timestamp.and_utc().timestamp_subsec_micros()
+    )
 }
 
 fn format_iso_time(timestamp: NaiveDateTime) -> String {
@@ -1061,6 +1066,20 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+
+    #[test]
+    fn datetime_scalar_matches_sqlalchemy_datetime_storage() {
+        for (input, expected) in [
+            ("2026-01-03T04:05:06", "2026-01-03 04:05:06.000000"),
+            ("2026-01-03T04:05:06.123456", "2026-01-03 04:05:06.123456"),
+            ("2026-01-03", "2026-01-03 00:00:00.000000"),
+        ] {
+            assert_eq!(
+                datetime_scalar(&json!(input)).unwrap(),
+                SqlValue::Text(expected.to_owned())
+            );
+        }
+    }
 
     fn schema(connection: &Connection) {
         connection

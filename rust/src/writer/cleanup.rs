@@ -20,6 +20,9 @@ const CLEANUP_ACTIONS: &[&str] = &[
     "cleanup_processed_post_files_only",
 ];
 
+// SQLAlchemy JSON defaults to none_as_null=False, so assigning Python None stores JSON text `null`.
+const SQLALCHEMY_JSON_NULL: &str = "null";
+
 pub fn is_cleanup_action(action: &str) -> bool {
     CLEANUP_ACTIONS.contains(&action)
 }
@@ -193,10 +196,10 @@ fn clear_post_processing_data_inner(
     transaction
         .execute(
             "UPDATE post SET unprocessed_audio_path=NULL,processed_audio_path=NULL,
-                duration=NULL,chapter_data=NULL,bleep_windows=NULL,
-                transcript_word_timestamps=NULL,refined_ad_boundaries=NULL,
-                refined_ad_boundaries_updated_at=NULL WHERE id=?1",
-            [post_id],
+                duration=NULL,chapter_data=NULL,bleep_windows=?1,
+                transcript_word_timestamps=?1,refined_ad_boundaries=?1,
+                refined_ad_boundaries_updated_at=NULL WHERE id=?2",
+            rusqlite::params![SQLALCHEMY_JSON_NULL, post_id],
         )
         .map_err(database_error)?;
     Ok(())
@@ -219,9 +222,9 @@ fn clear_post_processing_data_keep_transcript(
     transaction
         .execute(
             "UPDATE post SET unprocessed_audio_path=NULL,processed_audio_path=NULL,
-                duration=NULL,chapter_data=NULL,bleep_windows=NULL,
-                refined_ad_boundaries=NULL,refined_ad_boundaries_updated_at=NULL WHERE id=?1",
-            [post_id],
+                duration=NULL,chapter_data=NULL,bleep_windows=?1,
+                refined_ad_boundaries=?1,refined_ad_boundaries_updated_at=NULL WHERE id=?2",
+            rusqlite::params![SQLALCHEMY_JSON_NULL, post_id],
         )
         .map_err(database_error)?;
     Ok(json!({"post_id": post_id}))
@@ -244,9 +247,9 @@ fn prepare_post_for_auto_retry(
     transaction
         .execute(
             "UPDATE post SET processed_audio_path=NULL,duration=NULL,chapter_data=NULL,
-                bleep_windows=NULL,refined_ad_boundaries=NULL,
-                refined_ad_boundaries_updated_at=NULL WHERE id=?1",
-            [post_id],
+                bleep_windows=?1,refined_ad_boundaries=?1,
+                refined_ad_boundaries_updated_at=NULL WHERE id=?2",
+            rusqlite::params![SQLALCHEMY_JSON_NULL, post_id],
         )
         .map_err(database_error)?;
     Ok(json!({"post_id": post_id}))
@@ -597,6 +600,23 @@ mod tests {
             .unwrap();
     }
 
+    fn assert_json_null_columns(connection: &Connection, columns: &[&str]) {
+        for column in columns {
+            let (storage_type, value): (String, String) = connection
+                .query_row(
+                    &format!("SELECT typeof(\"{column}\"),\"{column}\" FROM post WHERE id=1"),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (storage_type.as_str(), value.as_str()),
+                ("text", "null"),
+                "{column}"
+            );
+        }
+    }
+
     #[test]
     fn missing_path_scan_clears_paths_and_requeues_latest_terminal_job() {
         let temp = TempDir::new().unwrap();
@@ -695,7 +715,21 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(row, (None, None, None));
+        assert_eq!(row, (None, None, Some("null".to_owned())));
+        assert_json_null_columns(
+            &connection,
+            &[
+                "bleep_windows",
+                "transcript_word_timestamps",
+                "refined_ad_boundaries",
+            ],
+        );
+        let chapter_data_is_sql_null: bool = connection
+            .query_row("SELECT chapter_data IS NULL FROM post", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(chapter_data_is_sql_null);
     }
 
     #[test]
@@ -738,6 +772,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(words, "[]");
+        assert_json_null_columns(&connection, &["bleep_windows", "refined_ad_boundaries"]);
     }
 
     #[test]
@@ -781,6 +816,29 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn auto_retry_clears_json_columns_to_json_null() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        schema(&connection);
+        seed_graph(&connection, 1);
+        let transaction = connection.transaction().unwrap();
+        prepare_post_for_auto_retry(
+            &transaction,
+            &Map::from_iter([("post_id".to_owned(), json!(1))]),
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        assert_json_null_columns(&connection, &["bleep_windows", "refined_ad_boundaries"]);
+        let words_are_preserved: bool = connection
+            .query_row(
+                "SELECT transcript_word_timestamps='[]' FROM post",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(words_are_preserved);
     }
 
     #[test]
@@ -857,6 +915,14 @@ mod tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+        assert_json_null_columns(
+            &connection,
+            &[
+                "bleep_windows",
+                "transcript_word_timestamps",
+                "refined_ad_boundaries",
+            ],
         );
         let run: (String, i64) = connection
             .query_row(

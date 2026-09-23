@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +204,67 @@ def _projection_records(
     ]
 
 
+def _database_row_diff_summary(
+    python_rows: dict[str, list[tuple[Any, ...]]],
+    rust_rows: dict[str, list[tuple[Any, ...]]],
+    db_path: Path,
+) -> str:
+    """Describe differing table/column names without logging database values."""
+    summaries = []
+    for table in sorted(python_rows.keys() | rust_rows.keys()):
+        python_table = python_rows.get(table, [])
+        rust_table = rust_rows.get(table, [])
+        if python_table == rust_table:
+            continue
+
+        with sqlite3.connect(db_path) as connection:
+            info = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+        columns = [row[1] for row in info]
+        primary_key = [
+            index
+            for _, index in sorted(
+                (row[5], index) for index, row in enumerate(info) if row[5]
+            )
+        ]
+        if primary_key:
+            python_by_key = {
+                tuple(row[index] for index in primary_key): row for row in python_table
+            }
+            rust_by_key = {
+                tuple(row[index] for index in primary_key): row for row in rust_table
+            }
+            common_keys = python_by_key.keys() & rust_by_key.keys()
+            differing_columns = Counter(
+                columns[index]
+                for key in common_keys
+                for index, (python_value, rust_value) in enumerate(
+                    zip(python_by_key[key], rust_by_key[key], strict=True)
+                )
+                if python_value != rust_value
+            )
+            python_only = len(python_by_key.keys() - rust_by_key.keys())
+            rust_only = len(rust_by_key.keys() - python_by_key.keys())
+        else:
+            differing_columns = Counter()
+            python_only = len(python_table)
+            rust_only = len(rust_table)
+
+        names = sorted(
+            differing_columns, key=lambda name: (-differing_columns[name], name)
+        )
+        shown_columns = names[:12]
+        if len(names) > len(shown_columns):
+            shown_columns.append(f"...+{len(names) - len(shown_columns)}")
+        summaries.append(
+            f"{table}(python_only_rows={python_only},rust_only_rows={rust_only},"
+            f"differing_columns={shown_columns})"
+        )
+        if len(summaries) == 6:
+            summaries.append("...")
+            break
+    return "; ".join(summaries)
+
+
 def _normalize_times(
     projection: dict[str, list[tuple[Any, ...]]],
     before: dict[str, list[tuple[Any, ...]]],
@@ -313,7 +375,12 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
     rust_rows = _normalize_times(
         observation["rust_rows"], observation["rust_before"], pair.rust.db_path
     )
-    assert python_rows == rust_rows, f"database effects differ for {case_id}"
+    if python_rows != rust_rows:
+        raise AssertionError(
+            f"database effects differ for {case_id}; "
+            "value-free table/column summary: "
+            f"{_database_row_diff_summary(python_rows, rust_rows, pair.python.db_path)}"
+        )
     assert _files(pair.python) == _files(pair.rust), f"filesystem differs for {case_id}"
 
     python_post = next(
@@ -351,7 +418,7 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
         assert not python_model_calls
         assert not python_jobs
         assert python_post["duration"] is None
-        assert python_post["transcript_word_timestamps"] is None
+        assert python_post["transcript_word_timestamps"] == "null"
     elif case_id == "cleanup_clear_outputs_keep_transcript":
         assert observation["python_data"] == {"post_id": _POST_ID}
         assert [row for row in python_transcripts if row["post_id"] == _POST_ID]

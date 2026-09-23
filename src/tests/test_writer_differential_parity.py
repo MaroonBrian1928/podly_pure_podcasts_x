@@ -62,6 +62,20 @@ from tests.writer_parity_processor import (
     assert_writer_processor_parity,
     build_writer_processor_case,
 )
+from tests.writer_parity_system import (
+    WRITER_DIFFERENTIAL_CASES as SYSTEM_WRITER_DIFFERENTIAL_CASES,
+)
+from tests.writer_parity_system import (
+    assert_writer_system_parity,
+    build_writer_system_case,
+)
+from tests.writer_parity_transactions import (
+    WRITER_DIFFERENTIAL_CASES as TRANSACTION_WRITER_DIFFERENTIAL_CASES,
+)
+from tests.writer_parity_transactions import (
+    assert_writer_transaction_parity,
+    build_writer_transaction_case,
+)
 from tests.writer_parity_users import (
     WRITER_DIFFERENTIAL_CASES as USER_WRITER_DIFFERENTIAL_CASES,
 )
@@ -78,7 +92,9 @@ WRITER_DIFFERENTIAL_CASES = (
     *FEED_WRITER_DIFFERENTIAL_CASES,
     *JOB_WRITER_DIFFERENTIAL_CASES,
     *PROCESSOR_WRITER_DIFFERENTIAL_CASES,
+    *SYSTEM_WRITER_DIFFERENTIAL_CASES,
     *CLEANUP_WRITER_DIFFERENTIAL_CASES,
+    *TRANSACTION_WRITER_DIFFERENTIAL_CASES,
 )
 
 
@@ -98,9 +114,6 @@ def _rust_writer_command() -> list[str]:
     configured = os.environ.get("PODLY_RUST_WRITER_BIN")
     if configured:
         return [configured]
-    executable = REPO_ROOT / "rust" / "target" / "debug" / "podly_writer"
-    if executable.is_file():
-        return [str(executable)]
     mise = shutil.which("mise")
     if mise is None:
         pytest.fail(
@@ -376,16 +389,17 @@ def test_writer_differential_parity(
 ) -> None:
     pair = writer_parity_pair
     owner_group = case.get("owner_group")
-    if owner_group == "user":
-        built = build_writer_user_case(case["case_id"], pair)
-    elif owner_group == "feed":
-        built = build_writer_feed_case(case["case_id"], pair)
-    elif owner_group == "job":
-        built = build_writer_job_case(case["case_id"], pair)
-    elif owner_group == "processor":
-        built = build_writer_processor_case(case["case_id"], pair)
-    elif owner_group == "cleanup":
-        built = build_writer_cleanup_case(case["case_id"], pair)
+    builders = {
+        "user": build_writer_user_case,
+        "feed": build_writer_feed_case,
+        "job": build_writer_job_case,
+        "processor": build_writer_processor_case,
+        "system": build_writer_system_case,
+        "cleanup": build_writer_cleanup_case,
+        "transaction": build_writer_transaction_case,
+    }
+    if isinstance(owner_group, str) and owner_group in builders:
+        built = builders[owner_group](case["case_id"], pair)
     else:
         built = _make_operation(case["case_id"], pair)
     if len(built) == 3:
@@ -445,7 +459,9 @@ def test_writer_differential_parity(
         "feed": assert_writer_feed_parity,
         "job": assert_writer_job_parity,
         "processor": assert_writer_processor_parity,
+        "system": assert_writer_system_parity,
         "cleanup": assert_writer_cleanup_parity,
+        "transaction": assert_writer_transaction_parity,
     }
     comparator = comparators.get(owner_group) if isinstance(owner_group, str) else None
     if comparator is not None:

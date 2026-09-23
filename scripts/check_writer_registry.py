@@ -39,6 +39,31 @@ def _literal_string(node: ast.expr | None) -> str | None:
     )
 
 
+def local_literal_action_targets(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, variable: str, call_line: int
+) -> set[str] | None:
+    """Resolve a local action selector only when every preceding write is literal."""
+    targets: set[str] = set()
+    for node in ast.walk(function):
+        if node is function or getattr(node, "lineno", call_line) >= call_line:
+            continue
+        if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            continue
+        assigned = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(
+            isinstance(target, ast.Name) and target.id == variable
+            for target in assigned
+        ):
+            continue
+        value = (
+            _literal_string(node.value) if not isinstance(node, ast.AugAssign) else None
+        )
+        if value is None:
+            return None
+        targets.add(value)
+    return targets or None
+
+
 def discover_python_surface() -> tuple[
     set[str], set[str], set[str], dict[str, set[str]]
 ]:
@@ -71,16 +96,21 @@ def discover_python_surface() -> tuple[
             def __init__(self, relative_path: str) -> None:
                 self.relative_path = relative_path
                 self.functions: list[str] = []
+                self.function_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
                 self.ordinal: dict[tuple[str, str, str], int] = {}
 
             def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
                 self.functions.append(node.name)
+                self.function_nodes.append(node)
                 self.generic_visit(node)
+                self.function_nodes.pop()
                 self.functions.pop()
 
             def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
                 self.functions.append(node.name)
+                self.function_nodes.append(node)
                 self.generic_visit(node)
+                self.function_nodes.pop()
                 self.functions.pop()
 
             def visit_Call(self, node: ast.Call) -> None:
@@ -91,7 +121,20 @@ def discover_python_surface() -> tuple[
                 if method == "action":
                     name = _literal_string(node.args[0]) if node.args else None
                     if name is None:
-                        dynamic_action_calls.add(f"{self.relative_path}:{node.lineno}")
+                        argument = node.args[0] if node.args else None
+                        resolved = (
+                            local_literal_action_targets(
+                                self.function_nodes[-1], argument.id, node.lineno
+                            )
+                            if isinstance(argument, ast.Name) and self.function_nodes
+                            else None
+                        )
+                        if resolved is None:
+                            dynamic_action_calls.add(
+                                f"{self.relative_path}:{node.lineno}"
+                            )
+                        else:
+                            called_actions.update(resolved)
                     else:
                         called_actions.add(name)
                 elif method in {"create", "update", "delete", "transaction"}:

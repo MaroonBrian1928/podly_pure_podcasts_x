@@ -377,9 +377,7 @@ mod tests {
             panic!("expected action operation");
         };
         let expected = "0.00020299939100182698".parse::<f64>().unwrap();
-        let actual = params["identifications"][0]["confidence"]
-            .as_f64()
-            .unwrap();
+        let actual = params["identifications"][0]["confidence"].as_f64().unwrap();
         assert_eq!(actual.to_bits(), expected.to_bits());
     }
 }
