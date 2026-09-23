@@ -408,7 +408,7 @@ export default function JobsPage() {
           <div>
             <div className="text-xs uppercase tracking-wide text-gray-500">Cutoff date</div>
             <div className="text-sm font-medium text-gray-900">
-              {cleanupPreview?.cutoff_utc ? formatDateTime(cleanupPreview.cutoff_utc) : '—'}
+              {cleanupPreview?.cutoff_utc ? formatDateTime(cleanupPreview.cutoff_utc) : '–'}
             </div>
           </div>
         </div>
@@ -514,7 +514,7 @@ export default function JobsPage() {
                     <span
                       title={
                         job.had_classification_parse_error
-                          ? 'No ads removed and at least one LLM batch failed to parse — likely classifier miss.'
+                          ? 'No ads removed and at least one LLM batch failed to parse. Likely a classifier miss.'
                           : 'No ads removed for this episode.'
                       }
                       className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
@@ -567,11 +567,11 @@ export default function JobsPage() {
                 </div>
                 <div>
                   <div className="text-gray-500">Created</div>
-                  <div>{job.created_at ? formatDateTime(job.created_at) : '—'}</div>
+                  <div>{job.created_at ? formatDateTime(job.created_at) : '–'}</div>
                 </div>
                 <div>
                   <div className="text-gray-500">Started</div>
-                  <div>{job.started_at ? formatDateTime(job.started_at) : '—'}</div>
+                  <div>{job.started_at ? formatDateTime(job.started_at) : '–'}</div>
                 </div>
                 {(() => {
                   const isTerminal =

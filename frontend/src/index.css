@@ -505,6 +505,30 @@
     color: var(--podly-purple-text) !important;
   }
 
+  html.dark [class~="bg-yellow-50"] {
+    background-color: rgb(133 77 14 / 0.28) !important;
+  }
+
+  html.dark [class~="hover:bg-yellow-100"]:hover {
+    background-color: var(--podly-yellow-surface-strong) !important;
+  }
+
+  html.dark [class~="border-yellow-300"] {
+    border-color: var(--podly-yellow-border) !important;
+  }
+
+  html.dark [class~="hover:bg-blue-100"]:hover {
+    background-color: rgb(30 64 175 / 0.56) !important;
+  }
+
+  html.dark [class~="hover:bg-indigo-100"]:hover {
+    background-color: rgb(67 56 202 / 0.42) !important;
+  }
+
+  html.dark [class~="hover:bg-green-200"]:hover {
+    background-color: rgb(20 83 45 / 0.56) !important;
+  }
+
   input.input,
   select.input,
   textarea.input {

@@ -377,7 +377,7 @@ export default function CostsTab() {
                         <td className="py-2 pr-4 text-right font-mono text-gray-600">
                           {user.subscription_amount_cents != null
                             ? `$${(user.subscription_amount_cents / 100).toFixed(2)}`
-                            : '—'}
+                            : '–'}
                         </td>
                         <td className="py-2 text-right font-mono text-gray-800">
                           ${user.monthly_cost.toFixed(2)}
@@ -429,12 +429,12 @@ export default function CostsTab() {
                       </td>
                       <td
                         className="py-2 pr-4 text-right text-gray-600 font-mono text-xs"
-                        title={`prompt ${c.prompt_tokens ?? '—'} + cached ${c.cached_prompt_tokens ?? '—'} + completion ${c.completion_tokens ?? '—'}`}
+                        title={`prompt ${c.prompt_tokens ?? '–'} + cached ${c.cached_prompt_tokens ?? '–'} + completion ${c.completion_tokens ?? '–'}`}
                       >
-                        {costTokenTotal(c) != null ? costTokenTotal(c)?.toLocaleString() : '—'}
+                        {costTokenTotal(c) != null ? costTokenTotal(c)?.toLocaleString() : '–'}
                       </td>
                       <td className="py-2 pr-4 text-right text-gray-600 font-mono">
-                        {c.estimated_cost != null ? `$${c.estimated_cost.toFixed(4)}` : '—'}
+                        {c.estimated_cost != null ? `$${c.estimated_cost.toFixed(4)}` : '–'}
                       </td>
                       <td className="py-2 pr-4 text-right text-gray-600">{c.retry_attempts}</td>
                       <td className="py-2 text-right text-gray-500 text-xs">
@@ -530,7 +530,7 @@ export default function CostsTab() {
             </div>
             <button
               onClick={() => setShowBackfillWizard(false)}
-              className="text-gray-400 hover:text-gray-700"
+              className="text-gray-500 hover:text-gray-700"
               aria-label="Close"
             >
               ×
@@ -612,7 +612,7 @@ export default function CostsTab() {
             </div>
             <button
               onClick={() => setShowCostBackfillWizard(false)}
-              className="text-gray-400 hover:text-gray-700"
+              className="text-gray-500 hover:text-gray-700"
               aria-label="Close"
             >
               ×

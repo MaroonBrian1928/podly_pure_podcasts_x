@@ -17,7 +17,7 @@ export function parseBackendDate(value: string | null | undefined): Date | null 
 
 export function formatBackendDateTime(value: string | null | undefined): string {
   const date = parseBackendDate(value);
-  return date ? date.toLocaleString() : '—';
+  return date ? date.toLocaleString() : '–';
 }
 
 export function formatBackendDate(
@@ -25,7 +25,7 @@ export function formatBackendDate(
   options: Intl.DateTimeFormatOptions = { year: 'numeric', month: 'short', day: 'numeric' },
 ): string {
   const date = parseBackendDate(value);
-  return date ? date.toLocaleDateString(undefined, options) : '—';
+  return date ? date.toLocaleDateString(undefined, options) : '–';
 }
 
 export function formatBackendTime(
@@ -43,7 +43,7 @@ export function backendDateMs(value: string | null | undefined): number {
 
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) {
-    return '—';
+    return '–';
   }
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);

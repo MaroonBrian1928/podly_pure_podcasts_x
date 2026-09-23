@@ -16,7 +16,7 @@ interface AnimatedDurationProps {
 // horizontally jittering as digits shift width.
 export default function AnimatedDuration({ ms, className = '' }: AnimatedDurationProps) {
   if (!Number.isFinite(ms) || ms < 0) {
-    return <span className={className}>—</span>;
+    return <span className={className}>–</span>;
   }
   const text = formatDuration(ms);
   return (

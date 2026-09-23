@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import ModalShell from './ModalShell';
 import { useDiagnostics } from '../contexts/DiagnosticsContext';
 import { DIAGNOSTIC_UPDATED_EVENT, diagnostics, type DiagnosticsEntry } from '../utils/diagnostics';
 
@@ -71,13 +72,13 @@ export default function DiagnosticsModal() {
 
   const issueUrl = useMemo(() => buildIssueUrl(issueTitle, issueBody), [issueTitle, issueBody]);
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40" onClick={close} />
-
-      <div className="relative w-full max-w-3xl bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden">
+    <ModalShell
+      isOpen={isOpen}
+      onClose={close}
+      containerClassName="items-center p-4 z-[60]"
+      panelClassName="w-full max-w-3xl bg-white rounded-xl border border-gray-200 shadow-lg overflow-hidden"
+    >
         <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Troubleshooting</h2>
@@ -164,7 +165,6 @@ export default function DiagnosticsModal() {
             Sensitive fields like tokens/cookies are redacted.
           </div>
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }

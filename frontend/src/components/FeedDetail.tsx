@@ -451,16 +451,23 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     return () => scrollContainer.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Handle click outside to close menu
   useEffect(() => {
+    if (!showMenu) return;
     const handleClickOutside = (event: MouseEvent) => {
-      if (showMenu && !(event.target as Element).closest('.menu-container')) {
+      if (!(event.target as Element).closest('.menu-container')) {
         setShowMenu(false);
       }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowMenu(false);
+    };
 
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [showMenu]);
 
   const handleWhitelistToggle = (episode: Episode) => {
@@ -665,7 +672,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
           {onClose && (
             <button
               onClick={onClose}
-              className="p-2 text-gray-400 hover:text-gray-600"
+              className="p-2 text-gray-500 hover:text-gray-600"
             >
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -725,7 +732,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                   />
                 ) : (
                   <div className="w-32 h-32 sm:w-40 sm:h-40 rounded-lg bg-gray-200 flex items-center justify-center shadow-lg">
-                    <svg className="w-16 h-16 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-16 h-16 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                     </svg>
                   </div>
@@ -1074,7 +1081,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                           />
                         ) : (
                           <div className="w-16 h-16 rounded-lg bg-gray-200 flex items-center justify-center">
-                            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <svg className="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                             </svg>
                           </div>

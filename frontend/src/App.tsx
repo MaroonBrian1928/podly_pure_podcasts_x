@@ -18,7 +18,6 @@ import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
 import PageTransitionFrame from './components/PageTransitionFrame';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
-import './App.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -68,16 +67,22 @@ function AppShell() {
     previousPathnameRef.current = location.pathname;
   }, [location.pathname]);
 
-  // Close mobile menu when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (mobileMenuRef.current && !mobileMenuRef.current.contains(event.target as Node)) {
         setMobileMenuOpen(false);
       }
     }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setMobileMenuOpen(false);
+    }
     if (mobileMenuOpen) {
       document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+        document.removeEventListener('keydown', handleKeyDown);
+      };
     }
   }, [mobileMenuOpen]);
 

@@ -185,7 +185,7 @@ export default function ChapterProcessingStats({
               <h2 className="text-xl font-bold text-gray-900 text-left">Processing Statistics & Debug</h2>
               <button
                 onClick={() => setShowModal(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                className="p-2 text-gray-500 hover:text-gray-600 rounded-lg hover:bg-gray-100"
               >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -585,16 +585,16 @@ export default function ChapterProcessingStats({
                                             {call.service_tier}
                                           </span>
                                         ) : (
-                                          <span className="text-gray-400">—</span>
+                                          <span className="text-gray-500">–</span>
                                         )}
                                       </td>
                                       <td className="px-4 py-3 text-sm text-gray-600">
                                         {tokenTotal != null ? (
-                                          <span title={`prompt ${call.prompt_tokens ?? '—'} + cached prompt ${call.cached_prompt_tokens ?? '—'} + completion ${call.completion_tokens ?? '—'}`}>
+                                          <span title={`prompt ${call.prompt_tokens ?? '–'} + cached prompt ${call.cached_prompt_tokens ?? '–'} + completion ${call.completion_tokens ?? '–'}`}>
                                             {tokenTotal.toLocaleString()}
                                           </span>
                                         ) : (
-                                          <span className="text-gray-400">—</span>
+                                          <span className="text-gray-500">–</span>
                                         )}
                                       </td>
                                       {showCostColumn && (
@@ -602,7 +602,7 @@ export default function ChapterProcessingStats({
                                           {call.estimated_cost_usd != null ? (
                                             `$${call.estimated_cost_usd.toFixed(4)}`
                                           ) : (
-                                            <span className="text-gray-400">—</span>
+                                            <span className="text-gray-500">–</span>
                                           )}
                                         </td>
                                       )}
@@ -755,7 +755,7 @@ export default function ChapterProcessingStats({
                                               {segment.speaker_label}
                                             </span>
                                           ) : (
-                                            <span className="text-gray-400">-</span>
+                                            <span className="text-gray-500">-</span>
                                           )}
                                         </td>
                                       )}

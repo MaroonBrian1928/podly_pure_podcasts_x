@@ -102,7 +102,7 @@ export function JobStageRail({ stages, stageDurationsMs, className = '' }: JobSt
                   ? 'text-green-600'
                   : stage.state === 'failed'
                     ? 'text-red-600 font-medium'
-                    : 'text-gray-400'
+                    : 'text-gray-500'
             }`}
           >
             <span className="flex h-3 items-center justify-center">
@@ -121,7 +121,7 @@ export function JobStageRail({ stages, stageDurationsMs, className = '' }: JobSt
             </span>
             <span>{stage.shortLabel}</span>
             {hasDuration ? (
-              <span className="font-mono tabular-nums text-[9px] text-gray-400">
+              <span className="font-mono tabular-nums text-[9px] text-gray-500">
                 {formatDuration(ms)}
               </span>
             ) : null}
@@ -272,17 +272,17 @@ function formatTierInFlight(inFlight: {
       ? `${inFlight.attempt}/${inFlight.max_retries}`
       : `${inFlight.attempt}`;
   // Name the call when we know it (chapter-phase calls run inside the
-  // audio-processing stage, where a bare "awaiting provider" reads oddly).
+  // audio-processing stage, where a bare "waiting on provider" reads oddly).
   const subject = inFlight.call_label ? `${inFlight.call_label}: ` : '';
   if (inFlight.status === 'retrying') {
     const remaining = backoffRemainingSeconds(inFlight.backoff_until);
     if (remaining !== null && remaining > 0) {
-      return `(${subject}attempt ${count} — backoff, retrying in ${formatSeconds(remaining)})`;
+      return `(${subject}attempt ${count}, backing off, retrying in ${formatSeconds(remaining)})`;
     }
     return `(${subject}retrying ${count})`;
   }
   // pending = the request is out; we're waiting on the provider's response.
-  return `(${subject}attempt ${count} — awaiting provider)`;
+  return `(${subject}attempt ${count}, waiting on provider)`;
 }
 
 function backoffRemainingSeconds(backoffUntil?: string): number | null {

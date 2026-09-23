@@ -1,3 +1,4 @@
+import ModalShell from '../../ModalShell';
 import type { EnvOverrideMap } from '../../../types';
 import { ENV_FIELD_LABELS } from './constants';
 
@@ -14,13 +15,14 @@ export default function EnvOverrideWarningModal({
   onConfirm,
   onCancel,
 }: EnvOverrideWarningModalProps) {
-  if (!paths.length) {
-    return null;
-  }
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
-      <div className="w-full max-w-lg space-y-4 rounded-lg bg-white p-5 shadow-xl">
+    <ModalShell
+      isOpen={paths.length > 0}
+      onClose={onCancel}
+      closeOnBackdrop={false}
+      containerClassName="items-center px-4 py-6"
+      panelClassName="w-full max-w-lg space-y-4 rounded-lg bg-white p-5 shadow-xl"
+    >
         <div>
           <h3 className="text-base font-semibold text-gray-900">Environment-managed settings</h3>
           <p className="text-sm text-gray-600">
@@ -69,7 +71,6 @@ export default function EnvOverrideWarningModal({
             Save anyway
           </button>
         </div>
-      </div>
-    </div>
+    </ModalShell>
   );
 }
