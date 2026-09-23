@@ -996,6 +996,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "dill" },
+    { name = "jsonschema" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
@@ -1024,6 +1025,7 @@ requires-dist = [
     { name = "flask-sqlalchemy" },
     { name = "groq" },
     { name = "jinja2" },
+    { name = "jsonschema", marker = "extra == 'dev'" },
     { name = "litellm", specifier = ">=1.95.0" },
     { name = "mutagen" },
     { name = "openai" },

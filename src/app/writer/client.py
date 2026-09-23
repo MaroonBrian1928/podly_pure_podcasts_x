@@ -216,6 +216,7 @@ class WriterClient:
             cmd.reply_queue = reply_q
 
         if self.queue:
+            cmd.enqueued_monotonic_ns = time.monotonic_ns()
             self.queue.put(cmd)
 
         if wait:

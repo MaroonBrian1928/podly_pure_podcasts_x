@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from app.auth.guards import require_admin
 from app.config_store import (
+    apply_app_scheduler_side_effects,
     hydrate_runtime_config_inplace,
     read_combined,
     to_pydantic_config,
@@ -587,11 +588,27 @@ def api_put_config() -> flask.Response:
         )
 
     try:
-        result = writer_client.action(
-            "update_combined_config",
-            {"payload": payload},
-            wait=True,
-        )
+        previous_app_settings = dict(read_combined().get("app", {}))
+        try:
+            result = writer_client.action(
+                "update_combined_config",
+                {"payload": payload},
+                wait=True,
+            )
+        finally:
+            # The writer contract deliberately commits config sections one at a
+            # time. Reconcile this process even when a later section fails.
+            try:
+                current_app_settings = dict(read_combined().get("app", {}))
+                apply_app_scheduler_side_effects(
+                    previous_app_settings,
+                    current_app_settings,
+                )
+            except Exception as scheduler_err:  # noqa: BLE001
+                logger.warning(
+                    "Post-update scheduler reconciliation failed: %s",
+                    scheduler_err,
+                )
         if not result or not result.success:
             raise RuntimeError(getattr(result, "error", "Writer update failed"))
         data = result.data or {}
