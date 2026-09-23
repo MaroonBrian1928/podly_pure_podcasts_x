@@ -14,33 +14,31 @@
 ## Overview
 
 Podly transcribes each podcast episode, uses an LLM to find the ad segments, and
-cuts them out — giving you back a clean, ad-free RSS feed. It is provider-neutral:
+cuts them out, giving you back a clean, ad-free RSS feed. It is provider-neutral:
 transcription runs on Groq or any OpenAI-compatible Whisper/Parakeet server, and
 ad detection works with most LLMs (OpenAI, Anthropic, Gemini, Groq, or a local
-model) — no OpenAI key required.
+model). No OpenAI key required.
 
 <img width="100%" src="docs/images/screenshot.png" />
 
 ## How To Run
 
-You have a few options to get started:
-
-> 🚀 **New to self-hosting?** Start with the
-> [Ultimate Beginner's Guide](docs/how_to_run_beginners.md). It walks you through
-> the Docker setup step by step — and even shows you how to have an AI assistant
-> (Claude Code, Gemini CLI, Cursor, or Windsurf) run the whole setup for you.
+> **New to self-hosting?** Start with the
+> [beginner's guide](docs/how_to_run_beginners.md). It walks you through the
+> Docker setup step by step, and shows how to have an AI assistant (Claude Code,
+> Gemini CLI, Cursor, or Windsurf) run the whole setup for you.
 
 - [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/podly?referralCode=NMdeg5&utm_medium=integration&utm_source=template&utm_campaign=generic)
-   - quick and easy setup in the cloud, follow our [Railway deployment guide](docs/how_to_run_railway.md). 
+   - Hosted in the cloud. Follow the [Railway deployment guide](docs/how_to_run_railway.md).
    - Use this if you want to share your Podly server with others.
-- **Run Locally**: 
-   - For local development and customization, 
-   - see our [beginner's guide for running locally](docs/how_to_run_beginners.md). 
-   - Use this for the most cost-optimal & private setup.
+- **Run locally**
+   - For local development and customization, follow the
+     [beginner's guide](docs/how_to_run_beginners.md).
+   - Use this for the cheapest and most private setup.
 
 > ⚠️ **Enable authentication before exposing Podly to the internet.** Without it,
 > anyone who can reach your URL can read and control your feeds. Auth is on by
-> default in `.env.example` — set your own password and keep it enabled.
+> default in `.env.example`; set your own password and keep it enabled.
 > Note that some podcast apps (e.g. **Pocket Casts**) fetch feeds from their own
 > servers, so your feed URL must be **publicly reachable**; use the "Copy
 > protected feed" button to share a public URL that stays token-protected. See
@@ -48,7 +46,7 @@ You have a few options to get started:
 > for details.
 
 
-## How it works:
+## How it works
 
 - You request an episode
 - Podly downloads the requested episode
@@ -67,9 +65,9 @@ at a transcription backend instead. Two options:
 - **Self-hosted / local (most private):** set `WHISPER_TYPE=remote` and point
   `WHISPER_REMOTE_BASE_URL` at any OpenAI-compatible transcription server. We
   recommend running one of these on your own machine or GPU box:
-  - [WhisperX API server](https://github.com/Nyralei/whisperx-api-server) —
+  - [WhisperX API server](https://github.com/Nyralei/whisperx-api-server):
     OpenAI-compatible WhisperX with word timestamps and diarization.
-  - [ParakeetX](https://github.com/MaroonBrian1928/parakeetX) — fast
+  - [ParakeetX](https://github.com/MaroonBrian1928/parakeetX): fast
     OpenAI-compatible server built on NVIDIA Parakeet.
 
   Example:
@@ -97,16 +95,16 @@ environment variables.
 
 ### Optional: INA audio segmentation (better ad boundaries)
 
-The transcript only contains words — it can't "hear" the music stings, jingles,
+The transcript only contains words, so it can't "hear" the music stings, jingles,
 and silence gaps that almost always wrap a podcast ad. INA
 ([inaSpeechSegmenter](https://github.com/ina-foss/inaSpeechSegmenter)) is an
 audio classifier that tags time ranges as `speech`, `music`, `silence`, or
 `noenergy`. Enabling it gives Podly that extra audio layer, which it uses to:
 
-- **Feed audio cues to the LLM** — non-speech regions are injected into the
+- **Feed audio cues to the LLM:** non-speech regions are injected into the
   transcript sent to the model (e.g. `[122.4] [MUSIC] (5.2s)`), a strong hint
   that an ad break starts or ends there.
-- **Clean up the cut boundaries** — adjacent ad windows separated only by
+- **Clean up the cut boundaries:** adjacent ad windows separated only by
   music/silence are bridged into one block, and ads at the start/end of an
   episode are extended to swallow the leading/trailing music sting. The result
   is fewer half-second jingles or dead-air gaps left behind after a cut.
@@ -155,7 +153,7 @@ STRIPE_SECRET_KEY=
 ```
 
 - Default off. When off, Podly never imports the `stripe` SDK into the
-  long-lived Flask/writer processes — saves several MB of RAM for
+  long-lived Flask/writer processes, which saves several MB of RAM for
   deployments that don't track revenue.
 - Set `PODLY_STRIPE_BILLING_ENABLED=true` and provide `STRIPE_SECRET_KEY`
   to enable the revenue-vs-cost view. Subscription amounts are cached
@@ -167,7 +165,7 @@ Several read-heavy and audio-heavy paths run in a short-lived Rust binary
 (`podly_tools`) instead of the long-lived Python process. The sidecar reads
 SQLite directly and returns the same JSON envelopes as the Python routes,
 keeping large transient allocations out of the Flask heap. **These paths are
-enabled by default** — the Docker image ships the binary and you don't need to
+enabled by default**. The Docker image ships the binary and you don't need to
 configure anything. On any sidecar error Podly silently falls back to the
 Python implementation (look for `falling back to Python` in
 `src/instance/logs/app.log`).
