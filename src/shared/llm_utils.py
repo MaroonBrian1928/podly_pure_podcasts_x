@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Final
 
 logger = logging.getLogger("global_logger")
 
 # Patterns for models that require the `max_completion_tokens` parameter
 # instead of the legacy `max_tokens`. OpenAI began enforcing this on the
-# newer gpt-4o / gpt-5 / o1 style models.
+# newer gpt-4o / gpt-5+ / o1 style models.
+_GPT5_PLUS_MODEL = re.compile(r"gpt-([5-9]|\d{2,})")
 _MAX_COMPLETION_TOKEN_MODELS: Final[tuple[str, ...]] = (
-    "gpt-5",
     "gpt-4o",
     "o1-",
     "o1_",
@@ -25,7 +26,9 @@ def model_uses_max_completion_tokens(model_name: str | None) -> bool:
     if not model_name:
         return False
     model_lower = model_name.lower()
-    return any(pattern in model_lower for pattern in _MAX_COMPLETION_TOKEN_MODELS)
+    return bool(_GPT5_PLUS_MODEL.search(model_lower)) or any(
+        pattern in model_lower for pattern in _MAX_COMPLETION_TOKEN_MODELS
+    )
 
 
 def normalize_completion_args_for_model(

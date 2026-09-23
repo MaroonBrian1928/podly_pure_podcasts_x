@@ -13,7 +13,10 @@ from podcast_processor.llm_model_call_utils import (
     model_supports_service_tier,
     try_update_model_call,
 )
-from shared.llm_utils import normalize_completion_args_for_model
+from shared.llm_utils import (
+    model_uses_max_completion_tokens,
+    normalize_completion_args_for_model,
+)
 
 
 def test_extract_litellm_finish_reason_from_object_choice() -> None:
@@ -598,3 +601,21 @@ def test_tier_retry_reraises_non_retryable(
             sleep=lambda _s: None,
         )
     assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("gpt-5.6-luna", True),
+        ("gpt-6-luna", True),
+        ("openai/gpt-6", True),
+        ("gpt-10", True),
+        ("gpt-4o-mini", True),
+        ("gpt-4.1", False),
+        ("gpt-3.5-turbo", False),
+        ("groq/openai/gpt-oss-120b", False),
+        (None, False),
+    ],
+)
+def test_model_uses_max_completion_tokens(model: str | None, expected: bool) -> None:
+    assert model_uses_max_completion_tokens(model) is expected
