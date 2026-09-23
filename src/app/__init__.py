@@ -184,6 +184,21 @@ def create_writer_app() -> Flask:
     )
 
 
+def create_bootstrap_app() -> Flask:
+    """Run schema, admin, and settings initialization once before a runtime writer.
+
+    Unlike the legacy writer app, bootstrap must fail closed if defaults cannot
+    be initialized. It does not start HTTP, a scheduler, or writer IPC.
+    """
+    return _create_configured_app(
+        app_role="bootstrap",
+        run_startup=True,
+        start_scheduler=False,
+        register_http=False,
+        fail_on_startup_error=True,
+    )
+
+
 def create_processing_app() -> Flask:
     """Create the per-job processing Flask app.
 
@@ -206,6 +221,7 @@ def _create_configured_app(
     start_scheduler: bool,
     register_http: bool = True,
     initialize_migrations: bool = True,
+    fail_on_startup_error: bool = False,
 ) -> Flask:
     # Setup directories early but only when actually creating the app (not during migrations)
     if not is_test:
@@ -229,7 +245,10 @@ def _create_configured_app(
 
     with app.app_context():
         if run_startup:
-            _run_app_startup(auth_settings)
+            if fail_on_startup_error:
+                _run_app_startup(auth_settings, fail_on_settings_error=True)
+            else:
+                _run_app_startup(auth_settings)
         else:
             _hydrate_web_config()
 
@@ -549,7 +568,9 @@ def _register_memory_cleanup(app: Flask) -> None:
         release_memory_to_os(f"app context teardown after {context}", app_logger)
 
 
-def _run_app_startup(auth_settings: AuthSettings) -> None:
+def _run_app_startup(
+    auth_settings: AuthSettings, *, fail_on_settings_error: bool = False
+) -> None:
     from flask_migrate import upgrade
 
     upgrade()
@@ -558,8 +579,10 @@ def _run_app_startup(auth_settings: AuthSettings) -> None:
         ensure_defaults_and_hydrate()
 
         _reset_processor_if_loaded()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         app_logger.error(f"Failed to initialize settings: {exc}")
+        if fail_on_settings_error:
+            raise
 
 
 def _hydrate_web_config() -> None:

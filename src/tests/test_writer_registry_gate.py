@@ -1,6 +1,29 @@
 from __future__ import annotations
 
-from scripts.check_writer_registry import case_mapping_failure
+import ast
+
+from scripts.check_writer_registry import (
+    case_mapping_failure,
+    local_literal_action_targets,
+)
+
+
+def test_dynamic_action_resolution_requires_only_literal_local_assignments() -> None:
+    module = ast.parse(
+        "def run(flag):\n"
+        '    action = "finish_transcription_replace"\n'
+        "    if flag:\n"
+        '        action = "finish_transcription_replace_from_artifact"\n'
+        "    writer_client.action(action, {})\n"
+    )
+    function = module.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    assert local_literal_action_targets(function, "action", 5) == {
+        "finish_transcription_replace",
+        "finish_transcription_replace_from_artifact",
+    }
+    function.body.insert(0, ast.parse("action = choose_runtime_action()").body[0])
+    assert local_literal_action_targets(function, "action", 5) is None
 
 
 def test_case_mapping_requires_a_differential_case() -> None:

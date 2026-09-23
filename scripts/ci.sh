@@ -29,6 +29,21 @@ echo "Running 'uv run ty check'"
 echo '============================================================='
 uv run ty check
 
+# Build the Rust executables used by writer differential tests before pytest.
+# Reuse only these binaries during tests so the Python and Rust paths execute
+# against the same current source revision.
+if [ -f rust/Cargo.toml ]; then
+    echo '============================================================='
+    echo "Building Rust binaries required by parity tests"
+    echo '============================================================='
+    mise exec -- cargo build \
+        --manifest-path rust/Cargo.toml \
+        --bin podly_writer \
+        --bin podly_tools
+    export PODLY_RUST_WRITER_BIN="${PWD}/rust/target/debug/podly_writer"
+    export PODLY_RUST_TOOLS_BIN="${PWD}/rust/target/debug/podly_tools"
+fi
+
 # run tests
 echo '============================================================='
 echo "Running 'uv run pytest --disable-warnings'"

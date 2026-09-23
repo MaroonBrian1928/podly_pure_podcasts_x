@@ -46,15 +46,135 @@ passed. The failures are under triage; some involve fixture aliasing and
 incorrect projection-column assumptions, while processor state differences
 still require investigation. CI stopped before the Rust and registry stages.
 
-Parity/benchmark evidence, if applicable: Differential parity is missing. P2.8
-must machine-check the current Python registry and production generic callers
-against Rust coverage, and the CI-owned harness must run matching operations on
-isolated DB copies before any P2 port-group box is restored.
+`/tmp/podly-rust-migration-p2-early-ci-6.log` passed Ruff and `ty`; pytest
+reported 886 passed, 2 skipped, and 11 differential failures. Job parity and
+the concurrent dequeue race now pass. Remaining failures are one feed case,
+six processor cases, and four cleanup cases. Rust/registry stages were not
+reached. The CI process is no longer running; the next task is to resolve these
+specific failures and rerun the full wrapper.
 
-Remaining limitations: Per-action fixture coverage, returned values, resulting
-rows/relationships, and external effects must be audited against the Appendix A
-checklist; P2.9 stress and all P3/P4 gates remain open. Next task is P2.8
-registry/parity implementation, then reverify P2.1–P2.7 in dependency order.
+`/tmp/podly-rust-migration-p2-early-ci-7.log` stopped at two Ruff B905 findings
+in new diagnostics. After correcting them, `...-8.log` passed Ruff and `ty`
+and reported 11 differential failures again. Value-free diagnostics narrowed
+them to feed `post.release_date`, processor `post.transcript_word_timestamps`,
+segment numeric values, and identification confidence, and cleanup differences
+in one `post` row per failing case. Rust binary build provenance is under audit:
+pytest runs before the Rust build stage, so the parity subprocess may have used
+a stale binary after Rust source/feature changes. No acceptance checkbox changed.
+
+`/tmp/podly-rust-migration-p2-fresh-binaries-ci.log` is the first run to build
+both Rust binaries before pytest and pin their paths for parity execution. Ruff
+and `ty` passed; all six prior processor failures and job/race cases passed.
+Pytest stopped with five failures: feed creation's `post.release_date` and four
+cleanup actions' JSON-backed `Post` columns. Rust/registry stages were not
+reached. These are current-source parity findings, not stale-binary evidence.
+
+On 2026-09-23, `/tmp/podly-rust-migration-p2-system-ci.log` built fresh Rust
+binaries and ran 903 Python tests. It stopped with two differential failures:
+the synthetic combined-config fixture omitted its required notifications row,
+and the cleanup assertion expected SQL NULL where SQLAlchemy persists JSON
+`"null"`. After correcting those test defects,
+`/tmp/podly-rust-migration-p2-system-ci-2.log` passed 901 Python tests (2
+skipped), including all differential cases, but stopped at Rust formatting.
+`/tmp/podly-rust-migration-p2-system-ci-3.log` passed Ruff, ty, the same Python
+suite, Rust formatting/checks/tests, then stopped at the deliberately
+fail-closed registry coverage gate. The gate reports unmapped production
+actions/generic operations and a dynamic action call at
+`src/podcast_processor/transcription_manager.py:261`. These are coverage
+metadata and inventory gaps, not parity test failures. CI is not yet green;
+P2 checkboxes remain open until the manifest and remaining required gates pass.
+
+`/tmp/podly-rust-migration-p2-registry-ci.log` is the first clean full CI run
+after mapping the live registry and generic operations to executed differential
+case IDs. Ruff, ty, 902 Python tests (2 skipped), Rust checks/tests, and the
+fail-closed registry gate all passed. The checker now resolves the two literal
+branches of the dynamic transcription finish action and still rejects any
+nonliteral reassignment; a new unit test covers that boundary. P2.8 is checked.
+P2.1–P2.7 remain unchecked pending a per-action checklist audit, and P2.9
+mixed-client stress is not yet complete. No production backend was selected.
+
+P2.9 partial (2026-09-23): `src/tests/test_writer_mixed_client_stress.py`
+uses one isolated Rust writer and eight client threads to submit 32 real
+web-like download-count and processing-like transcript-insert actions. It
+asserts 32 distinct correlated command IDs, successful responses, and exact
+persisted effects (+16 downloads and +16 segments). The first CI attempt
+stopped at a test-only Ruff import error; the second stopped at a fixture
+attribute error before issuing requests. After correcting both,
+`/tmp/podly-rust-migration-p2-mixed-ci-3.log` passed Ruff, ty, 903 Python
+tests (2 skipped), Rust checks/tests, and the registry gate. P2.9 remains
+unchecked: bounded Rust memory under concurrent large payloads, explicit
+SQLite lock contention, and combined restart/timeout stress still need
+verification. No live service or database was touched.
+
+Handoff at checkout `9ad73ae` plus the uncommitted worktree (2026-09-23): P0
+and P1 remain verified; P2.8 has a clean gate and checkbox; P2.1–P2.7 and
+P2.9 are not accepted; P3/P4 have not begun. The immediate next task is to
+complete P2.9's mixed-operation memory, SQLite lock, and restart/timeout
+cases through `mise exec -- ./scripts/ci.sh`, then audit each P2.1–P2.7
+action against the plan's per-action checklist and record any coverage gaps
+before advancing those checkboxes. After P2 acceptance, implement the explicit
+Python/Rust selector and `WriterClient` transport adapter in P3; relevant
+entrypoints are `src/app/writer/client.py`, `src/app/writer/protocol.py`,
+`src/app/__init__.py::_run_app_startup`,
+`src/app/auth/bootstrap.py::bootstrap_admin_user`, `docker-entrypoint.sh`,
+and `rust/src/bin/podly_writer.rs`. No Rust backend cutover, deployment,
+restart of the live instance, or production-data mutation has occurred.
+
+P2.1–P2.7 follow-up audit (2026-09-23): the differential runner proves at
+least one executed case per reachable action and compares results plus full
+database projections, but its registry mapping does not prove the required
+per-action branch matrix. Priority gaps are generic transaction ordering,
+rollback and commit-constraint parity (P2.1); web-process config visibility
+after Rust writes (P2.2); additional missing/repeat/boundary user, token,
+feed, job, processor artifact, and cleanup failure cases (P2.3–P2.7).
+Specifically, artifact failures need missing/malformed/disallowed/oversize
+comparison, and cleanup needs interrupted recovery. None of these port-group
+checkboxes was advanced. This audit is read-only evidence, not a passing gate.
+
+P3.5 bootstrap draft (2026-09-23): `create_bootstrap_app()` and
+`src/bootstrap.py` provide a one-shot role that initializes migrations, admin
+and settings without HTTP, scheduler, or writer IPC; bootstrap settings errors
+are fail-closed, while the existing writer app behavior is retained. The
+bootstrap role uses exclusive direct DB writes only before the runtime writer
+starts. Focused tests passed through the combined CI log above, but this does
+not establish P3.6 ordering/exclusivity or P3.7 idempotence. P3.5 remains
+unchecked until verification and lifecycle checks pass.
+
+Additional unverified P2 drafts (2026-09-23): P2.9 tests now include an
+eight-client 4,096-segment synthetic burst with post-burst RSS check,
+deterministic queue saturation, SQLite lock timeout/unknown outcome followed
+by exactly one commit, rollback, and restart. P2.1 adds five differential
+cases for reachable generic UPDATE and ordered/rollback transactions,
+including a NOT NULL constraint. The latter surfaced a Rust/Python transaction
+result-envelope mismatch; the Rust fix and differential cases subsequently
+passed coordinated CI. P2.1 remains unchecked pending the full action audit.
+
+P3 adapter draft (2026-09-23): a shared `PODLY_WRITER_BACKEND` parser and
+Rust branch in `WriterClient` were added with isolated fake-loopback tests.
+The intended behavior is Python by default; unknown backend fails, Rust mode
+never executes Python local fallback, `wait=False` returns admission only,
+and timeouts after admission are unknown outcomes without replay. This code
+passed fake-loopback CI, but has not yet been exercised against the real Rust
+writer; P3.1–P3.4 remain unchecked.
+
+Full CI after the transaction and stress increments:
+`/tmp/podly-rust-migration-p2-p3-combined-ci-6.log` passed Ruff, ty, 926
+Python tests (2 skipped), Rust format/check/tests, and the registry gate.
+The five new P2.9 tests passed on isolated fixture DBs: eight concurrent
+real action clients with 32 unique replies and exact counts; 4,096 large
+synthetic transcript rows at concurrency eight with less than 48 MiB
+post-burst RSS growth; bounded admission rejects saturation while preserving
+the active reply; a 150 ms deadline under SQLite `BEGIN IMMEDIATE` reports an
+unknown outcome, then commits exactly once after unlock; and a mixed-command
+rollback followed by restart accepts a fresh write. Ordered subcommand result
+and rollback parity are also checked by five new P2.1 differential cases.
+P2.9 is checked. P2.1 stays open because the wider per-operation checklist
+audit remains incomplete. The fake-loopback Rust adapter and bootstrap tests
+pass, but P3 remains unchecked pending real-client/bootstrap lifecycle gates.
+
+Remaining limitations: Finish the P2.1–P2.7 branch audit;
+then finish actual-client P3 integration and isolated bootstrap sequencing.
+P4 packaging, lifecycle, rollback, and benchmarks have not begun.
 
 ## P0.1 — Baseline revision and deployment
 

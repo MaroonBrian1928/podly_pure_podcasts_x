@@ -337,7 +337,47 @@ def _assert_db_equal(  # noqa: PLR0912 - normalization is parameterized by table
                         raise AssertionError(
                             "processing-job stage_history is invalid JSON"
                         ) from error
-    assert left == right, "feed writer persisted table rows differ"
+    if left != right:
+        differences = []
+        differing_table_count = 0
+        for table in sorted(left.keys() | right.keys()):
+            python_rows = left.get(table, [])
+            rust_rows = right.get(table, [])
+            if python_rows == rust_rows:
+                continue
+            differing_table_count += 1
+
+            row_differences = []
+            for index, (python_row, rust_row) in enumerate(
+                zip(python_rows, rust_rows, strict=False)
+            ):
+                if python_row == rust_row:
+                    continue
+                if isinstance(python_row, dict) and isinstance(rust_row, dict):
+                    fields = sorted(
+                        field
+                        for field in python_row.keys() | rust_row.keys()
+                        if python_row.get(field) != rust_row.get(field)
+                    )
+                    row_differences.append(f"row[{index}] fields={fields[:10]}")
+                else:
+                    row_differences.append(f"row[{index}] differs")
+                if len(row_differences) == 3:
+                    break
+
+            if len(python_rows) != len(rust_rows):
+                row_differences.append(
+                    f"remaining rows: Python={len(python_rows)}, Rust={len(rust_rows)}"
+                )
+            details = ", ".join(row_differences) or "row ordering differs"
+            differences.append(f"{table}: {details}")
+            if len(differences) == 8:
+                break
+
+        suffix = "; ".join(differences)
+        if differing_table_count > len(differences):
+            suffix += "; additional differing tables omitted"
+        raise AssertionError(f"feed writer persisted table rows differ: {suffix}")
 
 
 def _assert_timestamp(value: Any) -> None:
