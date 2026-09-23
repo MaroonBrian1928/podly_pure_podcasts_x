@@ -13,61 +13,61 @@
 
 ## Overview
 
-Podly transcribes each podcast episode, uses an LLM to find the ad segments, and
-cuts them out, giving you back a clean, ad-free RSS feed. It is provider-neutral:
-transcription runs on Groq or any OpenAI-compatible Whisper/Parakeet server, and
-ad detection works with most LLMs (OpenAI, Anthropic, Gemini, Groq, or a local
-model). No OpenAI key required.
+Podly transcribes each podcast episode, asks an LLM to find the ads, cuts them
+out, and serves you an ad-free RSS feed. You pick the providers: Groq or any
+OpenAI-compatible Whisper/Parakeet server for transcription, and OpenAI,
+Anthropic, Gemini, Groq, or a local model for ad detection. You don't need an
+OpenAI key.
 
 <img width="100%" src="docs/images/screenshot.png" />
 
 ## How To Run
 
 > **New to self-hosting?** Start with the
-> [beginner's guide](docs/how_to_run_beginners.md). It walks you through the
-> Docker setup step by step, and shows how to have an AI assistant (Claude Code,
-> Gemini CLI, Cursor, or Windsurf) run the whole setup for you.
+> [beginner's guide](docs/how_to_run_beginners.md). It covers the Docker setup
+> step by step and shows you how to hand the whole setup to an AI assistant
+> (Claude Code, Gemini CLI, Cursor, or Windsurf).
 
 - [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/podly?referralCode=NMdeg5&utm_medium=integration&utm_source=template&utm_campaign=generic)
-   - Hosted in the cloud. Follow the [Railway deployment guide](docs/how_to_run_railway.md).
-   - Use this if you want to share your Podly server with others.
+   - Runs in the cloud. Follow the [Railway deployment guide](docs/how_to_run_railway.md).
+   - Pick this to share your Podly server with other people.
 - **Run locally**
-   - For local development and customization, follow the
-     [beginner's guide](docs/how_to_run_beginners.md).
-   - Use this for the cheapest and most private setup.
+   - Follow the [beginner's guide](docs/how_to_run_beginners.md). You can
+     change the code and run your own development build.
+   - Pick this for the cheapest and most private setup.
 
-> ⚠️ **Enable authentication before exposing Podly to the internet.** Without it,
-> anyone who can reach your URL can read and control your feeds. Auth is on by
-> default in `.env.example`; set your own password and keep it enabled.
-> Note that some podcast apps (e.g. **Pocket Casts**) fetch feeds from their own
-> servers, so your feed URL must be **publicly reachable**; use the "Copy
-> protected feed" button to share a public URL that stays token-protected. See
-> the [beginner's guide](docs/how_to_run_beginners.md#recommended-enable-authentication)
-> for details.
+> ⚠️ **Enable authentication before you expose Podly to the internet.** Without
+> it, anyone who reaches your URL can read and control your feeds. `.env.example`
+> turns auth on; set your own password and leave it on.
+>
+> Some podcast apps, Pocket Casts among them, fetch feeds from their own servers,
+> so they need a public feed URL. The "Copy protected feed" button gives you a
+> public URL that keeps its access token. The
+> [beginner's guide](docs/how_to_run_beginners.md#recommended-enable-authentication)
+> has the details.
 
 
 ## How it works
 
-- You request an episode
-- Podly downloads the requested episode
-- A transcription model (Whisper or Parakeet) transcribes the episode
-- An LLM labels the ad segments
-- Podly removes the ad segments
-- Podly delivers the ad-free version of the podcast to you
+1. You request an episode.
+2. Podly downloads it.
+3. Whisper or Parakeet transcribes it.
+4. An LLM labels the ad segments.
+5. Podly cuts those segments and serves you the ad-free episode.
 
 ## Transcription (Whisper)
 
-Podly does not run embedded local Whisper inside the app container. You point it
-at a transcription backend instead. Two options:
+Podly sends audio to a transcription backend you run or rent; the app container
+doesn't bundle Whisper. Pick one:
 
-- **Groq (easiest):** set `WHISPER_TYPE=groq` and add a `GROQ_API_KEY`. Works out
-  of the box, nothing to self-host.
+- **Groq (easiest):** set `WHISPER_TYPE=groq` and add a `GROQ_API_KEY`. You have
+  nothing to host.
 - **Self-hosted / local (most private):** set `WHISPER_TYPE=remote` and point
   `WHISPER_REMOTE_BASE_URL` at any OpenAI-compatible transcription server. We
-  recommend running one of these on your own machine or GPU box:
+  recommend one of these on your own machine or GPU box:
   - [WhisperX API server](https://github.com/Nyralei/whisperx-api-server):
     OpenAI-compatible WhisperX with word timestamps and diarization.
-  - [ParakeetX](https://github.com/MaroonBrian1928/parakeetX): fast
+  - [ParakeetX](https://github.com/MaroonBrian1928/parakeetX): an
     OpenAI-compatible server built on NVIDIA Parakeet.
 
   Example:
@@ -79,38 +79,35 @@ at a transcription backend instead. Two options:
   # WHISPER_REMOTE_API_KEY=   # only if your server requires one
   ```
 
-If you are using `WHISPER_TYPE=remote`, Podly also supports OpenAI-compatible
-transcription flags for diarization:
+With `WHISPER_TYPE=remote`, two more flags control speaker diarization:
 
 ```env
 WHISPER_REMOTE_DIARIZE=false
 WHISPER_REMOTE_SPEAKER_EMBEDDINGS=false
 ```
 
-Set `WHISPER_REMOTE_DIARIZE=true` to request speaker diarization from a
-compatible remote Whisper endpoint. `WHISPER_REMOTE_SPEAKER_EMBEDDINGS=true`
-adds speaker embeddings to the diarization payload and requires diarization to
-be enabled. See [.env.local.example](.env.local.example) for the full set of
-environment variables.
+Set `WHISPER_REMOTE_DIARIZE=true` to have your remote Whisper server label
+speakers. Set `WHISPER_REMOTE_SPEAKER_EMBEDDINGS=true` as well to get speaker
+embeddings in that output; it needs diarization on.
+[.env.local.example](.env.local.example) lists every environment variable.
 
 ### Optional: INA audio segmentation (better ad boundaries)
 
-The transcript only contains words, so it can't "hear" the music stings, jingles,
-and silence gaps that almost always wrap a podcast ad. INA
-([inaSpeechSegmenter](https://github.com/ina-foss/inaSpeechSegmenter)) is an
-audio classifier that tags time ranges as `speech`, `music`, `silence`, or
-`noenergy`. Enabling it gives Podly that extra audio layer, which it uses to:
+A transcript records words and misses the music stings and silence that
+bracket most podcast ads. INA
+([inaSpeechSegmenter](https://github.com/ina-foss/inaSpeechSegmenter)) analyzes
+the audio and tags time ranges as `speech`, `music`, `silence`, or
+`noenergy`. Podly uses those tags in two places:
 
-- **Feed audio cues to the LLM:** non-speech regions are injected into the
-  transcript sent to the model (e.g. `[122.4] [MUSIC] (5.2s)`), a strong hint
-  that an ad break starts or ends there.
-- **Clean up the cut boundaries:** adjacent ad windows separated only by
-  music/silence are bridged into one block, and ads at the start/end of an
-  episode are extended to swallow the leading/trailing music sting. The result
-  is fewer half-second jingles or dead-air gaps left behind after a cut.
+- **Audio cues for the LLM:** Podly writes non-speech regions into the transcript
+  it sends to the model (e.g. `[122.4] [MUSIC] (5.2s)`). The model reads a music
+  block as a likely edge of an ad break.
+- **Cleaner cuts:** Podly merges ad windows with nothing but music or silence
+  between them, and stretches ads at the start or end of an episode to take the
+  music sting with them. You hear fewer half-second jingles and dead-air gaps after a cut.
 
-The trade-off is that it runs a separate service and adds a full audio-analysis
-pass per episode, so it is off by default.
+INA costs you a separate service and a full audio-analysis pass per episode, so
+Podly ships with it off.
 
 ```env
 INA_ENABLED=false
@@ -119,18 +116,15 @@ INA_TIMEOUT_SEC=3600
 ```
 
 Set `INA_ENABLED=true` and point `INA_BASE_URL` at a service that exposes
-`POST /segment`. For a ready-made local server, run
-[InaFastAPI](https://github.com/MaroonBrian1928/InaFastAPI), which wraps
-inaSpeechSegmenter behind that endpoint. INA analysis is best-effort:
-processing still completes if the INA service is unavailable, but the extra
-audio segment metadata (and the boundary cleanup above) will be missing. This is
-separate from remote Whisper speaker diarization, which continues to use the
-`WHISPER_REMOTE_*` flags above.
+`POST /segment`. [InaFastAPI](https://github.com/MaroonBrian1928/InaFastAPI)
+wraps inaSpeechSegmenter behind that endpoint and runs locally. If the INA
+service is down, Podly finishes the episode without the audio tags or the
+boundary cleanup. INA has no effect on speaker diarization; the
+`WHISPER_REMOTE_*` flags above control that.
 
 ## Optional UI Flags
 
-These environment variables let you hide specific UI surfaces without changing
-the rest of the application behavior:
+Two flags hide parts of the UI and leave everything else alone:
 
 ```env
 PODLY_HIDE_DISCORD_INTEGRATION=false
@@ -144,34 +138,33 @@ PODLY_HIDE_REPORT_ISSUE_BUTTON=false
 
 ## Stripe Billing (Optional)
 
-The admin cost dashboard can show Stripe subscription revenue alongside
-compute cost (the `subscription_amount_cents` column). This is opt-in:
+The admin cost dashboard can show Stripe subscription revenue next to compute
+cost, in the `subscription_amount_cents` column. You opt in with:
 
 ```env
 PODLY_STRIPE_BILLING_ENABLED=false
 STRIPE_SECRET_KEY=
 ```
 
-- Default off. When off, Podly never imports the `stripe` SDK into the
-  long-lived Flask/writer processes, which saves several MB of RAM for
-  deployments that don't track revenue.
-- Set `PODLY_STRIPE_BILLING_ENABLED=true` and provide `STRIPE_SECRET_KEY`
-  to enable the revenue-vs-cost view. Subscription amounts are cached
-  in-process for 1 hour to limit Stripe API calls.
+- Off by default. With billing off, Podly keeps the `stripe` SDK out of the
+  long-lived Flask and writer processes and saves several MB of RAM.
+- Set `PODLY_STRIPE_BILLING_ENABLED=true` and add `STRIPE_SECRET_KEY` to turn on
+  the revenue-vs-cost view. Podly caches subscription amounts in memory for an
+  hour to limit Stripe API calls.
 
 ## Rust Sidecar
 
-Several read-heavy and audio-heavy paths run in a short-lived Rust binary
-(`podly_tools`) instead of the long-lived Python process. The sidecar reads
-SQLite directly and returns the same JSON envelopes as the Python routes,
-keeping large transient allocations out of the Flask heap. **These paths are
-enabled by default**. The Docker image ships the binary and you don't need to
-configure anything. On any sidecar error Podly silently falls back to the
-Python implementation (look for `falling back to Python` in
-`src/instance/logs/app.log`).
+Podly runs several read-heavy and audio-heavy paths in a short-lived Rust binary,
+`podly_tools`, to keep large temporary allocations out of the long-lived Flask
+heap. The binary reads SQLite itself and returns the same JSON as the Python
+routes. **The Docker image ships it and turns it on**; you configure nothing.
 
-You only need these flags to **opt out** of a specific path (for debugging or
-parity checks). Set any of them to `false` to force the Python implementation:
+If the binary errors, Podly falls back to the Python code for that call and logs
+`falling back to Python` to `src/instance/logs/app.log`. The call still
+succeeds, so that log line is your one signal that the Rust path didn't run.
+
+Each flag below turns off one path. Set it to `false` to debug that path or
+compare it against Python:
 
 ```env
 PODLY_RUST_AUDIO_ENABLED=true
@@ -190,10 +183,9 @@ PODLY_RUST_COSTS_ENABLED=true
 ```
 
 `PODLY_RUST_COSTS_ENABLED=true` moves `/api/admin/costs` and
-`/api/admin/costs/calls` off the Flask heap. Python still pre-resolves
-LiteLLM token prices and passes them to the sidecar, and it enriches the
-response with Stripe revenue afterwards if `PODLY_STRIPE_BILLING_ENABLED`
-is on.
+`/api/admin/costs/calls` to the binary. Python looks up LiteLLM token prices
+first and hands them over, then adds Stripe revenue to the response when
+`PODLY_STRIPE_BILLING_ENABLED` is on.
 
 ### Cost Breakdown
 *Monthly cost breakdown for 5 podcasts*
