@@ -177,6 +177,18 @@ export default function LLMSection() {
             />
           </Field>
           <Field
+            label="Full Chapter Transcript Context"
+            hint="Send each topic block's full transcript text to the chapter LLM instead of a truncated sample. More accurate chapter boundaries at roughly 2-3x the prompt tokens. Can be overridden per podcast in feed settings."
+          >
+            <input
+              type="checkbox"
+              checked={!!pending?.llm?.chapter_full_block_text}
+              onChange={(e) =>
+                setField(['llm', 'chapter_full_block_text'], e.target.checked)
+              }
+            />
+          </Field>
+          <Field
             label="Enable LLM-Based Chapter Tagging"
             hint="Preserve embedded chapters when available, otherwise fall back to description or transcript-derived chapters for LLM processing."
           >

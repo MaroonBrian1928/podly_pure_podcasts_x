@@ -59,6 +59,40 @@ class OutputConfig(BaseModel):
         self.min_ad_segement_separation_seconds = value
 
 
+class NotificationConfig(BaseModel):
+    enabled: bool = Field(
+        default=DEFAULTS.NOTIFY_ENABLED,
+        description="Master switch for Apprise notifications.",
+    )
+    apprise_urls: list[str] = Field(
+        default_factory=lambda: list(DEFAULTS.NOTIFY_APPRISE_URLS),
+        description="Apprise notification target URLs (Discord, Telegram, ntfy, email, ...).",
+    )
+    notify_on_failure: bool = Field(
+        default=DEFAULTS.NOTIFY_ON_FAILURE,
+        description="Send a notification when an episode fails to process.",
+    )
+    notify_on_success: bool = Field(
+        default=DEFAULTS.NOTIFY_ON_SUCCESS,
+        description="Send a notification when an episode finishes processing successfully.",
+    )
+    notify_on_rust_fallback: bool = Field(
+        default=DEFAULTS.NOTIFY_ON_RUST_FALLBACK,
+        description=(
+            "Send a notification when the Rust sidecar fails and Podly falls "
+            "back to the Python implementation (throttled per operation)."
+        ),
+    )
+    include_llm_explanation: bool = Field(
+        default=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION,
+        description=(
+            "Include the LLM-generated plain-English root cause (the same "
+            "analysis as the Troubleshoot button) in failure notifications. "
+            "Costs one additional LLM call per failure."
+        ),
+    )
+
+
 WhisperConfigTypes = Literal["remote", "test", "groq"]
 
 
@@ -154,6 +188,14 @@ class Config(BaseModel):
             "generate fallback chapter tags from description/transcript."
         ),
     )
+    chapter_full_block_text: bool = Field(
+        default=DEFAULTS.CHAPTER_FULL_BLOCK_TEXT,
+        description=(
+            "Send the full transcript text of each topic block to the chapter "
+            "LLM instead of the truncated head+middle sample (~2-3x prompt "
+            "tokens). Per-feed override available in feed settings."
+        ),
+    )
     developer_mode: bool = Field(
         default=False,
         description="Enable developer mode features like test feeds",
@@ -199,6 +241,7 @@ class Config(BaseModel):
     cost_rate_per_hour: float = DEFAULTS.APP_COST_RATE_PER_HOUR
     whisper_cost_rate_per_hour: float = DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR
     ina_cost_rate_per_hour: float = DEFAULTS.APP_INA_COST_RATE_PER_HOUR
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)
 
     @model_validator(mode="before")
     @classmethod

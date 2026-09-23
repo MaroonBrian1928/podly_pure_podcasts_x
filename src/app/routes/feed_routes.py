@@ -74,6 +74,8 @@ _MISSING = object()
 # resets the cooldown and the next poll triggers a fresh kickoff.
 _BACKGROUND_REFRESH_LOCK = Lock()
 _BACKGROUND_REFRESH_LAST_KICKOFF: dict[int, float] = {}
+_BACKGROUND_REFRESH_IN_FLIGHT: set[int] = set()
+_MAX_AUTO_REFRESH_CONCURRENCY = 2
 _AUTO_REFRESH_COOLDOWN_SECONDS = 60.0
 
 
@@ -232,6 +234,7 @@ def _build_feed_settings_updates(
 
     for field_name, allow_null in (
         ("enable_llm_chapter_fallback_tagging", True),
+        ("chapter_full_block_text", True),
         ("auto_whitelist_new_episodes_override", True),
         ("enable_profanity_bleeping", False),
         ("confirm_whisperx_endpoint", False),
@@ -520,8 +523,10 @@ def _client_has_current_version(
     Honors `If-None-Match` (preferred) and `If-Modified-Since` (legacy).
     `etag` is the bare digest (without surrounding quotes).
     """
-    if request.if_none_match and request.if_none_match.contains(etag):
-        return True
+    if "If-None-Match" in request.headers:
+        # GET validators use weak comparison, and an explicit ETag condition
+        # takes precedence over dates even when the supplied tag is stale.
+        return request.if_none_match.contains_weak(etag)
     if last_modified_aware is not None and request.if_modified_since is not None:
         # HTTP dates are second-resolution; drop microseconds before comparing.
         lm = last_modified_aware.replace(microsecond=0)
@@ -551,6 +556,11 @@ def _should_kickoff_async_refresh(feed_id: int) -> bool:
     """True iff the per-feed cooldown has elapsed; reserves the next slot."""
     now = time.monotonic()
     with _BACKGROUND_REFRESH_LOCK:
+        if (
+            feed_id in _BACKGROUND_REFRESH_IN_FLIGHT
+            or len(_BACKGROUND_REFRESH_IN_FLIGHT) >= _MAX_AUTO_REFRESH_CONCURRENCY
+        ):
+            return False
         last = _BACKGROUND_REFRESH_LAST_KICKOFF.get(feed_id)
         if last is not None and now - last < _AUTO_REFRESH_COOLDOWN_SECONDS:
             return False
@@ -559,12 +569,36 @@ def _should_kickoff_async_refresh(feed_id: int) -> bool:
 
 
 def _spawn_async_refresh(app: Flask, feed_id: int) -> None:
-    Thread(
-        target=_refresh_feed_background,
-        args=(app, feed_id),
-        daemon=True,
-        name=f"feed-auto-refresh-{feed_id}",
-    ).start()
+    # Read-triggered refreshes are optional nudges: do not queue more work
+    # when readers poll many feeds together. The scheduler maintains freshness.
+    with _BACKGROUND_REFRESH_LOCK:
+        if feed_id in _BACKGROUND_REFRESH_IN_FLIGHT:
+            return
+        if len(_BACKGROUND_REFRESH_IN_FLIGHT) >= _MAX_AUTO_REFRESH_CONCURRENCY:
+            # Capacity may fill between the cooldown check and thread start.
+            # No refresh ran, so allow the next read to retry immediately.
+            _BACKGROUND_REFRESH_LAST_KICKOFF.pop(feed_id, None)
+            return
+        _BACKGROUND_REFRESH_IN_FLIGHT.add(feed_id)
+
+    def run() -> None:
+        try:
+            _refresh_feed_background(app, feed_id)
+        finally:
+            with _BACKGROUND_REFRESH_LOCK:
+                _BACKGROUND_REFRESH_IN_FLIGHT.discard(feed_id)
+
+    try:
+        Thread(
+            target=run,
+            daemon=True,
+            name=f"feed-auto-refresh-{feed_id}",
+        ).start()
+    except Exception:
+        with _BACKGROUND_REFRESH_LOCK:
+            _BACKGROUND_REFRESH_IN_FLIGHT.discard(feed_id)
+            _BACKGROUND_REFRESH_LAST_KICKOFF.pop(feed_id, None)
+        logger.exception("Failed to start automatic refresh for feed %s", feed_id)
 
 
 @feed_bp.route("/feed/<int:f_id>", methods=["GET"])
@@ -1252,6 +1286,7 @@ def _serialize_feed(
         "enable_llm_chapter_fallback_tagging": getattr(
             feed, "enable_llm_chapter_fallback_tagging", None
         ),
+        "chapter_full_block_text": getattr(feed, "chapter_full_block_text", None),
         "enable_profanity_bleeping": bool(
             getattr(feed, "enable_profanity_bleeping", False)
         ),

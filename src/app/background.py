@@ -45,6 +45,11 @@ def add_background_job(minutes: int) -> None:
         trigger="interval",
         minutes=minutes,
         replace_existing=True,
+        # The shared executor has one worker. Run delayed refreshes once instead
+        # of dropping them after the default one-second misfire grace period.
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
     )
 
 
@@ -67,6 +72,9 @@ def schedule_cleanup_job(retention_days: int | None) -> None:
         hours=24,
         next_run_time=datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=15),
         replace_existing=True,
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
     )
 
 

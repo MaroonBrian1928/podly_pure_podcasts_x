@@ -99,3 +99,14 @@ def test_collect_incremental_uses_generation_one(monkeypatch) -> None:
     memory_pressure.collect_incremental("test", logging.getLogger("test"))
 
     assert calls == [1]
+
+
+def test_trim_without_app_context_is_immediate(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        memory_pressure,
+        "release_memory_to_os",
+        lambda context, log: calls.append(context),
+    )
+    memory_pressure.request_memory_trim_after_context("standalone refresh")
+    assert calls == ["standalone refresh"]

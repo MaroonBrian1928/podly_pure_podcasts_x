@@ -14,7 +14,7 @@ import feedparser
 import PyRSS2Gen
 import requests
 from flask import current_app, g, request
-from sqlalchemy.orm import defer
+from sqlalchemy.orm import defer, load_only
 
 from app.extensions import db
 from app.memory_pressure import release_memory_to_os, request_memory_trim_after_context
@@ -390,12 +390,32 @@ def _build_refresh_feed_payload(
         if feed.image_url != new_image_url:
             updates["image_url"] = new_image_url
 
-    existing_posts = {post.guid: post for post in feed.posts}
+    # Refresh matching only needs source metadata. Loading feed.posts also
+    # materializes every transcript/processing JSON document in the archive.
+    posts = (
+        db.session.query(Post)
+        .filter(Post.feed_id == feed.id)
+        .options(
+            load_only(
+                Post.id,
+                Post.guid,
+                Post.download_url,
+                Post.release_date,
+                Post.title,
+                Post.description,
+                Post.image_url,
+                Post.processed_audio_path,
+                Post.duration,
+            )
+        )
+        .all()
+    )
+    existing_posts = {post.guid: post for post in posts}
     existing_posts_by_url = {
-        post.download_url: post for post in feed.posts if post.download_url
+        post.download_url: post for post in posts if post.download_url
     }
     oldest_post = min(
-        (post for post in feed.posts if post.release_date),
+        (post for post in posts if post.release_date),
         key=lambda p: p.release_date,
         default=None,
     )
@@ -566,8 +586,9 @@ def refresh_feed(feed: Feed) -> None:
             # current request session before serializing the feed response.
             db.session.expire_all()
     finally:
-        del feed_data, raw_xml, updates, new_posts, existing_post_updates
-        release_memory_to_os(f"feed refresh feed_id={feed_id}", logger)
+        # The plan owns the same lists as the aliases above. Drop it too before
+        # the single teardown trim, after the DB session releases its objects.
+        del rust_plan, feed_data, raw_xml, updates, new_posts, existing_post_updates
         request_memory_trim_after_context(f"feed refresh feed_id={feed_id}")
 
     logger.info(f"Feed with ID: {feed_id} refreshed")

@@ -1,6 +1,6 @@
 from collections.abc import Generator
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,7 +12,8 @@ from litellm.types.utils import Choices
 from app.extensions import db
 from app.models import AudioSegment, Feed, ModelCall, Post, TranscriptSegment
 from app.writer.client import writer_client
-from podcast_processor.ad_classifier import AdClassifier
+from podcast_processor.ad_classifier import AdClassifier, ClassifyParams
+from podcast_processor.llm_model_call_utils import LLMRequestTooLargeError
 from podcast_processor.model_output import (
     AdSegmentPrediction,
     AdSegmentPredictionList,
@@ -218,6 +219,75 @@ def test_call_model_retry_on_internal_error(test_config: Config, app: Flask) -> 
             assert refreshed.status == "success"
             assert refreshed.response == "test response"
             assert refreshed.retry_attempts == 2
+
+
+def test_prepare_api_call_caps_openai_output_tokens(
+    test_config: Config, app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with app.app_context():
+        test_config.llm_model = "gpt-5.6-luna"
+        test_config.openai_max_tokens = 948_576
+        classifier = AdClassifier(config=test_config)
+        model_call = ModelCall(model_name=test_config.llm_model, prompt="classify")
+
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: {"max_output_tokens": 128_000},
+        )
+
+        args = classifier._prepare_api_call(model_call, "system")
+
+        assert args is not None
+        assert args["max_completion_tokens"] == 128_000
+        assert "max_tokens" not in args
+
+
+def test_exhausted_flex_cycle_uses_gradually_increasing_outer_backoff(
+    test_config: Config, app: Flask
+) -> None:
+    with app.app_context():
+        test_config.llm_model = "gpt-5.6-luna"
+        test_config.llm_service_tier = "flex"
+        classifier = AdClassifier(config=test_config, db_session=db.session)
+        model_call = ModelCall(
+            post_id=0,
+            model_name=test_config.llm_model,
+            prompt="test prompt",
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            status="pending",
+        )
+        db.session.add(model_call)
+        db.session.commit()
+
+        with (
+            patch.object(
+                classifier,
+                "_prepare_api_call",
+                return_value={
+                    "model": test_config.llm_model,
+                    "service_tier": "flex",
+                },
+            ),
+            patch(
+                "podcast_processor.ad_classifier.call_litellm_with_tier_retry",
+                side_effect=RuntimeError("429 resource unavailable"),
+            ) as retry_mock,
+            patch("time.sleep") as sleep_mock,
+        ):
+            with pytest.raises(RuntimeError, match="429 resource unavailable"):
+                classifier._call_model(model_call, "system", max_retries=5)
+
+        assert retry_mock.call_count == 5
+        assert [call.args[0] for call in sleep_mock.call_args_list] == [
+            30,
+            60,
+            120,
+            240,
+        ]
+        db.session.refresh(model_call)
+        assert model_call.status == "failed_retries"
+        assert model_call.retry_attempts == 5
 
 
 def test_call_model_marks_retrying_during_backoff(
@@ -736,3 +806,125 @@ def test_build_chunk_payload_trims_for_token_limit(
     assert len(chunk_segments) >= consumed
     assert mock_validator.call_count == 2
     assert user_prompt
+
+
+def test_step_splits_chunk_after_provider_reports_oversized_input(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    segments = [
+        TranscriptSegment(
+            id=i + 1,
+            post_id=1,
+            sequence_num=i,
+            start_time=float(i),
+            end_time=float(i + 1),
+            text=f"Segment {i}",
+        )
+        for i in range(10)
+    ]
+    params = ClassifyParams(
+        system_prompt="system",
+        user_prompt_template=Template("{{ transcript }}"),
+        post=Post(id=1, title="Test"),
+        num_segments_per_prompt=10,
+        max_overlap_segments=0,
+    )
+
+    with (
+        patch.object(
+            classifier,
+            "_process_chunk",
+            side_effect=[
+                LLMRequestTooLargeError(limit=200_000, requested=212_037),
+                [],
+            ],
+        ) as process_chunk,
+        patch.object(
+            classifier,
+            "_compute_next_overlap_segments",
+            return_value=[],
+        ),
+    ):
+        consumed, overlap = classifier._step(params, [], 0, segments)
+
+    assert consumed == 8
+    assert overlap == []
+    assert process_chunk.call_count == 2
+    assert classifier._adaptive_input_token_limit == 180_000
+
+
+def test_adaptive_chunk_splitting_covers_every_segment_with_overlap(
+    test_classifier_with_mocks: AdClassifier,
+) -> None:
+    classifier = test_classifier_with_mocks
+    segments = [
+        TranscriptSegment(
+            id=i + 1,
+            post_id=1,
+            sequence_num=i,
+            start_time=float(i),
+            end_time=float(i + 1),
+            text=f"Segment {i}",
+        )
+        for i in range(20)
+    ]
+    params = ClassifyParams(
+        system_prompt="",
+        user_prompt_template=Template("{{ transcript }}"),
+        post=Post(id=1, title="Test"),
+        num_segments_per_prompt=10,
+        max_overlap_segments=2,
+    )
+    accepted_chunks: list[list[int]] = []
+    call_count = 0
+
+    def process_chunk(**kwargs: Any) -> list[TranscriptSegment]:
+        nonlocal call_count
+        call_count += 1
+        chunk_segments = cast(list[TranscriptSegment], kwargs["chunk_segments"])
+        if call_count == 1:
+            raise LLMRequestTooLargeError(limit=100, requested=125)
+        accepted_chunks.append([segment.sequence_num for segment in chunk_segments])
+        return []
+
+    def prompt_for_chunk(**kwargs: Any) -> str:
+        chunk_segments = cast(
+            list[TranscriptSegment], kwargs["current_chunk_db_segments"]
+        )
+        # The classifier's fallback estimator treats four characters as one
+        # token, so each segment contributes exactly ten estimated tokens.
+        return "x" * (len(chunk_segments) * 40)
+
+    current_index = 0
+    overlap: list[TranscriptSegment] = []
+    consumed_ranges: list[int] = []
+    with (
+        patch.object(classifier, "_process_chunk", side_effect=process_chunk),
+        patch.object(
+            classifier,
+            "_generate_user_prompt",
+            side_effect=prompt_for_chunk,
+        ),
+    ):
+        while current_index < len(segments):
+            consumed, overlap = classifier._step(
+                params,
+                overlap,
+                current_index,
+                segments,
+            )
+            assert consumed > 0
+            consumed_ranges.extend(range(current_index, current_index + consumed))
+            current_index += consumed
+
+    assert current_index == len(segments)
+    assert consumed_ranges == list(range(len(segments)))
+    assert set().union(*(set(chunk) for chunk in accepted_chunks)) == set(
+        range(len(segments))
+    )
+    assert accepted_chunks == [
+        list(range(0, 7)),
+        list(range(5, 14)),
+        list(range(12, 20)),
+    ]

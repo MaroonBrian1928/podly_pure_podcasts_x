@@ -5,11 +5,15 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
+
+import pytest
+from sqlalchemy import event
 
 import app.jobs_manager as jobs_manager_module
 from app.extensions import db
 from app.jobs_manager import JobsManager
-from app.models import Feed, Post, ProcessingJob
+from app.models import Feed, JobsManagerRun, Post, ProcessingJob
 
 
 def _create_feed() -> Feed:
@@ -148,7 +152,6 @@ def test_start_refresh_all_feeds_refreshes_each_feed_in_short_session(
 
     monkeypatch.setattr(jobs_manager_module, "_scheduler_app_context", app.app_context)
     monkeypatch.setattr(jobs_manager_module, "refresh_feed", fake_refresh_feed)
-    monkeypatch.setattr(jobs_manager_module, "collect_incremental", lambda *_args: None)
     monkeypatch.setattr(
         jobs_manager_module, "release_memory_to_os", lambda *_args: None
     )
@@ -224,6 +227,71 @@ def _manager() -> tuple[JobsManager, FakeStatusManager]:
     manager = JobsManager.__new__(JobsManager)
     manager._status_manager = status_manager
     return manager, status_manager
+
+
+def test_ensure_jobs_reads_only_scheduling_fields(app, monkeypatch, tmp_path):
+    processed = tmp_path / "processed.mp3"
+    processed.write_bytes(b"audio")
+    feed = _create_feed()
+    _create_post(
+        feed_id=feed.id,
+        guid="lightweight-schedule",
+        download_url="https://example.com/audio.mp3",
+        whitelisted=True,
+        processed_audio_path=str(processed),
+    )
+    db.session.remove()
+    statements = []
+
+    def capture_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+
+    engine = db.engine
+    event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        manager, _ = _manager()
+        assert manager._ensure_jobs_for_all_posts(None) == 0
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert len(statements) == 1  # Includes the feed title; no lazy Feed query.
+    assert "transcript_word_timestamps" not in statements[0]
+    assert "description" not in statements[0]
+
+
+@pytest.mark.parametrize("pending_count", [0, 3])
+def test_cleanup_counts_pending_jobs_without_loading_entities(
+    app, monkeypatch, pending_count
+):
+    for index in range(pending_count):
+        _create_job(f"pending-{index}", status="pending")
+    _create_job("completed", status="completed")
+    db.session.remove()
+    manager, _ = _manager()
+    monkeypatch.setattr(manager, "_ensure_jobs_for_all_posts", lambda run_id: 2)
+    action = Mock()
+    monkeypatch.setattr(jobs_manager_module.writer_client, "action", action)
+    loaded = []
+
+    def on_load(job, context):
+        loaded.append(job.id)
+
+    event.listen(ProcessingJob, "load", on_load)
+    try:
+        assert manager._cleanup_and_process_new_posts(JobsManagerRun(id="run-id")) == (
+            2,
+            pending_count,
+        )
+    finally:
+        event.remove(ProcessingJob, "load", on_load)
+
+    assert loaded == []
+    if pending_count:
+        action.assert_called_once_with(
+            "reassign_pending_jobs", {"run_id": "run-id"}, wait=True
+        )
+    else:
+        action.assert_not_called()
 
 
 def test_dequeue_next_job_enters_app_context_for_writer_call(app, monkeypatch) -> None:
@@ -385,3 +453,63 @@ def test_process_job_trims_web_memory_after_worker_exit(app, monkeypatch) -> Non
     manager._process_job(job_id, "trim-guid")
 
     assert trim_contexts == [f"web supervisor after processing job {job_id}"]
+
+
+def test_build_tier_summary_never_reports_attempt_zero() -> None:
+    summary = jobs_manager_module._build_tier_summary(
+        {
+            "label": "flex",
+            "latest": "flex",
+            "latest_status": "pending",
+            "latest_attempt": 0,
+            "latest_next_retry_at": None,
+            "tiers": {"flex"},
+        },
+        5,
+    )
+    in_flight = summary["in_flight"]
+    # A pending row means an attempt is underway; never render "attempt 0".
+    assert in_flight["attempt"] == 1
+    assert in_flight["status"] == "pending"
+    assert "backoff_until" not in in_flight
+
+
+def test_build_tier_summary_includes_backoff_deadline_when_retrying() -> None:
+    from datetime import datetime
+
+    summary = jobs_manager_module._build_tier_summary(
+        {
+            "label": "flex",
+            "latest": "flex",
+            "latest_status": "retrying",
+            "latest_attempt": 2,
+            "latest_next_retry_at": datetime(2026, 6, 10, 12, 0, 30),
+            "tiers": {"flex"},
+        },
+        5,
+    )
+    in_flight = summary["in_flight"]
+    assert in_flight["status"] == "retrying"
+    assert in_flight["attempt"] == 2
+    assert in_flight["backoff_until"] == "2026-06-10T12:00:30Z"
+
+
+def test_build_tier_summary_names_chapter_calls() -> None:
+    summary = jobs_manager_module._build_tier_summary(
+        {
+            "label": "flex",
+            "latest": "flex",
+            "latest_status": "pending",
+            "latest_attempt": 1,
+            "latest_next_retry_at": None,
+            "latest_call_label": jobs_manager_module._in_flight_call_label(-200, -200),
+            "tiers": {"flex"},
+        },
+        5,
+    )
+    assert summary["in_flight"]["call_label"] == "chapter topic plan"
+
+    # Real segment ranges (classification/boundary calls) get no label — the
+    # stage caption already says what's happening.
+    assert jobs_manager_module._in_flight_call_label(0, 1890) is None
+    assert jobs_manager_module._in_flight_call_label(-100, -100) == "chapter titles"

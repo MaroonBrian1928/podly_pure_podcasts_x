@@ -72,13 +72,18 @@ def upsert_model_call_action(params: dict[str, Any]) -> dict[str, Any]:
             if model_call is None:
                 raise
 
-    # Reset rows the next run is allowed to re-attempt: previously aborted
-    # (pending, retrying, failed_retries) or explicitly cancelled by a
-    # superseding job. Without these here, the next upsert of the same chunk
-    # would find the row, leave its status alone, and the classifier would
-    # immediately re-call the LLM with the wrong carried-over error_message
-    # visible in the UI.
-    if model_call.status in ["pending", "retrying", "failed_retries", "cancelled"]:
+    # Reset rows a later processing job is allowed to re-attempt. A
+    # failed_permanent status is terminal only for the job that made the bad
+    # request; keeping it forever would make every future job surface the old
+    # provider error without issuing a new model call after configuration or
+    # provider support has been fixed.
+    if model_call.status in [
+        "pending",
+        "retrying",
+        "failed_retries",
+        "failed_permanent",
+        "cancelled",
+    ]:
         model_call.status = "pending"
         model_call.prompt = str(prompt)
         model_call.retry_attempts = 0

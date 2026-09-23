@@ -71,6 +71,14 @@ MEMORY_TRIM_ACTIONS = {
     "upsert_model_call",
 }
 
+# Timestamp-only writes allocate little; the periodic writer trim handles their
+# accumulated allocator overhead without a full collection on every RSS read.
+DEFERRED_MEMORY_TRIM_ACTIONS = {
+    "dequeue_job",
+    "touch_feed_access_token",
+    "update_user_last_active",
+}
+
 
 def _action_name(cmd: object) -> str | None:
     data = getattr(cmd, "data", None)
@@ -84,7 +92,7 @@ def _memory_trim_context_for_command(cmd: object) -> str | None:
     if getattr(cmd, "type", None) != WriteCommandType.ACTION:
         return None
     action = _action_name(cmd)
-    if action == "dequeue_job":
+    if action in DEFERRED_MEMORY_TRIM_ACTIONS:
         return None
     if action not in MEMORY_TRIM_ACTIONS:
         return f"writer action {action or 'unknown'}"

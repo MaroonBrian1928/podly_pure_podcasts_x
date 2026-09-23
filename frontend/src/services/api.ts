@@ -225,6 +225,8 @@ export const feedsApi = {
         status: 'pending' | 'retrying';
         attempt: number;
         max_retries?: number;
+        backoff_until?: string;
+        call_label?: string;
       };
     };
     stage_history?: JobStageEvent[];
@@ -519,6 +521,8 @@ export const feedsApi = {
         status: 'pending' | 'retrying';
         attempt: number;
         max_retries?: number;
+        backoff_until?: string;
+        call_label?: string;
       };
     };
     stage_history?: JobStageEvent[];
@@ -848,6 +852,12 @@ export const configApi = {
     payload: Partial<{ whisper: WhisperConfig }>
   ): Promise<{ ok: boolean; message?: string; error?: string }> => {
     const response = await api.post('/api/config/test-whisper', payload ?? {});
+    return response.data;
+  },
+  testNotification: async (
+    payload: Partial<{ notifications: { apprise_urls?: string[] } }>
+  ): Promise<{ ok: boolean; message?: string; error?: string }> => {
+    const response = await api.post('/api/config/test-notification', payload ?? {});
     return response.data;
   },
 };

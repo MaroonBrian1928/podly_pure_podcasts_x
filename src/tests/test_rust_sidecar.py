@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -59,6 +60,8 @@ def test_try_render_feed_posts_returns_not_found_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    notify = Mock()
+    monkeypatch.setattr(rust_sidecar, "_notify_rust_fallback", notify)
 
     def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(
@@ -75,6 +78,7 @@ def test_try_render_feed_posts_returns_not_found_sentinel(
         whitelisted_only=False,
     )
     assert result is rust_sidecar.FEED_POSTS_NOT_FOUND
+    notify.assert_not_called()
 
 
 def test_try_render_feed_posts_rejects_payload_without_items_prefix(
@@ -105,6 +109,8 @@ def test_try_render_feed_posts_returns_raw_bytes_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    notify = Mock()
+    monkeypatch.setattr(rust_sidecar, "_notify_rust_fallback", notify)
     seen: list[list[str]] = []
     raw = (
         b'{"items":[{"id":1,"guid":"g","title":"t"}],'
@@ -127,6 +133,7 @@ def test_try_render_feed_posts_returns_raw_bytes_unchanged(
     # The wrapper must hand back the raw bytes unchanged (modulo trailing
     # newline) so Flask streams them directly without re-serializing.
     assert payload == raw
+    notify.assert_not_called()
     cmd = seen[0]
     assert "posts" in cmd and "feed-list" in cmd
     assert "--feed-id" in cmd and "7" in cmd
@@ -155,6 +162,62 @@ def test_try_render_feed_posts_falls_back_on_nonzero_exit(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        (OSError("missing binary"), "failed to start podly_tools: missing binary"),
+        (
+            subprocess.TimeoutExpired("podly_tools", 300),
+            "podly_tools timed out after 300s",
+        ),
+        (
+            subprocess.CompletedProcess([], 2, stdout=b"", stderr=b"db locked\n"),
+            "podly_tools exited with 2: db locked",
+        ),
+        (
+            subprocess.CompletedProcess([], 1, stdout=b"", stderr=b""),
+            "podly_tools exited with 1: <no stderr>",
+        ),
+        (
+            subprocess.CompletedProcess([], 0, stdout=b"not JSON", stderr=b""),
+            "podly_tools returned an unexpected payload prefix",
+        ),
+        (
+            subprocess.CompletedProcess([], 0, stdout=b"{}", stderr=b""),
+            "podly_tools returned an unexpected payload prefix",
+        ),
+    ],
+)
+def test_try_render_feed_posts_notifies_and_logs_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: Exception | subprocess.CompletedProcess[bytes],
+    expected_error: str,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_FEED_POSTS_ENABLED", "true")
+    notify = Mock()
+    monkeypatch.setattr(rust_sidecar, "_notify_rust_fallback", notify)
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert (
+        rust_sidecar.try_render_feed_posts(
+            db_path=Path("/tmp/x.sqlite"),
+            feed_id=1,
+            page=1,
+            page_size=25,
+            whitelisted_only=False,
+        )
+        is None
+    )
+    notify.assert_called_once_with("posts feed-list", expected_error)
+    assert "falling back to Python" in caplog.text
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
@@ -226,17 +289,74 @@ def test_try_probe_audio_duration_falls_back_on_bad_payload(
     assert rust_sidecar.try_probe_audio_duration_ms(Path("x.mp3")) is None
 
 
+def test_rust_audio_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", raising=False)
+    assert (
+        rust_sidecar.rust_audio_timeout_sec()
+        == rust_sidecar.DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    )
+
+
+def test_rust_audio_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", "120")
+    assert rust_sidecar.rust_audio_timeout_sec() == 120
+
+
+def test_rust_audio_timeout_invalid_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", "not-a-number")
+    assert (
+        rust_sidecar.rust_audio_timeout_sec()
+        == rust_sidecar.DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    )
+
+
+def test_bleep_audio_uses_long_audio_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Regression: the bleep sidecar command must run with the generous audio
+    # timeout, not the 300s default -- long bleep jobs were timing out and
+    # falling back to Python.
+    monkeypatch.setenv("PODLY_RUST_AUDIO_ENABLED", "true")
+    monkeypatch.setenv("PODLY_RUST_AUDIO_TIMEOUT_SEC", "1800")
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
+        captured["timeout_sec"] = timeout_sec
+        return {"ok": True}
+
+    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+
+    ok = rust_sidecar.try_bleep_audio(
+        windows_ms=[(1000, 2000)],
+        input_path=tmp_path / "in.mp3",
+        output_path=tmp_path / "out.mp3",
+        beep_frequency_hz=1000,
+        beep_volume=0.5,
+        duck_volume=0.0,
+        encoding="cbr",
+        cbr_bitrate_bps=128000,
+    )
+
+    assert ok is True
+    assert captured["timeout_sec"] == 1800
+
+
 def test_try_render_feed_xml_uses_rust_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = []
 
-    def fake_run(args: list[str]) -> dict[str, object]:
-        calls.append(args)
-        return {"xml": "<rss></rss>"}
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command[1:])
+        assert "text" not in kwargs
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'<?xml version="1.0"?><rss></rss>\n', stderr=b""
+        )
 
     monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
-    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+    monkeypatch.setattr(rust_sidecar.subprocess, "run", fake_run)
 
     result = rust_sidecar.try_render_feed_xml(
         db_path=Path("/tmp/db.sqlite"),
@@ -247,7 +367,7 @@ def test_try_render_feed_xml_uses_rust_when_enabled(
         feed_secret="secret",
     )
 
-    assert result == b"<rss></rss>"
+    assert result == b'<?xml version="1.0"?><rss></rss>\n'
     assert calls == [
         [
             "feed",
@@ -262,6 +382,7 @@ def test_try_render_feed_xml_uses_rust_when_enabled(
             "token",
             "--feed-secret",
             "secret",
+            "--raw-xml",
         ]
     ]
 
@@ -271,12 +392,15 @@ def test_try_render_feed_xml_passes_include_unprocessed_as_bare_flag(
 ) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(args: list[str]) -> dict[str, object]:
-        calls.append(args)
-        return {"xml": "<rss></rss>"}
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command[1:])
+        assert "text" not in kwargs
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'<?xml version="1.0"?><rss></rss>\n', stderr=b""
+        )
 
     monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
-    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+    monkeypatch.setattr(rust_sidecar.subprocess, "run", fake_run)
 
     rust_sidecar.try_render_feed_xml(
         db_path=Path("/tmp/db.sqlite"),
@@ -298,12 +422,15 @@ def test_try_render_aggregate_feed_xml_passes_require_auth_as_bare_flag(
 ) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(args: list[str]) -> dict[str, object]:
-        calls.append(args)
-        return {"xml": "<rss></rss>"}
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command[1:])
+        assert "text" not in kwargs
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'<?xml version="1.0"?><rss></rss>\n', stderr=b""
+        )
 
     monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
-    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+    monkeypatch.setattr(rust_sidecar.subprocess, "run", fake_run)
 
     result = rust_sidecar.try_render_aggregate_feed_xml(
         db_path=Path("/tmp/db.sqlite"),
@@ -315,7 +442,7 @@ def test_try_render_aggregate_feed_xml_passes_require_auth_as_bare_flag(
         feed_secret=None,
     )
 
-    assert result == b"<rss></rss>"
+    assert result == b'<?xml version="1.0"?><rss></rss>\n'
     assert calls == [
         [
             "feed",
@@ -329,6 +456,7 @@ def test_try_render_aggregate_feed_xml_passes_require_auth_as_bare_flag(
             "--limit-per-feed",
             "25",
             "--require-auth",
+            "--raw-xml",
         ]
     ]
 
@@ -338,12 +466,15 @@ def test_try_render_aggregate_feed_xml_omits_require_auth_when_false(
 ) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(args: list[str]) -> dict[str, object]:
-        calls.append(args)
-        return {"xml": "<rss></rss>"}
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command[1:])
+        assert "text" not in kwargs
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b'<?xml version="1.0"?><rss></rss>\n', stderr=b""
+        )
 
     monkeypatch.setenv("PODLY_RUST_FEED_XML_ENABLED", "true")
-    monkeypatch.setattr(rust_sidecar, "run_podly_tools", fake_run)
+    monkeypatch.setattr(rust_sidecar.subprocess, "run", fake_run)
 
     rust_sidecar.try_render_aggregate_feed_xml(
         db_path=Path("/tmp/db.sqlite"),
@@ -356,6 +487,48 @@ def test_try_render_aggregate_feed_xml_omits_require_auth_when_false(
     )
 
     assert "--require-auth" not in calls[0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("missing binary"),
+        subprocess.TimeoutExpired("podly_tools", 300),
+        subprocess.CompletedProcess([], 2, stdout=b"", stderr=b"old binary"),
+        subprocess.CompletedProcess(
+            [], 0, stdout=b'{"xml":"old protocol"}', stderr=b""
+        ),
+        subprocess.CompletedProcess([], 0, stdout=b"<?xml truncated", stderr=b""),
+    ],
+)
+def test_raw_rss_failures_notify_and_fall_back(monkeypatch, failure, caplog):
+    notices = []
+
+    def run(*args, **kwargs):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(rust_sidecar.subprocess, "run", run)
+    monkeypatch.setattr(
+        rust_sidecar, "_notify_rust_fallback", lambda *args: notices.append(args)
+    )
+    assert rust_sidecar._try_feed_xml_command(["feed", "render"], "feed render") is None
+    assert len(notices) == 1
+    assert notices[0][0] == "feed render"
+    assert "falling back to Python" in caplog.text
+
+
+def test_raw_rss_returns_original_bytes_without_json_roundtrip(monkeypatch):
+    xml = '<?xml version="1.0"?><rss><title>Café &amp; tea</title></rss>\n'.encode()
+    monkeypatch.setattr(
+        rust_sidecar.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=xml, stderr=b""
+        ),
+    )
+    assert rust_sidecar._try_feed_xml_command(["feed", "render"], "feed render") is xml
 
 
 def test_try_render_post_stats_returns_none_when_disabled(

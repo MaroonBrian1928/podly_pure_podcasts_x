@@ -3,12 +3,12 @@ from unittest import mock
 from urllib.parse import quote
 
 from app.extensions import db
-from app.models import Feed, Post
-from app.routes.post_routes import (
-    _build_troubleshoot_context,
-    _select_troubleshoot_entries,
-    post_bp,
+from app.failure_explainer import (
+    build_troubleshoot_context,
+    select_troubleshoot_entries,
 )
+from app.models import Feed, Post
+from app.routes.post_routes import post_bp
 from app.runtime_config import config as runtime_config
 
 
@@ -67,7 +67,7 @@ def test_select_troubleshoot_entries_prefers_flagged_levels():
             {"level": "WARNING", "message": "careful"},
         ]
     }
-    selected = _select_troubleshoot_entries(related)
+    selected = select_troubleshoot_entries(related)
     assert [e["message"] for e in selected] == ["boom", "careful"]
 
 
@@ -75,7 +75,7 @@ def test_select_troubleshoot_entries_falls_back_when_no_flagged():
     related = {
         "entries": [{"level": "INFO", "message": f"line {i}"} for i in range(20)]
     }
-    selected = _select_troubleshoot_entries(related)
+    selected = select_troubleshoot_entries(related)
     # Falls back to the tail of available entries (15) when nothing is flagged.
     assert len(selected) == 15
     assert selected[-1]["message"] == "line 19"
@@ -86,13 +86,14 @@ def test_troubleshoot_context_captures_traceback(app, tmp_path):
     log_file.write_text(_FAKE_LOG)
 
     with app.app_context():
-        post = Post(feed_id=1, guid=_GUID, title="x")
         # No jobs passed: the synthetic failure line is tagged with post_guid,
-        # so anchoring works off the post alone.
+        # so anchoring works off the post guid alone.
         with mock.patch(
-            "app.routes.post_routes._get_app_log_path", return_value=log_file
+            "app.failure_explainer.get_app_log_path", return_value=log_file
         ):
-            context = _build_troubleshoot_context(post=post, recent_jobs=[])
+            context = build_troubleshoot_context(
+                post_guid=_GUID, post_id=1, job_ids=set()
+            )
 
     assert context is not None
     # The root cause (traceback + underlying exception) must be present --
@@ -113,11 +114,13 @@ def test_troubleshoot_context_returns_none_without_failure(app, tmp_path):
         '2026-06-04 17:37:00,000 INFO all good here | extra={"taskName": null}\n'
     )
     with app.app_context():
-        post = Post(feed_id=1, guid=_GUID, title="x")
         with mock.patch(
-            "app.routes.post_routes._get_app_log_path", return_value=log_file
+            "app.failure_explainer.get_app_log_path", return_value=log_file
         ):
-            assert _build_troubleshoot_context(post=post, recent_jobs=[]) is None
+            assert (
+                build_troubleshoot_context(post_guid=_GUID, post_id=1, job_ids=set())
+                is None
+            )
 
 
 def test_troubleshoot_returns_explanation_from_traceback(app, tmp_path):
@@ -132,9 +135,7 @@ def test_troubleshoot_returns_explanation_from_traceback(app, tmp_path):
     runtime_config.llm_api_key = "sk-test"
     try:
         with (
-            mock.patch(
-                "app.routes.post_routes._get_app_log_path", return_value=log_file
-            ),
+            mock.patch("app.failure_explainer.get_app_log_path", return_value=log_file),
             mock.patch(
                 "litellm.completion",
                 return_value=_fake_completion_response(
@@ -183,7 +184,7 @@ def test_troubleshoot_falls_back_to_structured_entries(app):
     try:
         with (
             mock.patch(
-                "app.routes.post_routes._build_troubleshoot_context",
+                "app.routes.post_routes.build_troubleshoot_context",
                 return_value=None,
             ),
             mock.patch(
@@ -219,7 +220,7 @@ def test_troubleshoot_without_api_key_returns_400(app):
     runtime_config.llm_api_key = None
     try:
         with mock.patch(
-            "app.routes.post_routes._build_troubleshoot_context",
+            "app.routes.post_routes.build_troubleshoot_context",
             return_value="some traceback",
         ):
             response = app.test_client().post(
@@ -241,7 +242,7 @@ def test_troubleshoot_with_no_logs_reports_nothing_to_diagnose(app):
 
     with (
         mock.patch(
-            "app.routes.post_routes._build_troubleshoot_context", return_value=None
+            "app.routes.post_routes.build_troubleshoot_context", return_value=None
         ),
         mock.patch(
             "app.routes.post_routes._build_related_logs",

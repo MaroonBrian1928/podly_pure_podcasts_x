@@ -144,7 +144,7 @@ def release_memory_to_os(
 
 
 def request_memory_trim_after_context(context: str) -> None:
-    """Request a second trim after Flask tears down session/app-context state."""
+    """Request a trim after Flask tears down session/app-context state."""
     try:
         contexts = getattr(g, _TRIM_CONTEXTS_ATTR, None)
         if contexts is None:

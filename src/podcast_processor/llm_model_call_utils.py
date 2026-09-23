@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.writer.client import writer_client
@@ -10,13 +12,69 @@ from shared import defaults as DEFAULTS
 # Providers that accept the OpenAI-style `service_tier` kwarg via litellm.
 # Anthropic, Groq, xAI, etc. do not, so we skip the kwarg for those.
 _SERVICE_TIER_MODEL_PREFIXES = ("gemini/", "openai/")
+_OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4")
 _VALID_SERVICE_TIERS = {"default", "flex", "priority", "auto"}
+_TPM_REQUEST_LIMIT_RE = re.compile(
+    r"tokens per min(?:ute)?[^\n]*?limit\s*:?\s*([\d,]+)"
+    r"[^\n]*?requested\s*:?\s*([\d,]+)",
+    re.IGNORECASE,
+)
+
+
+class LLMRequestTooLargeError(Exception):
+    """A provider rejected one request because it exceeds the TPM ceiling."""
+
+    def __init__(self, *, limit: int, requested: int) -> None:
+        self.limit = limit
+        self.requested = requested
+        super().__init__(
+            "LLM request too large on tokens per minute (TPM): "
+            f"Limit {limit}, Requested {requested}"
+        )
+
+    @classmethod
+    def from_message(cls, message: str | None) -> LLMRequestTooLargeError | None:
+        if not message:
+            return None
+        match = _TPM_REQUEST_LIMIT_RE.search(message)
+        if match is None:
+            return None
+        return cls(
+            limit=int(match.group(1).replace(",", "")),
+            requested=int(match.group(2).replace(",", "")),
+        )
 
 
 def model_supports_service_tier(model_name: str | None) -> bool:
     if not model_name:
         return False
-    return model_name.startswith(_SERVICE_TIER_MODEL_PREFIXES)
+    if model_name.startswith(_SERVICE_TIER_MODEL_PREFIXES):
+        return True
+    return "/" not in model_name and model_name.startswith(_OPENAI_MODEL_PREFIXES)
+
+
+def _model_supports_flex_tier(model_name: str | None) -> bool:
+    if not model_name:
+        return False
+    if model_name.startswith("gemini/"):
+        return True
+    if not (
+        model_name.startswith("openai/")
+        or ("/" not in model_name and model_name.startswith(_OPENAI_MODEL_PREFIXES))
+    ):
+        return False
+
+    # OpenAI Flex has limited model availability. LiteLLM's price table tracks
+    # that support with explicit Flex rates, which avoids sending a tier that
+    # OpenAI will reject while staying current as LiteLLM adds models.
+    import litellm
+
+    normalized_name = model_name.removeprefix("openai/")
+    cost_entry = litellm.model_cost.get(normalized_name, {})
+    return all(
+        key in cost_entry
+        for key in ("input_cost_per_token_flex", "output_cost_per_token_flex")
+    )
 
 
 def _resolved_tier(config: Any) -> str:
@@ -79,8 +137,34 @@ def apply_service_tier(
         return completion_args
     if not model_supports_service_tier(completion_args.get("model")):
         return completion_args
+    if tier == "flex" and not _model_supports_flex_tier(completion_args.get("model")):
+        return completion_args
     completion_args["service_tier"] = tier
     return completion_args
+
+
+def _record_effective_service_tier(
+    response: Any,
+    completion_args: dict[str, Any],
+    *,
+    model_call_id: int | None,
+    logger: logging.Logger,
+) -> Any:
+    """Keep request state and ModelCall pricing aligned with the served tier."""
+    response_tier = getattr(response, "service_tier", None)
+    if response_tier is None and isinstance(response, dict):
+        response_tier = response.get("service_tier")
+    normalized_tier = str(response_tier or "").strip().lower()
+    if normalized_tier in {"flex", "priority"}:
+        completion_args["service_tier"] = normalized_tier
+    elif normalized_tier in {"default", "auto"}:
+        completion_args.pop("service_tier", None)
+    record_service_tier_on_model_call(
+        model_call_id,
+        completion_args,
+        logger=logger,
+    )
+    return response
 
 
 def _is_tier_retryable(exc: Exception) -> bool:
@@ -96,6 +180,146 @@ def _is_tier_retryable(exc: Exception) -> bool:
     return False
 
 
+def _call_with_tpm_adjustment(
+    completion: Any,
+    completion_args: dict[str, Any],
+    *,
+    logger: logging.Logger,
+) -> Any:
+    """Retry once with a smaller output allowance after a per-request TPM error.
+
+    OpenAI's reservation can be driven by either the estimated input or the
+    requested maximum output. The account-specific ceiling is not present in
+    LiteLLM's model metadata, so the first response is the only authoritative
+    place to learn it. Keep a small margin below the reported limit to avoid
+    token-estimation rounding on the retry.
+    """
+    try:
+        return completion(**completion_args)
+    except Exception as exc:
+        match = _TPM_REQUEST_LIMIT_RE.search(str(exc))
+        if match is None:
+            raise
+
+        limit = int(match.group(1).replace(",", ""))
+        requested = int(match.group(2).replace(",", ""))
+        overage = requested - limit
+        token_key = next(
+            (
+                key
+                for key in ("max_completion_tokens", "max_tokens")
+                if completion_args.get(key) is not None
+            ),
+            None,
+        )
+        if overage <= 0:
+            raise
+        if token_key is None:
+            raise LLMRequestTooLargeError(
+                limit=limit,
+                requested=requested,
+            ) from exc
+
+        try:
+            old_output_limit = int(completion_args[token_key])
+        except TypeError, ValueError:
+            raise exc from None
+
+        # OpenAI calculates this reservation as the greater of the estimated
+        # input and requested output. If Requested is already above the output
+        # allowance, shrinking output cannot change the rejected reservation;
+        # the caller must split the input instead.
+        if requested > old_output_limit:
+            raise LLMRequestTooLargeError(
+                limit=limit,
+                requested=requested,
+            ) from exc
+
+        safety_margin = max(1_000, limit // 100)
+        new_output_limit = old_output_limit - overage - safety_margin
+        if new_output_limit <= 0:
+            raise
+
+        completion_args[token_key] = new_output_limit
+        logger.warning(
+            "LLM request exceeded the provider's per-request TPM allowance "
+            "(%s requested, %s allowed); reducing %s from %s to %s and "
+            "retrying once",
+            requested,
+            limit,
+            token_key,
+            old_output_limit,
+            new_output_limit,
+        )
+        try:
+            return completion(**completion_args)
+        except Exception as retry_exc:
+            retry_match = _TPM_REQUEST_LIMIT_RE.search(str(retry_exc))
+            if retry_match is None:
+                raise
+            raise LLMRequestTooLargeError(
+                limit=int(retry_match.group(1).replace(",", "")),
+                requested=int(retry_match.group(2).replace(",", "")),
+            ) from retry_exc
+
+
+def _mark_model_call_backoff(
+    model_call_id: int | None,
+    *,
+    wait_seconds: float,
+    error: Exception,
+    attempt_num: int,
+    max_attempts: int,
+    logger: logging.Logger,
+) -> None:
+    """Best-effort: flip the row to `retrying` with the backoff deadline.
+
+    Without this, a flex-tier backoff leaves the row sitting at `pending` for
+    the whole sleep and the jobs UI can't tell "waiting on the provider" from
+    "sleeping before a retry"."""
+    if model_call_id is None:
+        return
+    next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(
+        seconds=wait_seconds
+    )
+    try:
+        writer_client.update(
+            "ModelCall",
+            int(model_call_id),
+            {
+                "status": "retrying",
+                "error_message": (
+                    f"Flex tier busy (attempt {attempt_num}/{max_attempts}): {error}"
+                ),
+                "next_retry_at": next_retry_at,
+            },
+            wait=True,
+        )
+    except Exception as exc:  # best-effort  # noqa: BLE001
+        logger.warning(
+            "Failed to record flex backoff on ModelCall %s: %s", model_call_id, exc
+        )
+
+
+def _mark_model_call_attempt_started(
+    model_call_id: int | None, *, logger: logging.Logger
+) -> None:
+    """Best-effort: back to `pending` (request in flight), clearing the deadline."""
+    if model_call_id is None:
+        return
+    try:
+        writer_client.update(
+            "ModelCall",
+            int(model_call_id),
+            {"status": "pending", "next_retry_at": None},
+            wait=True,
+        )
+    except Exception as exc:  # best-effort  # noqa: BLE001
+        logger.warning(
+            "Failed to clear flex backoff on ModelCall %s: %s", model_call_id, exc
+        )
+
+
 def call_litellm_with_tier_retry(
     completion_args: dict[str, Any],
     *,
@@ -104,6 +328,7 @@ def call_litellm_with_tier_retry(
     max_retries: int | None = None,
     base_delay: float | None = None,
     sleep: Any = time.sleep,
+    model_call_id: int | None = None,
 ) -> Any:
     """Run `litellm.completion(**args)` with Flex-aware retry + fallback.
 
@@ -112,6 +337,11 @@ def call_litellm_with_tier_retry(
     kwarg so the call retries at the standard tier instead of failing. For
     'priority' / 'auto' / 'default' (or when the kwarg isn't set), this is a
     single straight-through `litellm.completion` invocation.
+
+    When ``model_call_id`` is supplied, backoff windows are persisted on the
+    ModelCall row (`status="retrying"` + `next_retry_at`) so the jobs UI can
+    show the live backoff state; the row returns to `pending` as each retry
+    attempt goes out. All such writes are best-effort.
     """
     import litellm  # local import to keep top-level imports cheap
 
@@ -121,7 +351,17 @@ def call_litellm_with_tier_retry(
 
     flex_active = completion_args.get("service_tier") == "flex"
     if not flex_active:
-        return litellm.completion(**completion_args)
+        response = _call_with_tpm_adjustment(
+            litellm.completion,
+            completion_args,
+            logger=logger,
+        )
+        return _record_effective_service_tier(
+            response,
+            completion_args,
+            model_call_id=model_call_id,
+            logger=logger,
+        )
 
     retries = (
         max_retries
@@ -137,7 +377,17 @@ def call_litellm_with_tier_retry(
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            return litellm.completion(**completion_args)
+            response = _call_with_tpm_adjustment(
+                litellm.completion,
+                completion_args,
+                logger=logger,
+            )
+            return _record_effective_service_tier(
+                response,
+                completion_args,
+                model_call_id=model_call_id,
+                logger=logger,
+            )
         except Exception as exc:
             last_err = exc
             if not _is_tier_retryable(exc):
@@ -150,9 +400,19 @@ def call_litellm_with_tier_retry(
                     retries,
                     exc,
                 )
-                fallback_args = dict(completion_args)
-                fallback_args.pop("service_tier", None)
-                return litellm.completion(**fallback_args)
+                _mark_model_call_attempt_started(model_call_id, logger=logger)
+                completion_args.pop("service_tier", None)
+                response = _call_with_tpm_adjustment(
+                    litellm.completion,
+                    completion_args,
+                    logger=logger,
+                )
+                return _record_effective_service_tier(
+                    response,
+                    completion_args,
+                    model_call_id=model_call_id,
+                    logger=logger,
+                )
             wait = delay * (2**attempt)
             logger.info(
                 "Flex tier busy (%s); retrying in %.1fs (attempt %d/%d)",
@@ -161,7 +421,16 @@ def call_litellm_with_tier_retry(
                 attempt + 1,
                 retries,
             )
+            _mark_model_call_backoff(
+                model_call_id,
+                wait_seconds=float(wait),
+                error=exc,
+                attempt_num=attempt + 1,
+                max_attempts=retries,
+                logger=logger,
+            )
             sleep(wait)
+            _mark_model_call_attempt_started(model_call_id, logger=logger)
 
     assert last_err is not None
     raise last_err

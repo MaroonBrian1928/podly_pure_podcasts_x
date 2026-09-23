@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from app.extensions import db
+from app.models import Feed, ModelCall, Post
 from podcast_processor.ad_classifier import AdClassifier
 from podcast_processor.audio_processor import AudioProcessor
 from podcast_processor.ina_client import AudioSegmentResult
@@ -9,6 +11,74 @@ from podcast_processor.podcast_processor import PodcastProcessor
 from podcast_processor.processing_status_manager import ProcessingStatusManager
 from podcast_processor.transcription_manager import TranscriptionManager
 from shared.test_utils import create_standard_test_config
+
+
+def test_classification_counts_exclude_ina_and_whisper_and_surface_error(app) -> None:
+    with app.app_context():
+        feed = Feed(title="Counts", rss_url="https://example.com/counts.xml")
+        db.session.add(feed)
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid="classification-counts",
+            title="Counts",
+            download_url="https://example.com/counts.mp3",
+        )
+        db.session.add(post)
+        db.session.flush()
+
+        config = create_standard_test_config()
+        config.llm_model = "gpt-5.6-luna"
+        db.session.add_all(
+            [
+                ModelCall(
+                    post_id=post.id,
+                    model_name=config.llm_model,
+                    prompt="classify",
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=10,
+                    status="failed_permanent",
+                    error_message="max_tokens exceeds 128000",
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    model_name="ina:speech_music_noise",
+                    prompt="INA",
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=1,
+                    status="success",
+                ),
+                ModelCall(
+                    post_id=post.id,
+                    model_name="whisper-large-v3",
+                    prompt="Whisper transcription job",
+                    first_segment_sequence_num=0,
+                    last_segment_sequence_num=10,
+                    status="success",
+                ),
+            ]
+        )
+        db.session.commit()
+
+        processor = PodcastProcessor(
+            config=config,
+            transcription_manager=MagicMock(spec=TranscriptionManager),
+            ad_classifier=MagicMock(spec=AdClassifier),
+            audio_processor=MagicMock(spec=AudioProcessor),
+            status_manager=MagicMock(spec=ProcessingStatusManager),
+            db_session=db.session,
+            downloader=MagicMock(spec=PodcastDownloader),
+        )
+
+        counts = processor._get_llm_classification_model_call_counts(int(post.id))
+
+        assert counts is not None
+        assert counts.total == 1
+        assert counts.successful == 0
+        assert (
+            processor._get_latest_llm_classification_error(int(post.id))
+            == "max_tokens exceeds 128000"
+        )
 
 
 def test_run_ina_analysis_persists_segments_and_updates_model_call(app) -> None:

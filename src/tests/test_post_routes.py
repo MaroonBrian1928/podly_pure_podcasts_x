@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import quote
 
+import pytest
 from flask import g
+from sqlalchemy import event
 
 from app.extensions import db
 from app.models import (
@@ -572,6 +574,62 @@ def test_toggle_whitelist_all_requires_admin(app):
         assert whitelisted == 2
 
 
+@pytest.mark.parametrize("initial_statuses", [[], [True, False], [True, True]])
+def test_toggle_whitelist_all_does_not_load_post_entities(app, initial_statuses):
+    app.testing = True
+    app.register_blueprint(post_bp)
+
+    with app.app_context():
+        feed = Feed(title="Bulk Feed", rss_url="https://example.com/bulk.xml")
+        db.session.add(feed)
+        db.session.flush()
+        feed_id = feed.id
+        db.session.add_all(
+            [
+                Post(
+                    feed_id=feed_id,
+                    guid=f"bulk-memory-{index}",
+                    title=f"Episode {index}",
+                    download_url=f"https://example.com/{index}.mp3",
+                    whitelisted=status,
+                    transcript_word_timestamps=[{"word": "unused", "start": 0}],
+                )
+                for index, status in enumerate(initial_statuses)
+            ]
+        )
+        db.session.commit()
+
+    loaded_posts = []
+
+    def record_post_load(post, context):
+        loaded_posts.append(post.id)
+
+    event.listen(Post, "load", record_post_load)
+    try:
+        response = app.test_client().post(f"/api/feeds/{feed_id}/toggle-whitelist-all")
+    finally:
+        event.remove(Post, "load", record_post_load)
+
+    assert response.status_code == 200
+    assert loaded_posts == []
+    payload = response.get_json()
+    assert payload["total_count"] == len(initial_statuses)
+    if not initial_statuses:
+        assert payload["message"] == "No posts found in this feed"
+        assert payload["whitelisted_count"] == 0
+    else:
+        expected_status = not all(initial_statuses)
+        assert payload["all_whitelisted"] is expected_status
+        assert payload["updated_count"] == len(initial_statuses)
+        assert payload["whitelisted_count"] == (
+            len(initial_statuses) if expected_status else 0
+        )
+        with app.app_context():
+            assert Post.query.filter_by(
+                feed_id=feed_id, whitelisted=expected_status
+            ).count() == len(initial_statuses)
+
+
 def test_feed_posts_pagination_and_filtering(app):
     """Feed posts endpoint should paginate and support whitelisted filter."""
 
@@ -873,6 +931,55 @@ def test_reprocess_keep_transcript_rejects_transcript_for_old_whisper_model(app)
     assert payload is not None
     assert payload["error_code"] == "NO_REUSABLE_TRANSCRIPT"
     clear_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("use_rust", [False, True])
+def test_post_stats_does_not_select_word_timestamps(app, use_rust):
+    app.testing = True
+    app.register_blueprint(post_bp)
+    guid = "stats-deferred-words"
+
+    with app.app_context():
+        feed = Feed(title="Stats Feed", rss_url="https://example.com/stats.xml")
+        db.session.add(feed)
+        db.session.flush()
+        db.session.add(
+            Post(
+                feed_id=feed.id,
+                guid=guid,
+                title="Stats Episode",
+                download_url="https://example.com/audio.mp3",
+                transcript_word_timestamps=[{"word": "unused", "start": 0}],
+            )
+        )
+        db.session.commit()
+        engine = db.engine
+
+    statements = []
+
+    def capture_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+
+    rust_payload = {"post": {"guid": guid}, "processing_stats": {}}
+    event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        with mock.patch(
+            "app.routes.post_routes.try_render_post_stats",
+            return_value=rust_payload if use_rust else None,
+        ) as render_mock:
+            response = app.test_client().get(f"/api/posts/{guid}/stats")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert response.status_code == 200
+    assert response.get_json()["post"]["guid"] == guid
+    render_mock.assert_called_once()
+    assert any("select" in statement for statement in statements)
+    assert all(
+        "transcript_word_timestamps" not in statement for statement in statements
+    )
+    if use_rust:
+        assert response.get_json() == rust_payload
 
 
 def test_post_stats_omits_debug_info_when_disabled(app):
@@ -1612,7 +1719,7 @@ def test_post_stats_include_speaker_labels_and_related_logs(app, tmp_path):
 
     client = app.test_client()
 
-    with mock.patch("app.routes.post_routes._get_app_log_path", return_value=log_file):
+    with mock.patch("app.routes.post_routes.get_app_log_path", return_value=log_file):
         response = client.get(f"/api/posts/{guid}/stats")
 
     assert response.status_code == 200

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +31,7 @@ from podcast_processor.llm_concurrency_limiter import (
     get_concurrency_limiter,
 )
 from podcast_processor.llm_model_call_utils import (
+    LLMRequestTooLargeError,
     apply_service_tier,
     call_litellm_with_tier_retry,
     extract_litellm_usage,
@@ -44,6 +45,13 @@ from podcast_processor.prompt import (
     build_speaker_context_for_prompt,
     transcript_excerpt_for_prompt,
 )
+from podcast_processor.repeat_ad_finder import (
+    RepeatAdCandidate,
+    find_repeat_candidates_with_fallback,
+    repeat_ad_detection_enabled,
+    tokenize,
+)
+from podcast_processor.repeat_ad_refiner import RepeatAdRefiner
 from podcast_processor.token_rate_limiter import (
     TokenRateLimiter,
     configure_rate_limiter_for_model,
@@ -51,7 +59,10 @@ from podcast_processor.token_rate_limiter import (
 from podcast_processor.transcribe import Segment, load_word_timestamps_by_sequence
 from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 from shared.config import Config, TestWhisperConfig
-from shared.llm_utils import model_uses_max_completion_tokens
+from shared.llm_utils import (
+    model_uses_max_completion_tokens,
+    normalize_completion_args_for_model,
+)
 
 
 class ClassifyParams:
@@ -129,6 +140,7 @@ class AdClassifier:
         # this after classification finishes to decide whether to auto-retry
         # zero-ad runs (see PodcastProcessor zero-ads guard).
         self.had_parse_error = False
+        self._adaptive_input_token_limit: int | None = None
 
         # Initialize cue detector for neighbor expansion
         self.cue_detector = CueDetector()
@@ -145,6 +157,14 @@ class AdClassifier:
                 self.logger.info("Boundary refinement enabled")
         else:
             self.logger.info("Boundary refinement disabled via config")
+
+        # Repeat-ad detection (opt-in via ENABLE_REPEAT_AD_DETECTION). Catches
+        # dynamically-inserted ads the classifier missed by matching detected
+        # ads against the rest of the transcript and confirming with the LLM.
+        self.repeat_ad_refiner: RepeatAdRefiner | None = None
+        if repeat_ad_detection_enabled():
+            self.repeat_ad_refiner = RepeatAdRefiner(config, self.logger)
+            self.logger.info("Repeat-ad detection enabled")
 
     def classify(
         self,
@@ -239,6 +259,12 @@ class AdClassifier:
                         f"Created {created} neighbor identifications via bulk ops"
                     )
 
+            # Pass 1.5: Detect repeated (dynamically-inserted) ads the
+            # classifier missed. Runs before boundary refinement so the new ad
+            # blocks get refined and persisted alongside the original ones.
+            if self.repeat_ad_refiner is not None:
+                self._detect_repeat_ads(transcript_segments, post)
+
             # Pass 2: Refine boundaries
             if self.boundary_refiner:
                 self._refine_boundaries(transcript_segments, post)
@@ -257,47 +283,81 @@ class AdClassifier:
         overlap_segments = self._apply_overlap_cap(prev_overlap_segments)
         remaining_segments = transcript_segments[current_index:]
 
-        (
-            chunk_segments,
-            user_prompt_str,
-            consumed_segments,
-            token_limit_trimmed,
-        ) = self._build_chunk_payload(
-            overlap_segments=overlap_segments,
-            remaining_segments=remaining_segments,
-            total_segments=transcript_segments,
-            post=classify_params.post,
-            system_prompt=classify_params.system_prompt,
-            user_prompt_template=classify_params.user_prompt_template,
-            max_new_segments=classify_params.num_segments_per_prompt,
-        )
+        max_new_segments = classify_params.num_segments_per_prompt
 
-        if not chunk_segments or consumed_segments <= 0:
-            self.logger.error(
-                "No progress made while building classification chunk for post %s. "
-                "Stopping to avoid infinite loop.",
-                classify_params.post.id,
-            )
-            raise ClassifyException(
-                "No progress made while building classification chunk."
-            )
-
-        if token_limit_trimmed:
-            self.logger.debug(
-                "Token limit trimming applied for post %s at transcript index %s. "
-                "Processing chunk with %s new segments across %s total segments.",
-                classify_params.post.id,
-                current_index,
+        while True:
+            (
+                chunk_segments,
+                user_prompt_str,
                 consumed_segments,
-                len(chunk_segments),
+                token_limit_trimmed,
+            ) = self._build_chunk_payload(
+                overlap_segments=overlap_segments,
+                remaining_segments=remaining_segments,
+                total_segments=transcript_segments,
+                post=classify_params.post,
+                system_prompt=classify_params.system_prompt,
+                user_prompt_template=classify_params.user_prompt_template,
+                max_new_segments=max_new_segments,
             )
 
-        identified_segments = self._process_chunk(
-            chunk_segments=chunk_segments,
-            system_prompt=classify_params.system_prompt,
-            user_prompt_str=user_prompt_str,
-            post=classify_params.post,
-        )
+            if not chunk_segments or consumed_segments <= 0:
+                self.logger.error(
+                    "No progress made while building classification chunk for post %s. "
+                    "Stopping to avoid infinite loop.",
+                    classify_params.post.id,
+                )
+                raise ClassifyException(
+                    "No progress made while building classification chunk."
+                )
+
+            if token_limit_trimmed:
+                self.logger.debug(
+                    "Token limit trimming applied for post %s at transcript index %s. "
+                    "Processing chunk with %s new segments across %s total segments.",
+                    classify_params.post.id,
+                    current_index,
+                    consumed_segments,
+                    len(chunk_segments),
+                )
+
+            try:
+                identified_segments = self._process_chunk(
+                    chunk_segments=chunk_segments,
+                    system_prompt=classify_params.system_prompt,
+                    user_prompt_str=user_prompt_str,
+                    post=classify_params.post,
+                )
+                break
+            except LLMRequestTooLargeError as exc:
+                if consumed_segments <= 1:
+                    raise
+                learned_limit = max(1, int(exc.limit * 0.9))
+                if self._adaptive_input_token_limit is None:
+                    self._adaptive_input_token_limit = learned_limit
+                else:
+                    self._adaptive_input_token_limit = min(
+                        self._adaptive_input_token_limit,
+                        learned_limit,
+                    )
+                max_new_segments = max(
+                    1,
+                    min(
+                        consumed_segments - 1,
+                        int(consumed_segments * learned_limit / exc.requested),
+                    ),
+                )
+                self.logger.warning(
+                    "Provider rejected %s input segments for post %s (%s tokens "
+                    "requested, TPM limit %s); rebuilding the chunk with at "
+                    "most %s new segments and a %s-token input ceiling",
+                    consumed_segments,
+                    classify_params.post.id,
+                    exc.requested,
+                    exc.limit,
+                    max_new_segments,
+                    self._adaptive_input_token_limit,
+                )
 
         next_overlap_segments = self._compute_next_overlap_segments(
             chunk_segments=chunk_segments,
@@ -350,6 +410,12 @@ class AdClassifier:
                 model_call=model_call,
                 system_prompt=system_prompt,
             )
+        else:
+            oversized_error = LLMRequestTooLargeError.from_message(
+                model_call.error_message
+            )
+            if oversized_error is not None:
+                raise oversized_error
 
         if model_call.status == "success" and model_call.response:
             return self._process_successful_response(
@@ -413,8 +479,8 @@ class AdClassifier:
 
             if (
                 self.config.llm_max_input_tokens_per_call is not None
-                and not self._validate_token_limit(user_prompt_str, system_prompt)
-            ):
+                or self._adaptive_input_token_limit is not None
+            ) and not self._validate_token_limit(user_prompt_str, system_prompt):
                 token_limit_trimmed = True
                 if new_segment_count == 1:
                     self.logger.warning(
@@ -582,8 +648,15 @@ class AdClassifier:
 
     def _validate_token_limit(self, user_prompt_str: str, system_prompt: str) -> bool:
         """Validate that the prompt doesn't exceed the configured token limit."""
-        if self.config.llm_max_input_tokens_per_call is None:
+        configured_limit = self.config.llm_max_input_tokens_per_call
+        limits = [
+            limit
+            for limit in (configured_limit, self._adaptive_input_token_limit)
+            if limit is not None
+        ]
+        if not limits:
             return True
+        effective_limit = min(limits)
 
         # Create messages as they would be sent to the API
         messages = [
@@ -601,15 +674,15 @@ class AdClassifier:
             total_chars = len(system_prompt) + len(user_prompt_str)
             token_count = total_chars // 4  # ~4 characters per token
 
-        is_valid = token_count <= self.config.llm_max_input_tokens_per_call
+        is_valid = token_count <= effective_limit
 
         if not is_valid:
             self.logger.debug(
-                f"Prompt exceeds token limit: {token_count} > {self.config.llm_max_input_tokens_per_call}"
+                f"Prompt exceeds token limit: {token_count} > {effective_limit}"
             )
         else:
             self.logger.debug(
-                f"Prompt within token limit: {token_count} <= {self.config.llm_max_input_tokens_per_call}"
+                f"Prompt within token limit: {token_count} <= {effective_limit}"
             )
 
         return is_valid
@@ -636,11 +709,23 @@ class AdClassifier:
             )
 
         # Final validation: Check per-call token limit before making API call
-        if self.config.llm_max_input_tokens_per_call is not None:
+        if (
+            self.config.llm_max_input_tokens_per_call is not None
+            or self._adaptive_input_token_limit is not None
+        ):
             if not self._validate_token_limit(model_call_obj.prompt, system_prompt):
+                limits = [
+                    limit
+                    for limit in (
+                        self.config.llm_max_input_tokens_per_call,
+                        self._adaptive_input_token_limit,
+                    )
+                    if limit is not None
+                ]
+                effective_limit = min(limits)
                 error_msg = (
                     f"Prompt for ModelCall {model_call_obj.id} exceeds configured "
-                    f"token limit of {self.config.llm_max_input_tokens_per_call}. "
+                    f"token limit of {effective_limit}. "
                     f"Consider reducing num_segments_to_input_to_prompt."
                 )
                 self.logger.error(error_msg)
@@ -688,6 +773,7 @@ class AdClassifier:
 
         completion_args["response_format"] = {"type": "json_object"}
 
+        normalize_completion_args_for_model(completion_args)
         apply_service_tier(completion_args, self.config)
         return completion_args
 
@@ -1118,6 +1204,7 @@ class AdClassifier:
             "status": "success",
             "error_message": None,
             "retry_attempts": retry_attempts_value,
+            "service_tier": attempt_service_tier,
         }
         for field in (
             "prompt_tokens",
@@ -1155,7 +1242,7 @@ class AdClassifier:
             payload["estimated_cost_usd"] = cost
         return payload
 
-    def _call_model(
+    def _call_model(  # noqa: PLR0912
         self,
         model_call_obj: ModelCall,
         system_prompt: str,
@@ -1180,7 +1267,6 @@ class AdClassifier:
         for attempt in range(retry_count):
             retry_attempts_value = original_retry_attempts + attempt + 1
             current_attempt_num = attempt + 1
-
             self.logger.info(
                 f"Calling model {model_call_obj.model_name} for ModelCall {model_call_obj.id} (attempt {current_attempt_num}/{retry_count})"
             )
@@ -1193,7 +1279,7 @@ class AdClassifier:
                 if completion_args is None:
                     return None  # Token limit exceeded
 
-                attempt_service_tier = completion_args.get("service_tier")
+                requested_service_tier = completion_args.get("service_tier")
 
                 # Persist retry attempt + pending status (+ tier) via writer
                 if model_call_obj.id is not None:
@@ -1203,7 +1289,10 @@ class AdClassifier:
                         {
                             "status": "pending",
                             "retry_attempts": retry_attempts_value,
-                            "service_tier": attempt_service_tier,
+                            "service_tier": requested_service_tier,
+                            # The backoff (if any) is over; this attempt is in
+                            # flight, not waiting.
+                            "next_retry_at": None,
                         },
                         wait=True,
                     )
@@ -1211,7 +1300,7 @@ class AdClassifier:
                         raise RuntimeError(
                             getattr(pending_res, "error", "Failed to update ModelCall")
                         )
-                    model_call_obj.service_tier = attempt_service_tier
+                    model_call_obj.service_tier = requested_service_tier
 
                 from litellm.types.utils import Choices
 
@@ -1222,13 +1311,19 @@ class AdClassifier:
                             completion_args,
                             config=self.config,
                             logger=self.logger,
+                            model_call_id=model_call_obj.id,
                         )
                 else:
                     response = call_litellm_with_tier_retry(
                         completion_args,
                         config=self.config,
                         logger=self.logger,
+                        model_call_id=model_call_obj.id,
                     )
+
+                # The helper removes Flex after an exhausted-tier fallback and
+                # also honors OpenAI's response-reported tier.
+                attempt_service_tier = completion_args.get("service_tier")
 
                 response_first_choice = response.choices[0]
                 assert isinstance(response_first_choice, Choices)
@@ -1263,15 +1358,37 @@ class AdClassifier:
                 return raw_response_content
 
             except Exception as e:
+                if isinstance(e, LLMRequestTooLargeError):
+                    error_message = str(e)
+                    fail_res = writer_client.update(
+                        "ModelCall",
+                        model_call_obj.id,
+                        {
+                            "status": "failed_permanent",
+                            "error_message": error_message,
+                        },
+                        wait=True,
+                    )
+                    if not fail_res or not fail_res.success:
+                        raise RuntimeError(
+                            getattr(fail_res, "error", "Failed to update ModelCall")
+                        ) from e
+                    model_call_obj.status = "failed_permanent"
+                    model_call_obj.error_message = error_message
+                    raise
                 last_error = e
                 if self._is_retryable_error(e):
+                    # Preserve the classifier's gradual retry backoff after an
+                    # exhausted Flex-to-standard cycle. Do not sleep after the
+                    # final configured attempt.
+                    if attempt == retry_count - 1:
+                        break
                     self._handle_retryable_error(
                         model_call_obj=model_call_obj,
                         error=e,
                         attempt=attempt,
                         current_attempt_num=current_attempt_num,
                     )
-                    # Continue to next retry
                 else:
                     self.logger.error(
                         f"Non-retryable LLM error for ModelCall {model_call_obj.id} (attempt {current_attempt_num}): {e}",
@@ -1320,26 +1437,16 @@ class AdClassifier:
         )
         retry_count = getattr(self.config, "llm_max_retry_attempts", 3)
         error_message = f"Retrying ({current_attempt_num}/{retry_count}): {error}"
-        res = writer_client.update(
-            "ModelCall",
-            model_call_obj.id,
-            {"status": "retrying", "error_message": error_message},
-            wait=True,
-        )
-        if not res or not res.success:
-            raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
-        # Update local object to reflect database state
-        model_call_obj.status = "retrying"
-        model_call_obj.error_message = error_message
 
-        # Use longer backoff for rate limiting errors
+        # Compute the backoff before flipping the row so the retrying update can
+        # carry the deadline — the jobs UI uses it to show "retrying in Ns".
         error_str = str(error).lower()
         if any(
             term in error_str
             for term in ["rate_limit_error", "ratelimiterror", "429", "rate limit"]
         ):
-            # For rate limiting, use longer backoff: 60, 120, 240 seconds
-            wait_time = 60 * (2**attempt)
+            # For rate limiting, use a gradual backoff starting at 30 seconds.
+            wait_time = 30 * (2**attempt)
             self.logger.info(
                 f"Rate limit detected. Waiting {wait_time}s before retry for ModelCall {model_call_obj.id}."
             )
@@ -1349,6 +1456,25 @@ class AdClassifier:
             self.logger.info(
                 f"Waiting {wait_time}s before next retry for ModelCall {model_call_obj.id}."
             )
+        next_retry_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(
+            seconds=wait_time
+        )
+
+        res = writer_client.update(
+            "ModelCall",
+            model_call_obj.id,
+            {
+                "status": "retrying",
+                "error_message": error_message,
+                "next_retry_at": next_retry_at,
+            },
+            wait=True,
+        )
+        if not res or not res.success:
+            raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
+        # Update local object to reflect database state
+        model_call_obj.status = "retrying"
+        model_call_obj.error_message = error_message
 
         time.sleep(wait_time)
 
@@ -1597,6 +1723,162 @@ class AdClassifier:
         if is_self_promo:
             confidence = max(0.5, confidence - 0.25)
         return confidence
+
+    def _detect_repeat_ads(
+        self, transcript_segments: list[TranscriptSegment], post: Post
+    ) -> None:
+        """Find and confirm dynamically-inserted repeats of detected ads.
+
+        For each distinct ad already detected, deterministically locate matching
+        spans elsewhere in the transcript, ask the LLM to confirm each candidate
+        is advertisement content, and write ad identifications for confirmations
+        that clear the output confidence threshold. Boundary tightening of the
+        new blocks is left to the ``_refine_boundaries`` pass that runs next.
+        """
+        if self.repeat_ad_refiner is None:
+            return
+
+        identifications = (
+            self.db_session.query(Identification)
+            .join(TranscriptSegment)
+            .filter(TranscriptSegment.post_id == post.id, Identification.label == "ad")
+            .all()
+        )
+        blocks = self._group_into_blocks(identifications)
+        if not blocks:
+            return
+
+        min_confidence = float(self.config.output.min_confidence)
+        seg_payloads = [
+            {
+                "sequence_num": s.sequence_num,
+                "start_time": s.start_time,
+                "end_time": s.end_time,
+                "text": s.text,
+            }
+            for s in transcript_segments
+        ]
+        seg_by_seq = {int(s.sequence_num): s for s in transcript_segments}
+
+        block_meta: list[dict[str, Any]] = []
+        detected_ranges: list[tuple[int, int]] = []
+        for block in blocks:
+            segs = [
+                i.transcript_segment
+                for i in block["identifications"]
+                if i.transcript_segment is not None
+            ]
+            if not segs:
+                continue
+            seqs = [int(s.sequence_num) for s in segs]
+            first_seq, last_seq = min(seqs), max(seqs)
+            detected_ranges.append((first_seq, last_seq))
+            text = " ".join(
+                s.text or "" for s in sorted(segs, key=lambda x: x.sequence_num)
+            )
+            block_meta.append(
+                {
+                    "first_seq": first_seq,
+                    "last_seq": last_seq,
+                    "text": text,
+                    "confidence": float(block.get("confidence", 0.0) or 0.0),
+                }
+            )
+
+        # Dedupe by normalized text so an ad inserted N times is searched once.
+        seen_signatures: set[str] = set()
+        found_seqs: set[int] = set()
+        new_identifications: list[dict[str, Any]] = []
+
+        for meta in block_meta:
+            if meta["confidence"] < min_confidence:
+                continue
+            signature = " ".join(tokenize(meta["text"]))
+            if not signature or signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+
+            candidates = find_repeat_candidates_with_fallback(
+                seg_payloads,
+                post_guid=getattr(post, "guid", None),
+                target_first_seq=meta["first_seq"],
+                target_last_seq=meta["last_seq"],
+                exclude_ranges=detected_ranges,
+                logger=self.logger,
+            )
+
+            for cand in candidates:
+                cand_seqs = range(cand.first_seq, cand.last_seq + 1)
+                if any(seq in found_seqs for seq in cand_seqs):
+                    continue
+                rows = self._confirm_and_record_repeat(
+                    candidate=cand,
+                    reference_text=meta["text"],
+                    confidence_hint=meta["confidence"],
+                    seg_by_seq=seg_by_seq,
+                    post=post,
+                    min_confidence=min_confidence,
+                )
+                if rows:
+                    found_seqs.update(cand_seqs)
+                    new_identifications.extend(rows)
+
+        if new_identifications:
+            created = self._create_identifications_bulk(new_identifications)
+            self.logger.info(
+                "Repeat-ad detection created %s identifications across %s "
+                "confirmed repeat segments for post %s",
+                created,
+                len(found_seqs),
+                post.id,
+            )
+
+    def _confirm_and_record_repeat(
+        self,
+        *,
+        candidate: RepeatAdCandidate,
+        reference_text: str,
+        confidence_hint: float,
+        seg_by_seq: dict[int, TranscriptSegment],
+        post: Post,
+        min_confidence: float,
+    ) -> list[dict[str, Any]]:
+        """Confirm one candidate with the LLM; return identification rows if accepted."""
+        assert self.repeat_ad_refiner is not None
+        window_segs = [
+            seg_by_seq[seq]
+            for seq in range(candidate.first_seq, candidate.last_seq + 1)
+            if seq in seg_by_seq
+        ]
+        if not window_segs:
+            return []
+
+        candidate_payload = [
+            {"start_time": s.start_time, "text": s.text} for s in window_segs
+        ]
+        confirmation = self.repeat_ad_refiner.confirm(
+            reference_text=reference_text,
+            candidate_segments=candidate_payload,
+            candidate_first_seq=candidate.first_seq,
+            confidence_hint=confidence_hint,
+            post_id=post.id,
+        )
+        if (
+            not confirmation.is_ad
+            or confirmation.model_call_id is None
+            or confirmation.confidence < min_confidence
+        ):
+            return []
+
+        return [
+            {
+                "transcript_segment_id": s.id,
+                "model_call_id": confirmation.model_call_id,
+                "label": "ad",
+                "confidence": confirmation.confidence,
+            }
+            for s in window_segs
+        ]
 
     def _refine_boundaries(
         self, transcript_segments: list[TranscriptSegment], post: Post

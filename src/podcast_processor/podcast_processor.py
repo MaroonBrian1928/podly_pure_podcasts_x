@@ -15,7 +15,6 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import object_session
 
 from app.extensions import db
-from app.model_call_utils import whisper_model_call_filter
 from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
 from app.runtime_config import config as runtime_config
 from app.writer.client import writer_client
@@ -231,6 +230,7 @@ class PodcastProcessor:
         # Cache job and post attributes early to avoid ORM access after expire_all()
         # This includes relationship access like post.feed.title
         cached_post_guid = post.guid
+        cached_post_id = post.id
         cached_post_title = post.title
         cached_feed_title = post.feed.title
         cached_job_id = job.id
@@ -300,7 +300,7 @@ class PodcastProcessor:
             # Check if processed audio already exists (database or disk)
             if self._check_existing_processed_audio(post):
                 self.status_manager.update_job_status(
-                    job, "completed", 4, "Processing complete", 100.0
+                    job, "completed", job.total_steps or 4, "Processing complete", 100.0
                 )
                 return str(post.processed_audio_path)
 
@@ -345,7 +345,11 @@ class PodcastProcessor:
                             getattr(result, "error", "Failed to update post")
                         )
                     self.status_manager.update_job_status(
-                        job, "completed", 4, "Processing complete", 100.0
+                        job,
+                        "completed",
+                        job.total_steps or 4,
+                        "Processing complete",
+                        100.0,
                     )
                     return processed_audio_path
 
@@ -362,6 +366,12 @@ class PodcastProcessor:
                 )
 
                 self.logger.info(f"Processing podcast: {post} complete")
+                self._notify_processing_succeeded(
+                    post_guid=cached_post_guid,
+                    post_title=cached_post_title,
+                    feed_title=cached_feed_title,
+                    ad_windows_count=getattr(job, "ad_windows_count", None),
+                )
                 return processed_audio_path
             finally:
                 # Release lock using cached GUID without touching ORM state after potential rollback
@@ -377,6 +387,8 @@ class PodcastProcessor:
         except ProcessorException as e:
             error_msg = str(e)
             if "Processing job in progress" in error_msg:
+                # Not a genuine failure (a concurrent run holds the lock); update
+                # status but don't notify -- it's noise.
                 self.status_manager.update_job_status(
                     job,
                     "failed",
@@ -386,6 +398,15 @@ class PodcastProcessor:
             else:
                 self.status_manager.update_job_status(
                     job, "failed", cached_current_step, error_msg
+                )
+                self._notify_processing_failed(
+                    post_guid=cached_post_guid,
+                    post_id=cached_post_id,
+                    post_title=cached_post_title,
+                    feed_title=cached_feed_title,
+                    step_name=self._step_label(cached_current_step),
+                    error_message=error_msg,
+                    job_id=cached_job_id,
                 )
             raise
 
@@ -399,7 +420,83 @@ class PodcastProcessor:
             self.status_manager.update_job_status(
                 job, "failed", cached_current_step, f"Unexpected error: {e!s}"
             )
+            self._notify_processing_failed(
+                post_guid=cached_post_guid,
+                post_id=cached_post_id,
+                post_title=cached_post_title,
+                feed_title=cached_feed_title,
+                step_name=self._step_label(cached_current_step),
+                error_message=f"Unexpected error: {e!s}",
+                job_id=cached_job_id,
+            )
             raise
+
+    @staticmethod
+    def _step_label(step: int | None) -> str | None:
+        labels = {
+            0: "Queued",
+            1: "Downloading episode",
+            2: "Transcribing audio",
+            3: "Identifying ads",
+            4: "Processing audio",
+        }
+        if step is None:
+            return None
+        return labels.get(step)
+
+    def _notify_processing_failed(
+        self,
+        *,
+        post_guid: str,
+        post_id: int | None,
+        post_title: str | None,
+        feed_title: str | None,
+        step_name: str | None,
+        error_message: str,
+        job_id: str | None,
+    ) -> None:
+        """Best-effort failure notification via Apprise. Never raises."""
+        try:
+            from app.notifications import notification_service
+
+            notification_service.notify_processing_failed(
+                post_guid=post_guid,
+                post_id=post_id,
+                post_title=post_title,
+                feed_title=feed_title,
+                step_name=step_name,
+                error_message=error_message,
+                job_id=job_id,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to dispatch processing-failed notification for post %s",
+                post_guid,
+            )
+
+    def _notify_processing_succeeded(
+        self,
+        *,
+        post_guid: str,
+        post_title: str | None,
+        feed_title: str | None,
+        ad_windows_count: int | None,
+    ) -> None:
+        """Best-effort success notification via Apprise. Never raises."""
+        try:
+            from app.notifications import notification_service
+
+            notification_service.notify_processing_succeeded(
+                post_guid=post_guid,
+                post_title=post_title,
+                feed_title=feed_title,
+                ad_windows_count=ad_windows_count,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to dispatch processing-succeeded notification for post %s",
+                post_guid,
+            )
 
     def _acquire_processing_lock(
         self,
@@ -729,6 +826,15 @@ class PodcastProcessor:
         if feed is None:
             return False
         return bool(getattr(feed, "enable_profanity_bleeping", False))
+
+    def _resolve_chapter_full_block_text(self, feed: Any | None) -> bool:
+        """Per-feed override wins when set; otherwise the global setting."""
+        feed_override = (
+            getattr(feed, "chapter_full_block_text", None) if feed is not None else None
+        )
+        if feed_override is not None:
+            return bool(feed_override)
+        return bool(getattr(self.config, "chapter_full_block_text", False))
 
     def _word_level_boundary_refiner_enabled(self) -> bool:
         return bool(
@@ -1197,9 +1303,11 @@ class PodcastProcessor:
         has_saved_bleep_windows, saved_bleep_windows_ms = (
             self._load_saved_bleep_windows(post if enable_profanity_bleeping else None)
         )
-        # Step 2: Transcribe audio
+        # Step 2: Transcribe audio. The LLM pipeline has a dedicated
+        # chapter-generation step (5), so declare the larger step count up
+        # front — other strategies keep the default 4.
         self.status_manager.update_job_status(
-            job, "running", 2, "Transcribing audio", 50.0
+            job, "running", 2, "Transcribing audio", 50.0, total_steps=5
         )
         transcribe_progress = self._make_transcribe_progress_callback(
             job, step=2, label="Transcribing audio", progress_base=50.0
@@ -1225,9 +1333,10 @@ class PodcastProcessor:
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
 
-        # Fail the job if every LLM classification call failed (e.g. rate limit /
-        # service unavailable). Whisper transcription calls are excluded — only
-        # LLM ad-classification calls count. Without at least one successful
+        # Fail the job if every LLM classification call failed. Only calls for
+        # the configured classifier model count; Whisper, INA, and later
+        # chapter/refinement calls are not classification attempts. Without a
+        # successful
         # classification call there are no identifications, so the episode would
         # be "completed" with zero ads removed — silently wrong.
         call_counts = self._get_llm_classification_model_call_counts(int(post.id))
@@ -1244,9 +1353,15 @@ class PodcastProcessor:
                 post.id,
             )
         elif call_counts.successful == 0:
+            latest_error = self._get_latest_llm_classification_error(int(post.id))
+            error_suffix = (
+                f" Latest provider error: {latest_error}"
+                if latest_error
+                else " Check the model-call details for the provider error."
+            )
             raise ProcessorException(
                 f"LLM classification failed: all {call_counts.total} model call(s) were "
-                "unsuccessful (rate limit or service unavailable). Reprocess to retry."
+                f"unsuccessful.{error_suffix}"
             )
 
         # Step 4: Process audio (remove ad segments)
@@ -1315,6 +1430,12 @@ class PodcastProcessor:
             )
         )
         if chapter_fallback_enabled:
+            # Step 5: chapter generation is its own stage — it runs LLM calls
+            # (topic plan, title refinement) and must not masquerade as the
+            # audio-processing step it used to be buried in.
+            self.status_manager.update_job_status(
+                job, "running", 5, "Generating chapters", 95.0
+            )
             chapters_for_output, chapter_source = resolve_llm_path_chapters(
                 unprocessed_audio_path=unprocessed_audio_path,
                 description=post_description,
@@ -1351,6 +1472,9 @@ class PodcastProcessor:
                     # `transcript_segments_for_chapters`.
                     removed_windows_ms=removed_segments_ms,
                     words_by_sequence=words_by_sequence,
+                    full_block_text=self._resolve_chapter_full_block_text(
+                        getattr(post, "feed", None)
+                    ),
                 )
             elif (
                 chapter_source == "description"
@@ -1402,6 +1526,7 @@ class PodcastProcessor:
         session = getattr(self, "db_session", None)
         if session is None:
             return None
+        classifier_model = str(getattr(self.config, "llm_model", "") or "")
 
         return (
             session.query(
@@ -1412,10 +1537,30 @@ class PodcastProcessor:
             )
             .filter(
                 ModelCall.post_id == post_id,
-                ~whisper_model_call_filter(),
+                ModelCall.model_name == classifier_model,
             )
             .one()
         )
+
+    def _get_latest_llm_classification_error(self, post_id: int) -> str | None:
+        session = getattr(self, "db_session", None)
+        if session is None:
+            return None
+        classifier_model = str(getattr(self.config, "llm_model", "") or "")
+        row = (
+            session.query(ModelCall.error_message)
+            .filter(
+                ModelCall.post_id == post_id,
+                ModelCall.model_name == classifier_model,
+                ModelCall.status != "success",
+                ModelCall.error_message.isnot(None),
+            )
+            .order_by(ModelCall.timestamp.desc(), ModelCall.id.desc())
+            .first()
+        )
+        if row is None or not row[0]:
+            return None
+        return str(row[0])
 
     def _perform_chapter_insertion_only_processing(
         self,
@@ -1530,6 +1675,9 @@ class PodcastProcessor:
                 # cannot reconstruct from the DB alone.
                 post_guid=post.guid,
                 words_by_sequence=words_by_sequence,
+                full_block_text=self._resolve_chapter_full_block_text(
+                    getattr(post, "feed", None)
+                ),
             )
         elif (
             chapter_source == "description"
@@ -1637,6 +1785,7 @@ class PodcastProcessor:
         post_guid: str | None = None,
         removed_windows_ms: list[tuple[int, int]] | None = None,
         words_by_sequence: Mapping[int, list[Any]] | None = None,
+        full_block_text: bool = False,
     ) -> list[Any]:
         if not chapters_for_output or not transcript_segments:
             return chapters_for_output
@@ -1659,6 +1808,7 @@ class PodcastProcessor:
             align_word_starts=align_word_starts,
             words_by_sequence=words_by_sequence,
             word_align_config=self.config if align_word_starts else None,
+            full_block_text=full_block_text,
         )
         if topic_chapters:
             # With the toggle off, fall back to the title-matching heuristic.
@@ -1905,7 +2055,7 @@ class PodcastProcessor:
 
         # Mark job complete
         self.status_manager.update_job_status(
-            job, "completed", 4, "Processing complete", 100.0
+            job, "completed", job.total_steps or 4, "Processing complete", 100.0
         )
 
     def _raise_if_cancelled(
@@ -2018,7 +2168,7 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job,
             "completed",
-            4,
+            job.total_steps or 4,
             "Processing complete (developer mode)",
             100.0,
         )

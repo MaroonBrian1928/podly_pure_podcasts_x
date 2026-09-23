@@ -15,6 +15,10 @@ LLM_MAX_INPUT_TOKENS_PER_MINUTE: int | None = None
 ENABLE_BOUNDARY_REFINEMENT = True
 ENABLE_WORD_LEVEL_BOUNDARY_REFINDER = False
 ENABLE_LLM_CHAPTER_FALLBACK_TAGGING = False
+# Send the FULL transcript text of each topic block to the chapter LLM instead
+# of the truncated head+middle sample. ~2-3x the prompt tokens of the default,
+# but the model sees every topic transition. Per-feed override available.
+CHAPTER_FULL_BLOCK_TEXT = False
 # litellm `service_tier` kwarg forwarded to providers that support it
 # (currently OpenAI and Google Gemini). "flex" trades latency for ~50% lower
 # cost and surfaces 429/503 under load; "priority" trades cost for speed;
@@ -67,6 +71,15 @@ APP_AUTOPROCESS_ON_DOWNLOAD = False
 APP_COST_RATE_PER_HOUR = 0.04
 APP_WHISPER_COST_RATE_PER_HOUR = APP_COST_RATE_PER_HOUR
 APP_INA_COST_RATE_PER_HOUR = 0.0
+
+# Notification (Apprise) defaults
+NOTIFY_ENABLED = False
+NOTIFY_APPRISE_URLS: list[str] = []
+NOTIFY_INCLUDE_LLM_EXPLANATION = True
+# Per-event toggles (the UI renders these as a checklist).
+NOTIFY_ON_FAILURE = True
+NOTIFY_ON_SUCCESS = False
+NOTIFY_ON_RUST_FALLBACK = False
 
 # Credits defaults
 MINUTES_PER_CREDIT = 60

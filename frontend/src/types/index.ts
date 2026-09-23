@@ -13,6 +13,7 @@ export interface Feed {
   ad_detection_strategy?: 'llm' | 'chapter' | 'chapter_insert';
   chapter_filter_strings?: string | null;
   enable_llm_chapter_fallback_tagging?: boolean | null;
+  chapter_full_block_text?: boolean | null;
   auto_whitelist_new_episodes_override?: boolean | null;
   enable_profanity_bleeping?: boolean;
   confirm_whisperx_endpoint?: boolean;
@@ -22,6 +23,7 @@ export interface FeedSettingsUpdate {
   ad_detection_strategy?: 'llm' | 'chapter' | 'chapter_insert';
   chapter_filter_strings?: string | null;
   enable_llm_chapter_fallback_tagging?: boolean | null;
+  chapter_full_block_text?: boolean | null;
   auto_whitelist_new_episodes_override?: boolean | null;
   enable_profanity_bleeping?: boolean;
   confirm_whisperx_endpoint?: boolean;
@@ -155,6 +157,7 @@ export interface LLMConfig {
   enable_boundary_refinement: boolean;
   enable_word_level_boundary_refinder?: boolean;
   enable_llm_chapter_fallback_tagging?: boolean;
+  chapter_full_block_text?: boolean;
   llm_service_tier?: 'default' | 'flex' | 'priority' | 'auto';
 }
 
@@ -210,12 +213,22 @@ export interface AppConfigUI {
   ina_cost_rate_per_hour: number;
 }
 
+export interface NotificationConfigUI {
+  enabled: boolean;
+  apprise_urls: string[];
+  notify_on_failure: boolean;
+  notify_on_success: boolean;
+  notify_on_rust_fallback: boolean;
+  include_llm_explanation: boolean;
+}
+
 export interface CombinedConfig {
   llm: LLMConfig;
   whisper: WhisperConfig;
   processing: ProcessingConfigUI;
   output: OutputConfigUI;
   app: AppConfigUI;
+  notifications: NotificationConfigUI;
 }
 
 export interface EnvOverrideEntry {

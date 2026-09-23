@@ -1489,6 +1489,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         llmChapterFallbackGlobalDefault={
           configResponse?.config?.llm?.enable_llm_chapter_fallback_tagging
         }
+        chapterFullBlockTextGlobalDefault={
+          configResponse?.config?.llm?.chapter_full_block_text
+        }
         whisperType={configResponse?.config?.whisper?.whisper_type}
         episodeDescriptionView={episodeDescriptionView}
         onEpisodeDescriptionViewChange={handleEpisodeDescriptionViewChange}

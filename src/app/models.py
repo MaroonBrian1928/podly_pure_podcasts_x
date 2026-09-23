@@ -47,6 +47,9 @@ class Feed(db.Model):  # type: ignore[name-defined, misc]
     chapter_filter_strings = db.Column(db.Text, nullable=True)
     # Per-feed override for LLM chapter fallback tagging, null = use global config
     enable_llm_chapter_fallback_tagging = db.Column(db.Boolean, nullable=True)
+    # Per-feed override for the global LLMSettings.chapter_full_block_text
+    # toggle; NULL means inherit the global setting.
+    chapter_full_block_text = db.Column(db.Boolean, nullable=True)
     auto_whitelist_new_episodes_override = db.Column(db.Boolean, nullable=True)
     enable_profanity_bleeping = db.Column(db.Boolean, nullable=False, default=False)
     confirm_whisperx_endpoint = db.Column(db.Boolean, nullable=False, default=False)
@@ -261,6 +264,12 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     status = db.Column(db.String, nullable=False, default="pending")
     error_message = db.Column(db.Text, nullable=True)
     retry_attempts = db.Column(db.Integer, nullable=False, default=0)
+    # When status == "retrying", the naive-UTC moment the backoff sleep ends and
+    # the next attempt fires. Written alongside the retrying transition (both the
+    # classifier retry loop and the flex-tier wrapper) and cleared when the next
+    # attempt starts, so the jobs UI can show "backoff, retrying in Ns" instead
+    # of an opaque in-flight state. NULL outside backoff windows.
+    next_retry_at = db.Column(db.DateTime, nullable=True)
     # litellm `service_tier` value sent on the last attempt of this call (e.g.
     # "flex", "priority"). NULL when the call was made at the provider's
     # default tier or against a provider that doesn't accept service_tier
@@ -489,6 +498,11 @@ class LLMSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
     )
+    chapter_full_block_text = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.CHAPTER_FULL_BLOCK_TEXT,
+    )
     llm_service_tier = db.Column(
         db.Text,
         nullable=False,
@@ -687,6 +701,30 @@ class ChapterFilterSettings(db.Model):  # type: ignore[name-defined, misc]
     id = db.Column(db.Integer, primary_key=True, default=1)
     default_filter_strings = db.Column(
         db.Text, nullable=False, default=DEFAULTS.CHAPTER_FILTER_DEFAULT_STRINGS
+    )
+
+    created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+    updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
+
+
+class NotificationSettings(db.Model):  # type: ignore[name-defined, misc]
+    __tablename__ = "notification_settings"
+
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    enabled = db.Column(db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ENABLED)
+    # Newline-separated Apprise target URLs (may contain secrets/tokens).
+    apprise_urls = db.Column(db.Text, nullable=True)
+    notify_on_failure = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_FAILURE
+    )
+    notify_on_success = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_SUCCESS
+    )
+    notify_on_rust_fallback = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_ON_RUST_FALLBACK
+    )
+    include_llm_explanation = db.Column(
+        db.Boolean, nullable=False, default=DEFAULTS.NOTIFY_INCLUDE_LLM_EXPLANATION
     )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

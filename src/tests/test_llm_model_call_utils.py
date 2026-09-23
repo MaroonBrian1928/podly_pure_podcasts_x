@@ -5,12 +5,17 @@ from typing import Any
 import pytest
 
 from podcast_processor.llm_model_call_utils import (
+    LLMRequestTooLargeError,
     apply_service_tier,
     call_litellm_with_tier_retry,
     extract_litellm_finish_reason,
     extract_litellm_usage,
     model_supports_service_tier,
     try_update_model_call,
+)
+from shared.llm_utils import (
+    model_uses_max_completion_tokens,
+    normalize_completion_args_for_model,
 )
 
 
@@ -287,15 +292,60 @@ def test_try_update_model_call_omits_cost_on_failure(
     [
         ("gemini/gemini-2.5-flash", True),
         ("openai/gpt-4o-mini", True),
+        ("gpt-5", True),
         ("anthropic/claude-3-5-sonnet", False),
         ("groq/openai/gpt-oss-120b", False),
-        ("gpt-4o", False),
+        ("gpt-4o", True),
         (None, False),
         ("", False),
     ],
 )
 def test_model_supports_service_tier(model: str | None, expected: bool) -> None:
     assert model_supports_service_tier(model) is expected
+
+
+def test_normalize_openai_completion_args_caps_output_and_removes_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import litellm
+
+    monkeypatch.setattr(
+        litellm,
+        "get_model_info",
+        lambda _model: {"max_output_tokens": 128_000},
+    )
+    args: dict[str, Any] = {
+        "model": "gpt-5.6-luna",
+        "max_completion_tokens": 948_576,
+        "temperature": 0.1,
+    }
+
+    normalize_completion_args_for_model(args)
+
+    assert args["max_completion_tokens"] == 128_000
+    assert "temperature" not in args
+
+
+def test_normalize_reasoning_args_omits_limit_when_metadata_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import litellm
+
+    def fail_model_info(_model: str) -> dict[str, Any]:
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(litellm, "get_model_info", fail_model_info)
+    args: dict[str, Any] = {
+        "model": "gpt-5.6-luna",
+        "max_completion_tokens": 948_576,
+        "temperature": 0.1,
+    }
+
+    normalize_completion_args_for_model(args)
+
+    assert "max_completion_tokens" not in args
+    assert "max_tokens" not in args
+    assert "temperature" not in args
 
 
 def test_apply_service_tier_noop_when_default() -> None:
@@ -314,6 +364,19 @@ def test_apply_service_tier_sets_flex_for_gemini() -> None:
     args: dict[str, Any] = {"model": "gemini/gemini-2.5-flash"}
     apply_service_tier(args, SimpleNamespace(llm_service_tier="flex"))
     assert args["service_tier"] == "flex"
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-5", "gpt-5"])
+def test_apply_service_tier_sets_flex_for_openai(model: str) -> None:
+    args: dict[str, Any] = {"model": model}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="flex"))
+    assert args["service_tier"] == "flex"
+
+
+def test_apply_service_tier_skips_openai_model_without_flex_pricing() -> None:
+    args: dict[str, Any] = {"model": "openai/gpt-4o-mini"}
+    apply_service_tier(args, SimpleNamespace(llm_service_tier="flex"))
+    assert "service_tier" not in args
 
 
 def test_apply_service_tier_sets_priority_for_openai() -> None:
@@ -369,14 +432,90 @@ def test_tier_retry_passthrough_when_no_service_tier(
     assert "service_tier" not in fake.calls[0]
 
 
+def test_tpm_input_too_large_requests_chunk_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(
+        [
+            RuntimeError(
+                "RateLimitError: Request too large for gpt-5.6-luna on tokens "
+                "per min (TPM): Limit 200000, Requested 212037."
+            ),
+        ]
+    )
+    _patch_litellm(monkeypatch, fake)
+    args = {
+        "model": "gpt-5.6-luna",
+        "max_completion_tokens": 128_000,
+    }
+
+    with pytest.raises(LLMRequestTooLargeError) as raised:
+        call_litellm_with_tier_retry(
+            args,
+            config=SimpleNamespace(llm_service_tier="default"),
+            logger=logging.getLogger("test"),
+        )
+
+    assert raised.value.limit == 200_000
+    assert raised.value.requested == 212_037
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["max_completion_tokens"] == 128_000
+    assert args["max_completion_tokens"] == 128_000
+
+
+def test_tpm_output_reservation_reduces_output_limit_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCompletion(
+        [
+            RuntimeError("tokens per min (TPM): Limit 200000, Requested 212037"),
+            "ok",
+        ]
+    )
+    _patch_litellm(monkeypatch, fake)
+    args = {"model": "gpt-5.6-luna", "max_completion_tokens": 250_000}
+
+    result = call_litellm_with_tier_retry(
+        args,
+        config=SimpleNamespace(llm_service_tier="default"),
+        logger=logging.getLogger("test"),
+    )
+
+    assert result == "ok"
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["max_completion_tokens"] == 235_963
+
+
+def test_tpm_request_too_large_without_output_limit_requests_chunk_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = RuntimeError(
+        "RateLimitError: tokens per minute: Limit: 200,000, Requested: 212,037"
+    )
+    fake = _FakeCompletion([error])
+    _patch_litellm(monkeypatch, fake)
+
+    with pytest.raises(LLMRequestTooLargeError) as raised:
+        call_litellm_with_tier_retry(
+            {"model": "gpt-5.6-luna"},
+            config=SimpleNamespace(llm_service_tier="default"),
+            logger=logging.getLogger("test"),
+        )
+
+    assert raised.value.limit == 200_000
+    assert raised.value.requested == 212_037
+    assert len(fake.calls) == 1
+
+
 def test_tier_retry_succeeds_on_first_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _FakeCompletion(["ok"])
     _patch_litellm(monkeypatch, fake)
 
+    args = {"model": "openai/gpt-5", "service_tier": "flex"}
     result = call_litellm_with_tier_retry(
-        {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+        args,
         config=SimpleNamespace(llm_service_tier="flex"),
         logger=logging.getLogger("test"),
         sleep=lambda _s: None,
@@ -399,8 +538,9 @@ def test_tier_retry_backs_off_then_succeeds(
     _patch_litellm(monkeypatch, fake)
     sleeps: list[float] = []
 
+    args = {"model": "openai/gpt-5", "service_tier": "flex"}
     result = call_litellm_with_tier_retry(
-        {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+        args,
         config=SimpleNamespace(llm_service_tier="flex"),
         logger=logging.getLogger("test"),
         max_retries=5,
@@ -428,8 +568,9 @@ def test_tier_retry_falls_back_to_standard_on_exhaustion(
     )
     _patch_litellm(monkeypatch, fake)
 
+    args = {"model": "openai/gpt-5", "service_tier": "flex"}
     result = call_litellm_with_tier_retry(
-        {"model": "gemini/gemini-2.5-flash", "service_tier": "flex"},
+        args,
         config=SimpleNamespace(llm_service_tier="flex"),
         logger=logging.getLogger("test"),
         max_retries=3,
@@ -443,6 +584,7 @@ def test_tier_retry_falls_back_to_standard_on_exhaustion(
     assert fake.calls[1]["service_tier"] == "flex"
     assert fake.calls[2]["service_tier"] == "flex"
     assert "service_tier" not in fake.calls[3]
+    assert "service_tier" not in args
 
 
 def test_tier_retry_reraises_non_retryable(
@@ -459,3 +601,21 @@ def test_tier_retry_reraises_non_retryable(
             sleep=lambda _s: None,
         )
     assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("gpt-5.6-luna", True),
+        ("gpt-6-luna", True),
+        ("openai/gpt-6", True),
+        ("gpt-10", True),
+        ("gpt-4o-mini", True),
+        ("gpt-4.1", False),
+        ("gpt-3.5-turbo", False),
+        ("groq/openai/gpt-oss-120b", False),
+        (None, False),
+    ],
+)
+def test_model_uses_max_completion_tokens(model: str | None, expected: bool) -> None:
+    assert model_uses_max_completion_tokens(model) is expected

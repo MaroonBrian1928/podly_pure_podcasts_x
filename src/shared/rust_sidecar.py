@@ -26,6 +26,15 @@ RUST_FEED_POSTS_ENABLED_ENV = "PODLY_RUST_FEED_POSTS_ENABLED"
 RUST_WORD_BOUNDARY_ENABLED_ENV = "PODLY_RUST_WORD_BOUNDARY_ENABLED"
 RUST_CHAPTER_FALLBACK_ENABLED_ENV = "PODLY_RUST_CHAPTER_FALLBACK_ENABLED"
 RUST_COSTS_ENABLED_ENV = "PODLY_RUST_COSTS_ENABLED"
+RUST_REPEAT_AD_ENABLED_ENV = "PODLY_RUST_REPEAT_AD_ENABLED"
+
+# Audio operations (cut/bleep/split) re-encode the full episode and, for
+# profanity bleeping, run one ffmpeg pass per 96-window chunk serially -- an
+# episode with many profanity windows can take well over the default 300s
+# sidecar timeout, which would (wrongly) look like a Rust failure and fall back
+# to the slower Python path. Give audio ops a much larger, env-tunable timeout.
+RUST_AUDIO_TIMEOUT_SEC_ENV = "PODLY_RUST_AUDIO_TIMEOUT_SEC"
+DEFAULT_RUST_AUDIO_TIMEOUT_SEC = 3600
 
 
 class RustSidecarError(RuntimeError):
@@ -57,6 +66,24 @@ def rust_tools_bin() -> Path:
 
 def rust_audio_enabled() -> bool:
     return env_flag_enabled(RUST_AUDIO_ENABLED_ENV, RUST_DEFAULT_ENABLED)
+
+
+def rust_audio_timeout_sec() -> int:
+    """Timeout (seconds) for audio sidecar commands (cut/bleep/split)."""
+    raw = os.environ.get(RUST_AUDIO_TIMEOUT_SEC_ENV)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    try:
+        parsed = int(raw)
+    except ValueError:
+        LOGGER.warning(
+            "Invalid %s=%r; using default %ss",
+            RUST_AUDIO_TIMEOUT_SEC_ENV,
+            raw,
+            DEFAULT_RUST_AUDIO_TIMEOUT_SEC,
+        )
+        return DEFAULT_RUST_AUDIO_TIMEOUT_SEC
+    return max(1, parsed)
 
 
 def rust_feed_xml_enabled() -> bool:
@@ -107,36 +134,65 @@ def rust_costs_enabled() -> bool:
     return env_flag_enabled(RUST_COSTS_ENABLED_ENV, RUST_DEFAULT_ENABLED)
 
 
+def rust_repeat_ad_enabled() -> bool:
+    return env_flag_enabled(RUST_REPEAT_AD_ENABLED_ENV, RUST_DEFAULT_ENABLED)
+
+
+def _notify_rust_fallback(operation: str, error: str) -> None:
+    """Best-effort 'rust fell back to Python' notification.
+
+    Lazy-imports the app-layer notification service so this shared module keeps
+    no hard dependency on the app package, and never raises.
+    """
+    try:
+        from app.notifications import notification_service
+
+        notification_service.notify_rust_fallback(operation=operation, error=error)
+    except Exception:  # noqa: BLE001 - notifications must never affect the sidecar
+        LOGGER.debug("rust-fallback notification dispatch failed", exc_info=True)
+
+
 def run_podly_tools(args: list[str], timeout_sec: int = 300) -> dict[str, Any]:
     command = [str(rust_tools_bin()), *args]
+    # e.g. "audio probe", "stats render" -- identifies the failing operation and
+    # keys the notification throttle.
+    operation = " ".join(str(a) for a in args[:2]) or "podly_tools"
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=timeout_sec,
-        )
-    except OSError as exc:
-        raise RustSidecarError(f"failed to start podly_tools: {exc}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RustSidecarError(f"podly_tools timed out after {timeout_sec}s") from exc
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except OSError as exc:
+            raise RustSidecarError(f"failed to start podly_tools: {exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RustSidecarError(
+                f"podly_tools timed out after {timeout_sec}s"
+            ) from exc
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RustSidecarError(
-            f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
-        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            raise RustSidecarError(
+                f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
+            )
 
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RustSidecarError("podly_tools returned invalid JSON") from exc
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RustSidecarError("podly_tools returned invalid JSON") from exc
 
-    if not isinstance(payload, dict):
-        raise RustSidecarError("podly_tools returned a non-object JSON payload")
+        if not isinstance(payload, dict):
+            raise RustSidecarError("podly_tools returned a non-object JSON payload")
 
-    return payload
+        return payload
+    except RustSidecarError as exc:
+        # Every RustSidecarError leads a caller to fall back to Python; notify
+        # here (once, centrally) rather than at each of the ~15 call sites.
+        _notify_rust_fallback(operation, str(exc))
+        raise
 
 
 def try_probe_audio_duration_ms(input_path: Path) -> int | None:
@@ -264,7 +320,8 @@ def try_split_audio(
                 str(output_dir),
                 "--chunk-size-bytes",
                 str(chunk_size_bytes),
-            ]
+            ],
+            timeout_sec=rust_audio_timeout_sec(),
         )
     except RustSidecarError:
         LOGGER.exception("Rust audio split failed; falling back to Python behavior")
@@ -691,7 +748,7 @@ def _chapters_are_monotonic(chapters: list[dict[str, Any]]) -> bool:
 
 def _try_audio_command(args: list[str], label: str) -> bool:
     try:
-        payload = run_podly_tools(args)
+        payload = run_podly_tools(args, timeout_sec=rust_audio_timeout_sec())
     except RustSidecarError:
         LOGGER.exception("Rust audio %s failed; falling back to Python behavior", label)
         return False
@@ -705,17 +762,29 @@ def _try_audio_command(args: list[str], label: str) -> bool:
 
 
 def _try_feed_xml_command(args: list[str], label: str) -> bytes | None:
+    # Keep RSS as bytes end-to-end: a JSON envelope required Python to hold
+    # subprocess text, decoded JSON/XML text, and UTF-8 output simultaneously.
     try:
-        payload = run_podly_tools(args)
-    except RustSidecarError:
+        result = subprocess.run(
+            [str(rust_tools_bin()), *args, "--raw-xml"],
+            capture_output=True,
+            check=False,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RustSidecarError(
+                f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
+            )
+        xml = result.stdout
+        # Validate the renderer's framing without decoding/parsing the archive.
+        if not xml.startswith(b"<?xml ") or not xml.endswith(b"</rss>\n"):
+            raise RustSidecarError("podly_tools returned invalid raw RSS framing")
+    except (OSError, subprocess.TimeoutExpired, RustSidecarError) as exc:
+        _notify_rust_fallback(label, str(exc))
         LOGGER.exception("Rust %s failed; falling back to Python behavior", label)
         return None
-
-    xml = payload.get("xml")
-    if not isinstance(xml, str):
-        LOGGER.error("Rust %s returned invalid xml payload: %r", label, payload)
-        return None
-    return xml.encode("utf-8")
+    return xml
 
 
 class _windows_json_file:
@@ -1062,6 +1131,66 @@ def try_wb_refine_from_llm(
     return payload
 
 
+def try_repeat_ad_candidates(
+    *,
+    db_path: Path,
+    post_guid: str,
+    target_first_seq: int,
+    target_last_seq: int,
+    exclude_ranges: list[tuple[int, int]],
+    similarity_threshold: float,
+) -> list[dict[str, Any]] | None:
+    """Run the Rust deterministic repeat-ad candidate finder.
+
+    Mirrors ``repeat_ad_finder.find_repeat_candidates`` in Python: given a
+    detected ad's seq range, returns spans elsewhere in the transcript whose
+    text matches within ``similarity_threshold`` (token-LCS ratio). Returns
+    None on flag-off / sidecar error / bad payload so the caller falls back to
+    the Python implementation.
+    """
+    if not rust_repeat_ad_enabled():
+        return None
+
+    request_payload = {
+        "exclude_ranges": [[int(a), int(b)] for a, b in exclude_ranges],
+    }
+    with _json_file(request_payload) as input_path:
+        args = [
+            "transcript",
+            "repeat-ad-candidates",
+            "--db",
+            str(db_path),
+            "--post-guid",
+            post_guid,
+            "--target-first-seq",
+            str(int(target_first_seq)),
+            "--target-last-seq",
+            str(int(target_last_seq)),
+            "--similarity-threshold",
+            repr(float(similarity_threshold)),
+            "--input",
+            str(input_path),
+        ]
+        try:
+            payload = run_podly_tools(args)
+        except RustSidecarError:
+            LOGGER.exception("Rust repeat-ad-candidates failed; falling back to Python")
+            return None
+
+    raw = payload.get("candidates")
+    if not isinstance(raw, list):
+        LOGGER.error("Rust repeat-ad-candidates returned invalid payload: %r", payload)
+        return None
+
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            LOGGER.error("Rust repeat-ad-candidates returned non-dict: %r", item)
+            return None
+        result.append(item)
+    return result
+
+
 def try_chapter_topic_blocks(
     *,
     db_path: Path,
@@ -1072,6 +1201,7 @@ def try_chapter_topic_blocks(
     max_block_seconds: int = 120,
     max_chars_per_block: int = 1000,
     removed_windows_ms: list[tuple[int, int]] | None = None,
+    include_segment_markers: bool = False,
 ) -> list[dict[str, Any]] | None:
     """Run the Rust chapter topic-block builder.
 
@@ -1103,6 +1233,8 @@ def try_chapter_topic_blocks(
         str(int(max_block_seconds)),
         "--max-chars-per-block",
         str(int(max_chars_per_block)),
+        "--include-segment-markers",
+        "true" if include_segment_markers else "false",
     ]
     if total_duration_ms is not None:
         base_args += ["--total-duration-ms", str(int(total_duration_ms))]
@@ -1318,17 +1450,28 @@ def try_render_feed_posts(
             check=False,
             timeout=300,
         )
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        error = (
+            "podly_tools timed out after 300s"
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else f"failed to start podly_tools: {exc}"
+        )
+        _notify_rust_fallback("posts feed-list", error)
         LOGGER.exception(
             "Rust feed-posts subprocess failed; falling back to Python implementation"
         )
         return None
 
     if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        error = (
+            f"podly_tools exited with {result.returncode}: {stderr or '<no stderr>'}"
+        )
+        _notify_rust_fallback("posts feed-list", error)
         LOGGER.error(
-            "Rust feed-posts exited with %s: %s",
+            "Rust feed-posts exited with %s: %s; falling back to Python implementation",
             result.returncode,
-            result.stderr.decode("utf-8", errors="replace").strip() or "<no stderr>",
+            stderr or "<no stderr>",
         )
         return None
 
@@ -1345,8 +1488,12 @@ def try_render_feed_posts(
     # always starts with this prefix. If it doesn't, fall back rather than
     # forward garbage to the HTTP client.
     if not stripped.startswith(b'{"items":'):
+        _notify_rust_fallback(
+            "posts feed-list", "podly_tools returned an unexpected payload prefix"
+        )
         LOGGER.error(
-            "Rust feed-posts returned unexpected payload prefix: %r",
+            "Rust feed-posts returned unexpected payload prefix: %r; "
+            "falling back to Python implementation",
             stripped[:80],
         )
         return None
