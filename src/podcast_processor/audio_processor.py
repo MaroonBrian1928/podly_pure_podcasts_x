@@ -17,6 +17,13 @@ from shared.config import Config
 
 ATOMIC_AD_BLOCK_GAP_SECONDS = 10.0
 REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS = 0.75
+# An atomic ad block that matched no refined boundary is dropped from the cut
+# window only when it sits farther than this from the refined ad. Closer than
+# this, it is preserved: the refiner may have missed the true ad edge by a
+# few segments, and cutting a little extra stays fail-safe toward ad removal.
+# 30s mirrors the live min_ad_segment_separation_seconds -- the system's own
+# definition of "too far apart to be one ad break".
+UNMATCHED_BLOCK_MAX_GAP_SECONDS = 30.0
 EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS = 30.0
 SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS = 20.0
 MIN_NEIGHBOR_AD_DURATION_FOR_EDGE_MERGE_SECONDS = 15.0
@@ -293,6 +300,32 @@ class AudioProcessor:
             self._project_atomic_block(block, refined_boundaries)
             for block in atomic_blocks
         ]
+        if refined_boundaries:
+            refined_start = min(r.refined_start for r in refined_boundaries)
+            refined_end = max(r.refined_end for r in refined_boundaries)
+            kept_blocks = []
+            for projected, block in zip(projected_blocks, atomic_blocks):
+                if self._refined_boundaries_matching_block(block, refined_boundaries):
+                    kept_blocks.append(projected)
+                    continue
+                # Unmatched block: the refiner deliberately ignored this coarse
+                # transcript position (often a classifier false positive).
+                # Preserve it only if it sits close to the refined ad -- the
+                # refiner may have missed the true edge by a few segments.
+                # Farther than UNMATCHED_BLOCK_MAX_GAP_SECONDS away, it is not
+                # part of this ad break: drop it so it cannot drag the cut
+                # window via min()/max() and delete real episode content.
+                gap = (
+                    refined_start - block.end
+                    if block.end < refined_start
+                    else block.start - refined_end
+                    if block.start > refined_end
+                    else 0.0
+                )
+                if gap <= UNMATCHED_BLOCK_MAX_GAP_SECONDS:
+                    kept_blocks.append(projected)
+            if kept_blocks:
+                projected_blocks = kept_blocks
         return (
             min(block.start for block in projected_blocks),
             max(block.end for block in projected_blocks),
@@ -325,37 +358,49 @@ class AudioProcessor:
         blocks.append(TimeWindow(start=current_start, end=current_end))
         return blocks
 
+    @staticmethod
     def _project_atomic_block(
-        self,
         block: TimeWindow,
         refined_boundaries: list[RefinedBoundary],
     ) -> TimeWindow:
-        matched = self._best_refined_boundary_match(block, refined_boundaries)
-        if matched is None:
+        matched = AudioProcessor._refined_boundaries_matching_block(
+            block, refined_boundaries
+        )
+        if not matched:
             return block
-        return TimeWindow(start=matched.refined_start, end=matched.refined_end)
+        # Union every refined window overlapping this block. Keeping only the
+        # single best-overlap match used to silently drop correctly refined
+        # ad windows that shared one atomic transcript block, leaving ad
+        # audio uncut.
+        return TimeWindow(
+            start=min(refined.refined_start for refined in matched),
+            end=max(refined.refined_end for refined in matched),
+        )
 
     @staticmethod
-    def _best_refined_boundary_match(
+    def _refined_boundary_overlap(
+        block: TimeWindow,
+        refined: RefinedBoundary,
+    ) -> float:
+        return min(
+            block.end + REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+            refined.orig_end + REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+        ) - max(
+            block.start - REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+            refined.orig_start - REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
+        )
+
+    @classmethod
+    def _refined_boundaries_matching_block(
+        cls,
         block: TimeWindow,
         refined_boundaries: list[RefinedBoundary],
-    ) -> RefinedBoundary | None:
-        best_match: RefinedBoundary | None = None
-        best_overlap = 0.0
-
-        for refined in refined_boundaries:
-            overlap = min(
-                block.end + REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
-                refined.orig_end + REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
-            ) - max(
-                block.start - REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
-                refined.orig_start - REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS,
-            )
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_match = refined
-
-        return best_match if best_overlap > 0.0 else None
+    ) -> list[RefinedBoundary]:
+        return [
+            refined
+            for refined in refined_boundaries
+            if cls._refined_boundary_overlap(block, refined) > 0.0
+        ]
 
     def _safe_get_post_row(self, post: Post) -> Post | None:
         try:
