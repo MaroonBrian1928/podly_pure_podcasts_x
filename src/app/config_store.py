@@ -509,6 +509,20 @@ def _maybe_disable_cleanup_job(
                 pass
 
 
+def apply_app_scheduler_side_effects(
+    previous: dict[str, Any], current: dict[str, Any]
+) -> None:
+    """Reconcile scheduler state in the process that serves config updates."""
+    _maybe_reschedule_refresh_job(
+        previous.get("background_update_interval_minute"),
+        current.get("background_update_interval_minute"),
+    )
+    _maybe_disable_cleanup_job(
+        previous.get("post_cleanup_retention_days"),
+        current.get("post_cleanup_retention_days"),
+    )
+
+
 def update_combined(payload: dict[str, Any]) -> dict[str, Any]:
     if "llm" in payload:
         _update_section_llm(payload["llm"] or {})

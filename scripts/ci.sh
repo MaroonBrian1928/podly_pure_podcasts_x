@@ -1,5 +1,5 @@
 #!/bin/bash
-
+set -Eeuo pipefail
 
 # Parse command line arguments
 RUN_INTEGRATION=false
@@ -46,6 +46,12 @@ if [ -f rust/Cargo.toml ]; then
         cargo test
     )
 fi
+
+# The live Python writer API and Rust implementation must remain parity-complete.
+echo '============================================================='
+echo "Running 'uv run python scripts/check_writer_registry.py'"
+echo '============================================================='
+uv run python scripts/check_writer_registry.py
 
 # Run integration tests only if --int flag is provided
 if [ "$RUN_INTEGRATION" = true ]; then

@@ -46,6 +46,7 @@ dev = [
     "watchdog",
     "requests",
     "types-flask-cors",
+    "jsonschema",
 ]
 
 [tool.pytest.ini_options]
