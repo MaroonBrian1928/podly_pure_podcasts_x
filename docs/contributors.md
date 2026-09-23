@@ -2,12 +2,13 @@
 
 ## Quick Start (Docker - recommended for local setup)
 
-1. Make the script executable and run:
+1. Create your settings file, make the script executable, and run:
 
 ```bash
+cp .env.local.example .env.local   # then fill in your API keys
 chmod +x run_podly_docker.sh
-./run_podly_docker.sh --production # foreground with logs
-./run_podly_docker.sh --production -d # or detached
+./run_podly_docker.sh --dev        # foreground with logs
+./run_podly_docker.sh --dev -d     # or detached
 ```
 
 This uses the single Podly Docker image. Transcription always runs outside the
@@ -54,25 +55,25 @@ point for both local builds and the published image.
 
 ```bash
 ./run_podly_docker.sh --dev          # build local image and start for local changes
-./run_podly_docker.sh --production   # use published images (default)
 ./run_podly_docker.sh --dev --build  # build local image only
 ./run_podly_docker.sh --test-build   # test build
-./run_podly_docker.sh -d             # detached
+./run_podly_docker.sh --dev -d       # detached
 ```
 
 Common flags:
 
-- `--production` — use the pre-built published image (default)
 - `--dev` — build a local image with your code changes
+- `--production` — use a pre-built published image (the script's default; see below)
 - `--build`, `--test-build`, `--branch=BRANCH` — Docker build helpers
 - `-d/--detach` (or `-b/--background`) — run in the background
 - `-h/--help` — show all options
 
 **Development mode** (`--dev`) uses local Docker builds, mounts the instance
 directory, and rebuilds after code changes — good for development, testing, and
-customization. **Production mode** (`--production`, the default) pulls pre-built
-images from the GitHub Container Registry with the same volume mounts — good for
-deployment and quick, consistent setups.
+customization. **Production mode** (`--production`, the script's default) pulls a
+pre-built image, but this repo's `compose.yml` has its `image:` line commented
+out, so there is nothing to pull. Use `--dev` unless you point `compose.yml` at a
+published image.
 
 ### Application Port & Frontend
 
