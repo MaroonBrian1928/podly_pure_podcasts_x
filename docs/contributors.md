@@ -145,7 +145,7 @@ Podly ships with built-in authentication so you can secure feeds without relying
 - Provide a long, random `PODLY_SECRET_KEY` so Flask sessions remain valid across restarts. If you omit it, the app generates a new key on each boot and all users are signed out.
 - On first boot with an empty database, Podly seeds an admin user using the supplied credentials. **If you are enabling auth on an existing install, start from a fresh data volume.**
 - After signing in, open the Config page to rotate your password and manage additional users. When you change the admin password, update the corresponding environment variable in your deployment platform so restarts continue to succeed.
-- Use the "Copy protected feed" button to generate feed-specific access tokens that are embedded in subscription URLs so podcast clients can authenticate without your primary password. Rate limiting is still applied to repeated authentication failures.
+- Use the RSS button on a podcast's page to copy its subscription URL. The URL carries a feed-specific access token, so podcast clients can authenticate without your primary password. Rate limiting is still applied to repeated authentication failures.
 
 ## Ubuntu Service
 

@@ -1,4 +1,4 @@
-# How To Run: Ultimate Beginner's Guide
+# Beginner's Guide
 
 This guide will walk you through setting up Podly from scratch using Docker. Podly creates ad-free RSS feeds for podcasts by automatically detecting and removing advertisement segments.
 
@@ -25,10 +25,11 @@ steps for you. Then paste one of the prompts below into the chat.
 If you don't have the repo downloaded:
 
 ```
-Help me install docker and run Podly https://github.com/podly-pure-podcasts/podly_pure_podcasts
+Help me install docker and run Podly https://github.com/MaroonBrian1928/podly_pure_podcasts_x
 After the project is cloned, help me:
 - install docker & docker compose
-- run `./run_podly_docker.sh --production -d`
+- copy `.env.local.example` to `.env.local` and fill in my API keys and admin password
+- run `docker compose up -d --build`
 - configure the app via the web UI at http://localhost:5001/config
 Be sure to check if a dependency is already installed before downloading.
 We recommend Docker because installing ffmpeg and the app runtime can be difficult.
@@ -44,7 +45,8 @@ If you do have the repo pulled, open this file and prompt:
 Review this project, follow this guide and start Podly on my computer.
 Briefly, help me:
 - install docker & docker compose
-- run `./run_podly_docker.sh --production -d`
+- copy `.env.local.example` to `.env.local` and fill in my API keys and admin password
+- run `docker compose up -d --build`
 - configure the app via the web UI at http://localhost:5001/config
 Be sure to check if a dependency is already installed before downloading.
 We recommend docker because installing ffmpeg and the app runtime can be difficult.
@@ -125,19 +127,27 @@ create a new key, and copy it somewhere safe — most providers only show it onc
 ### Download the Project
 
 ```bash
-git clone https://github.com/podly-pure-podcasts/podly_pure_podcasts.git
-cd podly_pure_podcasts
+git clone https://github.com/MaroonBrian1928/podly_pure_podcasts_x.git podly
+cd podly
 ```
 
 ## Running Podly
 
 ### Run the Application via Docker
 
+Podly reads its settings from `.env.local` in the project folder. Create it from
+the example and fill in your API keys and admin password (see
+[Enable Authentication](#recommended-enable-authentication) below):
+
 ```bash
-chmod +x run_podly_docker.sh
-./run_podly_docker.sh --production      # foreground, published image
-./run_podly_docker.sh --production -d   # detached, published image
-./run_podly_docker.sh --dev --build     # build local image after code changes
+cp .env.local.example .env.local
+```
+
+Then build and start Podly:
+
+```bash
+docker compose up -d --build   # run in the background
+docker compose up --build      # or run in the foreground and watch the logs
 ```
 
 ### Recommended: Enable Authentication
@@ -147,15 +157,15 @@ chmod +x run_podly_docker.sh
 > control your feeds. The example config (`.env.local.example`) ships with
 > `REQUIRE_AUTH=true` for this reason — keep it on and set your own password.
 
-The Docker image reads environment variables from `.env.local` files or your shell. To require login:
+The container reads its settings from `.env.local` in the project folder. To require login:
 
-1. Export the variables before running Podly, or add them to `config/.env.local`:
+1. Set these values in `.env.local`:
 
-```bash
-export REQUIRE_AUTH=true
-export PODLY_ADMIN_USERNAME='podly_admin'
-export PODLY_ADMIN_PASSWORD='SuperSecurePass!2024'      # use your own strong password
-export PODLY_SECRET_KEY='replace-with-a-strong-64-char-secret'
+```env
+REQUIRE_AUTH=true
+PODLY_ADMIN_USERNAME=podly_admin
+PODLY_ADMIN_PASSWORD=SuperSecurePass!2024      # use your own strong password
+PODLY_SECRET_KEY=replace-with-a-strong-64-char-secret
 ```
 
    Generate a strong secret key with:
@@ -163,7 +173,7 @@ export PODLY_SECRET_KEY='replace-with-a-strong-64-char-secret'
 
 2. Start Podly as usual. On first boot with auth enabled and an empty database, the admin account is created automatically. If you are turning auth on for an existing volume, clear the `sqlite3.db` file so the bootstrap can succeed.
 
-3. Sign in at `http://localhost:5001`, then visit the Config page to change your password, add users, and copy RSS URLs with the "Copy protected feed" button. Podly generates feed-specific access tokens and embeds them in the link so podcast players can subscribe without exposing your main password. Remember to update your environment variables whenever you rotate the admin password.
+3. Sign in at `http://localhost:5001`, then visit the Config page to change your password and add users. To copy a podcast's feed URL, open the podcast and click its RSS button. Podly generates feed-specific access tokens and embeds them in the link so podcast players can subscribe without exposing your main password. Remember to update your environment variables whenever you rotate the admin password.
 
 ### Subscribing in a podcast app (public feeds & PocketCasts)
 
@@ -176,8 +186,8 @@ To use Podly with these apps:
 1. Host Podly somewhere publicly reachable (for example, the
    [Railway deployment](how_to_run_railway.md), or your own server with a public
    URL / reverse proxy).
-2. Keep authentication enabled (above) and use the **"Copy protected feed"**
-   button on the Config page. The copied URL contains a per-feed access token,
+2. Keep authentication enabled (above) and copy the feed URL with the RSS
+   button on the podcast's page. The copied URL contains a per-feed access token,
    so the app can fetch the feed over the public internet **without** exposing
    your admin login. This gives you a publicly *reachable* feed that is still
    *protected* by a secret token.
@@ -208,14 +218,14 @@ token-protected URL is the way to go.
 
 ### Adding Your First Podcast
 
-1. In the web interface, look for an "Add Podcast" or similar button
-2. Paste the RSS feed URL of your podcast
+1. In the web interface, click **Add Feed**
+2. Search for your podcast, or paste its RSS feed URL
 3. Podly will start processing new episodes automatically
 4. Processed episodes will have advertisements removed
 
 ### Getting Your Ad-Free RSS Feed
 
-1. After adding a podcast, Podly will generate a new RSS feed URL
+1. Open the podcast and click its RSS button to copy the Podly feed URL
 2. Use this new URL in your podcast app instead of the original
 3. Your podcast app will now download ad-free versions!
 

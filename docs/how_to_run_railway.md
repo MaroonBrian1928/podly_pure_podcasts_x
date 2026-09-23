@@ -77,7 +77,7 @@ Podly uses secure session cookies for the web dashboard and per-feed access toke
 
 > **Important:** Enabling auth on an existing deployment requires a fresh data volume. Create a new Railway deployment or wipe the existing storage so the initial admin can be seeded.
 
-After signing in, use the Config page to change your password, add additional users, and copy RSS links via the "Copy protected feed" button. Podly issues feed-specific access tokens and embeds them in each URL so listeners can subscribe without knowing your main password. When you rotate passwords, update the corresponding Railway variables so restarts succeed.
+After signing in, use the Config page to change your password, and add additional users. To copy a podcast's RSS link, open the podcast and click its RSS button. Podly issues feed-specific access tokens and embeds them in each URL so listeners can subscribe without knowing your main password. When you rotate passwords, update the corresponding Railway variables so restarts succeed.
 
 ## 6. Using Podly
 
@@ -88,7 +88,7 @@ After signing in, use the Config page to change your password, add additional us
 5.  Download and enjoy ad-free episodes!
 
 > **Subscribing with auth enabled:** if you turned on authentication (step 5),
-> use the **"Copy protected feed"** button on the Feeds/Config page rather than
+> copy the feed URL with the RSS button on the podcast's page rather than
 > the bare `/feed/1` URL. It embeds a per-feed access token so podcast apps can
 > fetch the feed without your login. This matters for apps like **Pocket Casts**,
 > which fetch feeds from their own servers and therefore need a publicly
