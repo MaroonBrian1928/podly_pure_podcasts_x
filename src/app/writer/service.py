@@ -51,7 +51,7 @@ def _start_idle_trim_thread(activity_counter: list[int]) -> threading.Thread | N
             last_count = current
             try:
                 release_memory_to_os("writer idle tick", logger)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("writer idle trim failed", exc_info=True)
 
     thread = threading.Thread(target=_loop, name="writer-idle-trim", daemon=True)
@@ -79,6 +79,7 @@ DEFERRED_MEMORY_TRIM_ACTIONS = {
     "touch_feed_access_token",
     "update_user_last_active",
 }
+
 
 def _writer_timing_enabled() -> bool:
     return os.environ.get("PODLY_WRITER_TIMING_LOG", "").strip().lower() in {
@@ -117,6 +118,7 @@ def _writer_timing_payload(
         "total_ms": total_ms,
         "success": success,
     }
+
 
 def _action_name(cmd: object) -> str | None:
     data = getattr(cmd, "data", None)

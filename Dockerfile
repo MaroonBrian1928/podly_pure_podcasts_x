@@ -17,7 +17,7 @@ WORKDIR /app/rust
 
 COPY rust/Cargo.toml rust/Cargo.lock* ./
 COPY rust/src/ ./src/
-RUN cargo build --release --locked
+RUN cargo build --release --locked --bins
 
 FROM python:3.14-slim AS backend
 COPY --from=ghcr.io/astral-sh/uv:0.11.26 /uv /uvx /bin/
@@ -67,10 +67,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY src/ ./src/
 RUN rm -rf ./src/instance
 COPY scripts/ ./scripts/
-RUN chmod +x scripts/start_services.sh
+RUN chmod +x scripts/start_services.sh scripts/healthcheck.sh
 
 RUN mkdir -p /app/bin
 COPY --from=rust-tools /app/rust/target/release/podly_tools /app/bin/podly_tools
+COPY --from=rust-tools /app/rust/target/release/podly_writer /app/bin/podly_writer
 
 COPY --from=frontend-build /app/dist ./src/app/static
 

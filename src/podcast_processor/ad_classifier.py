@@ -846,7 +846,7 @@ class AdClassifier:
                 .order_by(AudioSegment.start_time.asc())
                 .all()
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.logger.warning(
                 "Failed to load INA audio markers for prompt on post %s",
                 post.id,

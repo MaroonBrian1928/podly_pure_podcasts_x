@@ -16,7 +16,7 @@ from app.auth.passwords import verify_password
 from app.writer.protocol import WriteCommand, WriteCommandType
 from tests.writer_parity_fixtures import WriterParityPair
 
-ParamsFactory = Callable[[WriterParityPair], dict[str, Any]]
+ParamsFactory = Callable[[WriterParityPair], Any]
 
 
 def build_writer_user_case(
@@ -28,6 +28,43 @@ def build_writer_user_case(
     _seed_case_preconditions(pair, case_id)
     params = _USER_PARAMS[case_id](pair)
     action = case["action"]
+    if case_id == "user_upsert_discord_repeat_same_identity":
+        first_params, second_params = params
+        operation = {
+            "operation": "transaction",
+            "commands": [
+                {
+                    "command_id": command_id,
+                    "operation": "action",
+                    "action": action,
+                    "params": command_params,
+                }
+                for command_id, command_params in (
+                    ("discord-upsert-first", first_params),
+                    ("discord-upsert-repeat", second_params),
+                )
+            ],
+        }
+        command = WriteCommand(
+            id=f"parity-{case_id}",
+            type=WriteCommandType.TRANSACTION,
+            model=None,
+            data={
+                "commands": [
+                    {
+                        "id": command_id,
+                        "type": WriteCommandType.ACTION.value,
+                        "model": None,
+                        "data": {"action": action, "params": command_params},
+                    }
+                    for command_id, command_params in (
+                        ("discord-upsert-first", first_params),
+                        ("discord-upsert-repeat", second_params),
+                    )
+                ]
+            },
+        )
+        return operation, command
     operation = {"operation": "action", "action": action, "params": params}
     command = WriteCommand(
         id=f"parity-{case_id}",
@@ -52,6 +89,22 @@ def _seed_case_preconditions(pair: WriterParityPair, case_id: str) -> None:
         "user_set_billing_by_customer_id_found": (
             "UPDATE users SET stripe_customer_id=? WHERE id=?",
             ("cus_parity_existing", pair.manifest.user_id),
+        ),
+        "user_set_billing_by_customer_id_partial": (
+            "UPDATE users SET stripe_customer_id=? WHERE id=?",
+            ("cus_parity_existing", pair.manifest.user_id),
+        ),
+        "user_set_billing_subscription_only": (
+            "UPDATE users SET stripe_customer_id=?,stripe_subscription_id=? WHERE id=?",
+            ("cus_parity_existing", "sub_parity_old", pair.manifest.user_id),
+        ),
+        "user_set_billing_explicit_nulls": (
+            "UPDATE users SET stripe_customer_id=?,stripe_subscription_id=? WHERE id=?",
+            ("cus_parity_clear", "sub_parity_clear", pair.manifest.user_id),
+        ),
+        "user_upsert_discord_username_collision": (
+            "UPDATE users SET username=? WHERE id=?",
+            ("parity_collision", pair.manifest.user_id),
         ),
     }
     statement = statements.get(case_id)
@@ -140,9 +193,19 @@ def _assert_failed_user_action(observation: dict[str, Any]) -> None:
     assert observation["rust_error"]
     expected_message = {
         "user_create_duplicate_fails_without_mutation": "user with that username already exists",
+        "user_create_missing_username_fails": "username is required",
+        "user_create_empty_password_fails": "password is required",
+        "user_create_invalid_role_fails": "role",
         "user_update_password_missing_user_fails": "user 999101 not found",
         "user_set_role_invalid_role_fails": "role",
         "user_upsert_discord_registration_denied": "self-registration via discord is disabled",
+        "user_update_password_empty_fails": "new_password is required",
+        "user_set_role_missing_user_fails": "user 999101 not found",
+        "user_set_manual_feed_allowance_invalid_fails": "allowance must be an integer or none",
+        "user_set_manual_feed_allowance_missing_user_fails": "user 999101 not found",
+        "user_upsert_discord_missing_identity_fails": "discord_id and discord_username are required",
+        "user_set_billing_fields_invalid_allowance_rolls_back": "invalid literal for int() with base 10",
+        "user_update_last_active_missing_user_fails": "user 999101 not found",
     }[case_id]
     assert expected_message in _error_message(observation["python_error"])
     assert expected_message in _error_message(observation["rust_error"])
@@ -268,6 +331,77 @@ def _assert_updated_user(observation: dict[str, Any]) -> None:
     )
 
 
+def _assert_billing_fields(observation: dict[str, Any]) -> None:
+    assert observation["python_data"] == observation["rust_result"]
+    case_id = observation["case"]["case_id"]
+    expected = {
+        "user_set_billing_subscription_only": {
+            "stripe_customer_id": "cus_parity_existing",
+            "stripe_subscription_id": "sub_parity_partial",
+        },
+        "user_set_billing_explicit_nulls": {
+            "stripe_customer_id": None,
+            "stripe_subscription_id": None,
+        },
+        "user_set_billing_zero_and_empty": {
+            "feed_allowance": 0,
+            "feed_subscription_status": "",
+        },
+        "user_set_billing_by_customer_id_partial": {
+            "stripe_customer_id": "cus_parity_existing",
+            "stripe_subscription_id": "sub_parity_partial_customer",
+            "feed_allowance": 0,
+            "feed_subscription_status": "active",
+        },
+    }[case_id]
+    user_id = observation["pair"].manifest.user_id
+    for backend in (observation["pair"].python, observation["pair"].rust):
+        user = _read_user(backend.db_path, user_id)
+        for field, value in expected.items():
+            assert user[field] == value, (case_id, backend.name, field, user[field])
+    _assert_projection_equal(
+        observation,
+        user_id=user_id,
+        variable_user_fields=frozenset({"updated_at"}),
+    )
+
+
+def _assert_discord_username_collision(observation: dict[str, Any]) -> None:
+    assert observation["python_data"] == observation["rust_result"]
+    user_id = int(observation["python_data"]["user_id"])
+    assert observation["python_data"]["created"] is True
+    for backend in (observation["pair"].python, observation["pair"].rust):
+        user = _read_user(backend.db_path, user_id)
+        assert user["username"] == "parity_collision_1"
+        assert user["discord_id"] == "parity-discord-collision"
+    _assert_projection_equal(
+        observation,
+        user_id=user_id,
+        variable_user_fields=frozenset({"created_at", "updated_at"}),
+    )
+
+
+def _assert_repeated_discord_upsert(observation: dict[str, Any]) -> None:
+    results = observation["python_data"]["results"]
+    assert observation["python_data"] == observation["rust_result"]
+    assert [item["command_id"] for item in results] == [
+        "discord-upsert-first",
+        "discord-upsert-repeat",
+    ]
+    assert results[0]["data"]["created"] is True
+    assert results[1]["data"]["created"] is False
+    assert results[0]["data"]["user_id"] == results[1]["data"]["user_id"]
+    user_id = int(results[0]["data"]["user_id"])
+    for backend in (observation["pair"].python, observation["pair"].rust):
+        user = _read_user(backend.db_path, user_id)
+        assert user["discord_username"] == "Second Parity Name"
+    _assert_projection_equal(
+        observation,
+        user_id=user_id,
+        variable_user_fields=frozenset({"created_at", "updated_at"}),
+    )
+
+
 def assert_writer_user_parity(observation: dict[str, Any]) -> None:
     case = observation["case"]
     expected_success = case.get("expect_success", True)
@@ -284,6 +418,9 @@ def assert_writer_user_parity(observation: dict[str, Any]) -> None:
         "no_op": _assert_noop_user_action,
         "delete_user": _assert_delete_user,
         "updated_user": _assert_updated_user,
+        "billing_fields": _assert_billing_fields,
+        "discord_username_collision": _assert_discord_username_collision,
+        "repeated_discord_upsert": _assert_repeated_discord_upsert,
     }
     handler = handlers.get(case.get("semantics"))
     if handler is None:
@@ -351,6 +488,33 @@ WRITER_DIFFERENTIAL_CASES = (
         "expect_success": False,
     },
     {
+        "case_id": "user_create_missing_username_fails",
+        "operation": "action",
+        "action": "create_user",
+        "owner": "create_user",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
+        "case_id": "user_create_empty_password_fails",
+        "operation": "action",
+        "action": "create_user",
+        "owner": "create_user",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
+        "case_id": "user_create_invalid_role_fails",
+        "operation": "action",
+        "action": "create_user",
+        "owner": "create_user",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
         "case_id": "user_update_password_hash",
         "operation": "action",
         "action": "update_user_password",
@@ -361,6 +525,15 @@ WRITER_DIFFERENTIAL_CASES = (
     },
     {
         "case_id": "user_update_password_missing_user_fails",
+        "operation": "action",
+        "action": "update_user_password",
+        "owner": "update_user_password",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
+        "case_id": "user_update_password_empty_fails",
         "operation": "action",
         "action": "update_user_password",
         "owner": "update_user_password",
@@ -405,6 +578,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "expect_success": False,
     },
     {
+        "case_id": "user_set_role_missing_user_fails",
+        "operation": "action",
+        "action": "set_user_role",
+        "owner": "set_user_role",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
         "case_id": "user_set_manual_feed_allowance_value",
         "operation": "action",
         "action": "set_manual_feed_allowance",
@@ -421,6 +603,42 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "user",
         "source": "src/app/writer/actions/users.py",
         "semantics": "updated_user",
+    },
+    {
+        "case_id": "user_set_manual_feed_allowance_zero",
+        "operation": "action",
+        "action": "set_manual_feed_allowance",
+        "owner": "set_manual_feed_allowance",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "updated_user",
+    },
+    {
+        "case_id": "user_set_manual_feed_allowance_negative_boundary",
+        "operation": "action",
+        "action": "set_manual_feed_allowance",
+        "owner": "set_manual_feed_allowance",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "updated_user",
+    },
+    {
+        "case_id": "user_set_manual_feed_allowance_invalid_fails",
+        "operation": "action",
+        "action": "set_manual_feed_allowance",
+        "owner": "set_manual_feed_allowance",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
+        "case_id": "user_set_manual_feed_allowance_missing_user_fails",
+        "operation": "action",
+        "action": "set_manual_feed_allowance",
+        "owner": "set_manual_feed_allowance",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
     },
     {
         "case_id": "user_upsert_discord_create",
@@ -441,7 +659,34 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "updated_user",
     },
     {
+        "case_id": "user_upsert_discord_username_collision",
+        "operation": "action",
+        "action": "upsert_discord_user",
+        "owner": "upsert_discord_user",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "discord_username_collision",
+    },
+    {
+        "case_id": "user_upsert_discord_repeat_same_identity",
+        "operation": "transaction",
+        "action": "upsert_discord_user",
+        "owner": "upsert_discord_user",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "repeated_discord_upsert",
+    },
+    {
         "case_id": "user_upsert_discord_registration_denied",
+        "operation": "action",
+        "action": "upsert_discord_user",
+        "owner": "upsert_discord_user",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
+        "case_id": "user_upsert_discord_missing_identity_fails",
         "operation": "action",
         "action": "upsert_discord_user",
         "owner": "upsert_discord_user",
@@ -459,6 +704,42 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "updated_user",
     },
     {
+        "case_id": "user_set_billing_subscription_only",
+        "operation": "action",
+        "action": "set_user_billing_fields",
+        "owner": "set_user_billing_fields",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "billing_fields",
+    },
+    {
+        "case_id": "user_set_billing_explicit_nulls",
+        "operation": "action",
+        "action": "set_user_billing_fields",
+        "owner": "set_user_billing_fields",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "billing_fields",
+    },
+    {
+        "case_id": "user_set_billing_zero_and_empty",
+        "operation": "action",
+        "action": "set_user_billing_fields",
+        "owner": "set_user_billing_fields",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "billing_fields",
+    },
+    {
+        "case_id": "user_set_billing_fields_invalid_allowance_rolls_back",
+        "operation": "action",
+        "action": "set_user_billing_fields",
+        "owner": "set_user_billing_fields",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
+    {
         "case_id": "user_set_billing_by_customer_id_found",
         "operation": "action",
         "action": "set_user_billing_by_customer_id",
@@ -466,6 +747,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "user",
         "source": "src/app/writer/actions/users.py",
         "semantics": "updated_user",
+    },
+    {
+        "case_id": "user_set_billing_by_customer_id_partial",
+        "operation": "action",
+        "action": "set_user_billing_by_customer_id",
+        "owner": "set_user_billing_by_customer_id",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "semantics": "billing_fields",
     },
     {
         "case_id": "user_set_billing_by_customer_id_missing_is_noop",
@@ -485,6 +775,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "source": "src/app/writer/actions/users.py",
         "semantics": "last_active_timestamp",
     },
+    {
+        "case_id": "user_update_last_active_missing_user_fails",
+        "operation": "action",
+        "action": "update_user_last_active",
+        "owner": "update_user_last_active",
+        "owner_group": "user",
+        "source": "src/app/writer/actions/users.py",
+        "expect_success": False,
+    },
 )
 
 
@@ -497,6 +796,18 @@ _USER_PARAMS: dict[str, ParamsFactory] = {
         "username": "parity.user",
         "password": "another-password",
     },
+    "user_create_missing_username_fails": lambda _pair: {
+        "password": "synthetic-invalid-user-password",
+    },
+    "user_create_empty_password_fails": lambda _pair: {
+        "username": "parity.empty.password",
+        "password": "",
+    },
+    "user_create_invalid_role_fails": lambda _pair: {
+        "username": "parity.invalid.role",
+        "password": "synthetic-invalid-user-password",
+        "role": "owner",
+    },
     "user_update_password_hash": lambda pair: _merge_user(
         pair, new_password="synthetic-rotated-password"
     ),
@@ -504,16 +815,32 @@ _USER_PARAMS: dict[str, ParamsFactory] = {
         "user_id": 999_101,
         "new_password": "unused-password",
     },
+    "user_update_password_empty_fails": lambda pair: _merge_user(pair, new_password=""),
     "user_delete_removes_related_state": _user,
     "user_delete_missing_user_is_noop": lambda _pair: {"user_id": 999_101},
     "user_set_role": lambda pair: _merge_user(pair, role="user"),
     "user_set_role_invalid_role_fails": lambda pair: _merge_user(pair, role="owner"),
+    "user_set_role_missing_user_fails": lambda _pair: {
+        "user_id": 999_101,
+        "role": "admin",
+    },
     "user_set_manual_feed_allowance_value": lambda pair: _merge_user(
         pair, allowance="7"
     ),
     "user_set_manual_feed_allowance_null": lambda pair: _merge_user(
         pair, allowance=None
     ),
+    "user_set_manual_feed_allowance_zero": lambda pair: _merge_user(pair, allowance=0),
+    "user_set_manual_feed_allowance_negative_boundary": lambda pair: _merge_user(
+        pair, allowance=-1
+    ),
+    "user_set_manual_feed_allowance_invalid_fails": lambda pair: _merge_user(
+        pair, allowance="not-an-int"
+    ),
+    "user_set_manual_feed_allowance_missing_user_fails": lambda _pair: {
+        "user_id": 999_101,
+        "allowance": 5,
+    },
     "user_upsert_discord_create": lambda _pair: {
         "discord_id": "parity-discord-new",
         "discord_username": "Parity New Member",
@@ -523,10 +850,30 @@ _USER_PARAMS: dict[str, ParamsFactory] = {
         "discord_id": "parity-discord-existing",
         "discord_username": "Updated Parity Name",
     },
+    "user_upsert_discord_username_collision": lambda _pair: {
+        "discord_id": "parity-discord-collision",
+        "discord_username": "Parity Collision",
+        "allow_registration": True,
+    },
+    "user_upsert_discord_repeat_same_identity": lambda _pair: (
+        {
+            "discord_id": "parity-discord-repeat",
+            "discord_username": "First Parity Name",
+            "allow_registration": True,
+        },
+        {
+            "discord_id": "parity-discord-repeat",
+            "discord_username": "Second Parity Name",
+            "allow_registration": True,
+        },
+    ),
     "user_upsert_discord_registration_denied": lambda _pair: {
         "discord_id": "parity-discord-denied",
         "discord_username": "Denied Member",
         "allow_registration": False,
+    },
+    "user_upsert_discord_missing_identity_fails": lambda _pair: {
+        "discord_username": "Missing Discord ID",
     },
     "user_set_billing_fields": lambda pair: _merge_user(
         pair,
@@ -535,15 +882,39 @@ _USER_PARAMS: dict[str, ParamsFactory] = {
         feed_allowance=9,
         feed_subscription_status="active",
     ),
+    "user_set_billing_subscription_only": lambda pair: _merge_user(
+        pair, stripe_subscription_id="sub_parity_partial"
+    ),
+    "user_set_billing_explicit_nulls": lambda pair: _merge_user(
+        pair, stripe_customer_id=None, stripe_subscription_id=None
+    ),
+    "user_set_billing_zero_and_empty": lambda pair: _merge_user(
+        pair, feed_allowance=0, feed_subscription_status=""
+    ),
+    "user_set_billing_fields_invalid_allowance_rolls_back": lambda pair: _merge_user(
+        pair,
+        stripe_customer_id="cus_parity_partial_should_rollback",
+        stripe_subscription_id="sub_parity_partial_should_rollback",
+        feed_allowance="not-an-int",
+    ),
     "user_set_billing_by_customer_id_found": lambda _pair: {
         "stripe_customer_id": "cus_parity_existing",
         "stripe_subscription_id": "sub_parity_by_customer",
         "feed_allowance": 12,
         "feed_subscription_status": "past_due",
     },
+    "user_set_billing_by_customer_id_partial": lambda _pair: {
+        "stripe_customer_id": "cus_parity_existing",
+        "stripe_subscription_id": "sub_parity_partial_customer",
+        "feed_allowance": 0,
+        "feed_subscription_status": "active",
+    },
     "user_set_billing_by_customer_id_missing_is_noop": lambda _pair: {
         "stripe_customer_id": "cus_parity_absent",
         "feed_allowance": 99,
     },
     "user_update_last_active_timestamp": _user,
+    "user_update_last_active_missing_user_fails": lambda _pair: {
+        "user_id": 999_101,
+    },
 }

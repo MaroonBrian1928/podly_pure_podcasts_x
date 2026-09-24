@@ -4,6 +4,234 @@ Evidence is recorded against synthetic fixtures and isolated containers unless a
 entry explicitly says it is a read-only observation of the existing local
 container. No entry authorizes a deployment or a write to production data.
 
+## 2026-09-23 P3/P4 isolated integration increment
+
+2026-09-24 P4.5 first rollback rehearsal is not accepted:
+`/tmp/podly-rust-migration-p4-rollback-ci-20260924.log` passed ordinary CI
+(1028 Python tests/2 skipped, Rust checks/tests, registry) and built a unique
+isolated image/volume. It persisted synthetic pending/running jobs through the
+real Rust client, stopped the Rust stack, created a quiesced SQLite backup,
+verified integrity/schema revision/ORM columns, and then exited 137 just after
+starting the Python writer. No pending-job recovery result was recorded; the
+script's cleanup trap removed its uniquely named resources. The next task is
+to capture Python container state/OOM/exit diagnostics on failure, fix the
+rehearsal, and rerun only through `./scripts/ci.sh --writer-rollback`. Do not
+mark P4.5 from this partial run.
+
+2026-09-24 P3 exit gate: the real Rust-writer post-commit response-loss case
+passed in `/tmp/podly-rust-migration-p3-real-commit-ci-20260924-2.log` (Ruff,
+ty, 1028 Python tests passed/2 skipped, Rust formatting/check/tests, registry
+gate). A synthetic proxy forwards one authenticated action to the real
+isolated Rust server, fully receives its success after SQLite commit, then
+drops only the downstream response. The selected production `WriterClient`
+reports an unknown outcome with the forwarded command ID; independent SQLite
+inspection confirms exactly one committed mutation. A subsequent valid
+command succeeds with a distinct ID and a second mutation; the proxy saw
+exactly two requests, proving no transparent replay. Local Python execution
+is trapped. Existing adapter cases cover stale/late/mismatched replies,
+partial response, failed→valid sequence, concurrent correlation, and restart.
+P3.3 is checked; with the earlier P3.1–P3.2/P3.4–P3.8 evidence, P3 exits on
+isolated fixtures. The first CI attempt `...-20260924.log` passed all Python
+tests but exited after a transient concurrent edit to `scripts/ci.sh`; the
+stable rerun above is the acceptance evidence.
+
+2026-09-24 P3 audit: the green
+`/tmp/podly-rust-migration-p2-p3-audit-ci-20260924.log` also exercises selector,
+Rust `WriterClient` transport, five documented admission-only `wait=False`
+caller shapes, response protocol mismatch, no-local-fallback behavior, the
+one-shot bootstrap tests, and a real Flask route plus synthetic job
+create/progress/complete against an isolated Rust writer. The post-merge
+`/tmp/podly-rust-migration-main-merge-container-ci-20260924.log` additionally
+verified bootstrap→readiness→web ordering, no persistent bootstrap/Python
+writer, sequential same-volume startup, non-root UID, and fail-closed
+bootstrap. P3.1, P3.2, and P3.4–P3.8 pass their task gates. P3.3 remains open:
+the current timeout-after-commit/no-replay adapter test uses a simulated HTTP
+peer, not a real Rust writer with a committed SQLite row before the reply is
+lost. An isolated real-server case is required before the P3 exit gate.
+
+2026-09-24 P2 exit gate: `/tmp/podly-rust-migration-p2-p3-audit-ci-20260924.log`
+passed Ruff, ty, 1027 Python tests (2 skipped), Rust formatting/check/tests,
+and the dynamic registry gate. This includes later P2.3 missing/invalid user
+inputs and P2.4 real feed-token authentication against tokens emitted by both
+writers: invalid secret, wrong feed scope, nonmember denial, member access,
+aggregate ownership, revocation, and async touch, plus refresh/settings
+no-ops. Existing differential cases cover all registered user and feed
+actions and compare the independent cloned databases. With the earlier group
+evidence below, all P2.1–P2.9 checkboxes now pass. The Python feed deletion
+caller's separate filesystem cleanup was not exercised here because the
+writer action itself only performs database cascades; no real files were
+removed. The P3/P4 release gates remain separate and unchecked where their
+specific evidence is incomplete.
+
+2026-09-24 P2 audit follow-up: `/tmp/podly-rust-migration-p2-audit-ci-20260924-2.log`
+passed Ruff, ty, 1021 Python tests (2 skipped), Rust formatting/check/tests,
+and the registry gate. The preceding `...-20260924.log` stopped at a Ruff
+branch-count finding in the new jobs matrix, corrected before the green run.
+P2.1's explicit absent-row DELETE contract is now implemented for the static
+Post/ModelCall/Feed generic allowlist; the deleted-row count is intentionally
+ignored, and a differential case confirms Python and Rust both report success
+without changing rows. Together with ordered nested transactions, ignored
+unknown fields, absent UPDATE failure, and deferred commit-time rollback, this
+closes P2.1. New job cases cover partial-update rollback and empty dequeue;
+feed-token tests call the actual Python authenticator against Rust-created
+tokens. P2.6 also passes its group gate: all 12 registered processor actions
+execute against both isolated writers; ordered/fractional transcript data,
+9,000-word artifact imports, 64 MiB rejection, missing/malformed/symlink
+artifact paths, duplicate/retry behavior, and per-RPC replacement success and
+rollback are compared. The 64 MiB input limit bounds this writer path. These
+tests prove the Rust writer's artifact path, not the legacy Python wrapper's
+choice between its sidecar and fallback; no sidecar speedup is claimed.
+P2.2's group gate is supported by combined-config/default/null/rollback
+parity plus the real Rust-selected HTTP PUT/GET test proving web hydration,
+processor reset, notifications setting visibility, and a fresh worker's
+config read. P2.3's earlier verified cases include cross-language bcrypt
+verification, defaults/roles/activity, billing and Discord edge cases, and
+deletion relationship effects; a later audit added further invalid-input
+cases, so its checkbox remains open until those new cases pass CI. P2.5's
+group gate includes serial claim/requeue/cancel
+semantics, stale-cutoff cases, empty dequeue, partial status-update rollback,
+concurrent single-claim behavior, and cancellation-versus-late-completion.
+P2.2 and P2.5 pass in the cited CI run. A later P2.4 audit added real
+feed-token authentication checks and no-op branches, which are not yet in a
+green run; P2.4 remains open. A green registry gate alone does not certify
+these new branches. No live writer, database, or deployment was changed.
+
+2026-09-24 P2 commit/recovery follow-up: the final
+`/tmp/podly-rust-migration-p2-followup-ci-20260924-4.log` passed Ruff, ty,
+1014 Python tests (2 skipped), Rust formatting/check/tests, and the live
+registry gate. Earlier `...-2.log` exposed six new test comparator failures;
+`...-3.log` passed all Python tests but stopped at Rust formatting, corrected
+with `mise exec -- cargo fmt --manifest-path rust/Cargo.toml`. P2.1 now proves
+ordered transaction results, allowlisted generic updates, unknown-field
+ignore, explicit NULL, no-op, absent-row error, and full rollback at a real
+deferred SQLite commit failure on both isolated clones. The deferred-FK test
+mode is hidden and requires the existing test-actions flag; the production
+writer still opens SQLite with foreign keys OFF, and a config unit test rejects
+the FK flag alone. P2.7 now executes all six cleanup actions across isolated
+path/predicate/missing-record/file cases, a 501-row relationship/chunk edge,
+singleton recount, and a failed precommit unlink followed by Rust writer
+restart and a successful retry. It compares DB rows and clone-local file
+effects; no real audio path is used. P2.6 adds per-RPC success and failure
+replacement sequences and symlink-escape artifact rejection, comparing every
+stage and preserving exact parsed word-timestamp JSON despite the writers'
+different JSON whitespace/escaping. The Python-side normalization wrapper's
+sidecar execution path remains unproven by these cases, so no sidecar speedup
+is claimed. P2.7 passes its group gate. P2.1 remains open while the plan's
+explicit absent-row generic DELETE-success requirement is reconciled with the
+current production-reachable generic allowlist; the P2 exit gate and P4
+acceptance remain open.
+
+2026-09-24 expanded P2 differential increment: three CodeGraph Explore agents
+extended isolated generic/config, processor, and cleanup parity. The first
+`/tmp/podly-rust-migration-p2-expanded-ci-20260924.log` stopped at Ruff
+branch-count/style findings in new test comparators. The second `...-2.log`
+passed Ruff/ty but found one invalid test fixture: an explicit-NULL generic
+update targeted a non-nullable feed column. The case now seeds a non-null
+nullable override on both clones and clears that value through both writers.
+`/tmp/podly-rust-migration-p2-expanded-ci-20260924-3.log` passed the complete
+wrapper (Ruff, ty, 1002 Python tests passed with 2 skipped, Rust
+formatting/check/tests, registry gate).
+New cases cover generic unknown-field/NULL/no-op/missing-row behavior,
+config partial mutation and rollback, processor retry/artifact errors, and
+cleanup selection, path/idempotence, relationship and restart/retry recovery.
+P2.1/P2.6/P2.7 remain unchecked pending deferred commit-time rollback,
+multi-RPC replacement/symlink artifact, and cleanup checklist audits. No live
+data, audio path, or deployment was used.
+
+2026-09-24 main integration: fetched current `origin/main` (`5a0c283`) and
+merged it into `rust-migrate-v2` as `9de04b3`, then restored the verified
+uncommitted Rust increment. Conflicts in dependencies, startup/config,
+writer client/service, and tests were resolved to keep both main's Apprise,
+LiteLLM/GPT-6, and late-reply behavior and this branch's Rust adapter and
+timing instrumentation. `uv.lock` was regenerated with `mise exec -- uv lock`
+from the merged constraints. The first post-merge CI log
+`/tmp/podly-rust-migration-main-merge-ci-20260924.log` stopped at three ty
+redundant-cast diagnostics in an existing test. After removing those casts,
+`/tmp/podly-rust-migration-main-merge-ci-20260924-2.log` passed the full
+`mise exec -- ./scripts/ci.sh` wrapper: Ruff, ty, 983 Python tests (2
+skipped), Rust formatting/check/tests, and the registry gate. CI also removed
+14 obsolete `noqa: BLE001` comments in unrelated files; those mechanical
+auto-fixes remain visible in the worktree for review. The pre-merge stash is
+retained as a safety copy, and no push or deployment was performed.
+The follow-up `/tmp/podly-rust-migration-main-merge-container-ci-20260924.log`
+also passed the full wrapper plus the isolated Docker lifecycle gate after the
+merge. It rebuilt the image from the combined tree, verified fresh bootstrap,
+non-default UID, Rust executor readiness before web startup, same-volume
+restart, dependent shutdown on writer death, and bootstrap fail-closed. The
+script removed its uniquely named test image, containers, and volumes.
+Next writer task: complete P2.6 artifact/processor negative and retry parity,
+then P2.7 cleanup missing-file/interruption parity, re-run the full wrapper,
+and only then audit P3 checkboxes. P4.4 still needs older-schema upgrade and
+interrupted-command rehearsal; P4.5 rollback and P4.6 P0-comparable benchmark
+remain unverified. No P4 acceptance checkbox was changed by this merge.
+
+2026-09-24 parity follow-up: `/tmp/podly-rust-migration-parity-ci-20260924-7.log`
+passed the complete `mise exec -- ./scripts/ci.sh` wrapper: Ruff/ty,
+974 Python tests (2 skipped), Rust formatting/check/tests, and the registry
+gate. The new isolated users, feeds, and jobs differential cases now pass.
+The preceding `...-3.log` through `...-6.log` runs exposed fixture mistakes
+and one genuine behavior mismatch: Rust-created pending jobs from feed refresh
+had `step_name="Queued"` while Python persists SQL NULL (both retain the queue
+label in stage history). The Rust field was corrected; completed developer
+test jobs retain their completed step name. The eight-caller Python dequeue
+comparison now models the production Python writer's serial execution loop;
+without that ownership, direct parallel test sessions could claim several jobs
+and were not a faithful baseline. No P2.6/P2.7 completion is claimed; further
+branch and failure coverage is still required.
+
+The later `/tmp/podly-rust-migration-p3-synthetic-ci.log` run passed Ruff and
+ty, and the real-client integration test passed after extending it to create,
+advance, and complete a synthetic processing job through the selected Rust
+writer. Full CI did not pass: six newly added P2 jobs parity cases were picked
+up while their case builder was still being edited and failed as `Unknown job
+parity case`. Those in-progress cases must be finished and the full wrapper
+rerun before any new checkbox is marked. The Python fallback trap and cloned
+database isolation remain in the integration test.
+
+Checkout `46bc812` plus current uncommitted changes; production backend
+remains Python. `/tmp/podly-rust-migration-p3-launch-ci-4.log` passed Ruff,
+ty, shell syntax, 935 Python tests (2 skipped), Rust formatting/check/tests,
+and the live-registry gate. The new cases exercise a real Flask feed-settings
+route and processing-status mutation through `WriterClient` and an isolated
+Rust writer, with Python fallback trapped and the Python fixture clone
+unchanged. A separate config test exercises the real PUT/GET route, web
+in-place refresh and processor reset, and config hydration in a fresh Python
+worker process. One-shot bootstrap subprocess tests passed sequential
+idempotence, persisted-setting preservation, invalid auth/config, wrong DB
+target, unknown schema revision, and non-root permission handling.
+
+The first `mise exec -- ./scripts/ci.sh --writer-container` attempt is logged
+at `/tmp/podly-rust-migration-p4-isolated-container-ci.log`. Ordinary CI
+stages passed, the unique isolated image built, and fresh bootstrap migrated
+the isolated database under UID/GID 12001. Rust writer started but readiness
+correctly stayed HTTP 503 because `ActionRegistry::production_complete()` was
+hardcoded `false`. This is a real P1.5/P4 lifecycle gate, not an accepted P4
+result. The registry completeness check has since been changed to validate
+all compiled action groups at runtime; the later CI/container run below passed.
+The first test used a host `/tmp` bind mount; its fixture remains at
+`/tmp/podly-rust-writer-container.lFABbi` because files are owned by the
+container's remapped UID. The test now uses uniquely named Docker volumes so
+future runs can remove their exact test resources without host-permission
+workarounds. No production container, volume, port, or data was touched.
+P2.1–P2.7, P3, and P4 remain unchecked pending their full gates.
+
+The completed isolated rehearsal is
+`/tmp/podly-rust-migration-p4-isolated-container-ci-4.log`: Ruff, ty, shell
+syntax, 935 Python tests (2 skipped), Rust checks/tests, registry gate, and
+the separate container lifecycle script all passed. The script built a
+uniquely tagged image with both Rust binaries, used no host port or network,
+and mounted only uniquely named disposable Docker volumes. It verified fresh
+bootstrap under UID/GID 12001, full Rust executor readiness (not merely TCP),
+Python-web startup after readiness, one-shot bootstrap and Python-writer
+process retirement, same-volume restart without duplicate admin, dependent
+container shutdown after Rust writer death, and failure before writer/web
+startup when bootstrap lacks its admin password. The named test containers,
+volumes, and image were removed by the script. P4.4 remains incomplete because
+an older-schema upgrade and interrupted command have not been rehearsed in
+the container; P4.5 rollback and P4.6 baseline-comparable benchmarks also
+remain open. P4 checkboxes remain unchecked until the P0–P3 dependency gate
+and each P4 task's full scope are accepted. No live deployment changed.
+
 ## P2 verification audit — differential parity still required
 
 Task ID: P2.1–P2.8 audit (2026-09-22)
@@ -1030,3 +1258,42 @@ under a temporary directory. No production or repository audio path is touched.
 
 Remaining limitations: Registry completeness and mixed-client stress remain;
 production readiness stays false.
+
+## P4.4 — Isolated container lifecycle upgrade and interruption follow-up
+
+Task ID: P4.4 follow-up
+
+Commit/reference: Current migration worktree; no deployment.
+
+Files changed: `scripts/test_rust_writer_container.sh` and
+`scripts/writer_container_test_helpers.py`.
+
+Behavior preserved or intentionally changed: The disposable container gate
+now seeds a database by applying real Alembic migrations through
+`88710a0fe69c`, then starts the normal Rust deployment path and confirms
+bootstrap reaches `080b5181e23a`, creates `notification_settings`, and leaves
+one synthetic admin. A separate named volume exercises an admitted
+multi-command transaction: its first test-only action inserts a synthetic row,
+the second holds the transaction open, and the test confirms SQLite's write
+lock before killing the isolated Rust writer container. Normal startup on the
+same volume then proves the uncommitted insert was rolled back and did not
+duplicate the admin. All test containers use `--network none`, no host ports,
+unique disposable Docker volumes, and no live instance/database mount.
+
+Tests added and CI log path: `/tmp/podly-rust-migration-p4-container-upgrade-ci-20260924.log`
+exited 0 with final line `Isolated Rust writer container lifecycle checks
+passed.` It verified the older-schema upgrade, interrupted transaction lock,
+rollback after restart, fresh deployment, persistent-volume restart,
+non-default UID, readiness, process retirement, dependent shutdown, and
+bootstrap failure behavior.
+
+Parity/benchmark evidence, if applicable: The interruption uses only a
+synthetic `writer_test_events` table and a Rust test-actions flag. The startup
+sequence remains serial in `start_services.sh` (bootstrap, writer readiness,
+then web), and the healthcheck verifies writer executor readiness plus web
+availability. The container run does not artificially delay writer readiness
+to force a startup race; such a forced-delay test is not claimed here.
+
+Remaining limitations: No live data or services were touched. P4.4's listed
+older-schema and interrupted-command scenarios pass in isolation; the
+checklist remains subject to the root agent's complete P4 gate audit.

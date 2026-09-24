@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 use super::actions::{error, RpcActionResult};
 use super::protocol::RpcError;
 
-const PROCESSOR_ACTIONS: &[&str] = &[
+pub(super) const PROCESSOR_ACTIONS: &[&str] = &[
     "upsert_model_call",
     "delete_model_calls_for_post_by_model_name",
     "upsert_whisper_model_call",

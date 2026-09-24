@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,20 +13,28 @@ from tests.writer_parity_fixtures import WriterParityPair
 
 _JOBS = (
     ("dequeue_job", "dequeue_job_claim"),
+    ("dequeue_job", "dequeue_job_empty_queue_noop"),
     ("cleanup_stale_jobs", "cleanup_stale_jobs"),
+    ("cleanup_stale_jobs", "cleanup_stale_jobs_cutoff_sides"),
     ("clear_all_jobs", "clear_all_jobs"),
     ("clear_active_jobs", "clear_active_jobs"),
     ("create_job", "create_job"),
     ("create_job_if_missing", "create_job_if_missing_existing"),
     ("create_job_if_missing", "create_job_if_missing_new"),
     ("cancel_existing_jobs", "cancel_existing_jobs"),
+    ("cancel_existing_jobs", "cancel_existing_jobs_noop"),
     ("update_job_attribution", "update_job_attribution"),
     ("update_job_status", "update_job_status_cancelled_late_update"),
+    ("update_job_status", "update_job_status_completed"),
+    ("update_job_status", "update_job_status_repeat_same_step"),
+    ("update_job_status", "update_job_status_invalid_total_steps_rollback"),
     ("mark_cancelled", "mark_cancelled"),
+    ("mark_cancelled", "mark_cancelled_repeat"),
     ("mark_classification_parse_error", "mark_classification_parse_error"),
     ("record_ad_windows_count", "record_ad_windows_count_zero"),
     ("mark_auto_retry_attempted", "mark_auto_retry_attempted"),
     ("reassign_pending_jobs", "reassign_pending_jobs"),
+    ("reassign_pending_jobs", "reassign_pending_jobs_repeat"),
 )
 
 WRITER_DIFFERENTIAL_CASES = (
@@ -38,7 +47,23 @@ WRITER_DIFFERENTIAL_CASES = (
         "source": "src/app/writer/actions/jobs.py:dequeue_job_action",
     },
     {
+        "case_id": "action_dequeue_job_empty_queue_noop",
+        "operation": "action",
+        "action": "dequeue_job",
+        "owner_group": "job",
+        "owner": "dequeue_job",
+        "source": "src/app/writer/actions/jobs.py:dequeue_job_action",
+    },
+    {
         "case_id": "action_cleanup_stale_jobs",
+        "operation": "action",
+        "action": "cleanup_stale_jobs",
+        "owner_group": "job",
+        "owner": "cleanup_stale_jobs",
+        "source": "src/app/writer/actions/jobs.py:cleanup_stale_jobs_action",
+    },
+    {
+        "case_id": "action_cleanup_stale_jobs_cutoff_sides",
         "operation": "action",
         "action": "cleanup_stale_jobs",
         "owner_group": "job",
@@ -94,6 +119,14 @@ WRITER_DIFFERENTIAL_CASES = (
         "source": "src/app/writer/actions/jobs.py:cancel_existing_jobs_action",
     },
     {
+        "case_id": "action_cancel_existing_jobs_noop",
+        "operation": "action",
+        "action": "cancel_existing_jobs",
+        "owner_group": "job",
+        "owner": "cancel_existing_jobs",
+        "source": "src/app/writer/actions/jobs.py:cancel_existing_jobs_action",
+    },
+    {
         "case_id": "action_update_job_attribution",
         "operation": "action",
         "action": "update_job_attribution",
@@ -110,7 +143,40 @@ WRITER_DIFFERENTIAL_CASES = (
         "source": "src/app/writer/actions/jobs.py:update_job_status_action",
     },
     {
+        "case_id": "action_update_job_status_completed",
+        "operation": "action",
+        "action": "update_job_status",
+        "owner_group": "job",
+        "owner": "update_job_status",
+        "source": "src/app/writer/actions/jobs.py:update_job_status_action",
+    },
+    {
+        "case_id": "action_update_job_status_repeat_same_step",
+        "operation": "action",
+        "action": "update_job_status",
+        "owner_group": "job",
+        "owner": "update_job_status",
+        "source": "src/app/writer/actions/jobs.py:update_job_status_action",
+    },
+    {
+        "case_id": "action_update_job_status_invalid_total_steps_rollback",
+        "operation": "action",
+        "action": "update_job_status",
+        "owner_group": "job",
+        "owner": "update_job_status",
+        "source": "src/app/writer/actions/jobs.py:update_job_status_action",
+        "expect_success": False,
+    },
+    {
         "case_id": "action_mark_cancelled",
+        "operation": "action",
+        "action": "mark_cancelled",
+        "owner_group": "job",
+        "owner": "mark_cancelled",
+        "source": "src/app/writer/actions/jobs.py:mark_cancelled_action",
+    },
+    {
+        "case_id": "action_mark_cancelled_repeat",
         "operation": "action",
         "action": "mark_cancelled",
         "owner_group": "job",
@@ -143,6 +209,14 @@ WRITER_DIFFERENTIAL_CASES = (
     },
     {
         "case_id": "action_reassign_pending_jobs",
+        "operation": "action",
+        "action": "reassign_pending_jobs",
+        "owner_group": "job",
+        "owner": "reassign_pending_jobs",
+        "source": "src/app/writer/actions/jobs.py:reassign_pending_jobs_action",
+    },
+    {
+        "case_id": "action_reassign_pending_jobs_repeat",
         "operation": "action",
         "action": "reassign_pending_jobs",
         "owner_group": "job",
@@ -239,7 +313,10 @@ def _seed_case(pair: WriterParityPair, case_id: str) -> dict[str, Any]:
         "cancel_pending": "00000000-0000-0000-0000-000000000456",
         "cancel_running": "00000000-0000-0000-0000-000000000457",
         "reassign": "00000000-0000-0000-0000-000000000458",
+        "stale_old": "00000000-0000-0000-0000-000000000459",
+        "stale_recent": "00000000-0000-0000-0000-000000000460",
     }
+    stale_reference_time = datetime.now(UTC).replace(tzinfo=None)
     for backend in (pair.python, pair.rust):
         with sqlite3.connect(backend.db_path) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
@@ -254,6 +331,30 @@ def _seed_case(pair: WriterParityPair, case_id: str) -> dict[str, Any]:
                     manifest.post_guids[1],
                     "pending",
                     created_at="2026-01-03 03:04:05.000000",
+                )
+            elif case_id == "dequeue_job_empty_queue_noop":
+                connection.execute("DELETE FROM processing_job")
+            elif case_id == "cleanup_stale_jobs_cutoff_sides":
+                connection.execute("DELETE FROM processing_job")
+                _insert_job(
+                    connection,
+                    ids["stale_old"],
+                    manifest.post_guids[0],
+                    "pending",
+                    run_id=None,
+                    created_at=(
+                        stale_reference_time - timedelta(seconds=122)
+                    ).isoformat(sep=" "),
+                )
+                _insert_job(
+                    connection,
+                    ids["stale_recent"],
+                    manifest.post_guids[1],
+                    "pending",
+                    run_id=None,
+                    created_at=(
+                        stale_reference_time - timedelta(seconds=118)
+                    ).isoformat(sep=" "),
                 )
             elif case_id == "create_job_if_missing_new":
                 pass
@@ -292,22 +393,31 @@ def _seed_case(pair: WriterParityPair, case_id: str) -> dict[str, Any]:
                     requested_by_user_id=None,
                     billing_user_id=None,
                 )
-            elif case_id == "reassign_pending_jobs":
+            elif case_id in {
+                "reassign_pending_jobs",
+                "reassign_pending_jobs_repeat",
+            }:
                 _insert_job(
                     connection,
                     ids["reassign"],
                     manifest.post_guids[0],
                     "pending",
-                    run_id="00000000-0000-0000-0000-000000000400",
+                    run_id=(
+                        "00000000-0000-0000-0000-000000000400"
+                        if case_id == "reassign_pending_jobs"
+                        else _SINGLETON_RUN
+                    ),
                 )
     return ids
 
 
 def _simple_params(case_id: str) -> dict[str, Any] | None:
-    if case_id == "dequeue_job_claim":
+    if case_id in {"dequeue_job_claim", "dequeue_job_empty_queue_noop"}:
         return {"run_id": _SINGLETON_RUN}
     if case_id == "cleanup_stale_jobs":
         return {"older_than_seconds": 86400}
+    if case_id == "cleanup_stale_jobs_cutoff_sides":
+        return {"older_than_seconds": 120}
     if case_id in {"clear_all_jobs", "clear_active_jobs"}:
         return {}
     return None
@@ -355,7 +465,7 @@ def _creation_params(
     return None
 
 
-def _transition_params(
+def _transition_params(  # noqa: PLR0912 - action-specific parameter matrix
     pair: WriterParityPair, case_id: str, ids: dict[str, Any]
 ) -> dict[str, Any] | None:
     manifest = pair.manifest
@@ -364,6 +474,8 @@ def _transition_params(
             "post_guid": manifest.post_guids[0],
             "current_job_id": ids["cancel_current"],
         }
+    if case_id == "cancel_existing_jobs_noop":
+        return {"post_guid": "parity-no-active-jobs", "current_job_id": "new-job"}
     if case_id == "update_job_attribution":
         return {
             "job_id": ids["attribution"],
@@ -381,15 +493,45 @@ def _transition_params(
             "total_steps": 4,
             "error_message": "late worker result",
         }
+    if case_id == "update_job_status_completed":
+        return {
+            "job_id": manifest.job_ids[1],
+            "status": "completed",
+            "step": 4,
+            "step_name": "Completed",
+            "progress": 100.0,
+            "total_steps": 4,
+        }
+    if case_id == "update_job_status_repeat_same_step":
+        return {
+            "job_id": manifest.job_ids[1],
+            "status": "running",
+            "step": 2,
+            "step_name": "Transcribing",
+            "progress": 42.5,
+            "total_steps": 4,
+        }
+    if case_id == "update_job_status_invalid_total_steps_rollback":
+        return {
+            "job_id": manifest.job_ids[1],
+            "status": "completed",
+            "step": 4,
+            "step_name": "Must roll back",
+            "progress": 100.0,
+            # Status/step/progress are written before this validation fails.
+            "total_steps": "not-an-integer",
+        }
     if case_id == "mark_cancelled":
         return {"job_id": manifest.job_ids[1], "reason": "Parity cancellation"}
+    if case_id == "mark_cancelled_repeat":
+        return {"job_id": manifest.job_ids[2], "reason": "Synthetic cancellation"}
     if case_id == "mark_classification_parse_error":
         return {"job_id": manifest.job_ids[1]}
     if case_id == "record_ad_windows_count_zero":
         return {"job_id": manifest.job_ids[1], "count": 0}
     if case_id == "mark_auto_retry_attempted":
         return {"job_id": manifest.job_ids[1]}
-    if case_id == "reassign_pending_jobs":
+    if case_id in {"reassign_pending_jobs", "reassign_pending_jobs_repeat"}:
         return {"run_id": _SINGLETON_RUN}
     return None
 
@@ -527,6 +669,9 @@ def writer_job_records(
 
 
 def _assert_dequeue_effects(case_id: str, jobs: dict[str, dict[str, Any]]) -> None:
+    if case_id == "dequeue_job_empty_queue_noop":
+        assert not jobs
+        return
     if case_id != "dequeue_job_claim":
         return
     claimed = "00000000-0000-0000-0000-000000000451"
@@ -544,6 +689,10 @@ def _assert_delete_effects(
     if case_id == "cleanup_stale_jobs":
         assert observation["python_data"] == {"count": 3}
         assert not jobs
+    elif case_id == "cleanup_stale_jobs_cutoff_sides":
+        assert observation["python_data"] == {"count": 1}
+        assert "00000000-0000-0000-0000-000000000459" not in jobs
+        assert "00000000-0000-0000-0000-000000000460" in jobs
     elif case_id == "clear_all_jobs":
         assert observation["python_data"] == 3
         assert not jobs
@@ -591,6 +740,17 @@ def _assert_cancellation_effects(
     elif case_id == "update_job_status_cancelled_late_update":
         assert jobs[job_ids[2]]["status"] == "cancelled"
         assert jobs[job_ids[2]]["error_message"] == "Synthetic cancellation"
+    elif case_id == "update_job_status_completed":
+        assert jobs[job_ids[1]]["status"] == "completed"
+        assert jobs[job_ids[1]]["completed_at"] is not None
+    elif case_id == "update_job_status_repeat_same_step":
+        assert jobs[job_ids[1]]["status"] == "running"
+        history = json.loads(jobs[job_ids[1]]["stage_history"])
+        assert len(history) == 1
+        assert history[0]["step"] == 2
+    elif case_id == "mark_cancelled_repeat":
+        assert jobs[job_ids[2]]["status"] == "cancelled"
+        assert jobs[job_ids[2]]["error_message"] == "Synthetic cancellation"
     elif case_id == "mark_cancelled":
         assert jobs[job_ids[1]]["status"] == "cancelled"
         assert jobs[job_ids[1]]["error_message"] == "Parity cancellation"
@@ -620,6 +780,16 @@ def _assert_field_effects(case_id: str, jobs: dict[str, dict[str, Any]]) -> None
 def assert_writer_job_parity(observation: dict[str, Any]) -> None:
     """Compare action results and full DB state, normalizing only wall-clock fields."""
     case_id = observation["case"]["case_id"].removeprefix("action_")
+    if case_id == "update_job_status_invalid_total_steps_rollback":
+        assert observation["python_success"] is False
+        assert observation["rust_success"] is False
+        assert observation["python_error"]
+        assert observation["rust_error"]
+        assert observation["python_rows"] == observation["python_before"]
+        assert observation["rust_rows"] == observation["rust_before"]
+        assert observation["python_rows"] == observation["rust_rows"]
+        return
+
     assert observation["python_success"] is True, observation["python_error"]
     assert observation["rust_success"] is True, observation["rust_error"]
     assert observation["rust_result"] == observation["python_data"], {

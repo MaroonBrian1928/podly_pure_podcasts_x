@@ -22,6 +22,51 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "path_recovery_and_requeue",
     },
     {
+        "case_id": "cleanup_missing_audio_paths_legacy_title_candidate",
+        "operation": "action",
+        "action": "cleanup_missing_audio_paths",
+        "owner": "cleanup_missing_audio_paths",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_missing_audio_paths_action",
+        "semantics": "legacy_title_path_recovery",
+    },
+    {
+        "case_id": "cleanup_missing_audio_paths_preserves_valid_paths",
+        "operation": "action",
+        "action": "cleanup_missing_audio_paths",
+        "owner": "cleanup_missing_audio_paths",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_missing_audio_paths_action",
+        "semantics": "valid_stored_path_is_noop",
+    },
+    {
+        "case_id": "cleanup_missing_audio_paths_preserves_active_job",
+        "operation": "action",
+        "action": "cleanup_missing_audio_paths",
+        "owner": "cleanup_missing_audio_paths",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_missing_audio_paths_action",
+        "semantics": "missing_candidates_do_not_reset_active_job",
+    },
+    {
+        "case_id": "cleanup_missing_audio_paths_ignores_empty_and_directory_candidates",
+        "operation": "action",
+        "action": "cleanup_missing_audio_paths",
+        "owner": "cleanup_missing_audio_paths",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_missing_audio_paths_action",
+        "semantics": "only_nonempty_regular_candidate_is_recoverable",
+    },
+    {
+        "case_id": "cleanup_missing_audio_paths_ignores_unwhitelisted",
+        "operation": "action",
+        "action": "cleanup_missing_audio_paths",
+        "owner": "cleanup_missing_audio_paths",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_missing_audio_paths_action",
+        "semantics": "whitelist_selection_predicate",
+    },
+    {
         "case_id": "cleanup_clear_all_processing_data",
         "operation": "action",
         "action": "clear_post_processing_data",
@@ -30,12 +75,34 @@ WRITER_DIFFERENTIAL_CASES = (
         "source": "src/app/writer/actions/cleanup.py:clear_post_processing_data_action",
     },
     {
+        "case_id": "cleanup_clear_all_missing_post",
+        "operation": "action",
+        "action": "clear_post_processing_data",
+        "owner": "clear_post_processing_data",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:clear_post_processing_data_action",
+        "semantics": "missing_post_rejected_without_effects",
+        "expect_success": False,
+        "missing_record": True,
+    },
+    {
         "case_id": "cleanup_clear_outputs_keep_transcript",
         "operation": "action",
         "action": "clear_post_processing_data_keep_transcript",
         "owner": "clear_post_processing_data_keep_transcript",
         "owner_group": "cleanup",
         "source": "src/app/writer/actions/cleanup.py:clear_post_processing_data_keep_transcript_action",
+    },
+    {
+        "case_id": "cleanup_clear_outputs_keep_transcript_missing_post",
+        "operation": "action",
+        "action": "clear_post_processing_data_keep_transcript",
+        "owner": "clear_post_processing_data_keep_transcript",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:clear_post_processing_data_keep_transcript_action",
+        "semantics": "missing_post_rejected_without_effects",
+        "expect_success": False,
+        "missing_record": True,
     },
     {
         "case_id": "cleanup_prepare_auto_retry_preserves_input",
@@ -47,6 +114,17 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "retry_preserves_unprocessed_and_transcript",
     },
     {
+        "case_id": "cleanup_prepare_auto_retry_missing_post",
+        "operation": "action",
+        "action": "prepare_post_for_auto_retry",
+        "owner": "prepare_post_for_auto_retry",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:prepare_post_for_auto_retry_action",
+        "semantics": "missing_post_rejected_without_effects",
+        "expect_success": False,
+        "missing_record": True,
+    },
+    {
         "case_id": "cleanup_prepare_auto_retry_db_failure_after_unlink",
         "operation": "action",
         "action": "prepare_post_for_auto_retry",
@@ -54,7 +132,9 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "cleanup",
         "source": "src/app/writer/actions/cleanup.py:prepare_post_for_auto_retry_action",
         "semantics": "precommit_unlink_and_db_rollback",
-        "expect_success": False,
+        "expect_success": True,
+        "recovery_after_failure": True,
+        "repeat_count": 2,
     },
     {
         "case_id": "cleanup_processed_post_clears_db_state",
@@ -65,6 +145,17 @@ WRITER_DIFFERENTIAL_CASES = (
         "source": "src/app/writer/actions/cleanup.py:cleanup_processed_post_action",
     },
     {
+        "case_id": "cleanup_processed_post_missing_post",
+        "operation": "action",
+        "action": "cleanup_processed_post",
+        "owner": "cleanup_processed_post",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_processed_post_action",
+        "semantics": "missing_post_rejected_without_effects",
+        "expect_success": False,
+        "missing_record": True,
+    },
+    {
         "case_id": "cleanup_processed_post_files_only",
         "operation": "action",
         "action": "cleanup_processed_post_files_only",
@@ -72,6 +163,45 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "cleanup",
         "source": "src/app/writer/actions/cleanup.py:cleanup_processed_post_files_only_action",
         "semantics": "unlink_files_keep_processing_metadata",
+    },
+    {
+        "case_id": "cleanup_processed_post_files_only_missing_files",
+        "operation": "action",
+        "action": "cleanup_processed_post_files_only",
+        "owner": "cleanup_processed_post_files_only",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_processed_post_files_only_action",
+        "semantics": "missing_files_are_idempotent",
+        "repeat_count": 2,
+    },
+    {
+        "case_id": "cleanup_processed_post_files_only_skips_directories",
+        "operation": "action",
+        "action": "cleanup_processed_post_files_only",
+        "owner": "cleanup_processed_post_files_only",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_processed_post_files_only_action",
+        "semantics": "directory_path_is_not_unlinked",
+    },
+    {
+        "case_id": "cleanup_processed_post_files_only_missing_post",
+        "operation": "action",
+        "action": "cleanup_processed_post_files_only",
+        "owner": "cleanup_processed_post_files_only",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_processed_post_files_only_action",
+        "semantics": "missing_post_rejected_without_effects",
+        "expect_success": False,
+        "missing_record": True,
+    },
+    {
+        "case_id": "cleanup_prepare_auto_retry_skips_directories",
+        "operation": "action",
+        "action": "prepare_post_for_auto_retry",
+        "owner": "prepare_post_for_auto_retry",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:prepare_post_for_auto_retry_action",
+        "semantics": "directory_candidates_are_not_unlinked",
     },
 )
 
@@ -98,7 +228,45 @@ def _paths(backend: Any) -> tuple[Path, Path, Path]:
     return input_path, processed_path, backend.data_srv
 
 
-def _seed_backend(backend: Any, case_id: str) -> None:
+def _install_cleanup_order_guards(connection: sqlite3.Connection) -> None:
+    """Fail if cleanup deletes a parent before its dependent rows."""
+    connection.execute(
+        """CREATE TRIGGER parity_identification_delete_order
+           BEFORE DELETE ON transcript_segment
+           WHEN EXISTS (SELECT 1 FROM identification
+                        WHERE transcript_segment_id=OLD.id)
+           BEGIN SELECT RAISE(ABORT, 'identifications must be deleted first'); END"""
+    )
+    connection.execute(
+        """CREATE TRIGGER parity_audio_segment_delete_order
+           BEFORE DELETE ON model_call
+           WHEN EXISTS (SELECT 1 FROM audio_segment
+                        WHERE model_call_id=OLD.id)
+           BEGIN SELECT RAISE(ABORT, 'audio segments must be deleted first'); END"""
+    )
+
+
+def _seed_additional_transcript_graph(connection: sqlite3.Connection) -> None:
+    connection.executemany(
+        """INSERT INTO transcript_segment
+           (id,post_id,sequence_num,start_time,end_time,text,speaker_label)
+           VALUES (?,301,?,?,?,'Synthetic chunk boundary segment','A')""",
+        [
+            (10_000 + index, index + 1, index * 10.0, (index + 1) * 10.0)
+            for index in range(500)
+        ],
+    )
+    connection.executemany(
+        """INSERT INTO identification
+           (id,transcript_segment_id,model_call_id,confidence,label)
+           VALUES (?, ?, 601, 0.5, 'synthetic')""",
+        [(11_000 + index, 10_000 + index) for index in range(500)],
+    )
+
+
+def _seed_backend(  # noqa: PLR0912 - scenario-specific isolated fixture setup
+    backend: Any, case_id: str
+) -> None:
     input_path, processed_path, srv_root = _paths(backend)
     missing_input = backend.data_in / "intentionally-missing-input.mp3"
     stale_processed = backend.data_srv / "intentionally-missing-processed.mp3"
@@ -109,6 +277,56 @@ def _seed_backend(backend: Any, case_id: str) -> None:
         derived_path.write_bytes(b"recoverable derived processed audio\n")
         input_value = str(missing_input)
         processed_value = str(stale_processed)
+    elif case_id == "cleanup_missing_audio_paths_legacy_title_candidate":
+        legacy_path = srv_root / "Parity feed one" / "Integral duration episode.mp3"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_bytes(b"legacy-layout recovery candidate\n")
+        input_value = str(missing_input)
+        processed_value = str(stale_processed)
+    elif case_id in {
+        "cleanup_prepare_auto_retry_preserves_input",
+        "cleanup_prepare_auto_retry_db_failure_after_unlink",
+    }:
+        derived_path = srv_root / "Parity_feed_one" / input_path.name
+        derived_path.write_bytes(b"synthetic derived processed audio\n")
+        input_value = str(input_path)
+        processed_value = str(processed_path)
+    elif case_id in {
+        "cleanup_missing_audio_paths_preserves_active_job",
+        "cleanup_missing_audio_paths_ignores_unwhitelisted",
+    }:
+        input_path.unlink(missing_ok=True)
+        processed_path.unlink(missing_ok=True)
+        input_value = str(missing_input)
+        processed_value = str(stale_processed)
+    elif case_id == (
+        "cleanup_missing_audio_paths_ignores_empty_and_directory_candidates"
+    ):
+        input_path.unlink(missing_ok=True)
+        processed_path.unlink(missing_ok=True)
+        processed_path.touch()
+        derived_directory = srv_root / "Parity_feed_one" / missing_input.name
+        derived_directory.mkdir()
+        input_value = str(missing_input)
+        processed_value = str(processed_path)
+    elif case_id == "cleanup_processed_post_files_only_missing_files":
+        input_path.unlink(missing_ok=True)
+        processed_path.unlink(missing_ok=True)
+        input_value = str(input_path)
+        processed_value = str(processed_path)
+    elif case_id == "cleanup_processed_post_files_only_skips_directories":
+        input_path.unlink(missing_ok=True)
+        input_path.mkdir()
+        processed_path.unlink(missing_ok=True)
+        input_value = str(input_path)
+        processed_value = str(backend.data_srv / "missing-processed-audio.mp3")
+    elif case_id == "cleanup_prepare_auto_retry_skips_directories":
+        processed_path.unlink(missing_ok=True)
+        processed_path.mkdir()
+        derived_directory = srv_root / "Parity_feed_one" / input_path.name
+        derived_directory.mkdir()
+        input_value = str(input_path)
+        processed_value = str(processed_path)
     else:
         input_value = str(input_path)
         processed_value = str(processed_path)
@@ -124,12 +342,42 @@ def _seed_backend(backend: Any, case_id: str) -> None:
                WHERE id=?""",
             (input_value, processed_value, _POST_ID),
         )
-        # Create both retainable Whisper output and a disposable classifier
-        # call so keep-transcript/retry cases exercise the action's predicate.
-        connection.execute(
-            """UPDATE model_call SET model_name='whisper-large-v3',
-               prompt='Whisper transcription job' WHERE id=601"""
-        )
+        if case_id == "cleanup_missing_audio_paths_ignores_unwhitelisted":
+            connection.execute("UPDATE post SET whitelisted=0 WHERE id=?", (_POST_ID,))
+        # Keep each supported Whisper-recognition predicate independent from
+        # the others: exact prompt, model name containing "whisper", and the
+        # local_ model prefix. The classifier row must still be deleted.
+        if case_id in {
+            "cleanup_clear_outputs_keep_transcript",
+            "cleanup_prepare_auto_retry_preserves_input",
+            "cleanup_prepare_auto_retry_db_failure_after_unlink",
+        }:
+            connection.execute(
+                """UPDATE model_call SET model_name='synthetic/prompt-only',
+                   prompt='Whisper transcription job' WHERE id=601"""
+            )
+            connection.executemany(
+                """INSERT INTO model_call
+                   (id,post_id,first_segment_sequence_num,last_segment_sequence_num,
+                    model_name,prompt,response,timestamp,status,prompt_tokens,
+                    completion_tokens,total_tokens,retry_attempts)
+                   VALUES (?,301,0,0,?,?,?,'2026-01-02 03:04:05.000000',
+                           'success',1,1,2,0)""",
+                [
+                    (
+                        603,
+                        "synthetic/custom-whisper",
+                        "Custom transcription",
+                        "Whisper name",
+                    ),
+                    (604, "local_speech", "Local transcription", "Local model"),
+                ],
+            )
+        else:
+            connection.execute(
+                """UPDATE model_call SET model_name='whisper-large-v3',
+                   prompt='Whisper transcription job' WHERE id=601"""
+            )
         connection.execute(
             """INSERT INTO model_call
                (id,post_id,first_segment_sequence_num,last_segment_sequence_num,
@@ -138,7 +386,11 @@ def _seed_backend(backend: Any, case_id: str) -> None:
                VALUES (602,301,10,10,'synthetic/classifier','Synthetic classifier',
                        'Synthetic response','2026-01-02 03:04:05.000000','success',1,1,2,0)"""
         )
-        if case_id == "cleanup_missing_audio_paths_recover_and_requeue":
+        if case_id in {
+            "cleanup_missing_audio_paths_recover_and_requeue",
+            "cleanup_missing_audio_paths_legacy_title_candidate",
+            "cleanup_missing_audio_paths_preserves_valid_paths",
+        }:
             connection.execute(
                 """UPDATE processing_job SET status='failed',current_step=4,
                    step_name='Failed',error_message='missing output',started_at=?,
@@ -147,15 +399,52 @@ def _seed_backend(backend: Any, case_id: str) -> None:
                 (
                     "2026-01-02 03:04:05.000000",
                     "2026-01-02 03:04:06.000000",
-                    "2026-01-02 03:04:07.000000",
+                    "2999-01-02 03:04:07.000000",
                 ),
             )
-        if case_id == "cleanup_prepare_auto_retry_db_failure_after_unlink":
+        if case_id == "cleanup_missing_audio_paths_preserves_active_job":
+            updated = connection.execute(
+                """UPDATE processing_job SET status='running',current_step=3,
+                   step_name='Segmenting',progress_percentage=42.5,
+                   error_message=NULL,started_at=?,completed_at=NULL,created_at=?
+                   WHERE id='00000000-0000-0000-0000-000000000403'""",
+                ("2026-01-02 03:04:05.000000", "2026-01-02 03:04:07.000000"),
+            )
+            assert updated.rowcount == 1, "active cleanup parity job fixture is missing"
+        if case_id in {
+            "cleanup_prepare_auto_retry_db_failure_after_unlink",
+        }:
             connection.execute(
                 """CREATE TRIGGER parity_interrupt_cleanup_model_call
                    BEFORE DELETE ON model_call
                    WHEN OLD.id=602
                    BEGIN SELECT RAISE(ABORT, 'synthetic interrupted cleanup'); END"""
+            )
+        if case_id in {
+            "cleanup_clear_all_processing_data",
+            "cleanup_clear_outputs_keep_transcript",
+            "cleanup_prepare_auto_retry_preserves_input",
+            "cleanup_prepare_auto_retry_db_failure_after_unlink",
+        }:
+            _seed_additional_transcript_graph(connection)
+        if case_id in {
+            "cleanup_clear_all_processing_data",
+            "cleanup_processed_post_clears_db_state",
+        }:
+            _install_cleanup_order_guards(connection)
+        if case_id == "cleanup_processed_post_clears_db_state":
+            connection.execute(
+                """INSERT INTO jobs_manager_run
+                   (id,status,trigger,started_at,completed_at,total_jobs,queued_jobs,
+                    running_jobs,completed_jobs,failed_jobs,skipped_jobs,context_json,
+                    counters_reset_at,created_at,updated_at)
+                   VALUES ('jobs-manager-singleton','running','cleanup-parity',
+                           '2026-01-02 03:04:05.000000',NULL,99,0,99,0,0,0,'{}',
+                           '2026-01-02 03:04:04.000000','2026-01-02 03:04:05.000000',
+                           '2026-01-02 03:04:05.000000')"""
+            )
+            connection.execute(
+                "UPDATE processing_job SET jobs_manager_run_id='jobs-manager-singleton'"
             )
 
 
@@ -168,7 +457,8 @@ def build_writer_cleanup_case(
         _seed_backend(backend, case_id)
 
     action = case["action"]
-    params = {} if action == "cleanup_missing_audio_paths" else {"post_id": _POST_ID}
+    post_id = pair.manifest.missing_post_id if case.get("missing_record") else _POST_ID
+    params = {} if action == "cleanup_missing_audio_paths" else {"post_id": post_id}
     operation = {
         "operation": "action",
         "action": action,
@@ -190,17 +480,25 @@ def build_writer_cleanup_case(
     return operation, command, environment_overrides
 
 
+def release_writer_cleanup_interruption(pair: WriterParityPair) -> None:
+    """Remove only the synthetic failure hook between recovery attempts."""
+    for backend in (pair.python, pair.rust):
+        with sqlite3.connect(backend.db_path) as connection:
+            connection.execute("DROP TRIGGER parity_interrupt_cleanup_model_call")
+
+
 def _projection_records(
-    observation: dict[str, Any], backend: str, table: str
+    observation: dict[str, Any], backend: str, table: str, *, before: bool = False
 ) -> list[dict[str, Any]]:
     db_path = getattr(observation["pair"], backend).db_path
     with sqlite3.connect(db_path) as connection:
         columns = [
             row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')
         ]
+    projection_key = f"{backend}_{'before' if before else 'rows'}"
     return [
         dict(zip(columns, row, strict=True))
-        for row in observation[f"{backend}_rows"][table]
+        for row in observation[projection_key][table]
     ]
 
 
@@ -340,7 +638,14 @@ def _files(backend: Any) -> dict[str, bytes]:
     }
 
 
-def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
+def snapshot_writer_cleanup_files(backend: Any) -> dict[str, bytes]:
+    """Capture fixture-only audio effects between interrupted attempts."""
+    return _files(backend)
+
+
+def assert_writer_cleanup_parity(  # noqa: PLR0912 - action-specific parity branches
+    observation: dict[str, Any],
+) -> None:
     """Compare writer outcome, all rows, and clone-local file effects."""
     case = observation["case"]
     case_id = case["case_id"]
@@ -355,14 +660,49 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
         assert observation["python_error"] and observation["rust_error"]
         assert observation["python_before"] == observation["python_rows"]
         assert observation["rust_before"] == observation["rust_rows"]
-        # Filesystem unlink is outside the DB transaction: the retry action
-        # removes its processed candidate before the injected SQL failure.
-        for backend in (pair.python, pair.rust):
-            input_path, processed_path, _ = _paths_for_assertion(backend)
-            assert input_path.is_file()
-            assert not processed_path.exists()
+        if case_id == "cleanup_prepare_auto_retry_db_failure_after_unlink":
+            # Filesystem unlink is outside the DB transaction: this action
+            # removes its processed candidate before the injected SQL failure.
+            for backend in (pair.python, pair.rust):
+                input_path, processed_path, _ = _paths_for_assertion(backend)
+                assert input_path.is_file()
+                assert not processed_path.exists()
+        else:
+            # Missing-record validation must fail before touching fixture files.
+            for backend in (pair.python, pair.rust):
+                input_path, processed_path, _ = _paths_for_assertion(backend)
+                assert input_path.is_file()
+                assert processed_path.is_file()
         assert _files(pair.python) == _files(pair.rust)
         return
+
+    if case.get("recovery_after_failure"):
+        assert observation["python_successes"] == [False, True]
+        assert observation["rust_successes"] == [False, True]
+        assert observation["python_errors"][0]
+        assert observation["rust_errors"][0]
+        assert observation["python_errors"][1] is None
+        assert observation["rust_errors"][1] is None
+        recovery = observation["recovery_snapshot"]
+        assert recovery is not None
+        assert recovery["python_rows"] == observation["python_before"]
+        assert recovery["rust_rows"] == observation["rust_before"]
+        assert recovery["python_files"] == recovery["rust_files"]
+        assert "in/cleanup-parity-input.mp3" in recovery["python_files"]
+        assert (
+            "srv/Parity_feed_one/cleanup-parity-processed.mp3"
+            not in recovery["python_files"]
+        )
+        assert (
+            "srv/Parity_feed_one/cleanup-parity-input.mp3"
+            not in recovery["python_files"]
+        )
+        # The failed attempt unlinks every processed candidate before its SQL
+        # error; the input file remains for the retried transcription.
+        for backend in (pair.python, pair.rust):
+            _assert_retry_files(backend, processed_exists=False)
+            derived_path = backend.data_srv / "Parity_feed_one" / _INPUT_NAME
+            assert not derived_path.exists()
 
     assert observation["rust_result"] == observation["python_data"], {
         "case_id": case_id,
@@ -391,6 +731,19 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
     python_transcripts = _projection_records(
         observation, "python", "transcript_segment"
     )
+    python_transcripts_before = _projection_records(
+        observation, "python", "transcript_segment", before=True
+    )
+    python_transcripts_for_post_before = [
+        row for row in python_transcripts_before if row["post_id"] == _POST_ID
+    ]
+    transcript_ids_before = {
+        row["id"] for row in python_transcripts_before if row["post_id"] == _POST_ID
+    }
+    python_identifications = _projection_records(
+        observation, "python", "identification"
+    )
+    python_audio_segments = _projection_records(observation, "python", "audio_segment")
     python_model_calls = [
         row
         for row in _projection_records(observation, "python", "model_call")
@@ -412,17 +765,78 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
         assert latest["status"] == "pending"
         assert latest["current_step"] == 0
         assert latest["step_name"] == "Not started"
+    elif case_id == "cleanup_missing_audio_paths_legacy_title_candidate":
+        assert observation["python_data"] == 1
+        assert python_post["unprocessed_audio_path"] is None
+        assert python_post["processed_audio_path"].endswith(
+            "Parity feed one/Integral duration episode.mp3"
+        )
+        latest = max(python_jobs, key=lambda row: row["created_at"])
+        assert latest["status"] == "pending"
+    elif case_id == "cleanup_missing_audio_paths_preserves_valid_paths":
+        assert observation["python_data"] == 0
+        assert python_post["unprocessed_audio_path"].endswith(_INPUT_NAME)
+        assert python_post["processed_audio_path"].endswith(
+            "cleanup-parity-processed.mp3"
+        )
+        latest = max(python_jobs, key=lambda row: row["created_at"])
+        assert latest["status"] == "failed"
+    elif case_id == "cleanup_missing_audio_paths_preserves_active_job":
+        assert observation["python_data"] == 1
+        assert python_post["unprocessed_audio_path"] is None
+        assert python_post["processed_audio_path"] is None
+        active = next(row for row in python_jobs if row["id"].endswith("0403"))
+        assert active["status"] == "running"
+        assert active["current_step"] == 3
+        assert active["step_name"] == "Segmenting"
+        assert active["progress_percentage"] == 42.5
+    elif case_id == (
+        "cleanup_missing_audio_paths_ignores_empty_and_directory_candidates"
+    ):
+        assert observation["python_data"] == 1
+        assert python_post["unprocessed_audio_path"] is None
+        assert python_post["processed_audio_path"] is None
+        for backend in (pair.python, pair.rust):
+            assert (
+                backend.data_srv / "Parity_feed_one" / "cleanup-parity-processed.mp3"
+            ).is_file()
+            assert (
+                backend.data_srv / "Parity_feed_one" / "intentionally-missing-input.mp3"
+            ).is_dir()
+    elif case_id == "cleanup_missing_audio_paths_ignores_unwhitelisted":
+        assert observation["python_data"] == 0
+        assert python_post["whitelisted"] in (False, 0)
+        assert python_post["unprocessed_audio_path"].endswith(
+            "intentionally-missing-input.mp3"
+        )
+        assert python_post["processed_audio_path"].endswith(
+            "intentionally-missing-processed.mp3"
+        )
     elif case_id == "cleanup_clear_all_processing_data":
         assert observation["python_data"] == {"post_id": _POST_ID}
+        assert len(transcript_ids_before) == 501
         assert not [row for row in python_transcripts if row["post_id"] == _POST_ID]
+        assert (
+            not {row["transcript_segment_id"] for row in python_identifications}
+            & transcript_ids_before
+        )
+        assert not [row for row in python_audio_segments if row["post_id"] == _POST_ID]
         assert not python_model_calls
         assert not python_jobs
         assert python_post["duration"] is None
         assert python_post["transcript_word_timestamps"] == "null"
     elif case_id == "cleanup_clear_outputs_keep_transcript":
         assert observation["python_data"] == {"post_id": _POST_ID}
-        assert [row for row in python_transcripts if row["post_id"] == _POST_ID]
-        assert {row["id"] for row in python_model_calls} == {601}
+        assert len(transcript_ids_before) == 501
+        assert [row for row in python_transcripts if row["post_id"] == _POST_ID] == (
+            python_transcripts_for_post_before
+        )
+        assert (
+            not {row["transcript_segment_id"] for row in python_identifications}
+            & transcript_ids_before
+        )
+        assert not [row for row in python_audio_segments if row["post_id"] == _POST_ID]
+        assert {row["id"] for row in python_model_calls} == {601, 603, 604}
         assert not python_jobs
         assert python_post["duration"] is None
         assert python_post["transcript_word_timestamps"] is not None
@@ -430,19 +844,66 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
         assert observation["python_data"] == {"post_id": _POST_ID}
         assert python_post["processed_audio_path"] is None
         assert python_post["unprocessed_audio_path"].endswith(_INPUT_NAME)
-        assert [row for row in python_transcripts if row["post_id"] == _POST_ID]
-        assert {row["id"] for row in python_model_calls} == {601}
+        assert len(transcript_ids_before) == 501
+        assert [row for row in python_transcripts if row["post_id"] == _POST_ID] == (
+            python_transcripts_for_post_before
+        )
+        assert {row["id"] for row in python_model_calls} == {601, 603, 604}
+        assert (
+            not {row["transcript_segment_id"] for row in python_identifications}
+            & transcript_ids_before
+        )
         assert len(python_jobs) == 2
         _assert_retry_files(pair.python, processed_exists=False)
         _assert_retry_files(pair.rust, processed_exists=False)
+        for backend in (pair.python, pair.rust):
+            assert not (backend.data_srv / "Parity_feed_one" / _INPUT_NAME).exists()
+    elif case_id == "cleanup_prepare_auto_retry_db_failure_after_unlink":
+        assert observation["python_data"] == {"post_id": _POST_ID}
+        assert python_post["processed_audio_path"] is None
+        assert python_post["unprocessed_audio_path"].endswith(_INPUT_NAME)
+        assert [row for row in python_transcripts if row["post_id"] == _POST_ID] == (
+            python_transcripts_for_post_before
+        )
+        assert {row["id"] for row in python_model_calls} == {601, 603, 604}
+        assert len(python_jobs) == 2
+        _assert_retry_files(pair.python, processed_exists=False)
+        _assert_retry_files(pair.rust, processed_exists=False)
+    elif case_id == "cleanup_prepare_auto_retry_skips_directories":
+        assert observation["python_data"] == {"post_id": _POST_ID}
+        for backend in (pair.python, pair.rust):
+            assert (backend.data_in / _INPUT_NAME).is_file()
+            assert (
+                backend.data_srv / "Parity_feed_one" / "cleanup-parity-processed.mp3"
+            ).is_dir()
+            assert (backend.data_srv / "Parity_feed_one" / _INPUT_NAME).is_dir()
     elif case_id == "cleanup_processed_post_clears_db_state":
         assert observation["python_data"] == {"post_id": _POST_ID}
         assert python_post["whitelisted"] in (False, 0)
         assert python_post["duration"] is None
         assert not [row for row in python_transcripts if row["post_id"] == _POST_ID]
+        assert (
+            not {row["transcript_segment_id"] for row in python_identifications}
+            & transcript_ids_before
+        )
+        assert not [row for row in python_audio_segments if row["post_id"] == _POST_ID]
         assert not python_model_calls
         assert not python_jobs
-    elif case_id == "cleanup_processed_post_files_only":
+        singleton = next(
+            row
+            for row in _projection_records(observation, "python", "jobs_manager_run")
+            if row["id"] == "jobs-manager-singleton"
+        )
+        assert singleton["status"] == "running"
+        assert singleton["total_jobs"] == 1
+        assert singleton["queued_jobs"] == 0
+        assert singleton["running_jobs"] == 1
+        assert singleton["completed_jobs"] == 0
+        assert singleton["failed_jobs"] == 0
+    elif case_id in {
+        "cleanup_processed_post_files_only",
+        "cleanup_processed_post_files_only_missing_files",
+    }:
         assert observation["python_data"] == {"post_id": _POST_ID}
         assert python_post["whitelisted"] in (False, 0)
         assert python_post["unprocessed_audio_path"] is None
@@ -453,6 +914,15 @@ def assert_writer_cleanup_parity(observation: dict[str, Any]) -> None:
         assert python_jobs
         _assert_files_only_deleted(pair.python)
         _assert_files_only_deleted(pair.rust)
+    elif case_id == "cleanup_processed_post_files_only_skips_directories":
+        assert observation["python_data"] == {"post_id": _POST_ID}
+        assert python_post["whitelisted"] in (False, 0)
+        assert python_post["unprocessed_audio_path"] is None
+        assert python_post["processed_audio_path"] is None
+        assert python_post["duration"] == 123.5
+        for backend in (pair.python, pair.rust):
+            assert (backend.data_in / _INPUT_NAME).is_dir()
+            assert not (backend.data_srv / "missing-processed-audio.mp3").exists()
 
 
 def _paths_for_assertion(backend: Any) -> tuple[Path, Path, Path]:

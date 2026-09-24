@@ -343,6 +343,13 @@ def _validate_env_key_conflicts() -> None:
 
 def _create_flask_app() -> Flask:
     static_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
+    instance_path = os.environ.get("PODLY_INSTANCE_DIR")
+    if instance_path:
+        return Flask(
+            __name__,
+            static_folder=static_folder,
+            instance_path=os.path.abspath(instance_path),
+        )
     return Flask(__name__, static_folder=static_folder)
 
 
@@ -557,7 +564,7 @@ def _register_memory_cleanup(app: Flask) -> None:
 
         try:
             db.session.remove()
-        except Exception as remove_exc:  # noqa: BLE001
+        except Exception as remove_exc:
             app_logger.debug(
                 "Failed to remove DB session before memory trim: %s",
                 remove_exc,

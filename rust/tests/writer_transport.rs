@@ -89,6 +89,23 @@ fn fixture_db() -> NamedTempFile {
     file
 }
 
+#[test]
+fn readiness_probe_requires_the_actual_rust_executor() {
+    let db = fixture_db();
+    let mut server = Server::start(&db, 4, 1_000);
+    let port = server.port.to_string();
+    let probe = || {
+        Command::new(env!("CARGO_BIN_EXE_podly_writer"))
+            .args(["--probe", "--port", &port])
+            .output()
+            .unwrap()
+    };
+    assert!(probe().status.success());
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    assert!(!probe().status.success());
+}
+
 fn command(command_id: &str, action: &str, wait: bool, params: Value) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "version": 1,

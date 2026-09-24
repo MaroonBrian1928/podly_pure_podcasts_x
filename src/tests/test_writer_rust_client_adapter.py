@@ -184,6 +184,36 @@ def test_rust_writer_action_preserves_result_and_wait_modes(
         server.close()
 
 
+def test_known_fire_and_forget_writer_call_shapes_only_wait_for_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _RunningServer(
+        monkeypatch,
+        lambda request: _reply(request, state="accepted", status=202),
+    )
+    try:
+        client = WriterClient()
+        results = [
+            client.action("touch_feed_access_token", {"token_id": 2}, wait=False),
+            client.action("increment_download_count", {"post_id": 9}, wait=False),
+            client.action("update_user_last_active", {"user_id": 4}, wait=False),
+            client.update("ModelCall", 17, {"estimated_cost_usd": 0.25}, wait=False),
+            client.action("delete_feed_cascade", {"feed_id": 8}, wait=False),
+        ]
+        assert results == [None] * 5
+        assert len(server.requests) == 5
+        assert all(request["wait"] is False for request in server.requests)
+        assert [request["operation"] for request in server.requests] == [
+            "action",
+            "action",
+            "action",
+            "update",
+            "action",
+        ]
+    finally:
+        server.close()
+
+
 def test_rust_writer_maps_scalar_action_result_and_domain_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -243,14 +273,18 @@ def test_rust_mode_never_uses_python_fallback_even_when_enabled(
 def test_timeout_after_admission_is_unknown_and_not_replayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    admitted = threading.Event()
+    committed = threading.Event()
+    committed_commands: list[str] = []
     calls = 0
 
     def callback(request: dict[str, Any]) -> tuple[int, bytes]:
         nonlocal calls
         calls += 1
-        admitted.set()
         if calls == 1:
+            # Model a write whose durable commit has completed but whose reply
+            # is delayed beyond the client's deadline.
+            committed_commands.append(request["command_id"])
+            committed.set()
             time.sleep(1.2)
         return _reply(request, result={"committed": True})
 
@@ -266,9 +300,10 @@ def test_timeout_after_admission_is_unknown_and_not_replayed(
         with pytest.raises(WriterOutcomeUnknownError) as raised:
             client.submit(command, wait=True, timeout=1)
         assert raised.value.command_id == command.id
-        assert admitted.wait(timeout=1)
+        assert committed.wait(timeout=1)
         followup = client.action("increment_download_count", {"post_id": 11}, wait=True)
         assert followup is not None and followup.success
+        assert committed_commands == [command.id]
         assert calls == 2
     finally:
         server.close()
@@ -351,6 +386,32 @@ def test_connection_failure_then_writer_restart_reconnects_without_replay(
             first.shutdown()
             first.server_close()
             first_thread.join(timeout=2)
+
+
+def test_mismatched_writer_protocol_version_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _RunningServer(
+        monkeypatch,
+        lambda request: (
+            200,
+            json.dumps(
+                {
+                    "version": 2,
+                    "state": "completed",
+                    "command_id": request["command_id"],
+                    "success": True,
+                    "result": None,
+                }
+            ).encode(),
+        ),
+    )
+    try:
+        with pytest.raises(WriterOutcomeUnknownError, match="protocol mismatch"):
+            WriterClient().action("increment_download_count", {}, wait=True)
+        assert len(server.requests) == 1
+    finally:
+        server.close()
 
 
 def test_pre_admission_rejection_then_success_uses_new_correlated_command(

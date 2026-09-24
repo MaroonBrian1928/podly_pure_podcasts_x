@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -25,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 from flask import Flask
+from sqlalchemy import event
 
 from app.extensions import db
 from app.writer.executor import CommandExecutor
@@ -35,6 +37,8 @@ from tests.writer_parity_cleanup import (
 from tests.writer_parity_cleanup import (
     assert_writer_cleanup_parity,
     build_writer_cleanup_case,
+    release_writer_cleanup_interruption,
+    snapshot_writer_cleanup_files,
 )
 from tests.writer_parity_feeds import (
     WRITER_DIFFERENTIAL_CASES as FEED_WRITER_DIFFERENTIAL_CASES,
@@ -42,6 +46,7 @@ from tests.writer_parity_feeds import (
 from tests.writer_parity_feeds import (
     assert_writer_feed_parity,
     build_writer_feed_case,
+    prepare_writer_feed_case,
 )
 from tests.writer_parity_fixtures import (
     BASE_WRITER_DIFFERENTIAL_CASES,
@@ -59,8 +64,18 @@ from tests.writer_parity_processor import (
     WRITER_DIFFERENTIAL_CASES as PROCESSOR_WRITER_DIFFERENTIAL_CASES,
 )
 from tests.writer_parity_processor import (
+    _semantic_projection as _semantic_processor_projection,
+)
+from tests.writer_parity_processor import (
+    _table_columns as _processor_table_columns,
+)
+from tests.writer_parity_processor import (
+    _word_timestamp_payload as _processor_word_timestamp_payload,
+)
+from tests.writer_parity_processor import (
     assert_writer_processor_parity,
     build_writer_processor_case,
+    build_writer_processor_replacement_workflow,
 )
 from tests.writer_parity_system import (
     WRITER_DIFFERENTIAL_CASES as SYSTEM_WRITER_DIFFERENTIAL_CASES,
@@ -157,6 +172,8 @@ class RustWriterParityServer:
             str(self.port),
             "--enable-test-actions",
         ]
+        if env.get("PODLY_TEST_DEFERRED_FOREIGN_KEYS") == "1":
+            command.append("--enable-test-foreign-keys")
         self.process = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
@@ -296,12 +313,196 @@ def execute_python_parity_command(
         # process_command owns its per-command app context and transaction;
         # keep an outer context only for scoped-session cleanup and disposal.
         with app.app_context():
+            if os.environ.get("PODLY_TEST_DEFERRED_FOREIGN_KEYS") == "1":
+                event.listen(db.engine, "connect", _enable_sqlite_foreign_keys)
             try:
                 result = executor.process_command(command)
                 return result.success, result.data, result.error
             finally:
                 db.session.remove()
                 db.engine.dispose()
+
+
+def _enable_sqlite_foreign_keys(connection: Any, _connection_record: Any) -> None:
+    cursor = connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+def _run_processor_replacement_workflow(
+    case: dict[str, Any], pair: WriterParityPair, tmp_path: Path
+) -> None:
+    case_id = case["case_id"]
+    workflow = build_writer_processor_replacement_workflow(case_id, pair)
+    python_initial = writer_database_projection(
+        pair.python.db_path, pair.python.instance_dir
+    )
+    rust_initial = writer_database_projection(pair.rust.db_path, pair.rust.instance_dir)
+    assert python_initial == rust_initial
+
+    rust = RustWriterParityServer(pair.rust.db_path, tmp_path)
+    python_outcomes: list[tuple[bool, Any, str | None]] = []
+    rust_outcomes: list[dict[str, Any]] = []
+    python_states = []
+    try:
+        for operation, command in workflow:
+            rust_operation = json.loads(json.dumps(operation))
+            python_outcome = execute_python_parity_command(pair.python, command)
+            rust_outcome = rust.execute_outcome(rust_operation)
+            python_outcomes.append(python_outcome)
+            rust_outcomes.append(rust_outcome)
+            python_success, python_result, python_error = python_outcome
+            assert python_success is rust_outcome["success"], {
+                "case_id": case_id,
+                "action": command.data["action"],
+                "python_error": python_error,
+                "rust_error": rust_outcome.get("error"),
+            }
+            if python_success:
+                assert python_result == rust_outcome.get("result"), case_id
+            else:
+                assert python_error
+                assert rust_outcome.get("error")
+
+            python_state = writer_database_projection(
+                pair.python.db_path, pair.python.instance_dir
+            )
+            rust_state = writer_database_projection(
+                pair.rust.db_path, pair.rust.instance_dir
+            )
+            python_semantic_state = _semantic_processor_projection(
+                python_state, _processor_table_columns(pair.python.db_path)
+            )
+            rust_semantic_state = _semantic_processor_projection(
+                rust_state, _processor_table_columns(pair.rust.db_path)
+            )
+            assert python_semantic_state == rust_semantic_state, (
+                f"{case_id} diverged after {command.data['action']}"
+            )
+            python_states.append(python_semantic_state)
+            if case["workflow"] == "replacement_success":
+                post_id = pair.manifest.post_ids[0]
+                with sqlite3.connect(pair.python.db_path) as connection:
+                    transcript_json = connection.execute(
+                        "SELECT transcript_word_timestamps FROM post WHERE id=?",
+                        (post_id,),
+                    ).fetchone()[0]
+                    segment_rows = connection.execute(
+                        "SELECT sequence_num,start_time,end_time,text,speaker_label "
+                        "FROM transcript_segment WHERE post_id=? ORDER BY sequence_num",
+                        (post_id,),
+                    ).fetchall()
+                    identification_count = connection.execute(
+                        "SELECT COUNT(*) FROM identification "
+                        "WHERE transcript_segment_id=701"
+                    ).fetchone()[0]
+                    model_call = connection.execute(
+                        "SELECT status,first_segment_sequence_num,last_segment_sequence_num,"
+                        "retry_attempts,response,error_message "
+                        "FROM model_call WHERE id=601"
+                    ).fetchone()
+                if len(python_outcomes) == 1:
+                    assert json.loads(transcript_json) is None
+                    assert segment_rows == []
+                    assert identification_count == 0
+                    assert model_call == ("pending", 0, -1, 0, None, None)
+                elif len(python_outcomes) == 2:
+                    assert json.loads(transcript_json) is None
+                    assert segment_rows == [
+                        (
+                            8,
+                            0.125000000123,
+                            0.987654321987,
+                            "replacement segment café",
+                            "Speaker A",
+                        ),
+                        (
+                            9,
+                            1.234567890123,
+                            2.345678901234,
+                            "replacement segment 東京",
+                            None,
+                        ),
+                    ]
+                    assert model_call == ("pending", 0, -1, 0, None, None)
+                else:
+                    assert len(python_outcomes) == 3
+                    assert json.loads(transcript_json) == (
+                        _processor_word_timestamp_payload()
+                    )
+    finally:
+        rust.close()
+
+    post_id = pair.manifest.post_ids[0]
+    if case["workflow"] == "replacement_insert_failure":
+        assert [outcome[0] for outcome in python_outcomes] == [True, False]
+        assert [outcome["success"] for outcome in rust_outcomes] == [True, False]
+        # The earlier start RPC committed. The later failed insert RPC rolled
+        # back only its own first row, so the state remains exactly post-start.
+        assert python_states[0] == python_states[1]
+        for backend in (pair.python, pair.rust):
+            with sqlite3.connect(backend.db_path) as connection:
+                assert (
+                    connection.execute(
+                        "SELECT COUNT(*) FROM transcript_segment WHERE post_id=?",
+                        (post_id,),
+                    ).fetchone()[0]
+                    == 0
+                )
+                assert (
+                    connection.execute(
+                        "SELECT COUNT(*) FROM identification WHERE transcript_segment_id=701"
+                    ).fetchone()[0]
+                    == 0
+                )
+                assert connection.execute(
+                    "SELECT status,retry_attempts,response FROM model_call WHERE id=601"
+                ).fetchone() == ("pending", 0, None)
+                post_word_timestamps = connection.execute(
+                    "SELECT transcript_word_timestamps FROM post WHERE id=?",
+                    (post_id,),
+                ).fetchone()[0]
+                assert json.loads(post_word_timestamps) is None
+        return
+
+    assert [outcome[0] for outcome in python_outcomes] == [True, True, True]
+    assert [outcome["success"] for outcome in rust_outcomes] == [True, True, True]
+    expected_segments = [
+        (
+            8,
+            0.125000000123,
+            0.987654321987,
+            "replacement segment café",
+            "Speaker A",
+        ),
+        (
+            9,
+            1.234567890123,
+            2.345678901234,
+            "replacement segment 東京",
+            None,
+        ),
+    ]
+    for backend in (pair.python, pair.rust):
+        with sqlite3.connect(backend.db_path) as connection:
+            rows = connection.execute(
+                "SELECT sequence_num,start_time,end_time,text,speaker_label "
+                "FROM transcript_segment WHERE post_id=? ORDER BY sequence_num",
+                (post_id,),
+            ).fetchall()
+            assert rows == expected_segments
+            assert connection.execute(
+                "SELECT status,last_segment_sequence_num,response "
+                "FROM model_call WHERE id=601"
+            ).fetchone() == ("success", 1, "2 segments transcribed.")
+            stored_word_timestamps = connection.execute(
+                "SELECT transcript_word_timestamps FROM post WHERE id=?", (post_id,)
+            ).fetchone()[0]
+            assert json.loads(stored_word_timestamps) == (
+                _processor_word_timestamp_payload()
+            )
 
 
 def _make_operation(
@@ -389,6 +590,9 @@ def test_writer_differential_parity(
 ) -> None:
     pair = writer_parity_pair
     owner_group = case.get("owner_group")
+    if case.get("workflow"):
+        _run_processor_replacement_workflow(case, pair, tmp_path)
+        return
     builders = {
         "user": build_writer_user_case,
         "feed": build_writer_feed_case,
@@ -413,14 +617,13 @@ def test_writer_differential_parity(
     # Rust receives this detached, JSON-safe copy, never Python's mutations.
     rust_operation = json.loads(json.dumps(operation, default=_writer_wire_value))
 
+    if owner_group == "feed":
+        prepare_writer_feed_case(case["case_id"], pair)
+
     python_before = writer_database_projection(
         pair.python.db_path, pair.python.instance_dir
     )
     rust_before = writer_database_projection(pair.rust.db_path, pair.rust.instance_dir)
-
-    python_success, python_data, python_error = execute_python_parity_command(
-        pair.python, python_command, environment_overrides.get("python")
-    )
 
     rust = RustWriterParityServer(
         pair.rust.db_path,
@@ -428,10 +631,44 @@ def test_writer_differential_parity(
         environment_overrides.get("rust"),
     )
     try:
-        rust_outcome = rust.execute_outcome(rust_operation)
+        python_results = []
+        rust_outcomes = []
+        recovery_snapshot = None
+        for attempt_index in range(case.get("repeat_count", 1)):
+            python_results.append(
+                execute_python_parity_command(
+                    pair.python,
+                    python_command,
+                    environment_overrides.get("python"),
+                )
+            )
+            rust_outcomes.append(rust.execute_outcome(rust_operation))
+            if case.get("recovery_after_failure") and attempt_index == 0:
+                recovery_snapshot = {
+                    "python_rows": writer_database_projection(
+                        pair.python.db_path, pair.python.instance_dir
+                    ),
+                    "rust_rows": writer_database_projection(
+                        pair.rust.db_path, pair.rust.instance_dir
+                    ),
+                    "python_files": snapshot_writer_cleanup_files(pair.python),
+                    "rust_files": snapshot_writer_cleanup_files(pair.rust),
+                }
+                # The first attempt has rolled back. Stop the isolated Rust
+                # writer before changing the fixture trigger, then restart it
+                # against the same clone to prove the action can recover.
+                rust.close()
+                release_writer_cleanup_interruption(pair)
+                rust = RustWriterParityServer(
+                    pair.rust.db_path,
+                    tmp_path,
+                    environment_overrides.get("rust"),
+                )
     finally:
         rust.close()
 
+    python_success, python_data, python_error = python_results[-1]
+    rust_outcome = rust_outcomes[-1]
     rust_success = rust_outcome["success"]
     rust_result = rust_outcome.get("result")
     rust_error = rust_outcome.get("error")
@@ -446,9 +683,16 @@ def test_writer_differential_parity(
         "python_success": python_success,
         "python_data": python_data,
         "python_error": python_error,
+        "python_results": [result[1] for result in python_results],
+        "python_successes": [result[0] for result in python_results],
+        "python_errors": [result[2] for result in python_results],
         "rust_success": rust_success,
         "rust_result": rust_result,
         "rust_error": rust_error,
+        "rust_results": [outcome.get("result") for outcome in rust_outcomes],
+        "rust_successes": [outcome["success"] for outcome in rust_outcomes],
+        "rust_errors": [outcome.get("error") for outcome in rust_outcomes],
+        "recovery_snapshot": recovery_snapshot,
         "python_before": python_before,
         "rust_before": rust_before,
         "python_rows": python_rows,

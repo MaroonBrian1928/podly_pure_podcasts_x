@@ -94,7 +94,7 @@ def _jemalloc_purge_all_arenas(active_logger: logging.Logger) -> bool:
     key = f"arena.{_JEMALLOC_ARENAS_ALL}.purge".encode("ascii")
     try:
         rc = mallctl(key, None, None, None, 0)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         active_logger.debug("jemalloc purge raised: %s", exc, exc_info=True)
         return False
     if rc != 0:
@@ -129,7 +129,7 @@ def release_memory_to_os(
         if trim is not None:
             try:
                 trimmed_glibc = bool(trim(0))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 active_logger.debug(
                     "Memory trim failed after %s: %s", context, exc, exc_info=True
                 )
