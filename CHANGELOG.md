@@ -1,3 +1,22 @@
+## [2.1.2](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.1.1...v2.1.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @tanstack/react-query to v5.101.2 ([#42](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/42)) ([fe6da6b](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/fe6da6ba8f2b54d41594d318b2bde42d1bceb3c0))
+* **deps:** update dependency axios to v1.18.1 ([#43](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/43)) ([bb06286](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/bb0628651043aec7caaf294936ae923107d94cc2))
+* **deps:** update dependency react-router-dom to v7.18.1 ([#33](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/33)) ([a308725](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/a308725ff2f26180ce0c186f80a7fe1ab9eba0ba))
+* **deps:** update dependency tailwind-merge to v3.6.0 ([#44](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/44)) ([627fd10](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/627fd10e0140f5c1c1e3e58c28f2753f3ab67a0b))
+* **deps:** update ghcr.io/astral-sh/uv docker tag to v0.11.26 ([#30](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/30)) ([c87f17f](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c87f17fceb00014880e0318b0848d0fae25be470))
+* **deps:** update react monorepo to v19.2.7 ([#31](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/31)) ([74f52d5](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/74f52d5f627176044f57982fc92b3afbc13e4372))
+* **deps:** update rust crate anyhow to v1.0.103 ([#36](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/36)) ([314bd13](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/314bd1321513cb3fd17f5b032be40530fb3c486e))
+* **deps:** update rust crate chrono to v0.4.45 ([#37](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/37)) ([1783f70](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/1783f70fade4853742376216766ec7f47131b39e))
+* **deps:** update rust crate id3 to v1.17.0 ([#45](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/45)) ([2d23236](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/2d23236fee05f42eaf0c6eb43c255e04b22c0d45))
+* **deps:** update rust crate regex to v1.12.4 ([#38](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/38)) ([47d57f0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/47d57f0a10c3b2736549961b6af06e58d20200b0))
+* **deps:** update rust crate rusqlite to 0.40 ([#34](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/34)) ([ba636c7](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/ba636c7e40e696c7715effab1942bb1175dc6f87))
+* **deps:** update rust crate serde_json to v1.0.150 ([#39](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/39)) ([03b62ee](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/03b62eee2ed412dc06922a5ebbab7cc0db2ea47c))
+* **deps:** update rust crate uuid to v1.23.4 ([#40](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/40)) ([d4f24f7](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/d4f24f7447eeae7e39e9ceb235520c4539ff71df))
+
 ## [2.1.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.1.0...v2.1.1) (2026-06-30)
 
 

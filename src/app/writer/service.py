@@ -80,7 +80,6 @@ DEFERRED_MEMORY_TRIM_ACTIONS = {
     "update_user_last_active",
 }
 
-
 def _writer_timing_enabled() -> bool:
     return os.environ.get("PODLY_WRITER_TIMING_LOG", "").strip().lower() in {
         "1",
@@ -118,7 +117,6 @@ def _writer_timing_payload(
         "total_ms": total_ms,
         "success": success,
     }
-
 
 def _action_name(cmd: object) -> str | None:
     data = getattr(cmd, "data", None)
