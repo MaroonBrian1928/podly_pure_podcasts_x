@@ -205,7 +205,7 @@ class AudioProcessor:
                 .order_by(AudioSegment.start_time.asc())
                 .all()
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.logger.warning(
                 "Failed to load INA audio segments while building cut windows for post %s",
                 post.id,
@@ -225,7 +225,7 @@ class AudioProcessor:
                 .order_by(AudioSegment.start_time.asc())
                 .all()
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.logger.warning(
                 "Failed to load INA audio segments while expanding edge ad windows for post %s",
                 post.id,
@@ -262,7 +262,7 @@ class AudioProcessor:
                 )
                 .all()
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.logger.warning(
                 "Failed to load leading transcript segments while expanding edge ad windows for post %s",
                 post.id,

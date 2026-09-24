@@ -612,7 +612,7 @@ class PodcastProcessor:
 
         try:
             future.result(timeout=self._ina_timeout_sec() + 30)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.logger.warning("INA analysis failed: %s", exc, exc_info=True)
         finally:
             if executor is not None:
@@ -729,7 +729,7 @@ class PodcastProcessor:
                         },
                         wait=True,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     self.logger.warning(
                         "[INA] Failed to mark model call %s as failed",
                         model_call_id,

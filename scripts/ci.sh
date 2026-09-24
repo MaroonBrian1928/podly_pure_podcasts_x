@@ -3,9 +3,15 @@ set -Eeuo pipefail
 
 # Parse command line arguments
 RUN_INTEGRATION=false
+RUN_WRITER_CONTAINER=false
+RUN_WRITER_ROLLBACK=false
 for arg in "$@"; do
     if [ "$arg" = "--int" ]; then
         RUN_INTEGRATION=true
+    elif [ "$arg" = "--writer-container" ]; then
+        RUN_WRITER_CONTAINER=true
+    elif [ "$arg" = "--writer-rollback" ]; then
+        RUN_WRITER_ROLLBACK=true
     fi
 done
 
@@ -28,6 +34,11 @@ echo '============================================================='
 echo "Running 'uv run ty check'"
 echo '============================================================='
 uv run ty check
+
+echo '============================================================='
+echo "Checking startup and health shell syntax"
+echo '============================================================='
+bash -n scripts/start_services.sh scripts/healthcheck.sh scripts/test_rust_writer_container.sh scripts/test_rust_writer_rollback.sh
 
 # Build the Rust executables used by writer differential tests before pytest.
 # Reuse only these binaries during tests so the Python and Rust paths execute
@@ -74,4 +85,21 @@ if [ "$RUN_INTEGRATION" = true ]; then
     echo "Running integration workflow checks..."
     echo '============================================================='
     uv run python scripts/check_integration_workflow.py
+fi
+
+# This mode builds a uniquely tagged image and mounts only fresh named volumes.
+# It never targets the running localhost integration service used by --int.
+if [ "$RUN_WRITER_CONTAINER" = true ]; then
+    echo '============================================================='
+    echo "Running isolated Rust writer container lifecycle checks"
+    echo '============================================================='
+    ./scripts/test_rust_writer_container.sh
+fi
+
+# This mode rehearses writer rollback in a fresh, isolated named Docker volume.
+if [ "$RUN_WRITER_ROLLBACK" = true ]; then
+    echo '============================================================='
+    echo "Running isolated Rust writer rollback rehearsal"
+    echo '============================================================='
+    ./scripts/test_rust_writer_rollback.sh
 fi

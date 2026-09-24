@@ -20,7 +20,30 @@ impl ActionRegistry {
     }
 
     pub fn production_complete(&self) -> bool {
-        false
+        // Check every compiled handler group's names against the envelope
+        // validator. CI's live-registry gate separately compares these groups
+        // with Python's current registry and executed differential cases.
+        [
+            super::users::USER_ACTIONS,
+            super::feeds::FEED_ACTIONS,
+            super::jobs::JOB_ACTIONS,
+            super::processor::PROCESSOR_ACTIONS,
+            super::cleanup::CLEANUP_ACTIONS,
+            &[
+                "ensure_active_run",
+                "update_discord_settings",
+                "update_combined_config",
+            ],
+        ]
+        .into_iter()
+        .flatten()
+        .all(|name| {
+            self.validate(&Operation::Action {
+                action: (*name).to_owned(),
+                params: serde_json::Map::new(),
+            })
+            .is_ok()
+        })
     }
 
     pub fn validate(&self, operation: &Operation) -> Result<(), RpcError> {
@@ -124,6 +147,11 @@ impl ActionRegistry {
             {
                 Ok(())
             }
+            Operation::Delete { model, .. }
+                if matches!(model.as_str(), "Post" | "ModelCall" | "Feed") =>
+            {
+                Ok(())
+            }
             Operation::Action { .. } => Err(error(
                 "unsupported_action",
                 "writer action is not registered",
@@ -153,6 +181,7 @@ impl ActionRegistry {
             Operation::Update { model, id, data } => {
                 execute_model_update(transaction, model, id, data)
             }
+            Operation::Delete { model, id } => execute_model_delete(transaction, model, id),
             Operation::Action { action, params }
                 if self.test_actions
                     && matches!(
@@ -354,6 +383,31 @@ fn execute_model_update(
             )
             .map_err(database_error)?;
     }
+    Ok(Value::Null)
+}
+
+fn execute_model_delete(
+    transaction: &Transaction<'_>,
+    model: &str,
+    id: &Value,
+) -> Result<Value, RpcError> {
+    let (table, _) = model_spec(model).ok_or_else(|| {
+        error(
+            "unsupported_model",
+            "writer model operation is not registered",
+        )
+    })?;
+    let id = id
+        .as_i64()
+        .ok_or_else(|| error("invalid_id", "model id must be an integer"))?;
+    if id == 0 {
+        return Err(error("invalid_id", "model id must be nonzero"));
+    }
+    // SQLAlchemy's legacy generic DELETE succeeds even if the primary key is
+    // absent; intentionally ignore the affected-row count.
+    transaction
+        .execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])
+        .map_err(database_error)?;
     Ok(Value::Null)
 }
 

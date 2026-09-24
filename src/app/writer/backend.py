@@ -24,3 +24,7 @@ def selected_writer_backend() -> WriterBackend:
         raise RuntimeError(
             "PODLY_WRITER_BACKEND must be either 'python' or 'rust'"
         ) from exc
+
+
+if __name__ == "__main__":
+    print(selected_writer_backend().value)

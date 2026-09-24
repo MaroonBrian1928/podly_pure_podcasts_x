@@ -3,13 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use serde_json::Value;
 use tokio::sync::oneshot;
 
 use super::actions::{error, ActionRegistry};
 use super::database;
-use super::protocol::{Command, RpcError};
+use super::protocol::{Command, Operation, RpcError};
 
 #[derive(Debug)]
 pub enum AdmissionError {
@@ -47,6 +48,7 @@ struct WorkItem {
     command: Command,
     _reservation: CapacityReservation,
     response: Option<oneshot::Sender<ExecutionResult>>,
+    submitted_at: Instant,
 }
 
 pub struct Admission {
@@ -69,26 +71,62 @@ impl WriterExecutor {
         queue_bytes: usize,
         registry: ActionRegistry,
     ) -> anyhow::Result<Self> {
+        Self::start_inner(db_path, queue_entries, queue_bytes, registry, false)
+    }
+
+    pub(super) fn start_with_test_foreign_keys(
+        db_path: &Path,
+        queue_entries: usize,
+        queue_bytes: usize,
+        registry: ActionRegistry,
+    ) -> anyhow::Result<Self> {
+        Self::start_inner(db_path, queue_entries, queue_bytes, registry, true)
+    }
+
+    fn start_inner(
+        db_path: &Path,
+        queue_entries: usize,
+        queue_bytes: usize,
+        registry: ActionRegistry,
+        enable_test_foreign_keys: bool,
+    ) -> anyhow::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<WorkItem>(queue_entries);
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let path = db_path.to_owned();
+        let timing_enabled = writer_timing_enabled();
         let accepting = Arc::new(AtomicBool::new(false));
         let thread_accepting = Arc::clone(&accepting);
         let worker = thread::Builder::new()
             .name("podly-sqlite-writer".to_owned())
             .spawn(move || {
-                let connection = match database::open_ready(&path) {
-                    Ok(connection) => connection,
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error.to_string()));
-                        return;
-                    }
-                };
+                let connection =
+                    match database::open_ready_with_foreign_keys(&path, enable_test_foreign_keys) {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            let _ = started_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
                 thread_accepting.store(true, Ordering::Release);
                 let _ = started_tx.send(Ok(()));
 
                 while let Ok(work) = receiver.recv() {
+                    let dequeued_at = Instant::now();
+                    let queue_ms =
+                        dequeued_at.duration_since(work.submitted_at).as_secs_f64() * 1000.0;
                     let result = execute_one(&connection, &registry, &work.command);
+                    if timing_enabled {
+                        let finished_at = Instant::now();
+                        eprintln!(
+                            "[WRITER_TIMING] {}",
+                            writer_timing_json(
+                                &work.command,
+                                queue_ms,
+                                finished_at.duration_since(dequeued_at).as_secs_f64() * 1000.0,
+                                result.is_ok(),
+                            )
+                        );
+                    }
                     if let Some(response) = work.response {
                         let _ = response.send(ExecutionResult {
                             command_id: work.command.command_id,
@@ -132,6 +170,7 @@ impl WriterExecutor {
             command,
             _reservation: reservation,
             response: response_tx,
+            submitted_at: Instant::now(),
         };
         let sender = self.sender.lock().expect("writer sender poisoned");
         let Some(sender) = sender.as_ref() else {
@@ -202,6 +241,49 @@ impl WriterExecutor {
     }
 }
 
+fn writer_timing_enabled() -> bool {
+    writer_timing_enabled_value(std::env::var("PODLY_WRITER_TIMING_LOG").ok().as_deref())
+}
+
+fn writer_timing_enabled_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn writer_timing_json(
+    command: &Command,
+    queue_ms: f64,
+    execution_ms: f64,
+    success: bool,
+) -> String {
+    let action = match &command.operation {
+        Operation::Action { action, .. } => Some(action.as_str()),
+        _ => None,
+    };
+    let total_ms = queue_ms + execution_ms;
+    serde_json::json!({
+        "command_id": command.command_id,
+        "operation": match &command.operation {
+            Operation::Action { .. } => "action",
+            Operation::Create { .. } => "create",
+            Operation::Update { .. } => "update",
+            Operation::Delete { .. } => "delete",
+            Operation::Transaction { .. } => "transaction",
+            Operation::Unsupported { .. } => "unsupported",
+        },
+        "action": action,
+        "queue_ms": queue_ms,
+        "execution_ms": execution_ms,
+        "total_ms": total_ms,
+        "success": success,
+    })
+    .to_string()
+}
+
 impl Drop for WriterExecutor {
     fn drop(&mut self) {
         self.stop_admission();
@@ -260,6 +342,37 @@ mod tests {
                 [crate::writer::database::EXPECTED_SCHEMA_REVISION],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn timing_is_opt_in_and_payload_is_compatible_and_redacted() {
+        assert!(!writer_timing_enabled_value(None));
+        assert!(!writer_timing_enabled_value(Some("false")));
+        assert!(writer_timing_enabled_value(Some(" YES ")));
+
+        let command = Command {
+            version: 1,
+            command_id: "synthetic-command-id".to_owned(),
+            wait: true,
+            operation: Operation::Action {
+                action: "update_user_last_active".to_owned(),
+                params: Map::from_iter([(
+                    "secret_value".to_owned(),
+                    Value::String("must-not-be-logged".to_owned()),
+                )]),
+            },
+        };
+        let line = writer_timing_json(&command, 1.25, 2.5, true);
+        let payload: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(payload["command_id"], "synthetic-command-id");
+        assert_eq!(payload["operation"], "action");
+        assert_eq!(payload["action"], "update_user_last_active");
+        assert_eq!(payload["queue_ms"], 1.25);
+        assert_eq!(payload["execution_ms"], 2.5);
+        assert_eq!(payload["total_ms"], 3.75);
+        assert_eq!(payload["success"], true);
+        assert!(!line.contains("secret_value"));
+        assert!(!line.contains("must-not-be-logged"));
     }
 
     fn command(action: &str, params: BTreeMap<&str, Value>, wait: bool) -> Command {

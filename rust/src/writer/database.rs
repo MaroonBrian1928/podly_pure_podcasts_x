@@ -18,15 +18,23 @@ pub fn open_existing(path: &Path) -> Result<Connection> {
 }
 
 pub fn open_ready(path: &Path) -> Result<Connection> {
+    open_ready_with_foreign_keys(path, false)
+}
+
+pub(super) fn open_ready_with_foreign_keys(
+    path: &Path,
+    enable_foreign_keys: bool,
+) -> Result<Connection> {
     let connection = open_existing(path)?;
     connection.busy_timeout(Duration::from_millis(90_000))?;
-    connection.execute_batch(
+    let foreign_keys = if enable_foreign_keys { "ON" } else { "OFF" };
+    connection.execute_batch(&format!(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA wal_autocheckpoint=1000;
          PRAGMA journal_size_limit=67108864;
-         PRAGMA foreign_keys=OFF;",
-    )?;
+         PRAGMA foreign_keys={foreign_keys};"
+    ))?;
     let revisions = {
         let mut statement = connection
             .prepare("SELECT version_num FROM alembic_version ORDER BY version_num")

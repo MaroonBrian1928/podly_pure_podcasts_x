@@ -11,7 +11,7 @@ use super::actions::{error, RpcActionResult};
 use super::feeds::recalculate_run_counts;
 use super::protocol::RpcError;
 
-const CLEANUP_ACTIONS: &[&str] = &[
+pub(super) const CLEANUP_ACTIONS: &[&str] = &[
     "cleanup_missing_audio_paths",
     "clear_post_processing_data",
     "clear_post_processing_data_keep_transcript",

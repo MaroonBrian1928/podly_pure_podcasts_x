@@ -767,7 +767,7 @@ class JobsManager:
             finally:
                 try:
                     _db.session.expunge_all()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.debug(
                         "Failed to expunge session after feed refresh id=%s: %s",
                         feed_id,
@@ -776,7 +776,7 @@ class JobsManager:
                     )
                 try:
                     _db.session.remove()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.debug(
                         "Failed to remove session after feed refresh id=%s: %s",
                         feed_id,

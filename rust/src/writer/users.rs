@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use super::actions::{error, RpcActionResult};
 use super::protocol::RpcError;
 
-const USER_ACTIONS: &[&str] = &[
+pub(super) const USER_ACTIONS: &[&str] = &[
     "create_user",
     "update_user_password",
     "delete_user",
@@ -300,7 +300,7 @@ fn apply_billing_fields(
     }
     if let Some(value) = params.get("feed_allowance") {
         let allowance = if truthy(value) {
-            py_int(value).map_err(|_| error("invalid_params", "invalid integer value"))?
+            py_int(value).map_err(|message| error("invalid_params", &message))?
         } else {
             0
         };

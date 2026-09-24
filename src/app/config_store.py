@@ -75,9 +75,9 @@ def _ensure_row(model: type, defaults: dict[str, Any]) -> Any:
         except Exception:  # noqa: BLE001
             role = None
 
-        # Web app should be read-only; only the writer process is allowed to create
-        # missing settings rows.
-        if role == "writer":
+        # Web and processing apps are read-only. The runtime writer and exclusive
+        # one-shot bootstrap may create missing singleton settings rows.
+        if role in {"writer", "bootstrap"}:
             row = model(id=1, **defaults)
             db.session.add(row)
             safe_commit(

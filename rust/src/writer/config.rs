@@ -10,6 +10,10 @@ pub const DEFAULT_PORT: u16 = 50_001;
 #[derive(Debug, Parser)]
 #[command(name = "podly_writer", about = "Podly single-owner SQLite writer")]
 pub struct WriterArgs {
+    /// Check a running Rust writer's authenticated-free readiness endpoint.
+    #[arg(long, default_value_t = false)]
+    pub probe: bool,
+
     #[arg(long)]
     pub db: Option<PathBuf>,
 
@@ -18,6 +22,10 @@ pub struct WriterArgs {
 
     #[arg(long, hide = true, default_value_t = false)]
     pub enable_test_actions: bool,
+
+    /// Enable SQLite foreign keys only for isolated transaction parity tests.
+    #[arg(long, hide = true, default_value_t = false)]
+    pub enable_test_foreign_keys: bool,
 
     #[arg(long, hide = true)]
     pub test_queue_entries: Option<usize>,
@@ -39,10 +47,14 @@ pub struct WriterConfig {
     pub shutdown_grace: Duration,
     pub request_deadline: Duration,
     pub enable_test_actions: bool,
+    pub enable_test_foreign_keys: bool,
 }
 
 impl WriterConfig {
     pub fn from_args(args: WriterArgs) -> Result<Self> {
+        if args.enable_test_foreign_keys && !args.enable_test_actions {
+            bail!("--enable-test-foreign-keys requires --enable-test-actions");
+        }
         let db_path = match args.db {
             Some(path) => path,
             None => {
@@ -78,6 +90,23 @@ impl WriterConfig {
                         .unwrap_or(Duration::from_secs(30))
                 }),
             enable_test_actions: args.enable_test_actions,
+            enable_test_foreign_keys: args.enable_test_foreign_keys,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{WriterArgs, WriterConfig};
+
+    #[test]
+    fn deferred_foreign_key_override_requires_test_action_mode() {
+        let args =
+            WriterArgs::try_parse_from(["podly_writer", "--enable-test-foreign-keys"]).unwrap();
+
+        let error = WriterConfig::from_args(args).unwrap_err();
+        assert!(error.to_string().contains("requires --enable-test-actions"));
     }
 }

@@ -16,6 +16,15 @@ from tests.writer_parity_fixtures import WriterParityPair
 
 ParamsFactory = Callable[[WriterParityPair], dict[str, Any]]
 _NORMALIZED_TEMP_FILES_BEFORE: dict[str, set[str]] = {}
+_ARTIFACT_CASES = {
+    "processor_finish_transcription_replace_from_large_artifact",
+    "processor_artifact_missing_file",
+    "processor_artifact_malformed_json",
+    "processor_artifact_outside_allowed_roots",
+    "processor_artifact_symlink_escape",
+    "processor_artifact_oversize_rejected_before_parse",
+}
+_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 
 
 WRITER_DIFFERENTIAL_CASES = (
@@ -27,6 +36,16 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "processor",
         "source": "src/app/writer/actions/processor.py",
         "semantics": "new_model_call",
+    },
+    {
+        "case_id": "processor_upsert_model_call_retry_reuses_failed_row",
+        "operation": "action",
+        "action": "upsert_model_call",
+        "owner": "upsert_model_call",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "semantics": "model_call_retry",
+        "repeat_count": 2,
     },
     {
         "case_id": "processor_delete_model_calls_by_name",
@@ -80,6 +99,25 @@ WRITER_DIFFERENTIAL_CASES = (
         "expect_success": False,
     },
     {
+        "case_id": "processor_transcription_replacement_separate_rpcs",
+        "operation": "action",
+        "action": "start_transcription_replace",
+        "owner": "transcription_replacement_workflow",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "workflow": "replacement_success",
+    },
+    {
+        "case_id": "processor_transcription_replacement_insert_failure_separate_rpcs",
+        "operation": "action",
+        "action": "start_transcription_replace",
+        "owner": "transcription_replacement_workflow",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "workflow": "replacement_insert_failure",
+        "expect_success": False,
+    },
+    {
         "case_id": "processor_finish_transcription_replace_updates_model_and_json",
         "operation": "action",
         "action": "finish_transcription_replace",
@@ -96,6 +134,57 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "processor",
         "source": "src/app/writer/actions/processor.py",
         "semantics": "artifact",
+        "repeat_count": 2,
+    },
+    {
+        "case_id": "processor_artifact_missing_file",
+        "operation": "action",
+        "action": "finish_transcription_replace_from_artifact",
+        "owner": "finish_transcription_replace_from_artifact",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "artifact_kind": "missing",
+        "expect_success": False,
+    },
+    {
+        "case_id": "processor_artifact_malformed_json",
+        "operation": "action",
+        "action": "finish_transcription_replace_from_artifact",
+        "owner": "finish_transcription_replace_from_artifact",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "artifact_kind": "malformed",
+        "expect_success": False,
+    },
+    {
+        "case_id": "processor_artifact_outside_allowed_roots",
+        "operation": "action",
+        "action": "finish_transcription_replace_from_artifact",
+        "owner": "finish_transcription_replace_from_artifact",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "artifact_kind": "outside",
+        "expect_success": False,
+    },
+    {
+        "case_id": "processor_artifact_symlink_escape",
+        "operation": "action",
+        "action": "finish_transcription_replace_from_artifact",
+        "owner": "finish_transcription_replace_from_artifact",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "artifact_kind": "symlink_escape",
+        "expect_success": False,
+    },
+    {
+        "case_id": "processor_artifact_oversize_rejected_before_parse",
+        "operation": "action",
+        "action": "finish_transcription_replace_from_artifact",
+        "owner": "finish_transcription_replace_from_artifact",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "artifact_kind": "oversize",
+        "expect_success": False,
     },
     {
         "case_id": "processor_mark_model_call_failed_unicode",
@@ -113,6 +202,7 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "processor",
         "source": "src/app/writer/actions/processor.py",
         "semantics": "identification_batch",
+        "repeat_count": 2,
     },
     {
         "case_id": "processor_replace_identifications_requested_delete_count",
@@ -244,6 +334,13 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
             "last_segment_sequence_num": 19,
             "prompt": "Synthetic prompt with precision-safe sequence bounds — 東京",
         },
+        "processor_upsert_model_call_retry_reuses_failed_row": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_name": "synthetic/parity-model",
+            "first_segment_sequence_num": 0,
+            "last_segment_sequence_num": 0,
+            "prompt": "Synthetic retry prompt — retain the existing call identity",
+        },
         "processor_delete_model_calls_by_name": lambda: {
             "post_id": manifest.post_ids[1],
             "model_name": "synthetic/delete-target",
@@ -295,6 +392,31 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
             "transcript_word_timestamps": _word_timestamp_payload(),
         },
         "processor_finish_transcription_replace_from_large_artifact": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segment_count": 9_000,
+        },
+        "processor_artifact_missing_file": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segment_count": 9_000,
+        },
+        "processor_artifact_malformed_json": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segment_count": 9_000,
+        },
+        "processor_artifact_outside_allowed_roots": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segment_count": 9_000,
+        },
+        "processor_artifact_symlink_escape": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segment_count": 9_000,
+        },
+        "processor_artifact_oversize_rejected_before_parse": lambda: {
             "post_id": manifest.post_ids[0],
             "model_call_id": 601,
             "segment_count": 9_000,
@@ -412,6 +534,16 @@ def _seed_delete_target(pair: WriterParityPair) -> None:
             connection.executemany(sql, rows)
 
 
+def _seed_retry_model_call(pair: WriterParityPair) -> None:
+    for backend in (pair.python, pair.rust):
+        with sqlite3.connect(backend.db_path) as connection:
+            connection.execute(
+                """UPDATE model_call SET status='failed_retries',retry_attempts=4,
+                   error_message='synthetic previous failure',response='stale response'
+                   WHERE id=601"""
+            )
+
+
 def _artifact_path(backend: Any, case_id: str) -> Path:
     return backend.instance_dir / "data" / "processor-artifacts" / f"{case_id}.json"
 
@@ -423,10 +555,25 @@ def _write_artifact(backend: Any, case_id: str) -> Path:
     return path
 
 
+def _write_artifact_bytes(backend: Any, case_id: str, content: bytes) -> Path:
+    path = _artifact_path(backend, case_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path
+
+
+def _write_oversize_artifact(backend: Any, case_id: str) -> Path:
+    path = _artifact_path(backend, case_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as artifact:
+        artifact.truncate(_MAX_ARTIFACT_BYTES + 1)
+    return path
+
+
 def writer_processor_environment(
     case_id: str, pair: WriterParityPair
 ) -> dict[str, dict[str, str]]:
-    if case_id != "processor_finish_transcription_replace_from_large_artifact":
+    if case_id not in _ARTIFACT_CASES:
         return {"python": {}, "rust": {}}
     rust_tools_bin = os.environ.get("PODLY_RUST_TOOLS_BIN")
     python_environment = {
@@ -450,16 +597,51 @@ def build_writer_processor_case(
 ) -> tuple[dict[str, Any], WriteCommand, dict[str, dict[str, str]]]:
     if case_id == "processor_delete_model_calls_by_name":
         _seed_delete_target(pair)
+    if case_id == "processor_upsert_model_call_retry_reuses_failed_row":
+        _seed_retry_model_call(pair)
     params = _params_for_case(case_id, pair)
     rust_params = dict(params)
     python_params = dict(params)
     environments = writer_processor_environment(case_id, pair)
-    if case_id == "processor_finish_transcription_replace_from_large_artifact":
-        python_path = _write_artifact(pair.python, case_id)
-        rust_path = _write_artifact(pair.rust, case_id)
+    artifact_kind = (
+        next(
+            case.get("artifact_kind")
+            for case in WRITER_DIFFERENTIAL_CASES
+            if case["case_id"] == case_id
+        )
+        if case_id in _ARTIFACT_CASES
+        else None
+    )
+    if case_id in _ARTIFACT_CASES:
         _NORMALIZED_TEMP_FILES_BEFORE[case_id] = {
             str(path) for path in Path(tempfile.gettempdir()).glob("*.normalized.json")
         }
+        if artifact_kind == "missing":
+            python_path = _artifact_path(pair.python, case_id)
+            rust_path = _artifact_path(pair.rust, case_id)
+        elif artifact_kind == "malformed":
+            python_path = _write_artifact_bytes(pair.python, case_id, b'{"words":[}')
+            rust_path = _write_artifact_bytes(pair.rust, case_id, b'{"words":[}')
+        elif artifact_kind == "outside":
+            external = pair.source.root / f"{case_id}.json"
+            external.parent.mkdir(parents=True, exist_ok=True)
+            external.write_text("[]")
+            python_path = rust_path = external
+        elif artifact_kind == "symlink_escape":
+            external = pair.source.root / f"{case_id}-target.json"
+            external.parent.mkdir(parents=True, exist_ok=True)
+            external.write_text("[]")
+            python_path = _artifact_path(pair.python, case_id)
+            rust_path = _artifact_path(pair.rust, case_id)
+            for path in (python_path, rust_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(external)
+        elif artifact_kind == "oversize":
+            python_path = _write_oversize_artifact(pair.python, case_id)
+            rust_path = _write_oversize_artifact(pair.rust, case_id)
+        else:
+            python_path = _write_artifact(pair.python, case_id)
+            rust_path = _write_artifact(pair.rust, case_id)
         python_params["artifact_path"] = str(python_path)
         rust_params["artifact_path"] = str(rust_path)
 
@@ -476,6 +658,81 @@ def build_writer_processor_case(
         data={"action": action, "params": python_params},
     )
     return rust_operation, python_command, environments
+
+
+def build_writer_processor_replacement_workflow(
+    case_id: str, pair: WriterParityPair
+) -> list[tuple[dict[str, Any], WriteCommand]]:
+    post_id = pair.manifest.post_ids[0]
+    model_call_id = 601
+    segments = [
+        {
+            "sequence_num": 8,
+            "start_time": 0.125000000123,
+            "end_time": 0.987654321987,
+            "text": "replacement segment café",
+            "speaker_label": "Speaker A",
+        },
+        {
+            "sequence_num": 9,
+            "start_time": 1.234567890123,
+            "end_time": 2.345678901234,
+            "text": "replacement segment 東京",
+            "speaker_label": None,
+        },
+    ]
+    if case_id == "processor_transcription_replacement_separate_rpcs":
+        commands = [
+            (
+                "start_transcription_replace",
+                {"post_id": post_id, "model_call_id": model_call_id},
+            ),
+            (
+                "insert_transcript_segments",
+                {"post_id": post_id, "segments": segments},
+            ),
+            (
+                "finish_transcription_replace",
+                {
+                    "post_id": post_id,
+                    "model_call_id": model_call_id,
+                    "segment_count": len(segments),
+                    "transcript_word_timestamps": _word_timestamp_payload(),
+                },
+            ),
+        ]
+    elif case_id == "processor_transcription_replacement_insert_failure_separate_rpcs":
+        commands = [
+            (
+                "start_transcription_replace",
+                {"post_id": post_id, "model_call_id": model_call_id},
+            ),
+            (
+                "insert_transcript_segments",
+                {
+                    "post_id": post_id,
+                    "segments": [
+                        segments[0],
+                        {"sequence_num": 9, "start_time": 1.0, "text": "missing end"},
+                    ],
+                },
+            ),
+        ]
+    else:
+        raise AssertionError(f"No replacement workflow builder for {case_id}")
+
+    return [
+        (
+            {"operation": "action", "action": action, "params": params},
+            WriteCommand(
+                id=f"parity-{case_id}-{index}",
+                type=WriteCommandType.ACTION,
+                model=None,
+                data={"action": action, "params": params},
+            ),
+        )
+        for index, (action, params) in enumerate(commands)
+    ]
 
 
 def _table_columns(db_path: Any) -> dict[str, list[str]]:
@@ -598,7 +855,9 @@ def _processor_projection_differences(
     return "; ".join(differences) or "no table-level delta found"
 
 
-def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
+def assert_writer_processor_parity(  # noqa: PLR0912 - action-specific parity branches
+    observation: dict[str, Any],
+) -> None:
     case = observation["case"]
     case_id = case["case_id"]
     pair = observation["pair"]
@@ -614,6 +873,28 @@ def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
         if case_id == "processor_replace_identifications_failure_rolls_back_delete":
             assert "model_call_id" in str(observation["python_error"])
             assert "model_call_id" in str(observation["rust_error"])
+        if case_id.startswith("processor_artifact_"):
+            assert isinstance(observation["rust_error"], dict)
+            expected_code = (
+                "payload_too_large"
+                if case_id == "processor_artifact_oversize_rejected_before_parse"
+                else "invalid_params"
+            )
+            assert observation["rust_error"].get("code") == expected_code
+            remaining_temp_files = {
+                str(path)
+                for path in Path(tempfile.gettempdir()).glob("*.normalized.json")
+            }
+            assert remaining_temp_files == _NORMALIZED_TEMP_FILES_BEFORE[case_id]
+            if case_id == "processor_artifact_symlink_escape":
+                expected_target = (
+                    pair.source.root / f"{case_id}-target.json"
+                ).resolve()
+                for backend in (pair.python, pair.rust):
+                    symlink = _artifact_path(backend, case_id)
+                    assert symlink.is_symlink()
+                    assert symlink.resolve() == expected_target
+                    assert symlink.read_text() == "[]"
         return
 
     python_data = observation["python_data"]
@@ -635,6 +916,21 @@ def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
             assert call["error_message"] is None
             assert call["response"] is None
             datetime.fromisoformat(call["timestamp"])
+    elif semantics == "model_call_retry":
+        assert observation["python_results"] == observation["rust_results"]
+        assert len(observation["python_results"]) == 2
+        assert observation["python_results"][0] == observation["python_results"][1]
+        call_id = observation["python_results"][0]["model_call_id"]
+        assert call_id == 601
+        for backend in (pair.python, pair.rust):
+            call = _read_model_call(backend.db_path, call_id)
+            assert call["status"] == "pending"
+            assert call["retry_attempts"] == 0
+            assert call["error_message"] is None
+            assert call["response"] is None
+            assert call["prompt"] == (
+                "Synthetic retry prompt — retain the existing call identity"
+            )
     elif semantics == "transcript_segment_order":
         assert python_data == rust_result
         expected = _bulk_segments()
@@ -643,7 +939,14 @@ def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
                 backend.db_path, pair.manifest.post_ids[1], expected
             )
     elif semantics == "identification_batch":
-        assert python_data == rust_result == {"inserted": 540}
+        assert (
+            observation["python_results"]
+            == observation["rust_results"]
+            == [
+                {"inserted": 540},
+                {"inserted": 0},
+            ]
+        )
         for backend in (pair.python, pair.rust):
             with sqlite3.connect(backend.db_path) as connection:
                 count = connection.execute(
@@ -651,13 +954,18 @@ def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
                 ).fetchone()[0]
             assert count == 540
     elif semantics == "artifact":
+        expected_artifact_result = {
+            "post_id": pair.manifest.post_ids[0],
+            "segment_count": 9_000,
+        }
+        assert python_data == rust_result == expected_artifact_result
         assert (
-            python_data
-            == rust_result
-            == {
-                "post_id": pair.manifest.post_ids[0],
-                "segment_count": 9_000,
-            }
+            observation["python_results"]
+            == observation["rust_results"]
+            == [
+                expected_artifact_result,
+                expected_artifact_result,
+            ]
         )
         for backend in (pair.python, pair.rust):
             artifact = _artifact_path(backend, case_id)
@@ -668,11 +976,10 @@ def assert_writer_processor_parity(observation: dict[str, Any]) -> None:
                     (pair.manifest.post_ids[0],),
                 ).fetchone()[0]
             assert json.loads(stored) == _large_word_timestamp_payload()
-        prior_temp_files = _NORMALIZED_TEMP_FILES_BEFORE[case_id]
         remaining_temp_files = {
             str(path) for path in Path(tempfile.gettempdir()).glob("*.normalized.json")
         }
-        assert remaining_temp_files == prior_temp_files
+        assert remaining_temp_files == _NORMALIZED_TEMP_FILES_BEFORE[case_id]
     else:
         assert python_data == rust_result
 

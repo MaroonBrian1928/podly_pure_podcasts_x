@@ -47,12 +47,21 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
     } else {
         ActionRegistry::default()
     };
-    let executor = Arc::new(WriterExecutor::start(
-        &config.db_path,
-        config.queue_entries,
-        config.queue_bytes,
-        registry.clone(),
-    )?);
+    let executor = Arc::new(if config.enable_test_foreign_keys {
+        WriterExecutor::start_with_test_foreign_keys(
+            &config.db_path,
+            config.queue_entries,
+            config.queue_bytes,
+            registry.clone(),
+        )?
+    } else {
+        WriterExecutor::start(
+            &config.db_path,
+            config.queue_entries,
+            config.queue_bytes,
+            registry.clone(),
+        )?
+    });
     let lifecycle = Arc::new(LifecycleState::new());
     lifecycle.set(Lifecycle::Accepting);
     let registry_complete = config.enable_test_actions || registry.production_complete();

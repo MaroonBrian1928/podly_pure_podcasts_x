@@ -557,7 +557,9 @@ class WriterClient:
 
         result = payload.get("result")
         if cmd.type is WriteCommandType.TRANSACTION:
-            if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+            if not isinstance(result, dict) or not isinstance(
+                result.get("results"), list
+            ):
                 raise WriterOutcomeUnknownError(cmd.id, "invalid transaction response")
             transaction_results = []
             for index, item in enumerate(result["results"]):

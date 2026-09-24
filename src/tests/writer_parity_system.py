@@ -25,6 +25,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "ensure_active_run",
     },
     {
+        "case_id": "system_ensure_active_run_update_existing",
+        "operation": "action",
+        "action": "ensure_active_run",
+        "owner_group": "system",
+        "owner": "ensure_active_run",
+        "source": "src/app/writer/actions/system.py:ensure_active_run_action",
+        "semantics": "ensure_active_run_existing",
+    },
+    {
         "case_id": "system_update_discord_settings_create",
         "operation": "action",
         "action": "update_discord_settings",
@@ -32,6 +41,25 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner": "update_discord_settings",
         "source": "src/app/writer/actions/system.py:update_discord_settings_action",
         "semantics": "discord_settings",
+    },
+    {
+        "case_id": "system_update_discord_settings_partial_null",
+        "operation": "action",
+        "action": "update_discord_settings",
+        "owner_group": "system",
+        "owner": "update_discord_settings",
+        "source": "src/app/writer/actions/system.py:update_discord_settings_action",
+        "semantics": "discord_settings_partial",
+    },
+    {
+        "case_id": "system_update_discord_settings_invalid_type_rollback",
+        "operation": "action",
+        "action": "update_discord_settings",
+        "owner_group": "system",
+        "owner": "update_discord_settings",
+        "source": "src/app/writer/actions/system.py:update_discord_settings_action",
+        "semantics": "discord_settings_invalid",
+        "expect_success": False,
     },
     {
         "case_id": "system_update_combined_config_multiple_sections",
@@ -50,6 +78,25 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner": "update_combined_config",
         "source": "src/app/writer/actions/system.py:update_combined_config_action",
         "semantics": "combined_config_partial_commit",
+        "expect_success": False,
+    },
+    {
+        "case_id": "system_update_combined_config_empty_sections_noop",
+        "operation": "action",
+        "action": "update_combined_config",
+        "owner_group": "system",
+        "owner": "update_combined_config",
+        "source": "src/app/writer/actions/system.py:update_combined_config_action",
+        "semantics": "combined_config_noop",
+    },
+    {
+        "case_id": "system_update_combined_config_invalid_payload",
+        "operation": "action",
+        "action": "update_combined_config",
+        "owner_group": "system",
+        "owner": "update_combined_config",
+        "source": "src/app/writer/actions/system.py:update_combined_config_action",
+        "semantics": "combined_config_invalid",
         "expect_success": False,
     },
 )
@@ -75,21 +122,66 @@ def build_writer_system_case(
 
 
 def _seed_case_preconditions(pair: WriterParityPair, case_id: str) -> None:
-    if case_id != "system_update_combined_config_multiple_sections":
-        return
     for backend in (pair.python, pair.rust):
         with sqlite3.connect(backend.db_path) as connection:
-            connection.execute(
-                "UPDATE llm_settings SET llm_api_key=? WHERE id=1",
-                ("synthetic-existing-api-key",),
-            )
-            connection.execute(
-                "INSERT INTO notification_settings "
-                "(id,enabled,notify_on_failure,notify_on_success,"
-                "notify_on_rust_fallback,include_llm_explanation,created_at,updated_at) "
-                "VALUES (1,0,1,0,0,0,?,?)",
-                ("2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"),
-            )
+            if case_id == "system_ensure_active_run_update_existing":
+                connection.execute(
+                    "INSERT OR REPLACE INTO jobs_manager_run "
+                    "(id,status,trigger,started_at,completed_at,total_jobs,queued_jobs,"
+                    "running_jobs,completed_jobs,failed_jobs,skipped_jobs,context_json,"
+                    "counters_reset_at,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        _SINGLETON_RUN_ID,
+                        "completed",
+                        "previous-trigger",
+                        None,
+                        "2026-01-02 04:05:06.000000",
+                        17,
+                        2,
+                        3,
+                        7,
+                        4,
+                        1,
+                        '{"prior":"preserved"}',
+                        None,
+                        "2026-01-02 03:04:05.000000",
+                        "2026-01-02 03:04:05.000000",
+                    ),
+                )
+            elif case_id in {
+                "system_update_discord_settings_partial_null",
+                "system_update_discord_settings_invalid_type_rollback",
+            }:
+                connection.execute(
+                    "INSERT OR REPLACE INTO discord_settings "
+                    "(id,client_id,client_secret,redirect_uri,guild_ids,allow_registration,"
+                    "created_at,updated_at) VALUES (1,?,?,?,?,?,?,?)",
+                    (
+                        "synthetic-existing-client",
+                        "synthetic-existing-secret",
+                        "https://old.example.invalid/callback",
+                        "old-guild",
+                        1,
+                        "2026-01-02 03:04:05.000000",
+                        "2026-01-02 03:04:05.000000",
+                    ),
+                )
+            elif case_id in {
+                "system_update_combined_config_multiple_sections",
+                "system_update_combined_config_empty_sections_noop",
+            }:
+                connection.execute(
+                    "UPDATE llm_settings SET llm_api_key=? WHERE id=1",
+                    ("synthetic-existing-api-key",),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO notification_settings "
+                    "(id,enabled,notify_on_failure,notify_on_success,"
+                    "notify_on_rust_fallback,include_llm_explanation,created_at,updated_at) "
+                    "VALUES (1,0,1,0,0,0,?,?)",
+                    ("2026-01-01 00:00:00.000000", "2026-01-01 00:00:00.000000"),
+                )
 
 
 def _params_for_case(case_id: str) -> dict[str, Any]:
@@ -98,12 +190,24 @@ def _params_for_case(case_id: str) -> dict[str, Any]:
             "trigger": "parity-system-trigger",
             "context": {"source": "synthetic", "attempt": 7, "nested": {"ok": True}},
         },
+        "system_ensure_active_run_update_existing": lambda: {
+            "trigger": "parity-existing-run-trigger",
+            "context": {"source": "synthetic-update", "attempt": 8},
+        },
         "system_update_discord_settings_create": lambda: {
             "client_id": "synthetic-discord-client",
             "client_secret": "synthetic-discord-secret",
             "redirect_uri": "https://example.invalid/synthetic-callback",
             "guild_ids": "synthetic-guild-id",
             "allow_registration": False,
+        },
+        "system_update_discord_settings_partial_null": lambda: {
+            "client_secret": None,
+            "allow_registration": False,
+        },
+        "system_update_discord_settings_invalid_type_rollback": lambda: {
+            "client_id": "synthetic-must-roll-back",
+            "allow_registration": "not-a-boolean",
         },
         "system_update_combined_config_multiple_sections": lambda: {
             "payload": {
@@ -127,6 +231,19 @@ def _params_for_case(case_id: str) -> dict[str, Any]:
                 "llm": {"llm_model": "synthetic-first-section-committed"},
                 "output": {"min_confidence": {"invalid": "synthetic"}},
             }
+        },
+        "system_update_combined_config_empty_sections_noop": lambda: {
+            "payload": {
+                "llm": None,
+                "whisper": {},
+                "processing": None,
+                "output": {},
+                "app": None,
+                "notifications": {},
+            }
+        },
+        "system_update_combined_config_invalid_payload": lambda: {
+            "payload": None,
         },
     }
     try:
@@ -234,6 +351,37 @@ def assert_writer_system_parity(observation: dict[str, Any]) -> None:
         assert before_llm["llm_model"] != "synthetic-first-section-committed"
         return
 
+    if semantics == "combined_config_invalid":
+        assert observation["python_error"]
+        assert observation["rust_error"]
+        assert observation["python_rows"] == observation["python_before"]
+        assert observation["rust_rows"] == observation["rust_before"]
+        assert observation["python_rows"] == observation["rust_rows"]
+        return
+
+    if semantics == "combined_config_noop":
+        assert observation["python_data"] == observation["rust_result"]
+        assert observation["python_rows"] == observation["python_before"]
+        assert observation["rust_rows"] == observation["rust_before"]
+        assert observation["python_rows"] == observation["rust_rows"]
+        assert set(observation["python_data"]) == {
+            "llm",
+            "whisper",
+            "processing",
+            "output",
+            "app",
+            "notifications",
+        }
+        return
+
+    if semantics == "discord_settings_invalid":
+        assert observation["python_error"]
+        assert observation["rust_error"]
+        assert observation["python_rows"] == observation["python_before"]
+        assert observation["rust_rows"] == observation["rust_before"]
+        assert observation["python_rows"] == observation["rust_rows"]
+        return
+
     assert observation["python_data"] == observation["rust_result"], {
         "case_id": case_id,
         "python_result": observation["python_data"],
@@ -258,6 +406,27 @@ def assert_writer_system_parity(observation: dict[str, Any]) -> None:
         datetime.fromisoformat(context["last_trigger_at"])
         for timestamp in row[3:]:
             datetime.fromisoformat(timestamp)
+    elif semantics == "ensure_active_run_existing":
+        with sqlite3.connect(pair.python.db_path) as connection:
+            row = connection.execute(
+                "SELECT status,trigger,started_at,completed_at,total_jobs,queued_jobs,"
+                "running_jobs,completed_jobs,failed_jobs,skipped_jobs,context_json,"
+                "counters_reset_at,created_at,updated_at FROM jobs_manager_run WHERE id=?",
+                (_SINGLETON_RUN_ID,),
+            ).fetchone()
+        assert row is not None
+        assert row[0:2] == ("completed", "parity-existing-run-trigger")
+        assert row[2] is not None
+        assert row[3] == "2026-01-02 04:05:06.000000"
+        assert row[4:10] == (17, 2, 3, 7, 4, 1)
+        context = json.loads(row[10])
+        assert context["source"] == "synthetic-update"
+        assert context["attempt"] == 8
+        assert context["last_trigger"] == "parity-existing-run-trigger"
+        datetime.fromisoformat(context["last_trigger_at"])
+        assert row[11] is not None
+        assert row[12] == "2026-01-02 03:04:05.000000"
+        datetime.fromisoformat(row[13])
     elif semantics == "discord_settings":
         with sqlite3.connect(pair.python.db_path) as connection:
             row = connection.execute(
@@ -273,6 +442,22 @@ def assert_writer_system_parity(observation: dict[str, Any]) -> None:
             0,
         )
         datetime.fromisoformat(row[5])
+        datetime.fromisoformat(row[6])
+    elif semantics == "discord_settings_partial":
+        with sqlite3.connect(pair.python.db_path) as connection:
+            row = connection.execute(
+                "SELECT client_id,client_secret,redirect_uri,guild_ids,allow_registration,"
+                "created_at,updated_at FROM discord_settings WHERE id=1"
+            ).fetchone()
+        assert row is not None
+        assert row[:5] == (
+            "synthetic-existing-client",
+            None,
+            "https://old.example.invalid/callback",
+            "old-guild",
+            0,
+        )
+        assert row[5] == "2026-01-02 03:04:05.000000"
         datetime.fromisoformat(row[6])
     elif semantics == "combined_config":
         result = observation["python_data"]

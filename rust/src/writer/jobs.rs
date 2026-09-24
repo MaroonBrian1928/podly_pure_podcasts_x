@@ -8,7 +8,7 @@ use super::actions::{error, RpcActionResult};
 use super::feeds::recalculate_run_counts;
 use super::protocol::RpcError;
 
-const JOB_ACTIONS: &[&str] = &[
+pub(super) const JOB_ACTIONS: &[&str] = &[
     "dequeue_job",
     "cleanup_stale_jobs",
     "clear_all_jobs",

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::actions::{error, RpcActionResult};
 use super::protocol::RpcError;
 
-const FEED_ACTIONS: &[&str] = &[
+pub(super) const FEED_ACTIONS: &[&str] = &[
     "refresh_feed",
     "add_feed",
     "update_feed_settings",
@@ -745,7 +745,7 @@ fn insert_processing_job_at(
                 transaction_guid,
                 status,
                 step,
-                step_name,
+                (status == "completed").then_some(step_name),
                 progress,
                 started,
                 completed,
