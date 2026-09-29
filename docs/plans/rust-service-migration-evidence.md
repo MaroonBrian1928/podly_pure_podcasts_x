@@ -4,6 +4,28 @@ Evidence is recorded against synthetic fixtures and isolated containers unless a
 entry explicitly says it is a read-only observation of the existing local
 container. No entry authorizes a deployment or a write to production data.
 
+## 2026-09-29 Live cutover to the Rust writer
+
+Authorized by the user. Commit `45d8c0b` on `rust-migrate-v2`, built on the
+live host via `docker compose build`; the image's `/app/bin/podly_writer` SHA-256
+`656f29e84428b74aeddefcd8d89a0e045bbecafa4758a202a7ee646a7787e319` matches two
+independent `--no-cache` builds, which rules out a baked bit flip on this RAM-fault host.
+
+- Pre-checks: no pending/running jobs; live schema already at `080b5181e23a`
+  (no migration at cutover). `.env.local` gained `PODLY_WRITER_BACKEND=rust`
+  and a random `PODLY_IPC_AUTHKEY`.
+- Backup: SQLite backup-API copy `src/instance/sqlite3.pre-rust-2026-09-29.db`
+  (integrity ok, 886 jobs). Previous image tagged
+  `podly_pure_podcasts-podly:pre-rust-rollback`.
+- Result: healthy ~10 s after recreate. Processes: shell supervisor,
+  `podly_writer` (11.5 MiB RSS, 4 threads), Python web; no `app.writer`.
+  `podly_writer --probe` passes. A timestamp-only `update_user_last_active`
+  through the real client committed. HTTP 200 on `/` and `/api/auth/status`.
+  Container 111.8 MiB about one minute after start. No fallback,
+  unobserved-failure, or traceback lines.
+- Rollback: set `PODLY_WRITER_BACKEND=python` and `docker compose up -d`
+  (same schema); the backup and the pre-rust image are retained.
+
 ## 2026-09-29 Pre-ship writer follow-ups
 
 Task ID: P4 follow-up (release hardening; no checkbox change)
