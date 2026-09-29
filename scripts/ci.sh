@@ -90,6 +90,12 @@ echo "Running 'uv run python scripts/check_writer_registry.py'"
 echo '============================================================='
 uv run python scripts/check_writer_registry.py
 
+# Schema changes must be reviewed against the Rust writer's hand-written SQL.
+echo '============================================================='
+echo "Running 'uv run python scripts/check_writer_schema.py'"
+echo '============================================================='
+uv run python scripts/check_writer_schema.py
+
 # Run integration tests only if --int flag is provided
 if [ "$RUN_INTEGRATION" = true ]; then
     echo '============================================================='
