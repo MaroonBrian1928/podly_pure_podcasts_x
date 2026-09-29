@@ -349,22 +349,38 @@ def _action_coverage_failures(
     failures: list[str] = []
     for action in sorted(actions):
         entry = manifest.get("actions", {}).get(action, {})
-        case_id = entry.get("parity_case")
+        case_ids = entry.get("parity_cases")
+        if case_ids is None:
+            case_id = entry.get("parity_case")
+            case_ids = [case_id] if case_id is not None else []
+        if not isinstance(case_ids, list) or any(
+            not isinstance(case_id, str) for case_id in case_ids
+        ):
+            failures.append(f"{action}: parity_cases must be a list of case IDs")
+            case_ids = []
         unreachable_reason = entry.get("unreachable_reason")
         if action in called_actions:
             if unreachable_reason:
                 failures.append(
                     f"{action}: marked unreachable but has a production caller"
                 )
+            if not case_ids:
+                failures.append(
+                    f"{action}: production-reachable operation has no mapped differential parity case"
+                )
+        elif not unreachable_reason:
+            failures.append(
+                f"{action}: no production caller; add a concrete unreachable/removed-caller rationale"
+            )
+        # Keep compatibility-action tests pinned too. Otherwise these cases
+        # can disappear from the differential matrix without the registry
+        # gate noticing simply because production no longer calls the action.
+        for case_id in case_ids:
             failure = case_mapping_failure(
                 action, case_id, parity_cases, executed_cases, "action", action=action
             )
             if failure:
                 failures.append(failure)
-        elif not unreachable_reason:
-            failures.append(
-                f"{action}: no production caller; add a concrete unreachable/removed-caller rationale"
-            )
         if action not in validated:
             failures.append(f"{action}: absent from Rust production validation")
         if action not in handled:

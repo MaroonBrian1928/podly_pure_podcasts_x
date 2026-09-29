@@ -6,7 +6,9 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use podly_tools::writer::config::{WriterArgs, WriterConfig};
 
-#[tokio::main]
+// The writer's SQLite work is handled by one dedicated executor thread. Keep
+// Tokio's separate I/O runtime small instead of sizing it to every visible CPU.
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = WriterArgs::parse();
     if args.probe {

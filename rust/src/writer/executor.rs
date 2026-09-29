@@ -1,15 +1,16 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::oneshot;
 
 use super::actions::{error, ActionRegistry};
 use super::database;
+use super::memory::{self, should_purge};
 use super::protocol::{Command, Operation, RpcError};
 
 #[derive(Debug)]
@@ -51,6 +52,52 @@ struct WorkItem {
     submitted_at: Instant,
 }
 
+struct MemoryActivity {
+    active_handlers: AtomicUsize,
+    activity_count: AtomicUsize,
+    last_activity: Mutex<Instant>,
+}
+
+impl MemoryActivity {
+    fn new() -> Self {
+        Self {
+            active_handlers: AtomicUsize::new(0),
+            activity_count: AtomicUsize::new(0),
+            last_activity: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn note_activity(&self) {
+        *self.last_activity.lock().expect("memory activity poisoned") = Instant::now();
+        self.activity_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn track_handler(&self) -> RequestActivity<'_> {
+        self.active_handlers.fetch_add(1, Ordering::AcqRel);
+        self.note_activity();
+        RequestActivity { activity: self }
+    }
+
+    fn quiet_seconds(&self) -> u64 {
+        self.last_activity
+            .lock()
+            .expect("memory activity poisoned")
+            .elapsed()
+            .as_secs()
+    }
+}
+
+pub(super) struct RequestActivity<'a> {
+    activity: &'a MemoryActivity,
+}
+
+impl Drop for RequestActivity<'_> {
+    fn drop(&mut self) {
+        self.activity.note_activity();
+        self.activity.active_handlers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub struct Admission {
     pub response: Option<oneshot::Receiver<ExecutionResult>>,
 }
@@ -61,6 +108,7 @@ pub struct WriterExecutor {
     byte_budget: Arc<ByteBudget>,
     entries_used: Arc<AtomicUsize>,
     maximum_entries: usize,
+    memory_activity: Arc<MemoryActivity>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -96,6 +144,22 @@ impl WriterExecutor {
         let timing_enabled = writer_timing_enabled();
         let accepting = Arc::new(AtomicBool::new(false));
         let thread_accepting = Arc::clone(&accepting);
+        let entries_used = Arc::new(AtomicUsize::new(0));
+        let worker_entries_used = Arc::clone(&entries_used);
+        let memory_activity = Arc::new(MemoryActivity::new());
+        let worker_memory_activity = Arc::clone(&memory_activity);
+        let trim_enabled =
+            memory::memory_trim_enabled(std::env::var("PODLY_MEMORY_TRIM_ENABLED").ok().as_deref());
+        let idle_trim_interval = if trim_enabled {
+            memory::idle_trim_interval_seconds(
+                std::env::var("PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC")
+                    .ok()
+                    .as_deref(),
+            )
+            .map(Duration::from_secs)
+        } else {
+            None
+        };
         let worker = thread::Builder::new()
             .name("podly-sqlite-writer".to_owned())
             .spawn(move || {
@@ -110,29 +174,90 @@ impl WriterExecutor {
                 thread_accepting.store(true, Ordering::Release);
                 let _ = started_tx.send(Ok(()));
 
-                while let Ok(work) = receiver.recv() {
+                let mut last_purge_activity_count = 0;
+                loop {
+                    let work = match idle_trim_interval {
+                        Some(interval) => match receiver.recv_timeout(interval) {
+                            Ok(work) => work,
+                            Err(RecvTimeoutError::Disconnected) => break,
+                            Err(RecvTimeoutError::Timeout) => {
+                                let activity_count = worker_memory_activity
+                                    .activity_count
+                                    .load(Ordering::Acquire);
+                                let active_handlers = worker_memory_activity
+                                    .active_handlers
+                                    .load(Ordering::Acquire);
+                                let pending_work = worker_entries_used.load(Ordering::Acquire);
+                                if should_purge(
+                                    active_handlers,
+                                    pending_work,
+                                    activity_count,
+                                    last_purge_activity_count,
+                                    worker_memory_activity.quiet_seconds(),
+                                    interval.as_secs(),
+                                ) {
+                                    // This is a quiescence snapshot. No Tokio
+                                    // task or transaction is blocked while the
+                                    // allocator runs; a new request may begin
+                                    // after this decision and overlap the purge.
+                                    memory::purge_all_arenas();
+                                    last_purge_activity_count = activity_count;
+                                }
+                                continue;
+                            }
+                        },
+                        None => match receiver.recv() {
+                            Ok(work) => work,
+                            Err(_) => break,
+                        },
+                    };
                     let dequeued_at = Instant::now();
                     let queue_ms =
                         dequeued_at.duration_since(work.submitted_at).as_secs_f64() * 1000.0;
-                    let result = execute_one(&connection, &registry, &work.command);
-                    if timing_enabled {
-                        let finished_at = Instant::now();
-                        eprintln!(
-                            "[WRITER_TIMING] {}",
-                            writer_timing_json(
-                                &work.command,
-                                queue_ms,
-                                finished_at.duration_since(dequeued_at).as_secs_f64() * 1000.0,
-                                result.is_ok(),
-                            )
+                    let mut work = work;
+                    let purge_after = trim_enabled
+                        && matches!(
+                            &work.command.operation,
+                            Operation::Action { action, .. } if memory::purge_after_action(action)
                         );
+                    {
+                        let result = execute_one(&connection, &registry, &work.command);
+                        if timing_enabled {
+                            let finished_at = Instant::now();
+                            eprintln!(
+                                "[WRITER_TIMING] {}",
+                                writer_timing_json(
+                                    &work.command,
+                                    queue_ms,
+                                    finished_at.duration_since(dequeued_at).as_secs_f64() * 1000.0,
+                                    result.is_ok(),
+                                )
+                            );
+                        }
+                        let undelivered = match work.response.take() {
+                            Some(response) => response
+                                .send(ExecutionResult {
+                                    command_id: work.command.command_id.clone(),
+                                    result,
+                                })
+                                .err()
+                                .map(|unsent| unsent.result),
+                            None => Some(result),
+                        };
+                        // wait=false commands and disconnected callers have no
+                        // one to report to; the log is their only failure signal.
+                        if let Some(Err(error)) = undelivered {
+                            eprintln!(
+                                "[WRITER_UNOBSERVED_FAILURE] {}",
+                                unobserved_failure_json(&work.command, &error)
+                            );
+                        }
                     }
-                    if let Some(response) = work.response {
-                        let _ = response.send(ExecutionResult {
-                            command_id: work.command.command_id,
-                            result,
-                        });
+                    drop(work);
+                    if purge_after {
+                        memory::purge_all_arenas();
                     }
+                    worker_memory_activity.note_activity();
                 }
                 thread_accepting.store(false, Ordering::Release);
             })?;
@@ -145,8 +270,9 @@ impl WriterExecutor {
                     used: Mutex::new(0),
                     maximum: queue_bytes,
                 }),
-                entries_used: Arc::new(AtomicUsize::new(0)),
+                entries_used,
                 maximum_entries: queue_entries,
+                memory_activity,
                 thread: Mutex::new(Some(worker)),
             }),
             Err(message) => {
@@ -191,6 +317,15 @@ impl WriterExecutor {
 
     pub fn is_accepting(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
+    }
+
+    pub(super) fn track_request_activity(&self) -> RequestActivity<'_> {
+        self.memory_activity.track_handler()
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_handler_count(&self) -> usize {
+        self.memory_activity.active_handlers.load(Ordering::Acquire)
     }
 
     pub fn available_entries(&self) -> usize {
@@ -254,28 +389,47 @@ fn writer_timing_enabled_value(value: Option<&str>) -> bool {
     })
 }
 
+fn operation_name(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Action { .. } => "action",
+        Operation::Create { .. } => "create",
+        Operation::Update { .. } => "update",
+        Operation::Delete { .. } => "delete",
+        Operation::Transaction { .. } => "transaction",
+        Operation::Unsupported { .. } => "unsupported",
+    }
+}
+
+fn action_name(operation: &Operation) -> Option<&str> {
+    match operation {
+        Operation::Action { action, .. } => Some(action.as_str()),
+        _ => None,
+    }
+}
+
+// Error messages can echo caller values, so only the stable code is logged.
+fn unobserved_failure_json(command: &Command, error: &RpcError) -> String {
+    serde_json::json!({
+        "command_id": command.command_id,
+        "operation": operation_name(&command.operation),
+        "action": action_name(&command.operation),
+        "code": error.code,
+        "outcome": error.outcome,
+    })
+    .to_string()
+}
+
 fn writer_timing_json(
     command: &Command,
     queue_ms: f64,
     execution_ms: f64,
     success: bool,
 ) -> String {
-    let action = match &command.operation {
-        Operation::Action { action, .. } => Some(action.as_str()),
-        _ => None,
-    };
     let total_ms = queue_ms + execution_ms;
     serde_json::json!({
         "command_id": command.command_id,
-        "operation": match &command.operation {
-            Operation::Action { .. } => "action",
-            Operation::Create { .. } => "create",
-            Operation::Update { .. } => "update",
-            Operation::Delete { .. } => "delete",
-            Operation::Transaction { .. } => "transaction",
-            Operation::Unsupported { .. } => "unsupported",
-        },
-        "action": action,
+        "operation": operation_name(&command.operation),
+        "action": action_name(&command.operation),
         "queue_ms": queue_ms,
         "execution_ms": execution_ms,
         "total_ms": total_ms,
@@ -373,6 +527,36 @@ mod tests {
         assert_eq!(payload["success"], true);
         assert!(!line.contains("secret_value"));
         assert!(!line.contains("must-not-be-logged"));
+    }
+
+    #[test]
+    fn unobserved_failure_log_is_redacted() {
+        let command = Command {
+            version: 1,
+            command_id: "synthetic-async-id".to_owned(),
+            wait: false,
+            operation: Operation::Action {
+                action: "touch_feed_access_token".to_owned(),
+                params: Map::from_iter([(
+                    "secret_value".to_owned(),
+                    Value::String("must-not-be-logged".to_owned()),
+                )]),
+            },
+        };
+        let error = RpcError {
+            code: "not_found".to_owned(),
+            message: "token must-not-be-logged missing".to_owned(),
+            retryable: false,
+            outcome: "rolled_back",
+        };
+        let line = unobserved_failure_json(&command, &error);
+        let payload: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(payload["command_id"], "synthetic-async-id");
+        assert_eq!(payload["action"], "touch_feed_access_token");
+        assert_eq!(payload["code"], "not_found");
+        assert_eq!(payload["outcome"], "rolled_back");
+        assert!(!line.contains("must-not-be-logged"));
+        assert!(!line.contains("secret_value"));
     }
 
     fn command(action: &str, params: BTreeMap<&str, Value>, wait: bool) -> Command {

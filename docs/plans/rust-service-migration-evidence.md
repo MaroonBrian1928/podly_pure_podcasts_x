@@ -4,7 +4,911 @@ Evidence is recorded against synthetic fixtures and isolated containers unless a
 entry explicitly says it is a read-only observation of the existing local
 container. No entry authorizes a deployment or a write to production data.
 
+## 2026-09-28 recovery baseline — live verification follow-up
+
+Session 50642 remains live (polled via its original exec handle); log:
+`/tmp/podly-rust-migration-p0-recovery-ci-20260928-3.log`. Run 1 in
+`/tmp/podly-writer-python-p0-20260928-recovery-1/run-1.json` is complete and
+run 2 has started. All eleven resource phases have positive sample counts.
+Each of the five workload phases has positive cumulative CPU seconds
+(feed 88.457835, RSS 33.972682, small 3.007241, large 4.075468,
+mixed 3.781611). Python backend/process identity agree; fallback logs are
+empty; write successes/timing counts are exactly 1000/12/100, with zero
+client or writer failures. This is an intermediate observation, not a
+completed baseline or acceptance result. Preserve the active run and hold
+runtime/benchmark edits until terminal completion.
+
+Read-only Luna allocator audit identified a concrete difference to investigate
+if the paired recovery run still fails RSS: the image's system-wide jemalloc
+preload applies to both writers, but only the Python writer invokes the existing
+idle all-arena purge. The idle-trim environment setting does not implement a
+Rust purge. This does not yet prove that the Rust retained bytes are reclaimable;
+do not claim causation or add an unmeasured allocator workaround. P4.6 and P4.8
+remain unchecked; no web migration or live changes were performed.
+
+The independent CPU-gate audit confirms both ratios are checked separately:
+current Rust CPU/throughput efficiency versus historical P0 and versus paired
+Python must each be at most 1.15. Historical P0 used periodic Docker CPU;
+the recovery pair uses cumulative cgroup CPU divided by client duration.
+The old report cannot be retroactively recomputed without raw cumulative
+counters. Its published numerical constraint remains enforced in addition to
+the aligned cumulative paired gate, but the historical CPU comparison is not
+claimed as a like-for-like sampling-policy comparison. Periodic CPU remains
+diagnostic in the recovery reports; idle-only samples must not replace actual
+workload CPU to manufacture a passing gate.
+
+Recovery baseline completed: session 50642 terminal exit 0; CI log ends with
+`errors: []`. Ordinary CI passed 1066 Python tests/2 skipped, Rust formatting,
+clippy, 52 writer + 97 existing + 3 transport tests, and registry parity.
+All three runs have eleven sampled phases, positive cumulative CPU for all
+five workloads, Python backend/environment identity, HTTP 200 only, no fallback,
+and exactly 1000/12/100 successful writes with matching successful timing counts.
+The report and protocol were made read-only before the matching Rust run.
+Report SHA-256: `85ea9a13231a74c0c3c45085285a6479204b2a399422048066d33737cb5684a7`.
+Protocol SHA-256: `713dff0ad866c8220c586ba9750834b9eec59fa23a282bdf2017f34d34e9e84e`.
+DB SHA-256: `851273de0f0b149969e0eccc5da319c04f6c70e0283a29bfcf2a652688b33718`.
+Runner SHA-256: `83664a3e0c2dfb67518e3d422ebc95767d5e3779296fab7028a6615f390cc19d`.
+Image ID: `sha256:4f453c2bfda12f0c6e81e7e25a75a53f7ef5fced184e3a4578fcea0708d61906`.
+Sampling policy: `periodic-phase-end-cumulative-cpu-v2`. Original P0 report
+remains the mandatory historical threshold reference. No P4 checkbox advances
+solely because the Python baseline completed.
+
+Matching Rust CI/benchmark started on exec session **72795**; log
+`/tmp/podly-rust-migration-p4-recovery-ci-20260928-1.log`, output
+`/tmp/podly-rust-writer-p4-recovery-20260928-1`. It uses the frozen recovery
+Python report above, the same isolated `20260928-recovery-1` image, and the
+unchanged original P0 threshold report. Poll this original handle; do not restart
+because observation times out. Hold runtime/benchmark source edits and competing
+workloads until terminal completion. Next: inspect all three Rust runs and the
+comparison, retain failed evidence if any, expand both matched arms to five
+repetitions if the spread gate requires it, and only then assess P4.6/P4.8.
+
+Session 72795 passed ordinary CI (1066 Python passed/2 skipped, 52 writer,
+97 existing Rust, 3 transport tests; formatting/type/clippy/registry passed)
+and entered Rust measurement. Its protocol confirms exact equality of the
+recovery image ID, runner SHA, cumulative-v2 policy, canonical fixture SHA,
+environment fingerprint, and three-repetition profile. It pins the frozen
+Python report SHA above and original historical report SHA
+`2ec8584b9070e1326dabf4f02b343fc15351055e04004f3b236774cd58dc9af1`.
+Post-CI `git diff --check` passed and the runner/report hashes remain unchanged.
+Measurement remains active; performance acceptance is not established yet.
+
+Rust recovery run 1 completed while session 72795 continues with run 2.
+All eleven resource phases have samples (including two for each short write
+burst); backend process identity/readiness confirms Rust; all HTTP statuses are
+200; fallback logs and writer/client failures are empty; write/timing counts
+are 1000/12/100. Small/large/mixed client p95: 3.433/134.526/38.885 ms.
+Writer RSS is 10,485,760 bytes after ready and 34,680,832 after cooldown,
+with four threads and thirteen FDs at both observations. Container idle median
+127,401,984 bytes; final cooldown median 141,767,475; large cooldown median
+178,048,205. These recovery values still exceed own idle + 10 MiB, so run 1
+does not establish acceptance despite the lower writer RSS. Web FD snapshots
+are 14 after ready and 23 after cooldown; the aggregate resource snapshots
+must be evaluated by the unchanged gate rather than guessing a pass from
+individual process counts. Await all matched runs and the full comparison.
+
+CPU timing follow-up requested from the read-only Luna auditor: short writer
+phases report about 596–642% because cumulative counters surround the load
+helper while the denominator is its client-measured workload duration. Audit
+whether helper initialization/setup outside that timer is included in the
+counter delta; do not interpret those percentages as measured steady-state
+Rust core utilization or silently weaken/rewrite CPU constraints.
+
+Luna timing audit confirmed the scope: corrected counters exclude container
+startup/readiness/warmup, but bracket the full `writer_workload()` helper call.
+The numerator includes in-container helper interpreter startup, connection,
+payload construction, serialization, client execution, and result/report work;
+host Docker CLI CPU is not in the container cgroup. `client.elapsed_seconds`
+includes only the helper's thread-pool execution window. Consequently the
+reported short-write CPU percentage is client-duration-normalized CPU, not
+same-window utilization. Dividing it by throughput cancels that duration and
+measures approximately 100 * invocation CPU seconds / successful writes.
+The aligned pair uses the same runner/helper envelope; interpret the efficiency
+gate as charged invocation CPU per operation, not pure steady-state writer
+CPU. Phase-end periodic sampling occurs after this counter bracket. Keep this
+limitation explicit alongside the historical periodic-policy mismatch; neither
+audit authorizes changing the 1.15 limit or discarding a failed gate.
+
+Rust recovery run 2 also completed with all eleven sampled phases, Rust
+identity, no fallback, and 1000/12/100 successful writes (small/large/mixed
+p95 3.596/139.018/42.291 ms). Writer final RSS 44,040,192 bytes, four threads,
+thirteen FDs; web final RSS 117,104,640 and twenty-three FDs. Container idle
+median 96,526,664; large cooldown 161,795,277; final cooldown 137,992,602 bytes.
+Cooldown recovery again fails own idle + 10 MiB. Run 3 is active on the same
+session 72795; do not alter source during measurement.
+
+Next focused increments after terminal capture: align writer cumulative CPU
+counters with the helper's actual thread-pool timing window, excluding startup,
+payload construction and reporting (the current paired invocation scope is
+not same-window utilization); independently implement/test a quiescence-aware
+Rust allocator purge if the complete capture confirms retained freed memory
+as a candidate. Preserve the current reports and original numerical caps.
+Any runner/runtime/image change requires a newly frozen matched Python/Rust
+pair; do not reuse this baseline across changed measurement policy or image.
+
+Recovery comparison terminal result: session 72795 exited 1. All three runs
+completed; the full comparator evaluated rather than failing on missing phases.
+It rejected `cpu_efficiency_small_historical` (1.775 > 1.15),
+`post_burst_memory_recovery` (worst phase extra bytes by run
+51,170,509 / 66,107,474 / 69,064,459 > 10,485,760), and
+`paired_baseline_spread` (idle uncertainty can reverse a gate; requires five
+matched repetitions). Other comparator gates passed, including writer RSS,
+idle memory, HTTP/write latency, queue time, paired CPU, errors and resource
+bounds. This does not waive the three failed gates. The mismatched CPU timing
+scope identified above remains a measurement defect to correct, not a reason
+to remove the historical constraint.
+
+Frozen failed-capture hashes:
+report `5bce37d01b9994aa0b011ff8eaebeaf170a6997f89b467581cd880d218e0cf8f`;
+comparison `e2d63b252cd1ff436d81d55fef3a7d961d3f53cc79a76193929553a169e6142a`;
+protocol `a66a40522f5203b9adbda3a052c47c8e3a1effd8ac9cf6dc07634979b6afd0d0`.
+Those three artifacts were made read-only. Original P0 and paired Python
+artifacts remain unchanged. No benchmark process is active after this terminal
+result. Luna agents are now implementing two disjoint focused increments:
+same-window helper CPU measurement, and Rust quiescence-aware optional jemalloc
+purging on the existing SQLite owner thread. Root must review both and run CI
+before rebuilding an isolated image and capturing a new five-run Python/Rust
+pair. P4.6/P4.8 remain unchecked. No P5 or live changes.
+
+Focused recovery increments are implemented, not yet CI-verified:
+
+- `scripts/bench_writer_service.py` measures cgroup v2/v1 CPU around the existing
+  thread-pool request window when explicitly requested by migration CI; bad or
+  unavailable counters fail visibly. `scripts/bench_service_migration.py` uses
+  these helper fields for writer phases, keeps HTTP host brackets and periodic
+  CPU diagnostics, and requires the new helper-window sampling policy for the
+  accepted pair. Historical numerical limits remain unchanged.
+- `rust/src/writer/memory.rs`, `executor.rs`, `transport.rs`, `mod.rs` and
+  `Cargo.toml` add optional dynamic jemalloc arena purging on the existing
+  SQLite owner thread. No thread or transaction is added. The existing master
+  trim switch and idle interval are honored; integer parse/default/disable
+  behavior matches Python for ordinary settings, with extreme positive Rust
+  intervals capped at one year. New handler RAII tracking and existing work
+  reservations protect payload/result lifetimes at the idle decision.
+- Quiescence is checked at the decision via atomic snapshots, not exclusive
+  throughout purge: a newly arriving request may overlap a thread-safe allocator
+  purge. No mutex is held across purge, no maintenance rejection is introduced,
+  and Tokio never executes the blocking purge. Attempts consume activity even
+  when the optional hook is missing or fails; diagnostics are bounded once per
+  availability/success/failure category. Purge cannot reclaim live SQLite/runtime
+  allocations and is not yet proven to fix cooldown memory.
+
+Tests added cover strict counter parsing/failures, CPU source/window selection,
+paired-policy rejection, interval/master-switch behavior, fake hook key/errors,
+idle eligibility, and a real command-handler RAII lifetime test. Root is reviewing
+the small diagnostic-capture follow-up, then must run CI. No successful runtime
+purge or new acceptance result is claimed before that verification.
+
+Focused source review complete. The benchmark now records only allowlisted
+structured `writer_memory_trim` diagnostics; Rust runs require exact successful
+`arena_purge=all rc=0` evidence, while Python does not require the optional hook.
+Regression tests distinguish v2 reports usable solely as frozen fixture sources
+for new Python baselines from v2 reports rejected as v3 paired references.
+Full CI started in `/tmp/podly-rust-migration-p4-idle-window-ci-20260928-1.log`.
+Do not rebuild or capture the next pair until this CI is terminal and passes;
+review formatter changes and record the exact result. Next image/run artifacts
+must use fresh paths and five matched repetitions, preserving all failed data.
+
+First focused CI session 24267 exited 1: Ruff auto-fixed one finding, ty and
+Rust prerequisite build passed, Python tests 1085 passed/2 skipped, then Rust
+fmt rejected three line-wrap differences in executor/transport. Root applied
+exact fmt output via patch and started full rerun in
+`/tmp/podly-rust-migration-p4-idle-window-ci-20260928-2.log`. Clippy/new Rust
+unit tests/registry completion are not claimed by the first attempt. A litellm
+interpreter-exit logging error followed successful pytest and is recorded as a
+diagnostic, not the CI exit cause; the fail-fast stage was Rust formatting.
+
+Focused CI rerun session 47414 terminal exit 0:
+`/tmp/podly-rust-migration-p4-idle-window-ci-20260928-2.log` proves Ruff,
+ty, shell syntax, Rust prerequisite build, 1085 Python passed/2 skipped,
+Rust fmt/clippy, 58 writer + 97 existing + 3 transport tests, registry parity.
+The six additional writer tests cover idle settings/hook/quiescence and handler
+lifetime; Python tests cover helper-window CPU and diagnostic capture. Root
+reviewed changed source and `git diff --check` is clean. Runtime reclamation
+and full acceptance remain unproven until the matched container run.
+
+Read-only Docker metadata confirmed the tag
+`podly-rust-writer-p4:20260928-recovery-2` was unused. A new isolated image build
+started, log `/tmp/podly-rust-migration-p4-idle-window-image-20260928.log`.
+Next, once build succeeds: capture five Python repetitions through
+`./scripts/ci.sh --writer-baseline`, using the frozen recovery-1 report solely
+as fixture source; freeze/audit its new v3 report. Then capture five Rust
+repetitions against that exact image, runner/policy/environment/fixture and the
+original historical thresholds. Preserve all earlier artifacts and hold source
+edits/competing workloads during measurement. No acceptance checkbox advances
+from successful unit CI or an image build alone.
+
+Build exec session **52722** was polled live; do not restart on observation
+timeout. Current post-CI runner SHA-256 is
+`6482b5bd0a5c4cb69f41176c5f9cbd5f4be7a895627e6767ea0b03965d14684d`.
+Recovery-1 Python and Rust report hashes were rechecked unchanged. Once build
+52722 exits 0, the next command (after confirming the output path is unused) is:
+
+```sh
+PODLY_WRITER_BENCH_IMAGE=podly-rust-writer-p4:20260928-recovery-2 \
+PODLY_WRITER_BENCH_BASELINE=/tmp/podly-writer-python-p0-20260928-recovery-1/report.json \
+PODLY_WRITER_BENCH_REPETITIONS=5 \
+PODLY_WRITER_BENCH_OUTPUT=/tmp/podly-writer-python-p0-20260928-recovery-2 \
+mise exec -- ./scripts/ci.sh --writer-baseline \
+  > /tmp/podly-rust-migration-p0-idle-window-ci-20260928.log 2>&1
+```
+
+Audit/freeze the resulting report before Rust. The paired Rust command must
+use that new report as `PODLY_WRITER_BENCH_BASELINE`, the same image, five
+repetitions, original historical threshold report, and a fresh output path.
+Require recorded purge success plus the actual cooldown-memory gate; neither
+one substitutes for the other. No image was deployed or live container stopped.
+
+Image build session 52722 terminal exit 0; image inspection records
+`sha256:6ae6e5c610485ff185942e643529f87859bc1a3cdd7fbce90814aeca4a965fed`
+(Docker inspect `.Id`, not the exported config blob digest).
+The new baseline output path was confirmed absent. The five-run Python baseline
+command above has now started in the specified CI log. It reuses recovery-1
+solely as the frozen synthetic fixture source, not as a performance reference.
+Hold source edits, builds, tests and competing workloads after CI enters
+measurement; audit all five resulting runs and freeze their report before the
+matching Rust invocation. P4.6/P4.8 remain unchecked.
+
+Baseline exec session **63664** is the active handle; poll it rather than
+restarting on observation timeout. Build session 52722 is terminal. Current
+baseline log is `/tmp/podly-rust-migration-p0-idle-window-ci-20260928.log`;
+output `/tmp/podly-writer-python-p0-20260928-recovery-2`. Once this session is
+terminal, record exact CI result, all five run checks and report/protocol hashes.
+
+Baseline session 63664 passed ordinary CI (1085 Python passed/2 skipped,
+58 writer + 97 existing + 3 transport tests, Ruff/ty/fmt/clippy/registry) and
+entered run 1. Protocol pins five repetitions, Docker image ID above, runner
+`6482b5bd0a5c4cb69f41176c5f9cbd5f4be7a895627e6767ea0b03965d14684d`,
+`periodic-phase-end-helper-window-cumulative-cpu-v3`, and
+`writer_cpu_window=helper-threadpool-cgroup-cpu-v1`. Canonical DB/tree and
+environment fingerprint are unchanged from recovery-1. `git diff --check`
+passes after CI. No completed report or acceptance result yet; hold the
+measurement environment fixed through terminal completion.
+
+### Warmed-idle audit correction and controlled interruption
+
+Read-only Luna audit identified a real P0.6 gap: `wait_ready` exercises auth and
+`/feeds`, and the direct sidecar probe runs in another process. Neither warms
+the measured feed-post/RSS HTTP routes. The runner's ten requests per target
+route occur after its recorded idle window. Prior idle captures are cold, not
+proof of the explicitly required warmed idle. P0.6 is reopened; other completed
+writer parity/lifecycle tasks are not erased, and P4.6/P4.8 remain unchecked.
+
+To avoid completing a knowingly insufficient five-run reference, root resolved
+the exact driver via anchored Python/script/mode and output-path matching:
+PID 147231, Python3, matching recovery-2 output. Only that PID received SIGINT.
+Session 63664 terminated with exit 130/KeyboardInterrupt; its `finally` cleanup
+ran. A scoped Docker query for `podly-writer-python-147231` returned no remaining
+containers. No live process/container or production data was targeted.
+
+Completed run 1 and protocol are retained read-only; no final report exists.
+Run-1 SHA: `42df5c8141040645c32004b593ed57521e75f10c33ddc56e51f561eab2adfd00`.
+Protocol SHA: `cd23cd5b5b38b709092b1cf2f9063cf728184799320dcf1efc474444479d63f2`.
+Run 1 has all eleven original phases and positive same-window helper CPU for
+all three writer workloads. This is intermediate evidence, not an accepted
+baseline. Do not resume/reuse the interrupted directory as a paired reference.
+
+Next focused change is additive: retain original cold idle and its existing
+absolute/net-memory/resource/recovery gates, then sample a separate warmed idle
+for thirty seconds after the existing target-route warmups. Warmed idle must
+also meet the original absolute idle-memory cap and paired 50 MiB/25% reduction.
+All cooldowns still must recover to cold idle + 10 MiB; warming does not raise
+that allowance. New protocol policy requires the extra phase and pins its
+duration. Historical reports/caps are not rewritten. Luna is implementing
+runner/tests only; root must review and run CI before a new five-run pair.
+Runtime image/helper are unchanged, so the same exact recovery-2 image may be
+used with a new host-runner SHA in both arms; its bundled migration orchestrator
+is not executed by the benchmark. No competing measurement remains active.
+
+Current handoff: `/root/cpu_gate_audit` owns the additive warmed-idle runner/test
+edits and has not run CI. Review `_warm_idle_window` ordering (close cold idle,
+mark warmup, issue target HTTP warmups, quiet two seconds, warmed idle thirty
+seconds, per-process snapshot, then loads), v4 protocol rejection, additional
+warm memory gates, and unchanged cold recovery/resource gates. Once files are
+stable, run full `mise exec -- ./scripts/ci.sh` in a fresh warmed-idle CI log.
+Then capture five Python repetitions in a new recovery-3 directory using the
+complete immutable recovery-1 report solely as fixture source and pinned
+recovery-2 image. Do not use interrupted recovery-2 as a baseline. Freeze/audit
+the new reference before its five matching Rust runs. P0.6 may only be checked
+after warmed baseline evidence passes; P4.6/P4.8 require full Rust acceptance.
+
+Warmed-idle runner verification follow-up: ordinary CI log
+`/tmp/podly-rust-migration-p0-warmed-idle-ci-20260928-1.log` exited 1 at Ruff
+because the new recovery regression test omitted the `P0_ACCEPTANCE` import.
+The import was added. Retry log
+`/tmp/podly-rust-migration-p0-warmed-idle-ci-20260928-2.log` exited 1 at `ty`:
+the test fake sampler did not satisfy the declared `Sampler` type, and a
+resource dictionary inferred as `object` used `.pop`. Ruff passed on this
+retry; tests had not run. Luna is correcting only these test typing issues.
+No checkboxes advanced and no benchmark restarted on either failure.
+Luna corrected the test-only typing (`cast(Sampler, FakeSampler())` and
+`_complete_run` returning `dict[str, Any]`). Full CI retry is session **28082**,
+log `/tmp/podly-rust-migration-p0-warmed-idle-ci-20260928-3.log`.
+Ruff, type checking, shell syntax, and Rust binary build passed; pytest is
+running. Post-edit `git diff --check` passed. This is not a terminal CI result.
+Preflight reconfirmed recovery-2 image ID
+`sha256:6ae6e5c610485ff185942e643529f87859bc1a3cdd7fbce90814aeca4a965fed`
+and the immutable recovery-1 source report SHA
+`85ea9a13231a74c0c3c45085285a6479204b2a399422048066d33737cb5684a7`.
+The new policy is `periodic-phase-end-helper-window-warmed-idle-v4`.
+The warmed-idle edits are host-runner/report logic only; reuse this exact
+runtime image for both arms, pin the post-CI host runner SHA, and do not use
+the interrupted recovery-2 output as a paired baseline.
+
+Warmed-idle ordinary CI session 28082 completed with **exit 0**:
+1091 Python passed/2 skipped; Rust formatting/clippy, 58 writer + 97 existing
+Rust + 3 transport tests, and writer registry differential parity passed.
+`git diff --check` passed after CI. Host runner SHA-256 is
+`03258c3df50e521dd97ea27fb53e4d58ec9a5e6bcf379cde2a634119adf2459e`.
+No runtime/source changes are permitted while the matched measurements run.
+
+Five-repetition warmed Python baseline launched via
+`mise exec -- ./scripts/ci.sh --writer-baseline`, exec session **91784**,
+log `/tmp/podly-rust-migration-p0-warmed-baseline-ci-20260928.log`, output
+`/tmp/podly-writer-python-p0-20260928-recovery-3`. Environment selects pinned
+image `podly-rust-writer-p4:20260928-recovery-2`, the complete immutable
+recovery-1 report solely as fixture source, and repetitions=5. The output
+directory was absent before launch. Poll original session 91784; do not
+restart on observation timeout. This is not yet a verified baseline.
+Next task: await terminal completion; audit all five runs for thirteen sampled
+phases, thirty-second warmed idle, positive helper-window CPU, exact write
+counts, Python process identity, HTTP 200 only, and zero errors/fallback;
+freeze/hash report and protocol. Only then recheck P0.6 and start the matched
+five-run Rust benchmark with the unchanged original threshold report.
+P4.6/P4.8 remain unchecked. No deployment, production data, or web migration
+changes were performed.
+
+Baseline session 91784 remains live after its CI preflight passed (1091 Python
+passed/2 skipped, 58 writer + 97 existing Rust + 3 transport tests, registry).
+Run 1 has started. The actual output protocol confirms five repetitions,
+Python backend, v4 sampling, helper-threadpool CPU v1, separate warmed and cold
+idle windows of thirty seconds each, and exact runner/image/DB hashes above.
+Fixture-tree SHA is
+`18938fd962d9e2191d2f7f0395f88d275b70fda20e0224a706b7d6dce73fc2b2`.
+No final report exists yet; P0.6 remains unchecked. Continue polling session
+91784 and hold source/build/test workloads during measurement.
+
+Baseline session 91784 remains live; run 1 completed and run 2 started.
+Run 1 has positive samples in all thirteen phases, only HTTP 200 responses
+(10756 feed-post requests, 399 RSS requests), no fallback or write failures,
+and successful writer/timing counts exactly 1000/12/100. Helper-window CPU
+seconds/duration: small 1.878207/1.696942, large 3.059168/3.218148,
+mixed 2.597346/2.719560. Resource CPU fields agree with helper fields.
+Cold/warmed idle memory medians are 193147699/197551718 bytes. Warmed process
+snapshot confirms Python writer and web; this is intermediate evidence only.
+
+Read-only Luna release audit used CodeGraph to verify the current container
+harness. P4.4 is **reopened**, not erased: existing fresh/upgrade/restart,
+non-root, rollback-on-kill, bootstrap failure, writer death, and retirement
+evidence stands, but startup race prevention is currently supported by serial
+source ordering and successful readiness/postconditions, not a runtime
+assertion while writer readiness is withheld. `await_ready()` waits for the
+full healthcheck, then `assert_retired_python_writer()` inspects processes.
+The bootstrap failure test never reaches writer startup. Next required
+isolated CI increment after measurements: hold/delay Rust protocol readiness,
+assert web process/listener absent while not ready, then release readiness
+and verify normal startup. Do not alter runtime or run competing CI during
+the active baseline; preserve existing verified scenarios and gates.
+P4.8 must include this additional dynamic startup proof as well as the full
+performance comparison. No P5+ work is authorized by this audit.
+
+Baseline session 91784 continues live with run 3 after run 2 completed.
+Run 2 has all thirteen positive resource phases, Python backend/environment/
+process identity, no fallback or writer/client failures, HTTP 200 only
+(10773 feed-post requests, 396 RSS requests), and matching successful
+write/timing counts of 1000/12/100. Helper CPU seconds/window durations are
+small 1.829706/1.661705, large 2.851392/2.989126, mixed 2.595543/2.703008.
+Cold/warmed idle medians are 183920230/184968806 bytes. The host runner hash
+remains unchanged. Full five-run baseline acceptance is still pending.
+Luna is implementing only the isolated startup harness's missing withheld-
+readiness assertion; no runtime, image, CI script, or benchmark source edits
+or competing workload runs are permitted during this measurement.
+
+Baseline session 91784 remains live with run 4 after run 3 completed.
+Run 3 again has all thirteen sampled phases, matching Python backend/
+environment/process identity, no fallback or writer/client failures, and
+HTTP 200 only (10575 feed-post requests, 402 RSS requests). Successful
+write/timing counts match 1000/12/100. Helper CPU seconds/window durations:
+small 1.845138/1.670526, large 2.947998/3.090648, mixed 2.583009/2.691804.
+Cold/warmed idle medians are 170288742/174692762 bytes. Three complete runs
+are intermediate data only: this protocol requires five and the final report
+is not yet available. Poll original handle 91784, preserve the fixed host
+runner/image/fixture, and audit/freeze only after terminal completion.
+
+P4.4 readiness follow-up implemented by Luna in
+`scripts/test_rust_writer_container.sh` and the executable test-only fixture
+`scripts/writer_readiness_gate.py`. A dedicated non-root isolated container
+runs its real Rust binary on loopback port 50002 behind a proxy on 50001.
+The real binary's `--probe --port 50002` must pass first. While a marker is
+absent, the proxy returns test-generated HTTP 503; repeated real launcher
+probe and healthcheck failures plus `/proc` and refused port-5001 assertions
+prove web is not started. Opening the marker forwards actual Rust responses,
+then the existing health/process-retirement assertions must pass. This tests
+launcher readiness gating, not the Rust handler's internal readiness
+transition. No production flags/source or pinned benchmark image changed.
+Root review caught a child-reaping gap on proxy bind/marker failure; Luna
+included those operations inside protected cleanup. Containers/volumes and
+the validated mktemp directory are uniquely scoped. No tests/build/container
+commands ran during active measurement; `git diff --check` passed and runner
+SHA remains unchanged. P4.4 stays unchecked pending
+`mise exec -- ./scripts/ci.sh --writer-container` after baseline session 91784
+terminates and before the paired Rust measurement begins.
+
+Baseline session 91784 remains live with the fifth/final repetition after
+run 4 completed. Run 4 has all thirteen positive resource phases, matching
+Python selection/environment/process identity, no fallback or write failures,
+HTTP 200 only (10586 feed-post requests, 393 RSS requests), and exact matching
+write/timing counts 1000/12/100. Helper CPU seconds/window durations:
+small 1.817736/1.645834, large 3.116073/3.245202, mixed 2.589691/2.693778.
+Cold/warmed idle medians are 175321907/176265626 bytes. Do not freeze or accept
+the reference until session 91784 terminates with all five runs and errors=[];
+then audit/hash report and protocol, recheck P0.6 only if complete, run the
+pending CI-owned delayed-readiness test, and start matched Rust measurements.
+P4.4 remains reopened until that new runtime assertion passes.
+
+P0.6 warmed-baseline re-verification complete: session **91784** terminated
+with exit 0. The CI log ends with `errors: []` (the report itself contains
+protocol/runs, not a top-level errors field). All five runs have thirteen
+positive resource phases, HTTP 200 only at concurrency 8, correct Python
+selection/environment/process identity, no fallback or client/writer failures,
+exact successful write/timing counts 1000/12/100, and positive helper-window
+and HTTP cumulative CPU. Separate warm process snapshots include RSS,
+threads, and FDs; actual Rust feed/RSS probes return nonempty bytes in every
+run. Cold/warmed/cooldown windows are fixed thirty seconds. Source DB/tree
+and environment/runner/image hashes match the pinned protocol; successful
+completion includes the driver's source-integrity checks. P0.6 is checked
+again; original historical thresholds are unchanged.
+
+Frozen mode-444 reference:
+`/tmp/podly-writer-python-p0-20260928-recovery-3/report.json`, SHA-256
+`95725e8de3cfbd4c3979ae55a5d8f68b6bdebd924ad2e10b425185fd0af256ad`;
+protocol SHA-256
+`d83b679db26c023155a3cb61de825f5d775c753111fc46fc4eac6519a904781d`.
+Five repetitions satisfy the previously observed spread-required expansion;
+this does not waive performance/CPU/memory gates for the Rust arm.
+
+P4.4 delayed-readiness verification launched after baseline terminal via
+`mise exec -- ./scripts/ci.sh --writer-container`, session **66486**, log
+`/tmp/podly-rust-migration-p4-delayed-readiness-ci-20260928.log`.
+Poll original handle; no benchmark is active now. Inspect formatting/type
+changes and all existing plus new container scenarios. P4.4 remains unchecked
+until this run passes. Afterward run the five matched Rust repetitions using
+the frozen recovery-3 reference, unchanged recovery-2 image and host-runner
+hash/policy, plus original P0 threshold report. P4.6/P4.8 remain open.
+
+P4.4 dynamic readiness follow-up passed: session **66486**, terminal exit 0,
+log `/tmp/podly-rust-migration-p4-delayed-readiness-ci-20260928.log`.
+Ordinary CI passed 1091 Python/2 skipped, 58 writer + 97 existing Rust + 3
+transport tests, formatting/type/clippy/shell checks, and registry parity.
+The isolated lifecycle log advances through withheld readiness, prior-schema
+upgrade, persistent restart, interrupted transaction rollback (write lock
+confirmed), writer-death dependent shutdown, and bootstrap failure to the
+final passed line. Since the shell gate is fail-fast, all eight repeated
+closed-gate probe/health failures, absent web process/refused listener checks,
+and post-release actual probe/health/process assertions passed. P4.4 is
+checked again. Caveat: closed-gate 503 is test-generated; actual Rust's full
+probe succeeds behind the proxy and after release. The test does not claim
+to delay Rust's own executor initialization. CI formatted the new fixture;
+post-CI diff check passed, and host benchmark runner SHA is unchanged.
+Fixture SHA-256:
+`8e6afb975936f5b6cddf6bb1411e9e1e5304e767a0edf2abf96ddfa984f50f70`.
+
+Matched five-run Rust comparison launched via
+`mise exec -- ./scripts/ci.sh --writer-benchmark`, session **23399**, log
+`/tmp/podly-rust-migration-p4-warmed-comparison-ci-20260928.log`, fresh output
+`/tmp/podly-rust-writer-p4-recovery-20260928-3`. It selects the same recovery-2
+image, frozen recovery-3 Python report SHA
+`95725e8de3cfbd4c3979ae55a5d8f68b6bdebd924ad2e10b425185fd0af256ad`,
+five repetitions, and original P0 threshold report SHA
+`2ec8584b9070e1326dabf4f02b343fc15351055e04004f3b236774cd58dc9af1`.
+Both report hashes were revalidated before launch. Poll original session
+23399; hold source/build/test workloads after preflight enters measurement.
+Next: audit all five runs for actual Rust identity/readiness/retirement,
+thirteen resource phases, positive helper-window CPU, exact write counts,
+zero failures/fallback, and real all-arena purge success. Freeze final report,
+protocol, and comparison, then inspect **every** historical/paired gate and
+resource/spread/recovery constraint. Purge log success does not prove memory
+recovery. P4.6/P4.8 remain unchecked until full acceptance; no P5+ work or
+live deployment is authorized.
+
+Five-run Rust recovery-3 comparison is terminal and **failed acceptance**.
+Session 23399 no longer exists in the process tool; no exact matching
+benchmark process remains, and the log ends with the complete report/error
+JSON. Its exit status was not returned by the expired handle, so it is not
+recorded as observed. All five run files, final report, protocol, and comparison
+exist. Actual protocol pins the expected image/runner/fixture/env, five runs,
+Python reference SHA95725..., and original historical SHA2ec858... .
+The final error JSON lists missing `arena_purge=all rc=0` evidence in every
+run plus failing memory and thread/FD recovery gates. Other historical and
+paired latency/throughput/CPU/idle/warmed-idle/writer-RSS/identity/fallback/
+spread/equivalence gates pass; no failure is waived because writes are fast.
+Memory extra bytes by run: 64697139, 64969769, 69373788, 72509030, 65515028
+versus the unchanged 10485760 allowance. Threads delta is zero in every run;
+FD deltas are 9/8/9/9/9 versus allowance 8. Rust writer itself stays at four
+threads/thirteen FDs; web grows from fourteen FDs to twenty-three. Every
+trim evidence record is missing/empty; this does not establish whether the
+purge failed to execute or its log was not captured.
+
+Failed artifacts preserved mode444:
+report SHA `9cbeead06bddd315833d0ba78f34cd00c66871621c944b606c64fbcb6d865901`;
+protocol SHA `03376ae4554dd39ce19e8a70ba5749b8fa5ef2045ca0847d04f740e440aa9a3b`;
+comparison SHA `653d28d5a03761cba63899794dcaa8b3f7927566acc7318dbdbd0243a15f318d`.
+Next: Luna CodeGraph diagnosis of purge scheduling/config/log extraction and
+separate web FD ownership/lifecycle audit. No benchmark remains active, so
+implement verified causes with regression tests and required CI, then rebuild
+and measure an appropriately matched pair without changing thresholds.
+P4.6/P4.8 remain unchecked; P4.4 dynamic readiness verification stands.
+
 ## 2026-09-23 P3/P4 isolated integration increment
+
+## 2026-09-28 stopping-point handoff — P4 baseline provenance decision
+
+Replacement Python P0 verification completed after user approval:
+`/tmp/podly-rust-migration-p0-replacement-ci-20260928.log` exited 0;
+1047 Python tests passed/2 skipped, Rust fmt/clippy and 52 writer + 97 existing
++ 3 transport tests passed, and the registry gate passed. The subsequent
+three baseline runs completed with `errors: []`. Every run has all eleven
+resource phases, exclusively HTTP 200 responses, 1000/12/100 successful
+small/large/mixed writes with matching timing counts, no writer failures,
+and no fallback logs. Environment and process identity both confirm Python.
+
+Frozen replacement report:
+`/tmp/podly-writer-python-p0-20260928/report.json`, SHA-256
+`9923709f6513837c6ddd18a5e50aab0665ae9fc1cea0103df48d9bfa66988854`.
+Report and protocol were made read-only before any Rust measurement.
+Canonical source DB SHA remains
+`851273de0f0b149969e0eccc5da319c04f6c70e0283a29bfcf2a652688b33718`;
+protocol pins source-tree SHA
+`18938fd962d9e2191d2f7f0395f88d275b70fda20e0224a706b7d6dce73fc2b2`.
+Runner verified the frozen source before/after clones and runs. Paired image
+ID is `sha256:c072a50c4585d771c0873b95c0a96c419018950b0a7d95d1cc3a9dd7127538c8`
+(`podly-rust-writer-p4:20260928-acceptance-2`). Original artifacts remain intact.
+Next task is the dual-reference comparator verification and paired Rust runs
+using this exact source/image. No P4.6/P4.8 checkbox is advanced by this baseline.
+
+Independent read-only audit reconfirmed report/DB hashes, read-only source,
+absence of WAL/SHM sidecars, backend/process identity, HTTP probes and exact
+write/timing counts. Idle medians (201.3/173.6/173.3 MB) and feed P95
+(45.279/39.321/40.665 ms) exceed 10% spread. Proceed with three matched Rust
+runs, but require five matched runs if that spread could reverse a gate;
+retain all three initial samples. Provenance limitations: protocol records
+environment names rather than effective values (backend is captured per run),
+and pins image ID rather than source Git/build-context hashes. Python readiness
+is evidenced by process lists and successful HTTP probes, not a dedicated
+writer readiness payload. These limitations do not waive any acceptance gate.
+
+Dual-reference comparator review found and corrected a potentially false-green
+spread test: uncertainty must recompute derived gates at observed extrema,
+including Rust spread, and CPU uncertainty must match ratio-of-medians gates.
+A second audit found that reconstructing old environment values from today's
+runner could not prove equality. The fingerprint-less capture above remains
+preserved as evidence, but is not sufficient for final paired acceptance.
+Next: regenerate Python with an environment fingerprint using the same frozen
+source and image, then require exact fingerprint equality for paired Rust.
+No legacy reconstruction bypass is accepted. Original P0 caps/CPU constraints
+remain mandatory.
+
+Comparator verification attempts: default-sandbox CI exited 2 before tests
+(read-only uv cache); escalated CI log
+`/tmp/podly-rust-migration-dual-baseline-ci-20260928-2.log` exited 1 on Ruff
+branch/closure/unused-variable findings. After fixes, `...-3.log` exited 1 on
+new test-helper type annotations; Ruff passed. These are tooling verification
+failures, not measured Rust performance regressions. No Rust measurement exists
+at this point; subsequent CI must pass before measurement.
+
+Current verified continuation: comparator CI passed in
+`/tmp/podly-rust-migration-p0-fingerprinted-ci-20260928-2.log`: 1052 Python
+passed/2 skipped, Ruff/type checks, Rust fmt/clippy and 52 + 97 + 3 tests,
+registry differential gate. Prior fingerprinted attempt exited 1 on four
+benchmark-test assertions (1048 passed/2 skipped); corrected and rerun, no
+baseline measurement occurred in that failed attempt.
+The successful CI invocation is now measuring fingerprinted Python P0 in
+`/tmp/podly-writer-python-p0-20260928-fingerprinted`; exec session **42758**
+was polled live after CI and run 1 started. Do not restart on observation timeout.
+Protocol reconfirms the identical image/DB/tree hashes recorded above and pins
+environment fingerprint
+`b166c8b9c2132cf269bb3e52174d45491651798db0b3ed03a626330708a094ee`.
+The report is not yet complete. Hold benchmark source edits and competing
+workloads until this session is terminal; then audit/freeze the resulting
+report and use it as `PODLY_WRITER_BENCH_BASELINE` for Rust CI benchmark mode.
+Use the original report as `PODLY_WRITER_BENCH_THRESHOLD_REPORT` so both original
+and stricter paired constraints are enforced. P4.6/P4.8 remain unverified.
+
+Fingerprint-complete baseline finished: session 42758 terminal exit 0,
+`/tmp/podly-rust-migration-p0-fingerprinted-ci-20260928-2.log` ends with
+`errors: []`. All three runs have eleven resource phases, Python backend
+environment/process identity, only HTTP 200, exactly 1000/12/100 successful
+writes with matching successful timing records and no fallback/failure logs.
+Report SHA-256:
+`0f5a6bc9d92ad10d995f62f14890c30a0c732038562d124d6d0eb4927fb94642`;
+protocol SHA-256:
+`24f31ced2734285b6cb4483ca210a71bfe2f3a3528ed016df90344d0f77596f3`.
+Both files are read-only before Rust measurement. DB SHA remains
+`851273de0f0b149969e0eccc5da319c04f6c70e0283a29bfcf2a652688b33718`.
+This fingerprint-complete report supersedes the prior replacement capture as
+the paired reference; historical artifacts and original absolute/CPU limits
+remain intact. CI autoformat changes reviewed; `git diff --check` passes.
+
+Active paired Rust invocation: exec session **71361**, log
+`/tmp/podly-rust-migration-p4-paired-ci-20260928.log`, output
+`/tmp/podly-rust-writer-p4-paired-20260928`. It runs normal CI first, then
+`--writer-benchmark` with the fingerprint-complete Python report and original
+P0 threshold report. Poll this handle to terminal; no comparison result exists
+yet. Do not restart solely on timeout or edit measurement source mid-run.
+
+Paired Rust session 71361 is now terminal, exit 1. Ordinary CI passed
+(1052 Python passed/2 skipped, Rust fmt/clippy/tests 52 + 97 + 3, registry).
+All three runs proved Rust writer identity/readiness, had no write failures
+or fallback logs, and completed the prescribed workloads. Median end-to-end
+write P95: small 3.531 ms vs Python 12.840; large 143.821 vs 2060.692;
+mixed 40.815 vs 446.652. This proves faster writes, not overall acceptance.
+
+Performance acceptance failed measurement completeness: all three fast
+large-write bursts fell between periodic Docker resource samples, so
+`writer_large` is absent. Comparison reports `complete_measurements: false`
+with `KeyError`; remaining gate calculation is masked, not proven passing.
+Do not fill missing CPU samples with zero or accept this report.
+Independently observed writer RSS after cooldown is
+68,382,720 / 67,624,960 / 60,534,784 bytes, above the original 49,753,293 cap.
+Container idle medians 127,087,411 / 102,299,075 / 101,953,044 become final
+187,904,819 / 160,641,844 / 153,826,100 bytes: every run exceeds idle + 10 MiB.
+Rust writer accounts for most growth (ready about 12 MB; final 61–68 MB),
+with stable 14 threads/13 FDs; Python web RSS increases about 4 MB.
+Python web FD counts rise by 11 in both backends, suggesting common read-pool
+retention rather than Rust-only transport leakage; root cause is not yet proven.
+
+Report SHA `b85decf40c0f397a267c1ba2d650447c290ad75a780acb349f881c6cf33a074a`;
+comparison SHA `b34f7bb9384672ffbd7204d44a36be65d579259423c06c7d192282be54ec232f`.
+Next increments: repair short-phase sampling without changing workload or
+relaxing original CPU limits, investigate bounded Rust runtime/JSON allocation
+retention and shared FD growth, run CI, rebuild an isolated image after runtime
+changes, and repeat same-image Python/Rust baselines. No gate checkbox advanced.
+
+Recovery implementation increment (not yet rebenchmarked): Rust Tokio I/O
+workers fixed at two, separate from the single SQLite owner; the real-binary
+transport test now asserts four Linux threads while retaining its eight-client
+correlation test. Sampler phase changes synchronize with in-flight sampling
+and explicitly sample the outgoing phase, so fast bursts cannot disappear;
+workload latency/throughput timers remain outside boundary probes. Database
+pool retains three idle connections instead of five, with overflow seven
+instead of five: the total ten-connection ceiling and 60-second timeout are
+unchanged. A fresh isolated SQLite test checks ten checked-out connections,
+then only three retained after release. This targets common descriptor
+retention; its measured benefit and latency effects remain unproven.
+
+Verification: `/tmp/podly-rust-migration-p4-runtime-sampling-ci-20260928.log`
+passed 1054 Python tests/2 skipped, then exited 1 on Rust assertion formatting.
+After correction and the pool regression test,
+`/tmp/podly-rust-migration-p4-runtime-sampling-ci-20260928-2.log` exited 0:
+1055 Python passed/2 skipped, Ruff/type checks, Rust fmt/clippy and 52 + 97 + 3
+tests, registry gate. Reviewed formatter changes; `git diff --check` passes.
+A Luna agent reported a usage-limit failure during follow-up; root continued
+with approved targeted CodeGraph query/node/impact lookups, not main-session
+explore/context calls. No deployment or production data action occurred.
+
+Subsequent tooling edits pending verification: record and require matching
+runner SHA and `periodic-and-phase-end-v1` sampling policy in paired reports;
+permit a refreshed Python baseline to reuse a frozen fixture from an older
+image, while Rust comparisons still require exact same-image pairing. Added
+two regression cases for that image rule. Thus older periodic-only reports
+are historical artifacts, not valid new paired references. Original P0
+absolute/CPU limits remain enforced; Docker CPU percentages remain sampled
+averages rather than exact per-command CPU-cycle counters.
+
+Current isolated image build: exec session **46796**, tag
+`podly-rust-writer-p4:20260928-recovery-1`, log
+`/tmp/podly-rust-migration-p4-recovery-image-20260928.log`; polled live while
+Rust compilation was underway. Next: poll to terminal, run CI baseline mode
+using this image and the fingerprinted source report to reuse the exact
+immutable DB, then freeze its report and repeat Rust with both old thresholds
+and the new same-image baseline. Do not infer memory acceptance from the code
+changes. P4.6/P4.8 remain unchecked and P5+ has not started.
+
+Image build 46796 finished exit 0. A recovery-baseline CI attempt failed type
+checking on a new test's `SimpleNamespace` argument; corrected to
+`argparse.Namespace`. The next attempt, session 46972/log
+`/tmp/podly-rust-migration-p0-recovery-ci-20260928-2.log`, was deliberately
+stopped before benchmark startup (exit 143). Root verified process group
+4107617 contained only that CI, pytest and its resource tracker, then stopped
+that exact isolated group. No container or production process was stopped.
+Reason: a phase-end Docker CPU percentage can sample only idle time after a
+fast burst, falsely suggesting zero execution CPU. Memory boundary sampling
+is retained, but it cannot serve as short-burst CPU evidence.
+
+Current CPU correction: read cumulative cgroup CPU counters immediately before
+and after each HTTP/write workload; normalize the positive CPU delta by the
+client's measured workload duration. Retain periodic CPU averages separately
+for diagnostics. Original P0 CPU comparison remains enforced, as does the new
+same-image paired comparison; no historical value is rewritten. V2 accounting
+uses `usage_usec`, V1 uses `cpuacct.usage`; permissions/malformed/non-increasing
+counters fail explicitly rather than becoming zeros. New paired protocol
+policy is `periodic-phase-end-cumulative-cpu-v2`, with matching runner SHA.
+Tests cover both counter formats, permission denial, invalid/zero deltas, and
+short-workload accounting. CI is currently exec session **24014**, log
+`/tmp/podly-rust-migration-p4-cumulative-cpu-ci-20260928.log`; poll to terminal.
+No new baseline measurement is underway. After CI, capture a new baseline
+against `podly-rust-writer-p4:20260928-recovery-1` using the prior frozen source,
+then repeat Rust on the same image/policy/runner. Do not reuse old CPU reports
+as the paired reference. Decoder inspection also shows owned JSON values are
+consumed and action parameters moved; multiple representations alone do not
+prove deep-copy duplication. No decoder rewrite was made on that hypothesis.
+
+CPU-correction CI 24014 finished exit 0: 1065 Python passed/2 skipped,
+Ruff/type checks, Rust fmt/clippy and 52 + 97 + 3 tests, registry. Original P0
+CPU metrics were rechecked and are positive for all five workloads in all
+three historical runs; the old guard is calculable and remains mandatory.
+An additional summary regression now verifies that the cumulative workload
+CPU result replaces a zero post-burst periodic average while retaining that
+average separately for diagnostics.
+
+Latest continuation handle: exec session **50642**, log
+`/tmp/podly-rust-migration-p0-recovery-ci-20260928-3.log`, expected output
+`/tmp/podly-writer-python-p0-20260928-recovery-1`. It is currently in normal CI,
+then will run three Python baselines against the completed recovery image,
+using the prior immutable fingerprinted report solely as the fixture source.
+Poll this exact session to terminal; do not restart on timeout. Hold runtime
+and benchmark source edits/competing workloads once measurement begins.
+After success, audit positive cumulative CPU deltas and all eleven resource
+phases, record report/protocol/source hashes, make the report read-only, then
+use it for same-image Rust runs with the unchanged original threshold report.
+P4 memory/recovery/FD effects remain unverified; no acceptance checkbox advanced.
+
+Latest CI portion passed: 1066 Python tests/2 skipped, Ruff/type checks,
+Rust fmt/clippy and 52 + 97 + 3 tests, registry. Session 50642 remains live
+and recovery Python run 1 has begun. Its protocol pins image ID
+`sha256:4f453c2bfda12f0c6e81e7e25a75a53f7ef5fced184e3a4578fcea0708d61906`,
+the unchanged DB/tree/environment hashes above, and runner SHA
+`83664a3e0c2dfb67518e3d422ebc95767d5e3779296fab7028a6615f390cc19d`.
+The sampling policy is cumulative-CPU v2. No completed recovery report exists
+yet. Preserve the pending session and all historical reports for handoff.
+
+User decision received: approved establishment of a fresh immutable P0
+baseline without relaxing existing acceptance thresholds. The provenance
+blocker below is resolved by that authorization, not by changing the old
+fixture hash. Retain the original artifacts/results and fixed P0.7 limits;
+freeze/checkpoint the replacement source before hashing, verify it remains
+unchanged across baseline and paired runs, and enforce the original CPU limits
+as well as any stricter replacement-baseline-derived limits. P4.6/P4.8 stay
+unchecked until the measurements and full release audit pass.
+
+Replacement-pair gate rules fixed before new Rust measurements: run the same
+immutable image and exact P0 workload/environment profile (only the writer
+selector differs). Require every original P0.7 absolute limit and its original
+CPU-efficiency comparison. Also require CPU efficiency within 15% of the fresh
+Python backend. Idle memory must satisfy the minimum of the original cap,
+fresh Python idle minus 50 MiB, and 75% of fresh Python idle; writer RSS must
+satisfy the minimum of the original cap and 40% of fresh Python writer RSS.
+For maximum latency/queue limits, preserve the original regression budget:
+the paired cap is the minimum of the old cap and fresh Python median plus
+(old cap minus old Python median). Throughput floors are the maximum of the
+old floor and fresh Python median minus (old Python median minus old floor).
+Recovery/resource/correctness/process-retirement gates remain unchanged.
+Use at least three repetitions and expand to five if gating spread can change
+the decision. Freeze and checksum the replacement report before Rust runs.
+
+Completed in this resume: P4.5's full isolated rollback gate, stricter legacy
+action registry coverage, composite transcription empty/rollback parity,
+benchmark CI mode and verification tests, inventory/Appendix reconciliation,
+and CI-only benchmark controls in `.env.local.example`. Branch remains
+`rust-migrate-v2`, base `469baf5`, with these changes uncommitted; preserve them.
+Current main was already merged at `9de04b3`. No web migration/deployment/live
+restart/production write was performed. P4.6 and P4.8 remain unchecked.
+
+Exact verification: rollback
+`/tmp/podly-rust-migration-p4-rollback-ci-20260928-2.log` exit 0 (1028 Python
+passed/2 skipped, Rust checks/tests, registry, full container rehearsal).
+Final verification snapshot
+`/tmp/podly-rust-migration-p4-acceptance-ci-20260928.log` passed ordinary CI
+(1044 Python passed/2 skipped; Rust fmt/clippy, 52 writer + 97 existing +
+3 transport tests; registry) but the overall command exited 2 at benchmark
+preflight. No measured P4 container run or performance result exists.
+`git diff --check` passes. Reviewed CI auto-format changes are included.
+
+Blocking evidence: the original P0 report SHA still matches
+`2ec8584b9070e1326dabf4f02b343fc15351055e04004f3b236774cd58dc9af1`.
+Both report and protocol record fixture SHA
+`2ff695d7df8c86cca670890122d95a962a7da63a44006bd1ef3261ae1d7d3323`,
+but the retained source database hashes
+`81acf319252a7a212bf403e495934d638d23e6b8d6f4c0957612d77633176230`.
+Protocol was written at Sep 20 20:25:12.776; database mtime is 20:39:16.858,
+48 ms after the final report. It is WAL mode with valid integrity/schema;
+the original WAL bytes are unavailable. Current source has 341 4096-byte pages,
+header counter/version-valid-for 2, freelist 134 pages. A bounded read-only
+in-memory attempt of 300 plausible journal/header/page-count variants did not
+recover the recorded SHA. No retained P0 database matches it; run clones are
+post-workload snapshots, not immutable initial fixtures. The original image
+predates fixture generation. Checkpointing is plausible but unproven; neither
+logical equivalence nor the original bytes can be asserted from these artifacts.
+Original main DB bytes were not modified during investigation. SQLite's
+read-only WAL inspection may create shared-memory sidecars; none supplies the
+missing original WAL. Do not rewrite the expected hash or bypass preflight.
+
+Prior blocking next task (now resolved by user approval): obtain user direction to provide an immutable fixture matching the
+recorded SHA, or establish a replacement immutable/checkpointed P0 baseline
+without relaxing existing acceptance thresholds. Before any Rust comparison,
+freeze and verify the replacement fixture and protocol, run at least three
+Python baselines, and record any new stricter thresholds. Then repeat paired
+Rust workloads via `mise exec -- ./scripts/ci.sh --writer-benchmark`; keep old
+absolute/CPU/resource acceptance limits as well, rather than making a weaker
+gate. Current isolated image is `podly-rust-writer-p4:20260928-acceptance-2`,
+build log `/tmp/podly-rust-migration-p4-acceptance-image-20260928-2.log`.
+CI requires `PODLY_WRITER_BENCH_IMAGE`; optional baseline/output overrides are
+documented in the environment template. Disposable images remain available for
+resume; no live image/tag was overwritten. Benchmark output preflight directory
+`/tmp/podly-rust-writer-p4-benchmark.nJaJT1` contains no measured report.
+
+## Earlier integration evidence
+
+2026-09-28 final parity/documentation audit increment:
+
+Task IDs: P2.6/P2.8 audit follow-up and Appendix A reconciliation.
+Files: registry checker/coverage manifest, registry regression test, processor
+parity cases, writer inventory, plan Appendix A, benchmark runner/CI/tests.
+All four retained non-production actions now pin their existing differential
+cases without losing their unreachable-caller rationale. The registry gate
+validates every supplied case, including unreachable rows; a regression test
+rejects an unexecuted supplied case. Composite `replace_transcription` adds
+empty replacement and failure-after-delete/partial-insert cases with complete
+rollback projection checks. These pass the same independent live-writer clone
+harness as production actions. `clear_all_jobs` is conservatively referenced
+by its literal call in an uninvoked manager API, explaining the P0 five-gap
+versus manifest four-exception distinction. Inventory statuses and all 57
+Appendix A entries are reconciled only after this verification.
+CI: `/tmp/podly-rust-migration-p4-acceptance-ci-20260928.log` passed Ruff/ty,
+shell syntax, 1044 Python tests (2 skipped), Rust fmt/clippy and 52 writer,
+97 existing, 3 transport tests, and the registry gate. The benchmark preflight
+then exited 2 before launching measured containers because the retained P0
+fixture hash was `81acf319252a7a212bf403e495934d638d23e6b8d6f4c0957612d77633176230`,
+not the recorded `2ff695d7df8c86cca670890122d95a962a7da63a44006bd1ef3261ae1d7d3323`.
+P4.6/P4.8 remain unchecked; investigate fixture/hash semantics without relaxing
+the fixed P0 profile. Earlier tooling logs record corrected lint findings and
+the registry-test manifest-wrapper fixture failure (1043 passed/1 failed).
+No live service/data or default backend changed.
+
+2026-09-28 P4.5 acceptance:
+
+Task ID: P4.5.
+Commit/reference: `469baf5` plus the reviewed reconciliation-audit correction.
+Files changed: `scripts/test_rust_writer_rollback.sh`.
+Behavior preserved: an isolated one-shot bootstrap exits before the sole Rust
+writer starts. Real Rust RPC commits one pending and one interrupted running
+job; read-only inspection confirms the mounted database. All clients and Rust
+stop before a quiesced SQLite backup and integrity/schema/all-ORM checks.
+Only then does the Python writer start against that same unchanged schema.
+Its actual IPC readiness precedes two intentional commands: explicitly mark
+the known interrupted job failed, then claim the pending job once. No unknown
+Rust command is replayed. Every processing-job column is compared with the
+backup: only the pending claim's status/start time and the reconciliation's
+status/completion/error/exact step-name marker may change. Table counts match.
+Tests/CI: `mise exec -- ./scripts/ci.sh --writer-rollback`,
+`/tmp/podly-rust-migration-p4-rollback-ci-20260928-2.log`, exit 0. Ruff/ty,
+shell syntax, 1028 Python tests (2 skipped), Rust fmt/clippy and 52 writer,
+97 existing, 3 transport tests, registry gate, and the complete isolated
+rollback rehearsal passed. Unique disposable image/containers/volume were
+cleaned by the test. No live data, deployment, or restart was involved.
+Remaining limitations: P4.6 paired measurements and P4.8 release audit remain
+open; Python remains the default backend. The earlier run's extra `step_name`
+delta was the explicitly requested reconciliation value, now asserted exactly.
+
+2026-09-28 main-fold audit: current `main` (`5a0c283`) is already an ancestor
+of migration HEAD through merge `9de04b3`; `HEAD..main` contains no commits.
+Notification settings, chapter overrides, job total-steps, and permanent-failure
+retry changes from main have Rust equivalents and differential coverage. No
+additional merge or production mutation was required.
+
+2026-09-28 resume: the checkout was clean on `main` (`5a0c283`), then
+switched with approval to the existing migration branch (`469baf5`). No
+uncommitted user work was present. Fresh `mise exec -- ./scripts/ci.sh
+--writer-rollback` logged to
+`/tmp/podly-rust-migration-p4-rollback-ci-20260928.log`: ordinary CI and the
+registry gate passed. The isolated rehearsal verified committed Rust rows,
+quiesced backup/integrity/schema/ORM compatibility, exclusive Python startup,
+interrupted-job reconciliation, pending-job claim, and no command replay.
+The wrapper exited 1 at its final field-delta audit because reconciliation
+also changed `step_name`; this is not accepted P4.5 evidence. The next task
+is to verify that field against the submitted action and Python contract,
+assert its exact intended value, then rerun the complete gate. P4.6/P4.8
+remain open. No live instance or production data was modified.
 
 2026-09-24 P4.5 first rollback rehearsal is not accepted:
 `/tmp/podly-rust-migration-p4-rollback-ci-20260924.log` passed ordinary CI

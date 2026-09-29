@@ -5,6 +5,8 @@ set -Eeuo pipefail
 RUN_INTEGRATION=false
 RUN_WRITER_CONTAINER=false
 RUN_WRITER_ROLLBACK=false
+RUN_WRITER_BENCHMARK=false
+RUN_WRITER_BASELINE=false
 for arg in "$@"; do
     if [ "$arg" = "--int" ]; then
         RUN_INTEGRATION=true
@@ -12,8 +14,17 @@ for arg in "$@"; do
         RUN_WRITER_CONTAINER=true
     elif [ "$arg" = "--writer-rollback" ]; then
         RUN_WRITER_ROLLBACK=true
+    elif [ "$arg" = "--writer-benchmark" ]; then
+        RUN_WRITER_BENCHMARK=true
+    elif [ "$arg" = "--writer-baseline" ]; then
+        RUN_WRITER_BASELINE=true
     fi
 done
+
+if [ "$RUN_WRITER_BENCHMARK" = true ] && [ "$RUN_WRITER_BASELINE" = true ]; then
+    echo "Choose either --writer-baseline or --writer-benchmark, not both" >&2
+    exit 2
+fi
 
 # ensure dependencies are installed and are always up to date
 echo '============================================================='
@@ -102,4 +113,62 @@ if [ "$RUN_WRITER_ROLLBACK" = true ]; then
     echo "Running isolated Rust writer rollback rehearsal"
     echo '============================================================='
     ./scripts/test_rust_writer_rollback.sh
+fi
+
+# This mode runs the P0-paired concurrent writer acceptance benchmark after
+# the normal CI gates. Supply an already-built image and keep all output under
+# /tmp (or another explicitly chosen isolated artifact directory).
+if [ "$RUN_WRITER_BENCHMARK" = true ] || [ "$RUN_WRITER_BASELINE" = true ]; then
+    if [ -z "${PODLY_WRITER_BENCH_IMAGE:-}" ]; then
+        echo "PODLY_WRITER_BENCH_IMAGE must name the isolated image for writer benchmark/baseline" >&2
+        exit 2
+    fi
+    if [ -n "${PODLY_WRITER_BENCH_OUTPUT:-}" ]; then
+        BENCH_OUTPUT="$PODLY_WRITER_BENCH_OUTPUT"
+    elif [ "$RUN_WRITER_BASELINE" = true ]; then
+        BENCH_OUTPUT="$(mktemp -d /tmp/podly-rust-writer-p0-replacement.XXXXXX)"
+    else
+        BENCH_OUTPUT="$(mktemp -d /tmp/podly-rust-writer-p4-benchmark.XXXXXX)"
+    fi
+    if [ "$RUN_WRITER_BASELINE" = true ]; then
+        BASELINE_ARGS=()
+        if [ -n "${PODLY_WRITER_BENCH_BASELINE:-}" ]; then
+            BASELINE_ARGS+=(--baseline-report "$PODLY_WRITER_BENCH_BASELINE")
+        fi
+        if [ -n "${PODLY_WRITER_BENCH_REPETITIONS:-}" ]; then
+            BASELINE_ARGS+=(--repetitions "$PODLY_WRITER_BENCH_REPETITIONS")
+        fi
+        uv run python scripts/bench_service_migration.py \
+            --image "$PODLY_WRITER_BENCH_IMAGE" \
+            --output "$BENCH_OUTPUT" \
+            --writer-backend python \
+            --writer-baseline \
+            "${BASELINE_ARGS[@]}"
+    else
+        BENCH_BASELINE="${PODLY_WRITER_BENCH_BASELINE:-}"
+        if [ -z "$BENCH_BASELINE" ]; then
+            echo "PODLY_WRITER_BENCH_BASELINE must name the frozen replacement Python report" >&2
+            exit 2
+        fi
+        if [ ! -f "$BENCH_BASELINE" ]; then
+            echo "paired Python baseline report not found: $BENCH_BASELINE" >&2
+            exit 2
+        fi
+        BENCH_THRESHOLDS="${PODLY_WRITER_BENCH_THRESHOLD_REPORT:-/tmp/podly-rust-writer-p0-baseline-20260920/report.json}"
+        if [ ! -f "$BENCH_THRESHOLDS" ]; then
+            echo "historical P0 threshold report not found: $BENCH_THRESHOLDS" >&2
+            exit 2
+        fi
+        BENCH_ARGS=()
+        if [ -n "${PODLY_WRITER_BENCH_REPETITIONS:-}" ]; then
+            BENCH_ARGS+=(--repetitions "$PODLY_WRITER_BENCH_REPETITIONS")
+        fi
+        uv run python scripts/bench_service_migration.py \
+            --image "$PODLY_WRITER_BENCH_IMAGE" \
+            --output "$BENCH_OUTPUT" \
+            --baseline-report "$BENCH_BASELINE" \
+            --threshold-report "$BENCH_THRESHOLDS" \
+            --writer-backend rust \
+            "${BENCH_ARGS[@]}"
+    fi
 fi

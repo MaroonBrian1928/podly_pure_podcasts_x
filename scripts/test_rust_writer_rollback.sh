@@ -333,11 +333,19 @@ interrupted_changed = {
     for column in job_columns
     if interrupted_before[column] != interrupted[column]
 }
-assert interrupted_changed <= {"status", "completed_at", "error_message"}, (
+assert interrupted_changed <= {
+    "status",
+    "step_name",
+    "completed_at",
+    "error_message",
+}, (
     f"interrupted-job reconciliation changed unexpected fields: {sorted(interrupted_changed)}"
 )
 assert interrupted["status"] == "failed", (
     "interrupted job was not explicitly reconciled before pending recovery"
+)
+assert interrupted["step_name"] == "Interrupted by isolated rollback rehearsal", (
+    "interrupted job step name does not match explicit reconciliation"
 )
 assert interrupted["started_at"] == interrupted_before["started_at"], (
     "reconciliation changed the original start time"

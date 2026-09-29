@@ -280,6 +280,7 @@ async fn readiness(State(state): State<AppState>) -> Response {
 }
 
 async fn commands(State(state): State<AppState>, request: Request<Body>) -> Response {
+    let _request_activity = state.executor.track_request_activity();
     if let Err(error) = authenticate(request.headers().get(AUTHORIZATION), &state.auth_key) {
         return error.into_response();
     }
@@ -523,6 +524,9 @@ fn unknown(command_id: String) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use tempfile::NamedTempFile;
 
     #[test]
     fn auth_distinguishes_malformed_from_wrong_secret() {
@@ -543,5 +547,66 @@ mod tests {
         );
         let correct = HeaderValue::from_static("PodlyWriter c2VjcmV0");
         assert!(authenticate(Some(&correct), b"secret").is_ok());
+    }
+
+    #[tokio::test]
+    async fn request_activity_guard_covers_command_execution_and_response_conversion() {
+        let file = NamedTempFile::new().unwrap();
+        let connection = rusqlite::Connection::open(file.path()).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE alembic_version(version_num TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO alembic_version(version_num) VALUES (?1)",
+                [super::super::database::EXPECTED_SCHEMA_REVISION],
+            )
+            .unwrap();
+        drop(connection);
+
+        let registry = ActionRegistry::with_test_actions();
+        let executor =
+            Arc::new(WriterExecutor::start(file.path(), 4, 4096, registry.clone()).unwrap());
+        let lifecycle = Arc::new(LifecycleState::new());
+        lifecycle.set(Lifecycle::Accepting);
+        let state = AppState {
+            auth_key: Arc::from(b"secret".to_vec()),
+            executor: Arc::clone(&executor),
+            registry,
+            request_deadline: Duration::from_secs(5),
+            lifecycle,
+            registry_complete: true,
+        };
+        let payload = serde_json::json!({
+            "version": 1,
+            "command_id": "trim-guard-test",
+            "operation": "action",
+            "action": "__test_sleep",
+            "params": {"milliseconds": 250},
+            "wait": true
+        });
+        let authorization = format!("PodlyWriter {}", URL_SAFE_NO_PAD.encode(b"secret"));
+        let request = Request::builder()
+            .header(AUTHORIZATION, authorization)
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response_task = tokio::spawn(async move { commands(State(state), request).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while executor.active_handler_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("command handler should become active");
+        assert_eq!(executor.active_handler_count(), 1);
+
+        let response = response_task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(executor.active_handler_count(), 0);
+        executor.shutdown().unwrap();
     }
 }

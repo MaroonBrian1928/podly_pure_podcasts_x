@@ -429,9 +429,11 @@ def _configure_database(app: Flask) -> None:
         "connect_args": {
             "timeout": connect_timeout,
         },
-        # Keep pool small to reduce concurrent SQLite writers
-        "pool_size": 5,
-        "max_overflow": 5,
+        # Retain fewer idle read connections and their SQLite descriptors.
+        # Preserve the existing ten-connection concurrency ceiling; runtime
+        # writes still belong exclusively to the writer service.
+        "pool_size": 3,
+        "max_overflow": 7,
     }
 
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options

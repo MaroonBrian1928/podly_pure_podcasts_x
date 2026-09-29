@@ -73,6 +73,24 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "transcription_json",
     },
     {
+        "case_id": "processor_replace_transcription_empty_segments",
+        "operation": "action",
+        "action": "replace_transcription",
+        "owner": "replace_transcription",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "semantics": "transcription_empty",
+    },
+    {
+        "case_id": "processor_replace_transcription_failure_rolls_back_delete",
+        "operation": "action",
+        "action": "replace_transcription",
+        "owner": "replace_transcription",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "expect_success": False,
+    },
+    {
         "case_id": "processor_start_transcription_replace_side_effects",
         "operation": "action",
         "action": "start_transcription_replace",
@@ -364,6 +382,30 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
             "model_call_id": 601,
             "segments": _segments(),
             "transcript_word_timestamps": _word_timestamp_payload(),
+        },
+        "processor_replace_transcription_empty_segments": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segments": [],
+            "transcript_word_timestamps": [],
+        },
+        "processor_replace_transcription_failure_rolls_back_delete": lambda: {
+            "post_id": manifest.post_ids[0],
+            "model_call_id": 601,
+            "segments": [
+                {
+                    "sequence_num": 90,
+                    "start_time": 0.25,
+                    "end_time": 0.75,
+                    "text": "Synthetic row inserted before the forced failure",
+                },
+                {
+                    "sequence_num": 91,
+                    "start_time": 1.0,
+                    "text": "Missing end_time forces failure after replacement began",
+                },
+            ],
+            "transcript_word_timestamps": [],
         },
         "processor_start_transcription_replace_side_effects": lambda: {
             "post_id": manifest.post_ids[0],
@@ -873,6 +915,16 @@ def assert_writer_processor_parity(  # noqa: PLR0912 - action-specific parity br
         if case_id == "processor_replace_identifications_failure_rolls_back_delete":
             assert "model_call_id" in str(observation["python_error"])
             assert "model_call_id" in str(observation["rust_error"])
+        if case_id == "processor_replace_transcription_failure_rolls_back_delete":
+            assert observation["python_before"] == observation["python_rows"]
+            assert observation["rust_before"] == observation["rust_rows"]
+            for backend in (pair.python, pair.rust):
+                with sqlite3.connect(backend.db_path) as connection:
+                    existing_segments = connection.execute(
+                        "SELECT COUNT(*) FROM transcript_segment WHERE post_id=?",
+                        (pair.manifest.post_ids[0],),
+                    ).fetchone()[0]
+                assert existing_segments > 0
         if case_id.startswith("processor_artifact_"):
             assert isinstance(observation["rust_error"], dict)
             expected_code = (
@@ -938,6 +990,21 @@ def assert_writer_processor_parity(  # noqa: PLR0912 - action-specific parity br
             _assert_transcript_segment_order(
                 backend.db_path, pair.manifest.post_ids[1], expected
             )
+    elif semantics == "transcription_empty":
+        expected = {"post_id": pair.manifest.post_ids[0], "segment_count": 0}
+        assert python_data == rust_result == expected
+        for backend in (pair.python, pair.rust):
+            with sqlite3.connect(backend.db_path) as connection:
+                assert (
+                    connection.execute(
+                        "SELECT COUNT(*) FROM transcript_segment WHERE post_id=?",
+                        (pair.manifest.post_ids[0],),
+                    ).fetchone()[0]
+                    == 0
+                )
+                assert connection.execute(
+                    "SELECT status,last_segment_sequence_num,response FROM model_call WHERE id=601"
+                ).fetchone() == ("success", -1, "0 segments transcribed.")
     elif semantics == "identification_batch":
         assert (
             observation["python_results"]

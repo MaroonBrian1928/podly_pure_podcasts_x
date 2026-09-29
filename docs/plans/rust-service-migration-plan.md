@@ -1,6 +1,6 @@
 # Rust service migration implementation plan
 
-Status: proposed implementation plan; no migration tasks below are complete.
+Status: Writer P0–P3 verified; P4 lifecycle verified; performance acceptance in progress.
 
 Prepared: 2026-09-20. Revalidate file locations and inventories against the commit being implemented.
 
@@ -252,7 +252,7 @@ Dependency: P0–P3 complete. This is the first RAM-saving deployment milestone.
 - [x] **P4.2 — Update startup/supervision.** Select exactly one writer backend. For Rust mode, run one-shot bootstrap, then Rust writer readiness, then Python web. Propagate SIGTERM, reap children, stop dependent processes when the writer fails, and return a useful failure status. Do not rely only on a TCP-open probe.
 - [x] **P4.3 — Update readiness/health checks.** Health must verify the intended backend and executor readiness, not only that React's `/` page returns 200. Do not expose secret RPC details publicly. Use an available lightweight probe; do not assume `curl` is installed or introduce Python polling loops as the final steady-state solution.
 - [x] **P4.4 — Test fresh start, upgrade, and restart in an isolated container.** Include an existing database, empty deployment, non-default UID/GID, persistent volume, interrupted command, bootstrap failure, and writer death. Confirm no startup race lets web accept work before the writer is ready.
-- [ ] **P4.5 — Run rollback rehearsal.** Stop clients/new writer before selecting the Python backend. Use the same unchanged schema only after verifying compatibility; otherwise restore the tested backup with an explicit data-loss assessment. Do not start the old writer beside the new one. Verify pending-job recovery and avoid replaying unknown-outcome commands.
+- [x] **P4.5 — Run rollback rehearsal.** Stop clients/new writer before selecting the Python backend. Use the same unchanged schema only after verifying compatibility; otherwise restore the tested backup with an explicit data-loss assessment. Do not start the old writer beside the new one. Verify pending-job recovery and avoid replaying unknown-outcome commands.
 - [ ] **P4.6 — Benchmark against P0.** Repeat the same idle, concurrent HTTP, RSS, write-burst, and processing scenarios. Confirm the actual Rust writer path and absence of local fallback. Measure total container memory plus per-process RSS, latency, CPU, errors, threads, FDs, and post-burst recovery.
 - [x] **P4.7 — Verify process retirement.** After bootstrap exits and with no job running, process inspection shows Rust writer + Python web, and no `python -m app.writer`, bootstrap daemon, or compatibility proxy. Process removal is mandatory, even if request benchmarks are green.
 - [ ] **P4.8 — Complete the writer release gate.** All parity/failure tests pass, rollback is rehearsed, measured memory reduction meets P0 thresholds, and request/job behavior does not regress beyond agreed thresholds. Record evidence before making Rust the deployment default.
@@ -372,75 +372,75 @@ Snapshot: 57 actions verified from the current registry. Reconcile this list aga
 
 ### Users — 9
 
-- [ ] `create_user`
-- [ ] `update_user_password`
-- [ ] `delete_user`
-- [ ] `set_user_role`
-- [ ] `set_manual_feed_allowance`
-- [ ] `upsert_discord_user`
-- [ ] `set_user_billing_fields`
-- [ ] `set_user_billing_by_customer_id`
-- [ ] `update_user_last_active`
+- [x] `create_user`
+- [x] `update_user_password`
+- [x] `delete_user`
+- [x] `set_user_role`
+- [x] `set_manual_feed_allowance`
+- [x] `upsert_discord_user`
+- [x] `set_user_billing_fields`
+- [x] `set_user_billing_by_customer_id`
+- [x] `update_user_last_active`
 
 ### Feeds — 13
 
-- [ ] `refresh_feed`
-- [ ] `add_feed`
-- [ ] `update_feed_settings`
-- [ ] `increment_download_count`
-- [ ] `whitelist_post`
-- [ ] `ensure_user_feed_membership`
-- [ ] `remove_user_feed_membership`
-- [ ] `whitelist_latest_post_for_feed`
-- [ ] `toggle_whitelist_all_for_feed`
-- [ ] `create_dev_test_feed`
-- [ ] `delete_feed_cascade`
-- [ ] `create_feed_access_token`
-- [ ] `touch_feed_access_token`
+- [x] `refresh_feed`
+- [x] `add_feed`
+- [x] `update_feed_settings`
+- [x] `increment_download_count`
+- [x] `whitelist_post`
+- [x] `ensure_user_feed_membership`
+- [x] `remove_user_feed_membership`
+- [x] `whitelist_latest_post_for_feed`
+- [x] `toggle_whitelist_all_for_feed`
+- [x] `create_dev_test_feed`
+- [x] `delete_feed_cascade`
+- [x] `create_feed_access_token`
+- [x] `touch_feed_access_token`
 
 ### Jobs — 14
 
-- [ ] `dequeue_job`
-- [ ] `cleanup_stale_jobs`
-- [ ] `clear_all_jobs`
-- [ ] `clear_active_jobs`
-- [ ] `create_job`
-- [ ] `create_job_if_missing`
-- [ ] `cancel_existing_jobs`
-- [ ] `update_job_attribution`
-- [ ] `update_job_status`
-- [ ] `mark_cancelled`
-- [ ] `mark_classification_parse_error`
-- [ ] `record_ad_windows_count`
-- [ ] `mark_auto_retry_attempted`
-- [ ] `reassign_pending_jobs`
+- [x] `dequeue_job`
+- [x] `cleanup_stale_jobs`
+- [x] `clear_all_jobs`
+- [x] `clear_active_jobs`
+- [x] `create_job`
+- [x] `create_job_if_missing`
+- [x] `cancel_existing_jobs`
+- [x] `update_job_attribution`
+- [x] `update_job_status`
+- [x] `mark_cancelled`
+- [x] `mark_classification_parse_error`
+- [x] `record_ad_windows_count`
+- [x] `mark_auto_retry_attempted`
+- [x] `reassign_pending_jobs`
 
 ### Processor — 12
 
-- [ ] `upsert_model_call`
-- [ ] `delete_model_calls_for_post_by_model_name`
-- [ ] `upsert_whisper_model_call`
-- [ ] `replace_transcription`
-- [ ] `start_transcription_replace`
-- [ ] `insert_transcript_segments`
-- [ ] `finish_transcription_replace`
-- [ ] `finish_transcription_replace_from_artifact`
-- [ ] `mark_model_call_failed`
-- [ ] `insert_identifications`
-- [ ] `replace_identifications`
-- [ ] `replace_audio_segments`
+- [x] `upsert_model_call`
+- [x] `delete_model_calls_for_post_by_model_name`
+- [x] `upsert_whisper_model_call`
+- [x] `replace_transcription`
+- [x] `start_transcription_replace`
+- [x] `insert_transcript_segments`
+- [x] `finish_transcription_replace`
+- [x] `finish_transcription_replace_from_artifact`
+- [x] `mark_model_call_failed`
+- [x] `insert_identifications`
+- [x] `replace_identifications`
+- [x] `replace_audio_segments`
 
 ### Cleanup — 6
 
-- [ ] `cleanup_missing_audio_paths`
-- [ ] `clear_post_processing_data`
-- [ ] `clear_post_processing_data_keep_transcript`
-- [ ] `prepare_post_for_auto_retry`
-- [ ] `cleanup_processed_post`
-- [ ] `cleanup_processed_post_files_only`
+- [x] `cleanup_missing_audio_paths`
+- [x] `clear_post_processing_data`
+- [x] `clear_post_processing_data_keep_transcript`
+- [x] `prepare_post_for_auto_retry`
+- [x] `cleanup_processed_post`
+- [x] `cleanup_processed_post_files_only`
 
 ### System — 3
 
-- [ ] `ensure_active_run`
-- [ ] `update_discord_settings`
-- [ ] `update_combined_config`
+- [x] `ensure_active_run`
+- [x] `update_discord_settings`
+- [x] `update_combined_config`

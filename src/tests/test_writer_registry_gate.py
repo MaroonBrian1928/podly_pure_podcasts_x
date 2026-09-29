@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 
 from scripts.check_writer_registry import (
+    _action_coverage_failures,
     case_mapping_failure,
     local_literal_action_targets,
 )
@@ -98,3 +99,44 @@ def test_case_mapping_accepts_an_executed_matching_case() -> None:
         )
         is None
     )
+
+
+def test_unreachable_action_still_validates_every_pinned_parity_case() -> None:
+    manifest = {
+        "actions": {
+            "legacy_action": {
+                "parity_cases": ["legacy_success", "legacy_empty"],
+                "unreachable_reason": "No current production caller; retained for compatibility.",
+            }
+        }
+    }
+    parity_cases = {
+        "legacy_success": {
+            "case_id": "legacy_success",
+            "operation": "action",
+            "action": "legacy_action",
+        },
+        "legacy_empty": {
+            "case_id": "legacy_empty",
+            "operation": "action",
+            "action": "legacy_action",
+        },
+    }
+    kwargs = {
+        "manifest": manifest,
+        "actions": {"legacy_action"},
+        "called_actions": set(),
+        "validated": {"legacy_action"},
+        "handled": {"legacy_action"},
+        "parity_cases": parity_cases,
+    }
+    assert (
+        _action_coverage_failures(
+            **kwargs, executed_cases={"legacy_success", "legacy_empty"}
+        )
+        == []
+    )
+    failures = _action_coverage_failures(**kwargs, executed_cases={"legacy_success"})
+    assert failures == [
+        "legacy_action: parity case 'legacy_empty' is not registered and executed by the differential test"
+    ]
