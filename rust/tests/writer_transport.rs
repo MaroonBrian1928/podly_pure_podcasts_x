@@ -213,6 +213,19 @@ fn isolated_rust_transport_covers_admission_deadlines_and_reconnect() {
     assert_eq!(body["schema_revision"], "080b5181e23a");
     assert_eq!(body["ready"], true);
 
+    // Two I/O workers, the main thread and the single SQLite owner. The
+    // concurrent requests below must still succeed without a CPU-sized pool.
+    #[cfg(target_os = "linux")]
+    {
+        let threads = std::fs::read_dir(format!("/proc/{}/task", server.child.id()))
+            .unwrap()
+            .count();
+        assert_eq!(
+            threads, 4,
+            "writer runtime must retain its fixed thread bound"
+        );
+    }
+
     let (status, body) = server.request("/v1/commands", None, b"{}");
     assert_eq!(status, 401);
     assert_eq!(body["error"]["code"], "unauthorized");

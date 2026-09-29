@@ -6,6 +6,7 @@ pub mod executor;
 pub mod feeds;
 pub mod jobs;
 pub mod lifecycle;
+pub mod memory;
 pub mod processor;
 pub mod protocol;
 pub mod settings;

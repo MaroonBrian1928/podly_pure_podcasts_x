@@ -11,14 +11,23 @@ instance_volume="${container_name}-instance"
 failure_volume="${container_name}-failed-instance"
 upgrade_volume="${container_name}-older-schema-instance"
 interrupted_volume="${container_name}-interrupted-instance"
+readiness_name="${container_name}-delayed-readiness"
+readiness_volume="${container_name}-delayed-readiness-instance"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readiness_tmpdir="$(mktemp -d /tmp/podly-writer-readiness.XXXXXX)"
+readiness_marker="/tmp/${readiness_name}-ready"
+readiness_started="${readiness_marker}.started"
 
 cleanup() {
     docker rm -f \
         "$container_name" "$failure_name" "$upgrade_name" "$interrupted_name" \
-        "${container_name}-prepare-upgrade" "${container_name}-prepare-interruption" \
+        "$readiness_name" "${container_name}-prepare-upgrade" "${container_name}-prepare-interruption" \
         >/dev/null 2>&1 || true
-    docker volume rm "$instance_volume" "$failure_volume" "$upgrade_volume" "$interrupted_volume" >/dev/null 2>&1 || true
+    docker volume rm "$instance_volume" "$failure_volume" "$upgrade_volume" "$interrupted_volume" "$readiness_volume" >/dev/null 2>&1 || true
     docker image rm "$image_tag" >/dev/null 2>&1 || true
+    if [[ "$readiness_tmpdir" == /tmp/podly-writer-readiness.?????? ]]; then
+        rm -rf -- "$readiness_tmpdir"
+    fi
 }
 trap cleanup EXIT
 
@@ -26,6 +35,7 @@ docker volume create "$instance_volume" >/dev/null
 docker volume create "$failure_volume" >/dev/null
 docker volume create "$upgrade_volume" >/dev/null
 docker volume create "$interrupted_volume" >/dev/null
+docker volume create "$readiness_volume" >/dev/null
 echo "Building isolated Rust writer test image $image_tag..."
 docker build --quiet --tag "$image_tag" . >/dev/null
 
@@ -46,6 +56,28 @@ run_writer_container() {
         --env PUID=12001 \
         --env PGID=12001 \
         "$image_tag" >/dev/null
+}
+
+run_delayed_readiness_container() {
+    docker create \
+        --name "$readiness_name" \
+        --network none \
+        --volume "$readiness_volume:/app/src/instance" \
+        --env PODLY_WRITER_BACKEND=rust \
+        --env PODLY_INSTANCE_DIR=/app/src/instance \
+        --env PODLY_IPC_AUTHKEY=synthetic-container-test-key \
+        --env REQUIRE_AUTH=true \
+        --env PODLY_ADMIN_USERNAME=synthetic_admin \
+        --env PODLY_ADMIN_PASSWORD=synthetic-container-password \
+        --env PODLY_SECRET_KEY=synthetic-container-secret-not-for-production \
+        --env PUID=12001 \
+        --env PGID=12001 \
+        --env PODLY_READINESS_GATE_MARKER="$readiness_marker" \
+        "$image_tag" >/dev/null
+    docker cp "$readiness_name:/app/bin/podly_writer" "$readiness_tmpdir/podly_writer.real"
+    docker cp "$readiness_tmpdir/podly_writer.real" "$readiness_name:/app/bin/podly_writer.real"
+    docker cp "$script_dir/writer_readiness_gate.py" "$readiness_name:/app/bin/podly_writer"
+    docker start "$readiness_name" >/dev/null
 }
 
 await_ready() {
@@ -89,6 +121,61 @@ assert_retired_python_writer
 admin_count="$(docker exec "$container_name" sqlite3 /app/src/instance/sqlite3.db 'SELECT COUNT(*) FROM users;')"
 test "$admin_count" = 1
 test "$(docker exec "$container_name" stat -c %u /proc/1)" = 12001
+
+echo "Checking web startup remains gated while protocol readiness is withheld..."
+run_delayed_readiness_container
+gate_started=0
+for _ in {1..120}; do
+    if docker exec "$readiness_name" test -f "$readiness_started"; then
+        gate_started=1
+        break
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' "$readiness_name")" != true ]; then
+        docker logs "$readiness_name" >&2
+        exit 1
+    fi
+    sleep 0.25
+done
+test "$gate_started" = 1
+
+# Wait until the real Rust service is ready behind the test-only gate. Its
+# launcher-facing readiness probe must still fail until the marker is opened.
+real_writer_ready=0
+for _ in {1..80}; do
+    if docker exec "$readiness_name" python3 /app/bin/podly_writer assert-real-ready; then
+        real_writer_ready=1
+        break
+    fi
+    sleep 0.25
+done
+test "$real_writer_ready" = 1
+for _ in {1..8}; do
+    if docker exec "$readiness_name" /app/bin/podly_writer --probe >/dev/null 2>&1; then
+        echo "Rust readiness probe passed while the test gate was closed" >&2
+        exit 1
+    fi
+    if docker exec "$readiness_name" /app/scripts/healthcheck.sh >/dev/null 2>&1; then
+        echo "Container health passed while Rust readiness was withheld" >&2
+        exit 1
+    fi
+    docker exec "$readiness_name" python3 /app/bin/podly_writer assert-web-absent
+    sleep 0.25
+done
+
+docker exec "$readiness_name" touch "$readiness_marker"
+await_ready "$readiness_name"
+assert_retired_python_writer "$readiness_name"
+readiness_processes="$(docker top "$readiness_name" -eo pid,args)"
+if ! grep -Eq '/app/bin/podly_writer([[:space:]]|$)' <<<"$readiness_processes"; then
+    echo "Test-only readiness proxy is absent after writer readiness" >&2
+    exit 1
+fi
+if ! grep -q '/app/bin/podly_writer.real' <<<"$readiness_processes"; then
+    echo "Real Rust writer is absent behind the delayed-readiness proxy" >&2
+    exit 1
+fi
+docker stop --time 45 "$readiness_name" >/dev/null
+docker rm "$readiness_name" >/dev/null
 
 echo "Checking upgrade from an existing database at the prior Alembic revision..."
 docker run --rm --name "${container_name}-prepare-upgrade" \
