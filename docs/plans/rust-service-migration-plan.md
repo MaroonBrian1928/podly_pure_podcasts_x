@@ -1,6 +1,6 @@
 # Rust service migration implementation plan
 
-Status: Writer P0–P3 verified; P4 lifecycle verified; performance acceptance in progress.
+Status: Writer P0–P4 accepted on isolated evidence (2026-09-29); Rust not yet the deployment default; web migration not started.
 
 Prepared: 2026-09-20. Revalidate file locations and inventories against the commit being implemented.
 
@@ -253,9 +253,9 @@ Dependency: P0–P3 complete. This is the first RAM-saving deployment milestone.
 - [x] **P4.3 — Update readiness/health checks.** Health must verify the intended backend and executor readiness, not only that React's `/` page returns 200. Do not expose secret RPC details publicly. Use an available lightweight probe; do not assume `curl` is installed or introduce Python polling loops as the final steady-state solution.
 - [x] **P4.4 — Test fresh start, upgrade, and restart in an isolated container.** Include an existing database, empty deployment, non-default UID/GID, persistent volume, interrupted command, bootstrap failure, and writer death. Confirm no startup race lets web accept work before the writer is ready.
 - [x] **P4.5 — Run rollback rehearsal.** Stop clients/new writer before selecting the Python backend. Use the same unchanged schema only after verifying compatibility; otherwise restore the tested backup with an explicit data-loss assessment. Do not start the old writer beside the new one. Verify pending-job recovery and avoid replaying unknown-outcome commands.
-- [ ] **P4.6 — Benchmark against P0.** Repeat the same idle, concurrent HTTP, RSS, write-burst, and processing scenarios. Confirm the actual Rust writer path and absence of local fallback. Measure total container memory plus per-process RSS, latency, CPU, errors, threads, FDs, and post-burst recovery.
+- [x] **P4.6 — Benchmark against P0.** Repeat the same idle, concurrent HTTP, RSS, write-burst, and processing scenarios. Confirm the actual Rust writer path and absence of local fallback. Measure total container memory plus per-process RSS, latency, CPU, errors, threads, FDs, and post-burst recovery.
 - [x] **P4.7 — Verify process retirement.** After bootstrap exits and with no job running, process inspection shows Rust writer + Python web, and no `python -m app.writer`, bootstrap daemon, or compatibility proxy. Process removal is mandatory, even if request benchmarks are green.
-- [ ] **P4.8 — Complete the writer release gate.** All parity/failure tests pass, rollback is rehearsed, measured memory reduction meets P0 thresholds, and request/job behavior does not regress beyond agreed thresholds. Record evidence before making Rust the deployment default.
+- [x] **P4.8 — Complete the writer release gate.** All parity/failure tests pass, rollback is rehearsed, measured memory reduction meets P0 thresholds, and request/job behavior does not regress beyond agreed thresholds. Record evidence before making Rust the deployment default.
 
 Do not continue to web migration to hide a failed writer acceptance gate. Diagnose the failure first.
 

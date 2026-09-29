@@ -4,6 +4,179 @@ Evidence is recorded against synthetic fixtures and isolated containers unless a
 entry explicitly says it is a read-only observation of the existing local
 container. No entry authorizes a deployment or a write to production data.
 
+## 2026-09-29 Pre-ship writer follow-ups
+
+Task ID: P4 follow-up (release hardening; no checkbox change)
+
+Files changed: `rust/src/writer/executor.rs`.
+
+Behavior intentionally changed: a command whose result cannot be delivered
+(`wait=false`, or a waiting caller that disconnected) now logs one
+`[WRITER_UNOBSERVED_FAILURE]` JSON line on failure with command ID,
+operation, action, error code, and outcome. Error messages and params are not
+logged because messages can echo caller values. Previously these failures
+were silently discarded, contrary to section 4.2. Successful commands and
+delivered results log nothing new.
+
+Tests added and CI log path: `unobserved_failure_log_is_redacted`.
+`/tmp/podly-rust-migration-p4-unobserved-failure-ci-20260929-1.log` exit 0:
+1094 Python passed/2 skipped, 60 writer + 97 existing + 3 transport Rust
+tests, fmt/clippy/ty/Ruff, registry parity. The change touches only the
+undelivered-failure path, which no accepted benchmark command exercised, so the
+recovery-5 acceptance evidence is not re-measured for it.
+
+Recovery headroom characterization (recovery-5 Rust runs): cooldown excess over
+cold idle is ~7.5 MiB from the first HTTP burst and rises to 8.0–9.8 MiB by
+the final phase, then stops; idle does not grow across runs. At final
+cooldown the writer is ~+2.7 MiB over warmed idle, which is about the size of
+SQLite's default 2 MiB page cache (inferred, not measured). The web heap is
+~+3 MiB and the rest is the cold→warmed idle gap. No leak was found. Reducing
+it further would mean shrinking caches, a performance trade-off rather than a
+fix, so the thin margin is recorded as a known fragile gate.
+
+Recovery reference: the comparator measures recovery against cold idle,
+while the P0.7 text says warmed idle. This was an explicit earlier decision,
+enforced by `test_cold_idle_recovery_gate_is_unchanged_when_warmed_idle_is_higher`:
+warming must not raise the allowance. The stricter cold-idle reference is
+retained and governs acceptance; the discrepancy with the P0.7 wording is
+intentional.
+
+## 2026-09-29 P4.6/P4.8 — web burst trim and passing matched pair
+
+Task ID: P4.6, P4.8
+
+Commit/reference: uncommitted worktree on `rust-migrate-v2` (HEAD `469baf5`);
+isolated image `podly-rust-writer-p4:20260928-recovery-5`
+(`sha256:a90093e1bd952bfcdc004989e14520774de0059d0d7ae0bd849d8346cda3e76c`).
+No deployment; the default backend remains Python.
+
+Files changed: `src/app/__init__.py`, `src/app/memory_pressure.py`,
+`src/tests/test_database_pool_bounds.py`, `.env.local.example`, plus the
+Rust post-action purge recorded in the entry below.
+
+Behavior intentionally changed (user-approved web-side fix for the web-owned
+residuals diagnosed below): the web counts in-flight requests with Flask's
+`request_started` signal and a `g`-guarded `teardown_request`, which stays
+balanced when a hook short-circuits or a handler raises. One daemon thread in
+the scheduler-owning web process checks every 0.25 s; after a burst with no
+in-flight request for 1 s it disposes the idle SQLAlchemy pool (closing the
+SQLite descriptors deferred behind WAL read locks) and calls the existing
+`release_memory_to_os`. Disabled by `PODLY_MEMORY_TRIM_ENABLED=false`. Pool
+size/overflow and request concurrency are unchanged.
+
+Tests added and CI log path: real-SQLite regression proving eight pinned db
+descriptors return to zero after the burst trim and that it claims once;
+quiet/idle claim logic; balanced counting under 401 short-circuit and 500.
+`/tmp/podly-rust-migration-p4-web-burst-trim-ci-20260928-2.log` exit 0:
+1094 Python passed/2 skipped, 59 writer + 97 existing + 3 transport Rust
+tests, fmt/clippy/ty/Ruff, registry parity. Attempt `-1` failed on a ty
+diagnostic for a WSGI-attribute wrapper, replaced rather than ignored.
+`/tmp/podly-rust-migration-p4-container-rollback-ci-20260929.log` exit 0:
+ordinary CI plus `Isolated Rust writer container lifecycle checks passed.`
+and `Isolated rollback rehearsal passed: schema, backup, exclusivity,
+pending recovery, and no replay.`
+
+Parity/benchmark evidence: matched five-run pair on recovery-5, runner SHA
+`03258c3df50e521dd97ea27fb53e4d58ec9a5e6bcf379cde2a634119adf2459e`.
+Python baseline `/tmp/podly-writer-python-p0-20260928-recovery-5/report.json`
+(SHA `4cab19ebd5ccdb71b34e43485ee356f4a26b871f554af83afb8b9d1193243d8c`,
+log `/tmp/podly-rust-migration-p0-recovery-ci-20260928-5.log`, fixture source
+recovery-1 report). Rust `/tmp/podly-rust-writer-p4-recovery-20260928-5`
+(log `/tmp/podly-rust-migration-p4-recovery-ci-20260928-5.log`, exit 0,
+`errors: []`); report `024a768231cf87e0b2db6770c2888c0e8e21098ed17d30f056f707ef7fd4399a`,
+comparison `355be3d33b98697e3704c5a213ec078219a9df44af188e02bf1baedba662dc86`,
+protocol `8ce87aafa2b5fa006337780faf4cf9aafd4af4a10b5a6841b46710a822849493`;
+all three and the Python report/protocol made read-only. Thresholds unchanged
+against the original P0 report `2ec8584b…`.
+
+Every comparator gate passed. All five Rust runs recorded
+`arena_purge=all rc=0`; Rust identity, no fallback. Warmed-idle container
+median 101,580,800 B (limit 130,652,570; ~81.5 MiB below the P0 183,081,370 B
+median). Rust writer RSS median 14,061,568 B (limit 49,753,293). Post-burst
+recovery extra bytes by run 10,055,844 / 9,867,100 / 8,399,094 /
+10,265,559 / 10,097,786 (limit 10,485,760). Thread/FD deltas 0/0 in every
+run. Feed-posts p95 43.876 ms, 348.53 req/s; RSS p95 804.892 ms; writer
+small/large/mixed p95 3.551/164.2/39.44 ms; all CPU efficiency ratios ≤ 1.016.
+
+Remaining limitations: recovery headroom is thin (worst run ~215 KB under
+10 MiB); treat a future regression there as a real failure, not noise. The
+comparator still references cold `idle` rather than P0.7's warmed-idle text
+(warmed idle is higher, so the recorded pass is not flattered by it). The
+worktree's earlier changes were found staged in the index by an external
+actor; nothing was lost. Making Rust the deployment default and the section 15
+rollout remain separate, unauthorized steps. Web migration (P5+) not begun.
+
+## 2026-09-28 P4.6 recovery-failure diagnosis and writer purge parity
+
+Task ID: P4.6 (diagnosis/increment; remains unchecked)
+
+Commit/reference: uncommitted worktree on `rust-migrate-v2` (HEAD `469baf5`);
+isolated image `podly-rust-writer-p4:20260928-recovery-4`
+(`sha256:10ece36968507a815c2619b1088e10431621c208803091da336b5f4e6fbca531`).
+
+Files changed: `rust/src/writer/executor.rs`, `rust/src/writer/memory.rs`,
+`.env.local.example`.
+
+Diagnosis of the failed five-run comparison
+(`/tmp/podly-rust-writer-p4-recovery-20260928-3`), from its reports plus
+diagnostic-only isolated containers (pinned recovery-2 image, synthetic
+fixture clone, no live mounts):
+
+- Missing `arena_purge=all rc=0`: the purge never executed; capture and parsing
+  were correct. Rust purged only after `PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC`
+  (900 s in the benchmark and default) of quiescence, while each cooldown is
+  30 s. Not even the first-call `jemalloc_mallctl=available` line appeared.
+  With the interval forced to 5 s, both lines reached `docker logs` and the
+  parser, and writer RSS fell 70 → 13 MiB, so the retained writer memory
+  was reclaimable jemalloc dirty memory.
+- Parity gap: the Python writer purges (gc + all-arena jemalloc purge) after
+  every named action except `dequeue_job`, `touch_feed_access_token`, and
+  `update_user_last_active` (`src/app/writer/service.py`); the idle tick
+  covers only those. The Rust port had implemented only the idle tick.
+- Web FD owners: after the c=8 feed-posts burst the Python web gains +7
+  `sqlite3.db` and +2 `sqlite3.db-wal` descriptors (14 → 23), unchanged after a
+  further request. In WAL mode each open SQLAlchemy connection keeps a SHARED
+  lock on the database file, so SQLite's unix VFS defers closing descriptors
+  of closed overflow connections while any pooled connection remains open.
+  The retained count is bounded by peak concurrency, not a leak. The frozen
+  Python pair shows the identical web 17 → 26 (+9) growth, so the
+  `thread_fd_recovery` failure is web-owned and independent of writer backend;
+  the Rust writer stays at 4 threads/13 FDs.
+- Web memory: the feed-posts API route has no post-request purge (the RSS XML
+  routes do). Web RSS stays ~+23 MiB after cooldown; one existing RSS-route
+  purge reduced it 132 → 114 MiB. Every Rust run's `cooldown_http_feed_posts`
+  is already +17–25 MiB over idle, and every frozen Python run fails the same
+  recovery gate by 25–34 MiB.
+- Comparator note (unchanged): P0.7 text specifies own **warmed-idle** median
+  + 10 MiB; `scripts/bench_service_migration.py` compares against the cold
+  `idle` median. The difference is ~0–4 MiB and cannot flip these results;
+  it was left unchanged pending an explicit decision.
+
+Behavior intentionally changed: the Rust writer now calls the all-arena purge
+on its SQLite owner thread after each named action's payload/result is
+released, except the three deferred actions above, honoring
+`PODLY_MEMORY_TRIM_ENABLED`. Transaction boundaries, single-writer ownership,
+and reply-before-purge ordering are unchanged; no thread is added.
+
+Tests added and CI log path: Rust unit test
+`named_actions_purge_except_deferred_timestamp_touches`.
+`/tmp/podly-rust-migration-p4-post-action-purge-ci-20260928-2.log` exit 0:
+Ruff/ty, 1091 Python passed/2 skipped, Rust fmt/clippy, 59 writer + 97
+existing + 3 transport tests, registry parity. (Attempt `-1` failed only on
+Rust fmt line wrapping of the new test.)
+
+Parity/benchmark evidence: diagnostic probe on recovery-4 with the default
+900 s interval: writer RSS 13 MiB immediately after the 12-command large
+burst (previously 33–47 MiB after cooldown), `arena_purge=all rc=0` recorded.
+Container remained +27 MiB over idle solely from the Python web residual
+(web 107 → 132 MiB, 14 → 23 FDs). This is a diagnostic, not a benchmark.
+
+Remaining limitations: no matched five-run pair has been captured on
+recovery-4. Based on the web-owned residuals present in both arms, the
+unchanged recovery memory and FD gates are expected to keep failing until
+the Python web behavior is addressed or the gate decision is revisited by
+the user. P4.6/P4.8 remain unchecked; no web migration or live change.
+
 ## 2026-09-28 recovery baseline — live verification follow-up
 
 Session 50642 remains live (polled via its original exec handle); log:
@@ -538,6 +711,24 @@ separate web FD ownership/lifecycle audit. No benchmark remains active, so
 implement verified causes with regression tests and required CI, then rebuild
 and measure an appropriately matched pair without changing thresholds.
 P4.6/P4.8 remain unchecked; P4.4 dynamic readiness verification stands.
+
+Recovery diagnosis follow-up: CodeGraph's targeted `_docker_env` source and
+the current file confirm benchmark `PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC=900`,
+not two seconds. The 30-second cooldown cannot establish idle all-arena purge
+under that interval. This corrects any earlier assumption of a short benchmark
+override; no source/threshold change has been made to manufacture a purge.
+Luna confirms Docker stdout/stderr is captured before container removal, so
+Python volume `app.log` alone is not the trim parser's input. Investigate the
+actual Python/Rust release/allocator scheduling contract and retain the original
+profile/config until a justified implementation decision is documented.
+
+FD audit confirms artifact counts cannot identify descriptor targets. The
+existing read pool already retains three connections and allows seven overflow
+(total ceiling ten); another reduction is not justified by counts alone.
+Luna is implementing synthetic-only FD classification and an explicit one-run
+CI recovery diagnostic that cannot masquerade as a valid paired reference.
+This changes measurement instrumentation, not runtime pool behavior or gates.
+Root must review and run CI; no builds/tests/containers are currently active.
 
 ## 2026-09-23 P3/P4 isolated integration increment
 

@@ -2,11 +2,13 @@ import logging
 import os
 import secrets
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, current_app, g, has_app_context, request
+from flask import Flask, current_app, g, has_app_context, request, request_started
 
 
 def _load_dotenv_files() -> None:
@@ -554,9 +556,26 @@ def _register_api_logging(app: Flask) -> None:
 
 def _register_memory_cleanup(app: Flask) -> None:
     from app.memory_pressure import (
+        RequestBurstTrim,
         consume_memory_trim_contexts,
         release_memory_to_os,
     )
+
+    burst_trim = RequestBurstTrim()
+    app.extensions["podly_request_burst_trim"] = burst_trim
+
+    # request_started fires before any before_request hook can short-circuit;
+    # the g marker keeps the count balanced if context setup fails earlier.
+    def _note_request_started(_sender: Flask, **_extra: Any) -> None:
+        g.podly_burst_tracked = True
+        burst_trim.started()
+
+    request_started.connect(_note_request_started, app, weak=False)
+
+    @app.teardown_request
+    def _note_request_finished(_exc: BaseException | None) -> None:
+        if g.pop("podly_burst_tracked", False):
+            burst_trim.finished()
 
     @app.teardown_appcontext
     def _release_memory_after_app_context(exc: BaseException | None) -> None:
@@ -575,6 +594,34 @@ def _register_memory_cleanup(app: Flask) -> None:
 
         context = ", ".join(trim_contexts[-3:])
         release_memory_to_os(f"app context teardown after {context}", app_logger)
+
+
+def _trim_after_request_burst(app: Flask) -> None:
+    from app.memory_pressure import release_memory_to_os
+
+    burst_trim = app.extensions["podly_request_burst_trim"]
+    if not burst_trim.claim():
+        return
+    with app.app_context():
+        # Closing every idle pooled connection lets SQLite close the database
+        # descriptors it defers while any connection holds the WAL read lock.
+        db.engine.dispose()
+    release_memory_to_os("web request burst", app_logger)
+
+
+def _start_request_burst_trim(app: Flask) -> None:
+    if not _env_bool("PODLY_MEMORY_TRIM_ENABLED", default=True):
+        return
+
+    def _loop() -> None:
+        while True:
+            time.sleep(0.25)
+            try:
+                _trim_after_request_burst(app)
+            except Exception:
+                app_logger.debug("request burst trim failed", exc_info=True)
+
+    threading.Thread(target=_loop, name="web-burst-trim", daemon=True).start()
 
 
 def _run_app_startup(
@@ -635,3 +682,4 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
     )
     schedule_cleanup_job(getattr(config, "post_cleanup_retention_days", None))
     schedule_memory_trim_job()
+    _start_request_burst_trim(app)
