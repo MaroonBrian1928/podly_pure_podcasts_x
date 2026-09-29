@@ -23,6 +23,11 @@ independent `--no-cache` builds, which rules out a baked bit flip on this RAM-fa
   through the real client committed. HTTP 200 on `/` and `/api/auth/status`.
   Container 111.8 MiB about one minute after start. No fallback,
   unobserved-failure, or traceback lines.
+- Follow-up: the job loop logged `Error dequeuing job: 'job_id'` every poll
+  (670 times) because the Rust client adapter wrapped an idle `None` as
+  `{"result": None}`. Fixed in `5dff618`, redeployed from `1b86548` at
+  15:49 UTC with the same verified writer binary. Startup logged `Cleared 0
+  active jobs` and there were no dequeue errors afterwards.
 - Rollback: set `PODLY_WRITER_BACKEND=python` and `docker compose up -d`
   (same schema); the backup and the pre-rust image are retained.
 
