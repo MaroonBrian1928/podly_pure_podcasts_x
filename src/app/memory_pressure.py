@@ -5,6 +5,8 @@ import gc
 import logging
 import os
 import sys
+import threading
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -178,3 +180,41 @@ def collect_incremental(
         context,
         collected,
     )
+
+
+class RequestBurstTrim:
+    """Track in-flight web requests; claim one trim after each quiet burst.
+
+    Bursts leave freed allocator pages and extra pooled SQLite connections
+    (whose descriptors SQLite keeps open while any connection holds the WAL
+    read lock) until the next scheduled trim, which can be many minutes away.
+    """
+
+    def __init__(self, quiet_seconds: float = 1.0) -> None:
+        self.quiet_seconds = quiet_seconds
+        self._lock = threading.Lock()
+        self._active = 0
+        self._pending = False
+        self._last_finished = time.monotonic()
+
+    def started(self) -> None:
+        with self._lock:
+            self._active += 1
+            self._pending = True
+
+    def finished(self) -> None:
+        with self._lock:
+            self._active -= 1
+            self._last_finished = time.monotonic()
+
+    def claim(self, now: float | None = None) -> bool:
+        with self._lock:
+            now = time.monotonic() if now is None else now
+            if (
+                self._active
+                or not self._pending
+                or now - self._last_finished < self.quiet_seconds
+            ):
+                return False
+            self._pending = False
+            return True
