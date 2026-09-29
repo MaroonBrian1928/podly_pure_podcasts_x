@@ -1,4 +1,5 @@
 import datetime
+import io
 import json
 import logging
 import uuid
@@ -6,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest import mock
+from xml.sax.saxutils import XMLGenerator
 
 import feedparser
 import PyRSS2Gen
@@ -13,6 +15,7 @@ import pytest
 from sqlalchemy import event, inspect
 
 from app.feeds import (
+    ItunesRSSItem,
     _build_refresh_feed_payload,
     _feed_item_duration_seconds,
     _get_base_url,
@@ -758,6 +761,8 @@ def test_feed_item(mock_post, app):
     assert enclosure.url == "http://podly.com:5001/post/test-guid.mp3"
     assert enclosure.type == "audio/mpeg"
     assert enclosure.length == mock_post._audio_len_bytes
+    assert isinstance(result, ItunesRSSItem)
+    assert result.chapters_url is None
 
 
 def test_feed_item_appends_podly_chapters(mock_post, app):
@@ -790,6 +795,15 @@ def test_feed_item_appends_podly_chapters(mock_post, app):
     assert "<li>00:00 Episode intro</li>" in description
     assert "<li>08:05 Gold mission</li>" in description
     assert "Podly Post JSON" not in description
+    assert isinstance(result, ItunesRSSItem)
+    assert result.chapters_url == "http://podly.com:5001/post/test-guid/chapters.json"
+
+    out = io.StringIO()
+    result.publish(XMLGenerator(out, "utf-8"))
+    assert (
+        '<podcast:chapters url="http://podly.com:5001/post/test-guid/chapters.json"'
+        ' type="application/json+chapters"></podcast:chapters><guid>'
+    ) in out.getvalue()
 
 
 def test_feed_item_with_reverse_proxy(mock_post, app):
