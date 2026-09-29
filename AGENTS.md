@@ -1,5 +1,6 @@
 Project-specific rules:
 - Do not create Alembic migrations yourself; request the user to generate migrations after model changes using `./scripts/create_migration.sh "<message>"`.
+- The Rust writer (`rust/src/writer/`) uses hand-written SQL pinned to one Alembic revision. Any model or migration change must, in the same change, update the Rust writer's SQL (Python-side defaults, update allowlists), bump `EXPECTED_SCHEMA_REVISION`, and refresh the reviewed snapshot with `uv run python scripts/check_writer_schema.py --update`; CI's writer schema gate fails otherwise.
 - Only use ./scripts/ci.sh to run tests & lints - do not attempt to run directly
 - Expect ./scripts/ci.sh to modify files because it runs formatting and auto-fixes; review the working tree after running it.
 - use uv (not pipenv)
