@@ -119,7 +119,7 @@ def _format_chapter_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _chapters_for_description(post: Post) -> list[tuple[float, str]]:
+def feed_chapters(post: Post) -> list[tuple[float, str]]:
     raw_chapter_data = getattr(post, "chapter_data", None)
     if not raw_chapter_data:
         return []
@@ -160,7 +160,7 @@ def _chapters_for_description(post: Post) -> list[tuple[float, str]]:
 
 
 def _render_podly_chapters_html(post: Post) -> str:
-    chapters = _chapters_for_description(post)
+    chapters = feed_chapters(post)
     if not chapters:
         return ""
 
@@ -725,10 +725,12 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
         pubDate: str | None,
         image_url: str | None = None,
         duration_seconds: int | None = None,
+        chapters_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         self.image_url = image_url
         self.duration_seconds = duration_seconds
+        self.chapters_url = chapters_url
         super().__init__(
             title=title,
             enclosure=enclosure,
@@ -770,6 +772,14 @@ class ItunesRSSItem(PyRSS2Gen.RSSItem):
         PyRSS2Gen._opt_element(handler, "comments", self.comments)
         if self.enclosure is not None:
             self.enclosure.publish(handler)
+        if self.chapters_url:
+            # Podcasting 2.0 chapters let clients that stream before parsing the
+            # MP3's embedded ID3 chapters still show them.
+            handler.startElement(
+                "podcast:chapters",
+                {"url": self.chapters_url, "type": "application/json+chapters"},
+            )
+            handler.endElement("podcast:chapters")
         PyRSS2Gen._opt_element(handler, "guid", self.guid)
 
         pub_date = self.pubDate
@@ -826,6 +836,13 @@ def feed_item(post: Post, prepend_feed_title: bool = False) -> PyRSS2Gen.RSSItem
         pubDate=_format_pub_date(post.release_date),
         image_url=post.image_url,
         duration_seconds=duration_seconds,
+        chapters_url=(
+            _append_feed_token_params(
+                f"{base_url}/post/{quote(post.guid, safe='')}/chapters.json"
+            )
+            if feed_chapters(post)
+            else None
+        ),
     )
 
     return item
@@ -939,6 +956,7 @@ def generate_feed_xml(feed: Feed) -> Any:
 
     rss_feed.rss_attrs["xmlns:itunes"] = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     rss_feed.rss_attrs["xmlns:content"] = "http://purl.org/rss/1.0/modules/content/"
+    rss_feed.rss_attrs["xmlns:podcast"] = "https://podcastindex.org/namespace/1.0"
 
     xml_content = rss_feed.to_xml("utf-8")
     del rss_feed, items, posts
@@ -990,6 +1008,7 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
 
     rss_feed.rss_attrs["xmlns:itunes"] = "http://www.itunes.com/dtds/podcast-1.0.dtd"
     rss_feed.rss_attrs["xmlns:content"] = "http://purl.org/rss/1.0/modules/content/"
+    rss_feed.rss_attrs["xmlns:podcast"] = "https://podcastindex.org/namespace/1.0"
 
     xml_content = rss_feed.to_xml("utf-8")
     del rss_feed, items, posts

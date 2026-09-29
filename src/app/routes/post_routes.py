@@ -23,7 +23,11 @@ from app.failure_explainer import (
     select_troubleshoot_entries,
     tail_log_lines,
 )
-from app.feeds import build_post_feed_description_html, post_feed_render_defers
+from app.feeds import (
+    build_post_feed_description_html,
+    feed_chapters,
+    post_feed_render_defers,
+)
 from app.jobs_manager import get_jobs_manager
 from app.model_call_utils import whisper_model_call_filter
 from app.models import (
@@ -1810,6 +1814,30 @@ def api_download_original_post(p_guid: str) -> flask.Response:
     if should_increment_download_count_for_request():
         increment_download_count(post)
     return response
+
+
+@post_bp.route("/post/<path:p_guid>/chapters.json", methods=["GET"])
+def podcast_chapters_json(p_guid: str) -> flask.Response:
+    """Podcasting 2.0 JSON chapters for the feed's `<podcast:chapters>` tag."""
+    post = Post.query.filter_by(guid=p_guid).first()
+    if post is None:
+        return flask.make_response(
+            jsonify({"error": "Post not found", "error_code": "NOT_FOUND"}), 404
+        )
+
+    whitelist_response = ensure_whitelisted_for_download(post, p_guid)
+    if whitelist_response:
+        return whitelist_response
+
+    return jsonify(
+        {
+            "version": "1.2.0",
+            "chapters": [
+                {"startTime": start_time, "title": title}
+                for start_time, title in feed_chapters(post)
+            ],
+        }
+    )
 
 
 # Legacy endpoints for backward compatibility

@@ -7078,7 +7078,7 @@ fn post_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PostRow> {
 
 fn build_rss_xml(args: RssBuildArgs<'_>) -> String {
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
-    xml.push_str("<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\">\n<channel>\n");
+    xml.push_str("<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\" xmlns:podcast=\"https://podcastindex.org/namespace/1.0\">\n<channel>\n");
     push_text_element(&mut xml, "title", args.title);
     push_text_element(&mut xml, "link", args.link);
     push_text_element(
@@ -7143,6 +7143,21 @@ fn push_item(
         xml_escape(&audio_url),
         enclosure_len(post)
     ));
+    if !render_chapters(post.chapter_data.as_deref()).is_empty() {
+        let chapters_url = append_feed_token(
+            &format!(
+                "{}/post/{}/chapters.json",
+                base_url.trim_end_matches('/'),
+                urlencoding_simple(&post.guid)
+            ),
+            feed_token,
+            feed_secret,
+        );
+        xml.push_str(&format!(
+            "<podcast:chapters url=\"{}\" type=\"application/json+chapters\"></podcast:chapters>",
+            xml_escape(&chapters_url)
+        ));
+    }
     push_text_element(xml, "guid", &post.guid);
     if let Some(release_date) = post.release_date.as_deref() {
         push_text_element(xml, "pubDate", &format_rfc2822(Some(release_date)));
@@ -7619,6 +7634,10 @@ mod tests {
         );
         assert!(xml.contains("<itunes:duration>01:05</itunes:duration>"));
         assert!(xml.contains("<p><strong>Podly Chapters</strong></p><ul><li>00:00 Intro</li></ul>"));
+        assert!(xml.contains("xmlns:podcast=\"https://podcastindex.org/namespace/1.0\""));
+        assert!(xml.contains(
+            "<podcast:chapters url=\"https://podly.test/post/guid-1/chapters.json?feed_token=tok&amp;feed_secret=sec\" type=\"application/json+chapters\"></podcast:chapters>"
+        ));
         assert!(xml.contains("length=\"11\""));
     }
 
