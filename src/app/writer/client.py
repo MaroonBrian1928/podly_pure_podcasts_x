@@ -202,11 +202,7 @@ class WriterClient:
 
         func = cast(Callable[[dict[str, Any]], Any], func_obj)
         result = func(cmd.data.get("params", {}))
-        return WriteResult(
-            cmd.id,
-            True,
-            data=result if isinstance(result, dict) else {"result": result},
-        )
+        return WriteResult(cmd.id, True, data=result)
 
     def _local_execute_model(
         self, cmd: WriteCommand, model_map: dict[str, Any]
@@ -619,16 +615,15 @@ class WriterClient:
         return None
 
     @staticmethod
-    def _legacy_result_data(
-        value: Any, command_type: WriteCommandType | None
-    ) -> dict[str, Any] | None:
-        if command_type is WriteCommandType.ACTION:
-            return value if isinstance(value, dict) else {"result": value}
+    def _legacy_result_data(value: Any, command_type: WriteCommandType | None) -> Any:
+        # The Python writer service returns action values unwrapped: callers
+        # test `result.data` for truthiness (idle dequeue is None) and read
+        # scalar counts directly.
         if command_type is WriteCommandType.CREATE:
             return value if isinstance(value, dict) else None
         if command_type in (WriteCommandType.UPDATE, WriteCommandType.DELETE):
             return None
-        return value if isinstance(value, dict) else {"result": value}
+        return value
 
     @staticmethod
     def _await_reply(

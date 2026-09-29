@@ -231,7 +231,7 @@ def test_rust_writer_maps_scalar_action_result_and_domain_error(
         client = WriterClient()
         scalar = client.action("clear_all_jobs", {}, wait=True)
         failed = client.action("create_job", {}, wait=True)
-        assert scalar is not None and scalar.data == {"result": 7}
+        assert scalar is not None and scalar.data == 7
         assert failed is not None and not failed.success
         assert failed.error == "invalid_params: invalid parameters"
     finally:
@@ -439,6 +439,18 @@ def test_pre_admission_rejection_then_success_uses_new_correlated_command(
         server.close()
 
 
+def test_idle_dequeue_is_falsy_so_job_loop_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _RunningServer(monkeypatch, lambda request: _reply(request, result=None))
+    try:
+        result = WriterClient().action("dequeue_job", {"run_id": "run"}, wait=True)
+        assert result is not None and result.success
+        assert result.data is None
+    finally:
+        server.close()
+
+
 def test_concurrent_requests_keep_reply_correlation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,7 +462,7 @@ def test_concurrent_requests_keep_reply_correlation(
         def send(index: int) -> str:
             result = WriterClient().action("increment_download_count", {"index": index})
             assert result is not None and result.success
-            assert result.data == {"result": result.command_id}
+            assert result.data == result.command_id
             return result.command_id
 
         with ThreadPoolExecutor(max_workers=12) as pool:
@@ -531,7 +543,7 @@ def test_rust_transaction_serialization_and_response_adaptation() -> None:
             {
                 "command_id": "action-1",
                 "success": True,
-                "data": {"result": 3},
+                "data": 3,
                 "error": None,
             },
             {"command_id": "update-1", "success": True, "data": None, "error": None},
