@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from queue import Empty, Queue
 from typing import Any, cast
 
@@ -65,6 +66,24 @@ def _default_submit_timeout() -> int:
         )
         return DEFAULT_SUBMIT_TIMEOUT_SECONDS
     return value
+
+
+def _model_column_values(data: dict[str, Any]) -> dict[str, Any]:
+    """Encode datetimes the way SQLAlchemy stores them in SQLite.
+
+    The Rust writer stores DateTime columns as the text it receives, and
+    SQLAlchemy only parses back "YYYY-MM-DD HH:MM:SS.ffffff".
+    """
+    return {
+        key: (
+            (
+                value.astimezone(UTC).replace(tzinfo=None) if value.tzinfo else value
+            ).strftime("%Y-%m-%d %H:%M:%S.%f")
+            if isinstance(value, datetime)
+            else value
+        )
+        for key, value in data.items()
+    }
 
 
 class WriterClient:
@@ -414,10 +433,10 @@ class WriterClient:
                 **common,
                 "operation": "create",
                 "model": cmd.model,
-                "data": cmd.data,
+                "data": _model_column_values(cmd.data),
             }
         if cmd.type is WriteCommandType.UPDATE:
-            values = dict(cmd.data)
+            values = _model_column_values(cmd.data)
             record_id = values.pop("id", None)
             return {
                 **common,
