@@ -549,3 +549,48 @@ def test_rust_transaction_serialization_and_response_adaptation() -> None:
             {"command_id": "update-1", "success": True, "data": None, "error": None},
         ]
     }
+
+
+def test_model_datetimes_use_sqlalchemy_sqlite_storage_format() -> None:
+    from datetime import UTC, datetime, timedelta, timezone
+
+    from app.writer.protocol import WriteCommand, WriteCommandType
+
+    update = WriteCommand(
+        id="update-1",
+        type=WriteCommandType.UPDATE,
+        model="Post",
+        data={
+            "id": 7,
+            "refined_ad_boundaries": [{"refined_start": 1.5}],
+            "refined_ad_boundaries_updated_at": datetime(2026, 9, 30, 7, 44, 58),
+            "other_at": datetime(
+                2026, 9, 30, 2, 0, 0, 5, tzinfo=timezone(timedelta(hours=-5))
+            ),
+        },
+    )
+    payload = WriterClient._rust_command_payload(update, wait=True)
+    assert payload["id"] == 7
+    assert payload["data"] == {
+        "refined_ad_boundaries": [{"refined_start": 1.5}],
+        "refined_ad_boundaries_updated_at": "2026-09-30 07:44:58.000000",
+        "other_at": "2026-09-30 07:00:00.000005",
+    }
+    WriterClient._encode_rust_command(update, wait=True)
+
+    transaction = WriteCommand(
+        id="tx-1",
+        type=WriteCommandType.TRANSACTION,
+        model=None,
+        data={
+            "commands": [
+                {
+                    "type": "update",
+                    "model": "Post",
+                    "data": {"id": 7, "updated_at": datetime(2026, 1, 2, tzinfo=UTC)},
+                }
+            ]
+        },
+    )
+    nested = WriterClient._rust_command_payload(transaction, wait=True)
+    assert nested["commands"][0]["data"] == {"updated_at": "2026-01-02 00:00:00.000000"}

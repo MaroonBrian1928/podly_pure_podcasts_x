@@ -321,3 +321,56 @@ def test_committed_rust_write_response_loss_is_unknown_and_never_replayed(
         proxy.server_close()
         proxy_thread.join(timeout=2)
         server.close()
+
+
+def test_post_datetime_update_round_trips_through_real_rust_writer(
+    writer_parity_pair: WriterParityPair,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ad classifier's refined-boundary update, sent to the real Rust writer."""
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+
+    monkeypatch.setenv("PODLY_WRITER_BACKEND", "rust")
+    monkeypatch.setenv("PODLY_IPC_AUTHKEY", "synthetic-writer-parity-auth-key")
+    server = RustWriterParityServer(writer_parity_pair.rust.db_path, tmp_path)
+    monkeypatch.setattr(writer_client_module, "RUST_WRITER_HOST", "127.0.0.1")
+    monkeypatch.setattr(writer_client_module, "RUST_WRITER_PORT", server.port)
+    monkeypatch.setattr(
+        writer_client,
+        "_local_execute",
+        lambda _command: pytest.fail("Python local writer fallback was invoked"),
+    )
+
+    post_id = _read_sqlite(
+        writer_parity_pair.rust.db_path,
+        "SELECT id FROM post WHERE guid = ?",
+        (writer_parity_pair.manifest.post_guids[0],),
+    )[0]
+    updated_at = datetime(2026, 9, 30, 7, 44, 58, 991234)
+    boundaries = [{"orig_start": 10.0, "refined_start": 10.25, "confidence": 0.9}]
+
+    try:
+        result = writer_client.update(
+            "Post",
+            post_id,
+            {
+                "refined_ad_boundaries": boundaries,
+                "refined_ad_boundaries_updated_at": updated_at,
+            },
+            wait=True,
+        )
+        assert result is not None and result.success, result
+    finally:
+        server.close()
+
+    raw_boundaries, raw_updated_at = _read_sqlite(
+        writer_parity_pair.rust.db_path,
+        "SELECT refined_ad_boundaries, refined_ad_boundaries_updated_at "
+        "FROM post WHERE id = ?",
+        (post_id,),
+    )
+    assert json.loads(raw_boundaries) == boundaries
+    assert raw_updated_at == "2026-09-30 07:44:58.991234"
+    parse = sqlite_dialect.DATETIME().result_processor(sqlite_dialect.dialect(), None)
+    assert parse is not None and parse(raw_updated_at) == updated_at
