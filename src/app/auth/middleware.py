@@ -86,19 +86,20 @@ def init_auth_middleware(app: Any) -> None:
             return None
 
         if _is_token_protected_endpoint(request.path):
-            retry_after = failure_rate_limiter.retry_after(client_identifier)
+            limiter_key = _feed_token_limiter_key(client_identifier)
+            retry_after = failure_rate_limiter.retry_after(limiter_key)
             if retry_after:
                 return _too_many_requests(retry_after)
 
             token_result = _authenticate_feed_token_from_query()
             if token_result is None:
-                backoff = failure_rate_limiter.register_failure(client_identifier)
+                backoff = failure_rate_limiter.register_failure(limiter_key)
                 response = _token_unauthorized()
                 if backoff:
                     response.headers["Retry-After"] = str(backoff)
                 return response
 
-            failure_rate_limiter.register_success(client_identifier)
+            failure_rate_limiter.register_success(limiter_key)
             g.current_user = token_result.user
             g.feed_token = token_result
             return None
@@ -121,6 +122,20 @@ def _load_session_user() -> AuthenticatedUser | None:
         return None
 
     return AuthenticatedUser(id=user.id, username=user.username, role=user.role)
+
+
+def _feed_token_limiter_key(client_identifier: str) -> str:
+    """Throttle failures per presented token rather than per client address.
+
+    Behind a reverse proxy or Docker's port proxy every client shares one
+    address, so an address key lets a podcast app retrying stale URLs lock
+    out every valid feed token (and admin login). Guessing secrets for one
+    token id is still throttled; requests without a token keep the address key.
+    """
+    token_id = request.args.get("feed_token")
+    if token_id:
+        return f"feed_token:{token_id[:64]}"
+    return client_identifier
 
 
 def _is_token_protected_endpoint(path: str) -> bool:
