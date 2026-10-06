@@ -377,7 +377,7 @@ def _docker_env(writer_backend: str) -> list[str]:
         "PODLY_WRITER_IDLE_TRIM_INTERVAL_SEC": "900",
         "PODLY_MEMORY_TRIM_INTERVAL_MIN": "15",
         "PODLY_RUST_TOOLS_BIN": "/app/bin/podly_tools",
-        "SERVER_THREADS": "32",
+        "SERVER_THREADS": "8",
     }
     values.update({name: "true" for name in RUST_FLAGS})
     flattened: list[str] = []
