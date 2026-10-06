@@ -45,3 +45,9 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest --disable-warnings
+
+      - name: Check writer registry parity
+        run: uv run python scripts/check_writer_registry.py
+
+      - name: Check writer schema snapshot
+        run: uv run python scripts/check_writer_schema.py
