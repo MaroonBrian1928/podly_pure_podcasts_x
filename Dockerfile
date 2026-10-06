@@ -58,6 +58,11 @@ RUN JEMALLOC_PATH="$(dpkg -L libjemalloc2 | grep -E 'libjemalloc\.so\.2$' | head
     printf '%s\n' "$JEMALLOC_PATH" > /etc/podly-jemalloc-path && \
     printf '%s\n' "$JEMALLOC_PATH" > /etc/ld.so.preload
 ENV PODLY_JEMALLOC_PRELOAD=1
+# A background thread returns freed pages to the OS after the decay delay even
+# when a process is idle, instead of waiting for that arena's next allocation.
+# The GIL serializes Python allocation, so two arenas cost no parallelism and
+# fragment far less than the per-CPU default.
+ENV MALLOC_CONF=background_thread:true,narenas:2
 
 COPY pyproject.toml uv.lock ./
 
