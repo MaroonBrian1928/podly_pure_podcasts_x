@@ -280,7 +280,10 @@ fn update_job_attribution(
             changed = true;
         }
     }
-    if let Some(value) = params.get("billing_user_id") {
+    if let Some(value) = params
+        .get("billing_user_id")
+        .filter(|value| !value.is_null())
+    {
         let next = sql_scalar(value)?;
         if !sql_value_matches_optional_i64(&next, current.billing_user_id) {
             update_job_column(transaction, &job_id, "billing_user_id", next)?;
@@ -465,7 +468,7 @@ fn insert_job(
         .filter(|value| !value.is_null())
         .map(py_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let created_at = match data.get("created_at") {
+    let created_at = match data.get("created_at").filter(|value| !value.is_null()) {
         Some(value) => datetime_scalar(value)?,
         None => SqlValue::Text(format_database_time(now)),
     };
@@ -475,6 +478,7 @@ fn insert_job(
     };
     let current_step = data
         .get("current_step")
+        .filter(|value| !value.is_null())
         .cloned()
         .unwrap_or_else(|| json!(0));
     let step_name = data.get("step_name").cloned().unwrap_or(Value::Null);
@@ -530,6 +534,10 @@ fn insert_job(
             return Err(error("invalid_params", "invalid job field"));
         }
         if matches!(field.as_str(), "id" | "created_at" | "stage_history") {
+            continue;
+        }
+        // SQLAlchemy applies a column default for an explicit None, like an omitted key.
+        if value.is_null() && fields.iter().any(|(existing, _)| *existing == field) {
             continue;
         }
         fields.retain(|(existing, _)| *existing != field);
@@ -1121,5 +1129,60 @@ mod tests {
             "completed"
         );
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn explicit_nulls_keep_defaults_and_attribution() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        schema(&connection);
+        let transaction = connection.transaction().unwrap();
+        create_job(
+            &transaction,
+            &Map::from_iter([(
+                "job_data".to_owned(),
+                json!({
+                    "id":"job","post_guid":"guid","status":"pending",
+                    "current_step":null,"total_steps":null,"progress_percentage":null,
+                    "created_at":null,"had_classification_parse_error":null,
+                    "auto_retry_attempted":null,"billing_user_id":101
+                }),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            update_job_attribution(
+                &transaction,
+                &Map::from_iter([
+                    ("job_id".to_owned(), json!("job")),
+                    ("billing_user_id".to_owned(), Value::Null),
+                ]),
+            )
+            .unwrap()["changed"],
+            false
+        );
+        let row: (i64, i64, f64, Option<String>, i64, i64, i64) = transaction
+            .query_row(
+                "SELECT current_step,total_steps,progress_percentage,created_at,
+                        had_classification_parse_error,auto_retry_attempted,billing_user_id
+                 FROM processing_job WHERE id='job'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (row.0, row.1, row.2, row.4, row.5, row.6),
+            (0, 4, 0.0, 0, 0, 101)
+        );
+        assert!(row.3.is_some());
     }
 }
