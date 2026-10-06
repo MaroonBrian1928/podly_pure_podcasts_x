@@ -11,6 +11,7 @@ from flask.typing import ResponseReturnValue
 
 from app.auth import AuthSettings
 from app.auth.middleware import init_auth_middleware
+from app.auth.rate_limiter import FailureRateLimiter, FailureState
 from app.auth.state import failure_rate_limiter
 from app.extensions import db
 from app.models import Feed, Post, User
@@ -382,3 +383,33 @@ def test_repeated_wrong_secret_for_one_token_is_still_throttled(
     ]
     assert statuses[:3] == [401, 401, 401]
     assert 429 in statuses
+
+
+def test_blocked_token_id_still_admits_its_owner(auth_app: Flask) -> None:
+    feed_id, token_id, secret = _share_token(auth_app)
+    attacker = auth_app.test_client()
+    for _ in range(6):
+        attacker.get(f"/feed/{feed_id}", query_string={"feed_token": token_id})
+    assert (
+        attacker.get(
+            f"/feed/{feed_id}", query_string={"feed_token": token_id}
+        ).status_code
+        == 429
+    )
+
+    owner = auth_app.test_client()
+    response = owner.get(
+        f"/feed/{feed_id}",
+        query_string={"feed_token": token_id, "feed_secret": secret},
+    )
+    assert response.status_code == 200
+
+
+def test_failure_limiter_storage_is_bounded() -> None:
+    storage: dict[str, FailureState] = {}
+    limiter = FailureRateLimiter(storage=storage, max_entries=50)
+    for attempt in range(500):
+        limiter.register_failure(f"feed_token:fresh-{attempt}")
+    assert len(storage) == 50
+    assert "feed_token:fresh-499" in storage
+    assert "feed_token:fresh-0" not in storage
