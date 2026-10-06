@@ -73,8 +73,7 @@ fn create_user(transaction: &Transaction<'_>, params: &Map<String, Value>) -> Rp
             "A user with that username already exists",
         ));
     }
-    let password_hash = hash(password, DEFAULT_COST)
-        .map_err(|_| error("internal_error", "password hashing failed"))?;
+    let password_hash = hash_password(password)?;
     let now = database_now();
     transaction
         .execute(
@@ -89,6 +88,17 @@ fn create_user(transaction: &Transaction<'_>, params: &Map<String, Value>) -> Rp
     Ok(json!({"user_id": transaction.last_insert_rowid()}))
 }
 
+// Python's bcrypt rejects passwords over 72 bytes at login, so a truncated hash would lock the user out.
+fn hash_password(password: &str) -> Result<String, RpcError> {
+    if password.len() > 72 {
+        return Err(error(
+            "invalid_params",
+            "password cannot be longer than 72 bytes",
+        ));
+    }
+    hash(password, DEFAULT_COST).map_err(|_| error("internal_error", "password hashing failed"))
+}
+
 fn update_user_password(
     transaction: &Transaction<'_>,
     params: &Map<String, Value>,
@@ -100,8 +110,7 @@ fn update_user_password(
         .filter(|password| !password.is_empty())
         .ok_or_else(|| error("invalid_params", "new_password is required"))?;
     require_user(transaction, user_id, &original)?;
-    let password_hash = hash(password, DEFAULT_COST)
-        .map_err(|_| error("internal_error", "password hashing failed"))?;
+    let password_hash = hash_password(password)?;
     update_user_column(
         transaction,
         user_id,
@@ -593,6 +602,55 @@ mod tests {
         assert!(row.1.starts_with("$2"));
         assert_eq!(row.1.split('$').nth(2), Some("12"));
         assert!(verify("secret", &row.1).unwrap());
+    }
+
+    #[test]
+    fn passwords_over_72_bytes_are_rejected_without_changing_the_hash() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        schema(&connection);
+        let user_id = seed_user(&connection, "alice");
+        let before: String = connection
+            .query_row(
+                "SELECT password_hash FROM users WHERE id=?1",
+                [user_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        for password in ["a".repeat(73), "é".repeat(37)] {
+            let err = update_user_password(
+                &transaction,
+                &Map::from_iter([
+                    ("user_id".to_owned(), json!(user_id)),
+                    ("new_password".to_owned(), json!(password)),
+                ]),
+            )
+            .unwrap_err();
+            assert_eq!(err.code, "invalid_params");
+        }
+        update_user_password(
+            &transaction,
+            &Map::from_iter([
+                ("user_id".to_owned(), json!(user_id)),
+                ("new_password".to_owned(), json!("a".repeat(72))),
+            ]),
+        )
+        .unwrap();
+        transaction.rollback().unwrap();
+        // Hash of "a" * 72 from Python's bcrypt: both sides agree at the limit.
+        assert!(verify(
+            "a".repeat(72),
+            "$2b$04$xrhEYmKyZiOU0kdJeFKSlutWNvBKt7jHpMyPOEXvgE..wnVLzBefq"
+        )
+        .unwrap());
+        let after: String = connection
+            .query_row(
+                "SELECT password_hash FROM users WHERE id=?1",
+                [user_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]
