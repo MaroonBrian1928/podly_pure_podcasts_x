@@ -87,22 +87,25 @@ def init_auth_middleware(app: Any) -> None:
 
         if _is_token_protected_endpoint(request.path):
             limiter_key = _feed_token_limiter_key(client_identifier)
+            # Valid credentials bypass the limiter: anyone who knows a token id can
+            # put it into backoff, and that must not lock out its owner. Secrets are
+            # random, so the limiter only damps guessing.
+            token_result = _authenticate_feed_token_from_query()
+            if token_result is not None:
+                failure_rate_limiter.register_success(limiter_key)
+                g.current_user = token_result.user
+                g.feed_token = token_result
+                return None
+
             retry_after = failure_rate_limiter.retry_after(limiter_key)
             if retry_after:
                 return _too_many_requests(retry_after)
 
-            token_result = _authenticate_feed_token_from_query()
-            if token_result is None:
-                backoff = failure_rate_limiter.register_failure(limiter_key)
-                response = _token_unauthorized()
-                if backoff:
-                    response.headers["Retry-After"] = str(backoff)
-                return response
-
-            failure_rate_limiter.register_success(limiter_key)
-            g.current_user = token_result.user
-            g.feed_token = token_result
-            return None
+            backoff = failure_rate_limiter.register_failure(limiter_key)
+            response = _token_unauthorized()
+            if backoff:
+                response.headers["Retry-After"] = str(backoff)
+            return response
 
         return _json_unauthorized()
 
