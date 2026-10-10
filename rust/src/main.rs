@@ -1176,8 +1176,8 @@ fn wb_context_by_seq_window(
     }
     let min_seq = segments.iter().map(|s| s.sequence_num).min().unwrap();
     let max_seq = segments.iter().map(|s| s.sequence_num).max().unwrap();
-    let start_seq = min_seq.max(first_seq - 2);
-    let end_seq = max_seq.min(last_seq + 2);
+    let start_seq = min_seq.max(first_seq - 8);
+    let end_seq = max_seq.min(last_seq + 8);
     segments
         .iter()
         .filter(|s| s.sequence_num >= start_seq && s.sequence_num <= end_seq)
@@ -4383,6 +4383,11 @@ fn is_valid_stats_ad_group(group: &StatsAdGroup) -> bool {
     true
 }
 
+// Matches Python's REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS (0.75).
+const REFINED_BOUNDARY_MATCH_TOLERANCE: f64 = 0.75;
+// Matches Python's UNMATCHED_BLOCK_MAX_GAP_SECONDS (30.0).
+const UNMATCHED_BLOCK_MAX_GAP_SECONDS: f64 = 30.0;
+
 fn cut_window_for_stats_ad_group(
     group: &StatsAdGroup,
     refined: &[RefinedBoundaryRow],
@@ -4392,15 +4397,48 @@ fn cut_window_for_stats_ad_group(
         return (group.start_time, group.end_time);
     }
     let projected: Vec<(f64, f64)> = blocks
-        .into_iter()
-        .map(|block| project_atomic_block(block, refined))
+        .iter()
+        .map(|block| project_atomic_block(*block, refined))
         .collect();
+    // Drop far unmatched blocks, matching the Python fix (f6bb450). An atomic
+    // block the refiner deliberately ignored (often a classifier false
+    // positive) must not drag the cut window via min()/max() and delete real
+    // episode content. Blocks within UNMATCHED_BLOCK_MAX_GAP_SECONDS are kept,
+    // since the refiner may have missed the true edge by a few segments.
+    let mut kept: Vec<(f64, f64)> = Vec::new();
+    if !refined.is_empty() {
+        let refined_start = refined
+            .iter()
+            .map(|r| r.refined_start)
+            .fold(f64::INFINITY, f64::min);
+        let refined_end = refined
+            .iter()
+            .map(|r| r.refined_end)
+            .fold(f64::NEG_INFINITY, f64::max);
+        for (proj, block) in projected.iter().zip(blocks.iter()) {
+            if refined_boundaries_matching_block(*block, refined) {
+                kept.push(*proj);
+                continue;
+            }
+            let gap = if block.1 < refined_start {
+                refined_start - block.1
+            } else if block.0 > refined_end {
+                block.0 - refined_end
+            } else {
+                0.0
+            };
+            if gap <= UNMATCHED_BLOCK_MAX_GAP_SECONDS {
+                kept.push(*proj);
+            }
+        }
+    }
+    let final_projected = if kept.is_empty() { projected } else { kept };
     (
-        projected
+        final_projected
             .iter()
             .map(|item| item.0)
             .fold(f64::INFINITY, f64::min),
-        projected
+        final_projected
             .iter()
             .map(|item| item.1)
             .fold(f64::NEG_INFINITY, f64::max),
@@ -4434,19 +4472,45 @@ fn atomic_ad_blocks_for_group(group: &StatsAdGroup) -> Vec<(f64, f64)> {
 }
 
 fn project_atomic_block(block: (f64, f64), refined: &[RefinedBoundaryRow]) -> (f64, f64) {
-    let mut best: Option<&RefinedBoundaryRow> = None;
-    let mut best_overlap = 0.0;
+    // Union every refined window overlapping this block, matching the Python
+    // fix (d5c1fad). Keeping only the single best-overlap match silently
+    // dropped correctly refined ad windows that shared one atomic transcript
+    // block, leaving ad audio uncut.
+    let mut matched: Vec<&RefinedBoundaryRow> = Vec::new();
     for boundary in refined {
-        let overlap = (block.1 + 1.5).min(boundary.orig_end + 1.5)
-            - (block.0 - 1.5).max(boundary.orig_start - 1.5);
-        if overlap > best_overlap {
-            best_overlap = overlap;
-            best = Some(boundary);
+        let overlap = (block.1 + REFINED_BOUNDARY_MATCH_TOLERANCE)
+            .min(boundary.orig_end + REFINED_BOUNDARY_MATCH_TOLERANCE)
+            - (block.0 - REFINED_BOUNDARY_MATCH_TOLERANCE)
+                .max(boundary.orig_start - REFINED_BOUNDARY_MATCH_TOLERANCE);
+        if overlap > 0.0 {
+            matched.push(boundary);
         }
     }
-    best.filter(|_| best_overlap > 0.0)
-        .map(|boundary| (boundary.refined_start, boundary.refined_end))
-        .unwrap_or(block)
+    if matched.is_empty() {
+        return block;
+    }
+    let start = matched
+        .iter()
+        .map(|b| b.refined_start)
+        .fold(f64::INFINITY, f64::min);
+    let end = matched
+        .iter()
+        .map(|b| b.refined_end)
+        .fold(f64::NEG_INFINITY, f64::max);
+    (start, end)
+}
+
+fn refined_boundaries_matching_block(
+    block: (f64, f64),
+    refined: &[RefinedBoundaryRow],
+) -> bool {
+    refined.iter().any(|boundary| {
+        let overlap = (block.1 + REFINED_BOUNDARY_MATCH_TOLERANCE)
+            .min(boundary.orig_end + REFINED_BOUNDARY_MATCH_TOLERANCE)
+            - (block.0 - REFINED_BOUNDARY_MATCH_TOLERANCE)
+                .max(boundary.orig_start - REFINED_BOUNDARY_MATCH_TOLERANCE);
+        overlap > 0.0
+    })
 }
 
 fn parse_refined_boundaries_full(raw: Option<&str>) -> Vec<RefinedBoundaryRow> {
@@ -8717,8 +8781,8 @@ mod tests {
             .collect();
         let selected = select_wb_context_segments(&segments, 100.0, 110.0, Some(5), Some(6));
         let seq_nums: Vec<i64> = selected.iter().map(|s| s.sequence_num).collect();
-        // start_seq = max(0, 5-2)=3, end_seq = min(9, 6+2)=8 → [3..=8]
-        assert_eq!(seq_nums, vec![3, 4, 5, 6, 7, 8]);
+        // start_seq = max(0, 5-8)=0, end_seq = min(9, 6+8)=9 → [0..=9]
+        assert_eq!(seq_nums, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]

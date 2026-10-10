@@ -150,10 +150,18 @@ class AdClassifier:
         self.boundary_refiner: BoundaryRefiner | WordBoundaryRefiner | None = None
         if config.enable_boundary_refinement:
             if getattr(config, "enable_word_level_boundary_refinder", False):
-                self.boundary_refiner = WordBoundaryRefiner(config, self.logger)
+                self.boundary_refiner = WordBoundaryRefiner(
+                    config, self.logger, token_limiter=self.rate_limiter
+                )
                 self.logger.info("Word-level boundary refiner enabled")
             else:
-                self.boundary_refiner = BoundaryRefiner(config, self.logger)
+                # Share the classifier's token bucket with the refiner: both
+                # draw on the same provider per-minute token budget, so the
+                # refiner must pace itself instead of firing unpaced right
+                # after classification filled the window (was causing 429s).
+                self.boundary_refiner = BoundaryRefiner(
+                    config, self.logger, token_limiter=self.rate_limiter
+                )
                 self.logger.info("Boundary refinement enabled")
         else:
             self.logger.info("Boundary refinement disabled via config")
@@ -1910,8 +1918,14 @@ class AdClassifier:
         ad_blocks = self._group_into_blocks(identifications)
 
         for block in ad_blocks:
-            # Skip low confidence or very short blocks
-            if block["confidence"] < 0.6 or (block["end"] - block["start"]) < 15.0:
+            # Skip low confidence or very short blocks. The confidence gate
+            # matches the cutter's output.min_confidence: don't refine what we
+            # don't cut. Refining below the cut threshold wastes LLM calls on
+            # blocks whose boundaries would be silently discarded downstream.
+            if (
+                block["confidence"] < float(self.config.output.min_confidence)
+                or (block["end"] - block["start"]) < 15.0
+            ):
                 continue
 
             # Refine
