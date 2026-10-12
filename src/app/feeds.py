@@ -17,7 +17,7 @@ from flask import current_app, g, request
 from sqlalchemy.orm import defer, load_only
 
 from app.extensions import db
-from app.memory_pressure import release_memory_to_os, request_memory_trim_after_context
+from app.memory_pressure import request_memory_trim_after_context
 from app.models import Feed, Post, ProcessingJob, User, UserFeed
 from app.runtime_config import config
 from app.writer.client import writer_client
@@ -959,9 +959,6 @@ def generate_feed_xml(feed: Feed) -> Any:
     rss_feed.rss_attrs["xmlns:podcast"] = "https://podcastindex.org/namespace/1.0"
 
     xml_content = rss_feed.to_xml("utf-8")
-    del rss_feed, items, posts
-    release_memory_to_os(f"feed XML feed_id={feed.id}", logger)
-    request_memory_trim_after_context(f"feed XML feed_id={feed.id}")
 
     logger.info(f"XML generated for feed with ID: {feed.id}")
     return xml_content
@@ -1011,9 +1008,6 @@ def generate_aggregate_feed_xml(user: User | None) -> Any:
     rss_feed.rss_attrs["xmlns:podcast"] = "https://podcastindex.org/namespace/1.0"
 
     xml_content = rss_feed.to_xml("utf-8")
-    del rss_feed, items, posts
-    release_memory_to_os(f"aggregate feed XML user_id={user_id}", logger)
-    request_memory_trim_after_context(f"aggregate feed XML user_id={user_id}")
 
     logger.info(f"Aggregate XML generated for: {username}")
     return xml_content
@@ -1057,7 +1051,7 @@ def _try_generate_feed_xml_with_rust(
     if db_path is None:
         return None
     token_id, secret = _feed_token_request_values()
-    xml_content = try_render_feed_xml(
+    return try_render_feed_xml(
         db_path=db_path,
         feed_id=int(feed.id),
         base_url=_get_base_url(),
@@ -1065,10 +1059,6 @@ def _try_generate_feed_xml_with_rust(
         feed_token=token_id,
         feed_secret=secret,
     )
-    if xml_content is not None:
-        release_memory_to_os(f"rust feed XML feed_id={feed.id}", logger)
-        request_memory_trim_after_context(f"rust feed XML feed_id={feed.id}")
-    return xml_content
 
 
 def _try_generate_aggregate_feed_xml_with_rust(user: User | None) -> bytes | None:
@@ -1077,7 +1067,7 @@ def _try_generate_aggregate_feed_xml_with_rust(user: User | None) -> bytes | Non
         return None
     user_id = int(user.id) if user else 0
     token_id, secret = _feed_token_request_values()
-    xml_content = try_render_aggregate_feed_xml(
+    return try_render_aggregate_feed_xml(
         db_path=db_path,
         user_id=user_id,
         base_url=_get_base_url(),
@@ -1086,10 +1076,6 @@ def _try_generate_aggregate_feed_xml_with_rust(user: User | None) -> bytes | Non
         feed_token=token_id,
         feed_secret=secret,
     )
-    if xml_content is not None:
-        release_memory_to_os(f"rust aggregate feed XML user_id={user_id}", logger)
-        request_memory_trim_after_context(f"rust aggregate feed XML user_id={user_id}")
-    return xml_content
 
 
 def get_user_aggregate_posts(user_id: int, limit_per_feed: int = 3) -> list[Post]:

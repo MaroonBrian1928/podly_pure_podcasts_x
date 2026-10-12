@@ -32,6 +32,7 @@ from app.feeds import (
     make_post,
     refresh_feed,
 )
+from app.memory_pressure import consume_memory_trim_contexts
 from app.models import Feed, Post, ProcessingJob
 from app.runtime_config import config as runtime_config
 from app.writer.actions.feeds import refresh_feed_action
@@ -1201,7 +1202,7 @@ def test_generate_feed_xml_filters_processed_whitelisted(
         runtime_config.autoprocess_on_download = False
         trim_contexts = []
         monkeypatch.setattr(
-            "app.feeds.release_memory_to_os",
+            "app.memory_pressure.release_memory_to_os",
             lambda context, log=None: trim_contexts.append(context),
         )
         try:
@@ -1251,7 +1252,8 @@ def test_generate_feed_xml_filters_processed_whitelisted(
             mock_rss_2.assert_called_once()
             mock_rss.to_xml.assert_called_once_with("utf-8")
             assert result == "<rss></rss>"
-            assert trim_contexts == [f"feed XML feed_id={feed.id}"]
+            assert trim_contexts == []
+            assert consume_memory_trim_contexts() == []
         finally:
             runtime_config.autoprocess_on_download = original_flag
 
@@ -1267,7 +1269,7 @@ def test_generate_feed_xml_includes_all_when_autoprocess_enabled(
         runtime_config.autoprocess_on_download = True
         trim_contexts = []
         monkeypatch.setattr(
-            "app.feeds.release_memory_to_os",
+            "app.memory_pressure.release_memory_to_os",
             lambda context, log=None: trim_contexts.append(context),
         )
         try:
@@ -1320,7 +1322,8 @@ def test_generate_feed_xml_includes_all_when_autoprocess_enabled(
             mock_rss_2.assert_called_once()
             mock_rss.to_xml.assert_called_once_with("utf-8")
             assert result == "<rss></rss>"
-            assert trim_contexts == [f"feed XML feed_id={feed.id}"]
+            assert trim_contexts == []
+            assert consume_memory_trim_contexts() == []
         finally:
             runtime_config.autoprocess_on_download = original_flag
 
@@ -1338,10 +1341,6 @@ def test_generate_feed_xml_hides_posts_with_active_processing_job(
     with app.app_context():
         original_flag = getattr(runtime_config, "autoprocess_on_download", False)
         runtime_config.autoprocess_on_download = True
-        monkeypatch.setattr(
-            "app.feeds.release_memory_to_os",
-            lambda *_args, **_kwargs: None,
-        )
         try:
             feed = Feed(rss_url="http://example.com/feed", title="Feed 1")
             db.session.add(feed)
@@ -1467,7 +1466,7 @@ def test_generate_aggregate_feed_xml_releases_transient_memory(
         mock_rss.to_xml.return_value = "<rss></rss>"
         trim_contexts = []
         monkeypatch.setattr(
-            "app.feeds.release_memory_to_os",
+            "app.memory_pressure.release_memory_to_os",
             lambda context, log=None: trim_contexts.append(context),
         )
 
@@ -1478,7 +1477,8 @@ def test_generate_aggregate_feed_xml_releases_transient_memory(
         assert all(
             call.kwargs["prepend_feed_title"] for call in mock_feed_item.call_args_list
         )
-        assert trim_contexts == ["aggregate feed XML user_id=5"]
+        assert trim_contexts == []
+        assert consume_memory_trim_contexts() == []
 
 
 @mock.patch("app.feeds.Post")
@@ -1891,9 +1891,6 @@ def test_refresh_trims_once_after_context_session_cleanup(monkeypatch, planner_f
     )
     monkeypatch.setattr(
         memory_pressure, "release_memory_to_os", lambda *args: events.append("trim")
-    )
-    monkeypatch.setattr(
-        "app.feeds.release_memory_to_os", lambda *args: events.append("early trim")
     )
     _register_memory_cleanup(test_app)
     with test_app.app_context():
