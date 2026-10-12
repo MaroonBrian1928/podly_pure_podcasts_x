@@ -6041,22 +6041,22 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         }
     }
 
-    // --- ad time per post (sum of (end-start) where label = 'ad') ---
-    let mut ad_time_by_post: HashMap<i64, f64> = HashMap::new();
+    // --- original length per post ---
+    // post.duration is the processed (ad-removed) length. The transcript is of
+    // the unprocessed audio, so its last segment end is a lower bound on the
+    // original length that does not depend on which ad labels were cut; it misses
+    // any untranscribed tail after the last segment.
+    let mut transcript_end_by_post: HashMap<i64, f64> = HashMap::new();
     if !post_ids.is_empty() {
         let placeholders: String = (0..post_ids.len())
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT transcript_segment.post_id, \
-                    SUM(transcript_segment.end_time - transcript_segment.start_time) \
+            "SELECT post_id, MAX(end_time) \
              FROM transcript_segment \
-             JOIN identification \
-               ON identification.transcript_segment_id = transcript_segment.id \
-             WHERE identification.label = 'ad' \
-               AND transcript_segment.post_id IN ({placeholders}) \
-             GROUP BY transcript_segment.post_id"
+             WHERE post_id IN ({placeholders}) \
+             GROUP BY post_id"
         );
         let mut stmt = conn.prepare(&sql)?;
         let params: Vec<&dyn rusqlite::ToSql> =
@@ -6065,8 +6065,8 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
             Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
         })?;
         for row in rows {
-            let (post_id, ad_time) = row?;
-            ad_time_by_post.insert(post_id, ad_time);
+            let (post_id, end_time) = row?;
+            transcript_end_by_post.insert(post_id, end_time);
         }
     }
 
@@ -6126,8 +6126,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
             Some(v) => *v,
             None => continue,
         };
-        let ad_time = *ad_time_by_post.get(&post_id).unwrap_or(&0.0);
-        let duration = cut_duration + ad_time;
+        let duration = cut_duration.max(*transcript_end_by_post.get(&post_id).unwrap_or(&0.0));
         let duration_hours = if duration > 0.0 {
             duration / 3600.0
         } else {
@@ -9839,6 +9838,62 @@ mod tests {
         assert_eq!(payload["total_whisper_cost"], 0.0);
         assert_eq!(payload["total_ina_cost"], 0.0);
         assert_eq!(payload["total_llm_cost"], 0.2625);
+    }
+
+    #[test]
+    fn costs_render_admin_measures_original_length_from_transcript() {
+        // (processed duration, ad identification confidences)
+        let cases: [(Option<f64>, &[f64]); 4] = [
+            (Some(3000.0), &[0.95]),      // ads cut: processed length excludes them
+            (Some(3600.0), &[0.2]),       // low-confidence ad was never cut
+            (Some(3000.0), &[0.95, 0.9]), // two model calls flagged the same segment
+            (None, &[]),                  // duration cleared after processing
+        ];
+        for (duration, confidences) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("podly.sqlite");
+            seed_costs_db(&db_path);
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE post SET duration = ?1 WHERE id = 1",
+                params![duration],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript_segment VALUES
+                    (1, 1, 0, 0.0, 600.0, 'Ad', NULL),
+                    (2, 1, 1, 600.0, 3600.0, 'Show', NULL)",
+                [],
+            )
+            .unwrap();
+            for (index, confidence) in confidences.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO identification (transcript_segment_id, model_call_id, confidence, label)
+                     VALUES (1, ?1, ?2, 'ad')",
+                    params![100 + index as i64, confidence],
+                )
+                .unwrap();
+            }
+            drop(conn);
+            let rates_json = write_costs_rates_json(dir.path());
+
+            let payload = render_admin_costs(CostsRenderAdminArgs {
+                db: db_path,
+                year: 2026,
+                month: 5,
+                rates_json,
+            })
+            .unwrap();
+
+            assert_eq!(
+                payload["total_audio_hours"], 1.0,
+                "case {duration:?} {confidences:?}"
+            );
+            assert_eq!(
+                payload["total_whisper_cost"], 0.04,
+                "case {duration:?} {confidences:?}"
+            );
+        }
     }
 
     #[test]
