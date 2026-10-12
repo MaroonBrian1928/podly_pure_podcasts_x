@@ -4637,7 +4637,9 @@ fn resolve_original_duration_seconds(
         .reduce(f64::max)
         .unwrap_or(0.0);
     if post_duration.is_some() {
-        cut_duration + ad_time_seconds
+        // The transcript is of the unprocessed audio, so its end is a lower bound
+        // when current ad settings yield fewer windows than were cut.
+        (cut_duration + ad_time_seconds).max(transcript_duration)
     } else {
         transcript_duration.max(cut_duration)
     }
@@ -9894,6 +9896,35 @@ mod tests {
                 "case {duration:?} {confidences:?}"
             );
         }
+    }
+
+    #[test]
+    fn stats_original_duration_is_at_least_transcript_end() {
+        let segment = |id: i64, start_time: f64, end_time: f64| StatsTranscriptSegmentRow {
+            id,
+            sequence_num: id,
+            start_time,
+            end_time,
+            text: String::new(),
+            speaker_label: None,
+        };
+        let full = [segment(0, 0.0, 600.0), segment(1, 600.0, 3600.0)];
+        // Cut windows found by current settings add back to the original.
+        assert_eq!(
+            resolve_original_duration_seconds(Some(3000.0), &full, &[], 600.0),
+            3600.0
+        );
+        // Current settings find no ads; the transcript still bounds the original.
+        assert_eq!(
+            resolve_original_duration_seconds(Some(3000.0), &full, &[], 0.0),
+            3600.0
+        );
+        // A partial transcript never shortens the reconstruction.
+        let partial = [segment(0, 10.0, 20.0)];
+        assert_eq!(
+            resolve_original_duration_seconds(Some(100.0), &partial, &[], 10.0),
+            110.0
+        );
     }
 
     #[test]

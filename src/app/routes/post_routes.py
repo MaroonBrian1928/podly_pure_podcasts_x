@@ -147,7 +147,11 @@ def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> No
         app_config.get("ina_cost_rate_per_hour", DEFAULTS.APP_INA_COST_RATE_PER_HOUR)
         or 0.0
     )
-    duration_hours = float(post.duration or 0.0) / 3600.0 if post.duration else 0.0
+    # Whisper and INA run on the unprocessed audio, so bill its length.
+    duration_seconds = processing_stats.get("original_duration_seconds")
+    if not isinstance(duration_seconds, (int, float)):
+        duration_seconds = float(post.duration or 0.0)
+    duration_hours = max(0.0, float(duration_seconds)) / 3600.0
 
     calls = stats_data.get("model_calls") or []
 
@@ -819,8 +823,10 @@ def _resolve_original_duration_seconds(
 
     if post_duration:
         # post.duration is the cut (ad-removed) audio length, so reconstruct the
-        # original episode length by adding back the removed ad time.
-        return cut_duration_seconds + ad_time_seconds
+        # original episode length by adding back the removed ad time. The
+        # transcript is of the unprocessed audio, so its end is a lower bound when
+        # current ad settings yield fewer windows than were cut.
+        return max(cut_duration_seconds + ad_time_seconds, transcript_duration_seconds)
 
     return max(
         transcript_duration_seconds,

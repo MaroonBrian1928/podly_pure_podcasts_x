@@ -1674,6 +1674,7 @@ def _is_valid_admin_costs_payload(payload: dict[str, Any]) -> bool:
         "total_llm_cost",
         "total_whisper_cost",
         "total_ina_cost",
+        "total_audio_hours",
         "users",
         "feeds",
     }
