@@ -350,7 +350,7 @@ impl WriterExecutor {
 
     fn reserve(&self, bytes: usize) -> Result<CapacityReservation, AdmissionError> {
         self.entries_used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 (used < self.maximum_entries).then_some(used + 1)
             })
             .map_err(|_| AdmissionError::CapacityExhausted)?;
