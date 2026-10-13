@@ -19,6 +19,10 @@ from podcast_processor.processing_status_manager import ProcessingStatusManager
 from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config
 from shared.test_utils import create_standard_test_config
+from tests.writer_parity_fixtures import (  # noqa: F401
+    writer_parity_pair,
+    writer_parity_snapshot,
+)
 
 
 @pytest.fixture
