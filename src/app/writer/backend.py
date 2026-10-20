@@ -14,10 +14,10 @@ class WriterBackend(StrEnum):
 def selected_writer_backend() -> WriterBackend:
     """Read and validate the shared startup/client backend setting.
 
-    Python remains the migration default. Invalid values fail closed so a typo
+    Rust is the default; ``python`` is the rollback. Invalid values fail closed so a typo
     cannot select a different writer implementation in one process.
     """
-    value = os.environ.get("PODLY_WRITER_BACKEND", WriterBackend.PYTHON.value)
+    value = os.environ.get("PODLY_WRITER_BACKEND", WriterBackend.RUST.value)
     try:
         return WriterBackend(value.strip().lower())
     except ValueError as exc:

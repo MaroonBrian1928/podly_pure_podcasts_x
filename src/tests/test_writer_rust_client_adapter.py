@@ -140,13 +140,13 @@ def _rust_writer_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PODLY_IPC_AUTHKEY", "test-only-key")
 
 
-def test_backend_selector_defaults_to_python_and_rejects_unknown_values(
+def test_backend_selector_defaults_to_rust_and_rejects_unknown_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PODLY_WRITER_BACKEND", raising=False)
-    assert selected_writer_backend() is WriterBackend.PYTHON
-    monkeypatch.setenv("PODLY_WRITER_BACKEND", "rust")
     assert selected_writer_backend() is WriterBackend.RUST
+    monkeypatch.setenv("PODLY_WRITER_BACKEND", "python")
+    assert selected_writer_backend() is WriterBackend.PYTHON
     monkeypatch.setenv("PODLY_WRITER_BACKEND", "pythonish")
     with pytest.raises(RuntimeError, match="must be either"):
         selected_writer_backend()
