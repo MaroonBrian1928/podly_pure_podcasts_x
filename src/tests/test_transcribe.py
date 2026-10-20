@@ -15,11 +15,10 @@ def test_remote_transcribe() -> None:
     from podcast_processor.transcribe import (
         OpenAIWhisperTranscriber,
     )
+    from shared.config import RemoteWhisperConfig
 
     logger = logging.getLogger("global_logger")
-    from shared.test_utils import create_standard_test_config
-
-    config = create_standard_test_config().model_dump()
+    config = RemoteWhisperConfig(api_key="test-key")
 
     transcriber = OpenAIWhisperTranscriber(logger, config)
 
@@ -393,3 +392,37 @@ def test_merge_segments_with_saved_word_timestamps_rebuilds_rich_segments() -> N
     assert merged[0].speaker_label == "SPEAKER_00"
     assert [word.word for word in (merged[0].words or [])] == ["Hello", "world"]
     assert merged[1].words is None
+
+
+def test_non_finite_word_values_never_reach_the_artifact_payload() -> None:
+    import json
+
+    from podcast_processor.transcribe import (
+        OpenAIWhisperTranscriber,
+        serialize_segment_word_timestamps,
+    )
+
+    segments = OpenAIWhisperTranscriber.extract_segments_from_transcription(
+        {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 2.0,
+                    "text": "Hello world",
+                    "words": [
+                        {"word": "Hello", "start": 0.0, "end": 0.5, "score": "nan"},
+                        {"word": "world", "start": "inf", "end": 1.0, "score": 0.9},
+                    ],
+                }
+            ]
+        }
+    )
+
+    payload = serialize_segment_word_timestamps(segments)
+    assert payload == [
+        {
+            "sequence_num": 0,
+            "words": [{"word": "Hello", "start": 0.0, "end": 0.5, "score": None}],
+        }
+    ]
+    json.dumps(payload, allow_nan=False)
