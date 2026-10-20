@@ -1,3 +1,10 @@
+## [3.0.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v3.0.0...v3.0.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **deps:** update node.js to v24 ([#47](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/47)) ([c8266cb](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c8266cb3f10399bebc341dbe933b38189a806b4b))
+
 # [3.0.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.1.2...v3.0.0) (2026-10-20)
 
 
