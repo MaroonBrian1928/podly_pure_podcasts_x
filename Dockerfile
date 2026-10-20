@@ -1,5 +1,5 @@
 # Multi-stage build for combined frontend and backend
-FROM node:18-alpine AS frontend-build
+FROM node:24-alpine AS frontend-build
 
 WORKDIR /app
 
