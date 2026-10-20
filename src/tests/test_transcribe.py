@@ -15,11 +15,10 @@ def test_remote_transcribe() -> None:
     from podcast_processor.transcribe import (
         OpenAIWhisperTranscriber,
     )
+    from shared.config import RemoteWhisperConfig
 
     logger = logging.getLogger("global_logger")
-    from shared.test_utils import create_standard_test_config
-
-    config = create_standard_test_config().model_dump()
+    config = RemoteWhisperConfig(api_key="test-key")
 
     transcriber = OpenAIWhisperTranscriber(logger, config)
 
