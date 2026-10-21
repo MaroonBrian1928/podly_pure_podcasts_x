@@ -96,3 +96,6 @@ CLAUDE.md
 
 # taste-skill review screenshots
 .taste-skill/
+
+# Impeccable design-hook local cache
+.impeccable/hook.cache.json

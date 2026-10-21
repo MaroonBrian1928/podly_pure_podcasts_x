@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-21T00:00:00Z",
+  "title": "Design System: Podly",
+  "extensions": {
+    "colorMeta": {
+      "signal-blue": { "role": "primary", "displayName": "Signal Blue", "canonical": "#2563eb", "tonalRamp": ["#172554", "#1e3a8a", "#1d4ed8", "#2563eb", "#3b82f6", "#93c5fd", "#bfdbfe", "#eff6ff"] },
+      "signal-blue-deep": { "role": "primary", "displayName": "Signal Blue Deep", "canonical": "#1d4ed8" },
+      "cut-red": { "role": "secondary", "displayName": "Cut Red", "canonical": "#dc2626", "tonalRamp": ["#450a0a", "#7f1d1d", "#b91c1c", "#dc2626", "#ef4444", "#fca5a5", "#fecaca", "#fef2f2"] },
+      "cut-red-deep": { "role": "secondary", "displayName": "Cut Red Deep", "canonical": "#b91c1c" },
+      "pause-amber-tint": { "role": "tertiary", "displayName": "Pause Amber Tint", "canonical": "#fef3c7", "tonalRamp": ["#451a03", "#78350f", "#92400e", "#d97706", "#f59e0b", "#fcd34d", "#fde68a", "#fffbeb"] },
+      "pause-amber-ink": { "role": "tertiary", "displayName": "Pause Amber Ink", "canonical": "#92400e" },
+      "paper-canvas": { "role": "neutral", "displayName": "Paper Canvas", "canonical": "#f9fafb", "tonalRamp": ["#030712", "#111827", "#374151", "#4b5563", "#9ca3af", "#d1d5db", "#e5e7eb", "#f9fafb"] },
+      "paper-surface": { "role": "neutral", "displayName": "Paper Surface", "canonical": "#ffffff" },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#111827" },
+      "ink-muted": { "role": "neutral", "displayName": "Ink Muted", "canonical": "#4b5563" },
+      "hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#e5e7eb" },
+      "hairline-strong": { "role": "neutral", "displayName": "Hairline Strong", "canonical": "#d1d5db" },
+      "midnight-canvas": { "role": "neutral", "displayName": "Midnight Canvas", "canonical": "#040a18", "tonalRamp": ["#040a18", "#0f172a", "#131c2f", "#233045", "#313f56", "#64748b", "#a7b4c6", "#e2e8f0"] },
+      "midnight-surface": { "role": "neutral", "displayName": "Midnight Surface", "canonical": "#0f172a" },
+      "midnight-ink": { "role": "neutral", "displayName": "Midnight Ink", "canonical": "#f8fafc" },
+      "midnight-ink-muted": { "role": "neutral", "displayName": "Midnight Ink Muted", "canonical": "#d6dfec" },
+      "subscribe-black": { "role": "neutral", "displayName": "Subscribe Black", "canonical": "#000000" }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Headline", "purpose": "Page titles: Jobs, Billing, feed name." },
+      "title": { "displayName": "Title", "purpose": "Section and empty-state headings, stat values." },
+      "body": { "displayName": "Body", "purpose": "Default text; medium weight for labels, nav and buttons." },
+      "label": { "displayName": "Label", "purpose": "Metadata, chips, compact buttons." },
+      "data": { "displayName": "Data", "purpose": "Timings, durations, timestamps and logs with tabular numerals." }
+    },
+    "shadows": [
+      { "name": "card-rest", "value": "0 1px 2px 0 rgb(0 0 0 / 0.05)", "purpose": "Feed cards and stat tiles at rest." },
+      { "name": "card-hover", "value": "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)", "purpose": "Feed card under the pointer." },
+      { "name": "floating", "value": "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)", "purpose": "Menus, popovers, audio player." },
+      { "name": "modal", "value": "0 25px 50px -12px rgb(0 0 0 / 0.25)", "purpose": "Modal panels over the blurred navy backdrop." }
+    ],
+    "motion": [
+      { "name": "ease-out", "value": "cubic-bezier(0.23, 1, 0.32, 1)", "purpose": "Default entrance easing (pop-in, menus)." },
+      { "name": "ease-drawer", "value": "cubic-bezier(0.32, 0.72, 0, 1)", "purpose": "Phone feed-detail slide-over, 440ms." },
+      { "name": "press", "value": "scale 0.96, 80ms in / 360ms cubic-bezier(0.33, 1, 0.68, 1) out", "purpose": "Press feedback on every button." },
+      { "name": "page-transition", "value": "320ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Page slide-and-unblur on route change." },
+      { "name": "modal", "value": "320–380ms cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Modal panel rise and fade." },
+      { "name": "digit-tick", "value": "350ms cubic-bezier(0.34, 1.56, 0.64, 1)", "purpose": "Per-digit entrance on live timers; the only overshoot in the system." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one blue action per view.",
+      "html": "<button class=\"ds-btn ds-btn-primary\">Add Feed</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: 6px; font-size: 14px; line-height: 20px; font-weight: 500; font-family: ui-sans-serif, system-ui, sans-serif; border: none; cursor: pointer; white-space: nowrap; transition: background-color 360ms cubic-bezier(0.33, 1, 0.68, 1), scale 360ms cubic-bezier(0.33, 1, 0.68, 1); } .ds-btn:active { scale: 0.96; transition-duration: 80ms; } .ds-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px #f9fafb, 0 0 0 4px #3b82f6; } .ds-btn-primary { background: #2563eb; color: #fff; } .ds-btn-primary:hover { background: #1d4ed8; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Bordered default for non-primary actions.",
+      "html": "<button class=\"ds-btn-secondary\">Log out</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 6px; font: 500 14px/20px ui-sans-serif, system-ui, sans-serif; background: #fff; color: #1f2937; border: 1px solid #d1d5db; cursor: pointer; transition: background-color 360ms cubic-bezier(0.33, 1, 0.68, 1), scale 360ms cubic-bezier(0.33, 1, 0.68, 1); } .ds-btn-secondary:hover { background: #f9fafb; } .ds-btn-secondary:active { scale: 0.96; transition-duration: 80ms; } .ds-btn-secondary:focus-visible { outline: none; box-shadow: 0 0 0 2px #f9fafb, 0 0 0 4px #3b82f6; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Text-only action inside dense rows.",
+      "html": "<button class=\"ds-btn-ghost\">Reprocess</button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 6px; font: 500 14px/20px ui-sans-serif, system-ui, sans-serif; background: transparent; color: #374151; border: none; cursor: pointer; transition: background-color 360ms cubic-bezier(0.33, 1, 0.68, 1), color 360ms, scale 360ms cubic-bezier(0.33, 1, 0.68, 1); } .ds-btn-ghost:hover { background: #f3f4f6; color: #111827; } .ds-btn-ghost:active { scale: 0.96; transition-duration: 80ms; } .ds-btn-ghost:focus-visible { outline: none; box-shadow: 0 0 0 2px #f9fafb, 0 0 0 4px #3b82f6; }"
+    },
+    {
+      "name": "Subscribe Button",
+      "kind": "button",
+      "refersTo": "button-dark",
+      "description": "Near-black, reserved for a feed's Subscribe action.",
+      "html": "<button class=\"ds-btn-dark\">Subscribe</button>",
+      "css": ".ds-btn-dark { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 6px; font: 500 14px/20px ui-sans-serif, system-ui, sans-serif; background: #000; color: #fff; border: none; cursor: pointer; transition: background-color 360ms cubic-bezier(0.33, 1, 0.68, 1), scale 360ms cubic-bezier(0.33, 1, 0.68, 1); } .ds-btn-dark:hover { background: rgb(0 0 0 / 0.8); } .ds-btn-dark:active { scale: 0.96; transition-duration: 80ms; } .ds-btn-dark:focus-visible { outline: none; box-shadow: 0 0 0 2px #f9fafb, 0 0 0 4px #3b82f6; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Standard field with a soft blue focus halo.",
+      "html": "<input class=\"ds-input\" placeholder=\"Search podcasts\" />",
+      "css": ".ds-input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; color: #111827; font: 400 14px/20px ui-sans-serif, system-ui, sans-serif; transition: border-color 150ms ease, box-shadow 150ms ease; } .ds-input::placeholder { color: #6b7280; } .ds-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgb(59 130 246 / 0.2); }"
+    },
+    {
+      "name": "Navigation",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Header nav: neutral states, no accent color.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-active\" href=\"#\">Podcasts</a><a class=\"ds-nav-item\" href=\"#\">Jobs</a><a class=\"ds-nav-item\" href=\"#\">Config</a></nav>",
+      "css": ".ds-nav { display: flex; gap: 8px; align-items: center; height: 48px; padding: 0 16px; background: #fff; border-bottom: 1px solid #e5e7eb; } .ds-nav-item { padding: 6px 12px; border-radius: 6px; font: 500 14px/20px ui-sans-serif, system-ui, sans-serif; color: #374151; text-decoration: none; transition: background-color 150ms, color 150ms; } .ds-nav-item:hover { background: #f9fafb; color: #111827; } .ds-nav-item:focus-visible { outline: none; box-shadow: 0 0 0 2px #3b82f6; } .ds-nav-active { background: #f3f4f6; color: #111827; }"
+    },
+    {
+      "name": "Status Chips",
+      "kind": "chip",
+      "refersTo": "chip-status",
+      "description": "Tint-plus-ink state chips; the only place status hues live.",
+      "html": "<div class=\"ds-chips\"><span class=\"ds-chip ds-chip-amber\">Paused</span><span class=\"ds-chip ds-chip-green\">Processed</span><span class=\"ds-chip ds-chip-gray\">Not joined</span></div>",
+      "css": ".ds-chips { display: flex; gap: 8px; } .ds-chip { display: inline-flex; padding: 2px 8px; border-radius: 9999px; font: 500 11px/16px ui-sans-serif, system-ui, sans-serif; } .ds-chip-amber { background: #fef3c7; color: #92400e; } .ds-chip-green { background: #dcfce7; color: #166534; } .ds-chip-gray { background: #f3f4f6; color: #374151; }"
+    },
+    {
+      "name": "Feed Card",
+      "kind": "card",
+      "refersTo": "feed-card",
+      "description": "Selectable feed row with artwork; blue border and inset ring when selected.",
+      "html": "<button class=\"ds-feed-card\" aria-current=\"true\"><span class=\"ds-feed-art\"></span><span class=\"ds-feed-body\"><span class=\"ds-feed-title\">The Daily Example</span><span class=\"ds-feed-meta\">by Example Media</span><span class=\"ds-feed-count\">214 episodes</span></span></button>",
+      "css": ".ds-feed-card { display: flex; gap: 12px; width: 320px; padding: 16px; text-align: left; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); cursor: pointer; font-family: ui-sans-serif, system-ui, sans-serif; transition: background-color 150ms, border-color 150ms, box-shadow 150ms; } .ds-feed-card:hover { background: #f9fafb; border-color: #d1d5db; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1); } .ds-feed-card:focus-visible { outline: none; box-shadow: 0 0 0 2px #3b82f6; } .ds-feed-card[aria-current='true'] { border-color: #3b82f6; box-shadow: inset 0 0 0 1px #3b82f6; } .ds-feed-art { flex: none; width: 48px; height: 48px; border-radius: 6px; background: #e5e7eb; } .ds-feed-body { display: flex; flex-direction: column; min-width: 0; } .ds-feed-title { font-weight: 500; font-size: 16px; line-height: 24px; color: #111827; } .ds-feed-meta { margin-top: 4px; font-size: 14px; line-height: 20px; color: #4b5563; } .ds-feed-count { margin-top: 8px; font-size: 12px; line-height: 16px; color: #4b5563; font-variant-numeric: tabular-nums; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Control Room",
+    "overview": "Podly is somewhere you check in, not somewhere you stay. Someone adds a feed, copies a link, sees that last night's episodes processed, and leaves. The interface is a calm room of neutral surfaces with a single blue accent. Color shows up only when something needs a decision or has gone wrong. Brand character lives in precise details: tabular numerals, a short press response on every control, and motion that settles instead of bouncing.\n\nDensity is moderate and leans compact. Controls are small (36px default, 30px compact), and body copy is 14px. A split view puts feeds next to episodes on desktop, and on a phone the episode view slides over the list. There are two themes with equal standing, light paper and Midnight Navy. Both come from one set of role variables, so any class means the same role in either theme.",
+    "keyCharacteristics": [
+      "Neutral-first surfaces, with one blue accent for primary action, focus and selection.",
+      "Status hues (amber, red, green, sky) appear only as tinted chips and banners, never as decoration.",
+      "System sans for everything, with monospace and tabular numerals for timings, counts and logs.",
+      "Flat surfaces with hairline borders, plus a soft shadow on cards and floating layers.",
+      "Quick, damped motion that always respects `prefers-reduced-motion`."
+    ],
+    "rules": [
+      { "name": "The Role, Not Shade, Rule", "body": "Gray and status classes resolve to CSS variables (`--gray-*`, `--amber-*`, …), generated in `tailwind.config.js` for `:root` and `html.dark`. Write `bg-gray-50` or `text-amber-800` and the role flips with the theme. Never add `dark:` overrides per class. Shades 400 and 500 are mid-tones and stay fixed.", "section": "colors" },
+      { "name": "The One Accent Rule", "body": "Blue means \"act here\" or \"you are here\". It appears on the primary action, the focused control and the selected item, and nowhere else.", "section": "colors" },
+      { "name": "The Tabular Rule", "body": "Any number that updates live or sits in a column uses `tabular-nums`, so digits never shift.", "section": "typography" },
+      { "name": "The Border-First Rule", "body": "Separate surfaces with a hairline before reaching for a shadow. A shadow means \"this lifts or floats\".", "section": "elevation" }
+    ],
+    "dos": [
+      "**Do** use the `.btn`, `.btn-*` and `.input` component classes in `index.css` instead of rebuilding controls with ad-hoc utilities.",
+      "**Do** write gray and status colors as role classes (`bg-gray-50`, `text-amber-800`) and let the variables handle dark mode.",
+      "**Do** use `tabular-nums` (and `font-mono` for timings and logs) on any changing or columnar number.",
+      "**Do** give every animation a `prefers-reduced-motion: reduce` fallback, as `index.css` does.",
+      "**Do** keep layouts working at phone width first. The slide-over feed detail is the reference pattern."
+    ],
+    "donts": [
+      "**Don't** add `dark:` overrides for themed hues or grays. Fix the role variable instead.",
+      "**Don't** use Signal Blue for decoration, headings or navigation states.",
+      "**Don't** add a second accent hue, or use status colors outside chips, banners and inline state.",
+      "**Don't** use heavy shadows on resting surfaces. Save `shadow-lg` and above for layers that float.",
+      "**Don't** use bouncy or overshooting easing outside the live-digit tick."
+    ]
+  }
+}
