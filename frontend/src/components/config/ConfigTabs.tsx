@@ -25,7 +25,8 @@ const TABS: { id: ConfigTabId; label: string; adminOnly?: boolean }[] = [
   { id: 'notifications', label: 'Notifications', adminOnly: true },
 ];
 
-const sidebarItem = 'block w-full rounded-md px-3 py-1.5 text-left text-sm font-medium transition-colors';
+const sidebarItem =
+  'block w-full rounded-md px-3 py-1.5 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500';
 const sidebarActive = 'bg-gray-100 text-gray-900';
 const sidebarInactive = 'text-gray-600 hover:bg-gray-50 hover:text-gray-900';
 
@@ -130,7 +131,7 @@ export default function ConfigTabs() {
                 role="tab"
                 aria-selected={activeTab === tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`py-3 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
+                className={`py-3 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
                   activeTab === tab.id
                     ? 'border-blue-600 text-gray-900'
                     : 'border-transparent text-gray-600 hover:text-gray-900'

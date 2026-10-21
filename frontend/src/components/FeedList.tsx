@@ -78,8 +78,7 @@ export default function FeedList({
   const { requireAuth, user } = useAuth();
   const showMembership = Boolean(requireAuth && user?.role === 'admin');
 
-  // Ensure feeds is an array
-  const feedsArray = Array.isArray(feeds) ? feeds : [];
+  const feedsArray = useMemo(() => (Array.isArray(feeds) ? feeds : []), [feeds]);
 
   const displayedFeeds = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();

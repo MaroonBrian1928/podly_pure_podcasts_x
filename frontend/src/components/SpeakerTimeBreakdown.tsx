@@ -76,7 +76,7 @@ export default function SpeakerTimeBreakdown({
                     <td className="px-4 py-3 text-sm text-gray-900">
                       <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${
                         speaker.speaker_label
-                          ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                          ? 'border-gray-200 bg-gray-100 text-gray-700'
                           : 'border-gray-200 bg-gray-100 text-gray-700'
                       }`}>
                         {label}

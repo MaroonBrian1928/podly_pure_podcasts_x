@@ -19,27 +19,27 @@ const STAGE_ORDER = ['download', 'transcription', 'classification', 'chapters', 
 const STAGE_META: Record<string, { label: string; badgeClass: string }> = {
   download: {
     label: 'Download',
-    badgeClass: 'bg-sky-100 text-sky-800 border-sky-200',
+    badgeClass: 'bg-gray-100 text-gray-800 border-gray-200',
   },
   transcription: {
     label: 'Transcription',
-    badgeClass: 'bg-blue-100 text-blue-800 border-blue-200',
+    badgeClass: 'bg-gray-100 text-gray-800 border-gray-200',
   },
   classification: {
     label: 'Classification',
-    badgeClass: 'bg-violet-100 text-violet-800 border-violet-200',
+    badgeClass: 'bg-gray-100 text-gray-800 border-gray-200',
   },
   chapters: {
     label: 'Chapters',
-    badgeClass: 'bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200',
+    badgeClass: 'bg-gray-100 text-gray-800 border-gray-200',
   },
   audio: {
     label: 'Audio',
-    badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    badgeClass: 'bg-gray-100 text-gray-800 border-gray-200',
   },
   job: {
-    label: 'Job Status',
-    badgeClass: 'bg-amber-100 text-amber-800 border-amber-200',
+    label: 'Job status',
+    badgeClass: 'bg-gray-100 text-gray-800 border-gray-200',
   },
   general: {
     label: 'General',
@@ -49,10 +49,10 @@ const STAGE_META: Record<string, { label: string; badgeClass: string }> = {
 
 const LEVEL_BADGE_CLASS: Record<string, string> = {
   DEBUG: 'bg-gray-100 text-gray-700',
-  INFO: 'bg-blue-50 text-blue-700',
+  INFO: 'bg-sky-50 text-sky-700',
   WARNING: 'bg-amber-50 text-amber-700',
   ERROR: 'bg-red-50 text-red-700',
-  CRITICAL: 'bg-rose-100 text-rose-800',
+  CRITICAL: 'bg-red-100 text-red-800',
 };
 
 export default function ProcessingStageLogs({ relatedLogs }: ProcessingStageLogsProps) {

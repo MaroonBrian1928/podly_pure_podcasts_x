@@ -553,7 +553,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const appAutoWhitelistDefault =
     configResponse?.config?.app?.automatically_whitelist_new_episodes;
 
-  const episodes = episodesPage?.items ?? [];
+  const episodes = useMemo(() => episodesPage?.items ?? [], [episodesPage?.items]);
   const totalCount = episodesPage?.total ?? 0;
   const whitelistedCount =
     episodesPage?.whitelisted_total ?? episodes.filter((ep: Episode) => ep.whitelisted).length;
@@ -585,10 +585,8 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     }
   };
 
-  const episodesToShow = useMemo(() => episodes, [episodes]);
-
   const sortedEpisodes = useMemo(() => {
-    const list = [...episodesToShow];
+    const list = [...episodes];
     return list.sort((a, b) => {
       switch (sortBy) {
         case 'newest':
@@ -601,7 +599,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
           return 0;
       }
     });
-  }, [episodesToShow, sortBy]);
+  }, [episodes, sortBy]);
 
   // Calculate whitelist status for bulk button
   const allWhitelisted = totalCount > 0 && whitelistedCount === totalCount;
@@ -676,7 +674,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
       >
         {/* Mobile Header */}
         <div className="flex items-center justify-between p-4 border-b lg:hidden">
-          <h2 className="text-lg font-semibold text-gray-900">Podcast Details</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Podcast details</h2>
           {onClose && (
             <button
               onClick={onClose}
@@ -713,9 +711,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                 aria-label="Sort episodes"
                 className="input w-auto py-1.5 pl-3 pr-8"
               >
-                <option value="newest">Newest First</option>
-                <option value="oldest">Oldest First</option>
-                <option value="title">Title A-Z</option>
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="title">Title A–Z</option>
               </select>
 
               {/* do not add addtional controls to sticky headers */}
@@ -824,7 +822,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                     className="btn btn-secondary flex-1 sm:flex-none"
                   >
                     <RefreshIcon className={`h-4 w-4 shrink-0 ${refreshFeedMutation.isPending ? 'animate-spin' : ''}`} />
-                    <span>Refresh Feed</span>
+                    <span>Refresh feed</span>
                   </button>
                 )}
 
@@ -982,9 +980,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
               aria-label="Sort episodes"
               className="input w-auto py-1.5 pl-3 pr-8"
             >
-              <option value="newest">Newest First</option>
-              <option value="oldest">Oldest First</option>
-              <option value="title">Title A-Z</option>
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="title">Title A–Z</option>
             </select>
           </div>
         </div>

@@ -297,8 +297,8 @@ export default function HomePage() {
   };
 
   const feedSortOptions: { value: FeedSortOption; label: string }[] = [
-    { value: 'newest', label: 'Newest Episode' },
-    { value: 'oldest', label: 'Oldest Episode' },
+    { value: 'newest', label: 'Newest episode' },
+    { value: 'oldest', label: 'Oldest episode' },
     { value: 'title-asc', label: 'Title A–Z' },
     { value: 'title-desc', label: 'Title Z–A' },
     { value: 'feed-added-oldest', label: 'Feed Added (Oldest)' },
@@ -313,7 +313,7 @@ export default function HomePage() {
       }`}>
         <div className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-3">
           <h1 className="w-full text-2xl font-semibold text-gray-900 sm:w-auto sm:flex-1">
-            Podcast Feeds
+            Podcast feeds
           </h1>
           <div className="flex items-center gap-2">
             <div ref={sortMenuRef} className="relative">
@@ -386,7 +386,7 @@ export default function HomePage() {
               title={planLimitReached ? 'Your plan is full. Click to upgrade.' : undefined}
             >
               <PlusIcon className="w-4 h-4" />
-              {planLimitReached ? 'Plan full' : showAddForm ? 'Close' : 'Add Feed'}
+              {planLimitReached ? 'Plan full' : showAddForm ? 'Close' : 'Add feed'}
             </button>
           </div>
         </div>
@@ -514,7 +514,7 @@ export default function HomePage() {
       >
             <div className="flex items-center justify-between border-b border-gray-200 px-4 sm:px-6 py-4">
               <div>
-                <h2 className="text-xl sm:text-2xl font-semibold text-gray-900">Add a Podcast Feed</h2>
+                <h2 className="text-xl sm:text-2xl font-semibold text-gray-900">Add a podcast feed</h2>
                 <p className="text-sm text-gray-500 mt-1">
                   Paste an RSS URL or search the catalog to find shows to follow.
                 </p>

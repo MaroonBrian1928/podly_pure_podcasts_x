@@ -240,7 +240,7 @@ export default function LLMProcessingStats({
   const getAudioLabelStyle = (label: string) => {
     switch (label) {
       case 'music':
-        return 'bg-rose-100 text-rose-800';
+        return 'bg-red-100 text-red-800';
       case 'noise':
         return 'bg-amber-100 text-amber-800';
       case 'noEnergy':
@@ -252,7 +252,7 @@ export default function LLMProcessingStats({
   const getAudioMarkerStyle = (label: string) => {
     switch (label) {
       case 'music':
-        return 'bg-rose-50 text-rose-700';
+        return 'bg-red-50 text-red-700';
       case 'noise':
         return 'bg-amber-50 text-amber-700';
       case 'noEnergy':
@@ -305,12 +305,12 @@ export default function LLMProcessingStats({
               <nav role="tablist" className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
-                  ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
+                  ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio segments' }] : []),
                   ...(showSpeakerTab ? [{ id: 'speakers', label: 'Speakers' }] : []),
-                  { id: 'model-calls', label: 'Model Calls' },
-                  { id: 'transcript', label: 'Transcript Segments' },
+                  { id: 'model-calls', label: 'Model calls' },
+                  { id: 'transcript', label: 'Transcript segments' },
                   { id: 'identifications', label: 'Identifications' },
-                  { id: 'logs', label: 'Related Logs' }
+                  { id: 'logs', label: 'Related logs' }
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -372,9 +372,9 @@ export default function LLMProcessingStats({
                             </span>
                           </div>
                           <div className="text-left">
-                            <span className="font-medium text-gray-700">Detection Method:</span>
-                            <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                              LLM Transcription
+                            <span className="font-medium text-gray-700">Detection method:</span>
+                            <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-sky-100 text-sky-800">
+                              LLM transcription
                             </span>
                           </div>
                         </div>
@@ -392,10 +392,7 @@ export default function LLMProcessingStats({
                         timelineDurationSeconds={originalDurationSeconds}
                         minimumSegmentWidthPx={10}
                         segments={adTimelineSegments}
-                        metricAccentClassName="text-green-700"
-                        percentageAccentClassName="text-green-700"
-                        tooltipAccentClassName="text-green-700"
-                        segmentClassName="bg-rose-500 dark:bg-rose-400"
+                        segmentClassName="bg-red-500"
                         legendBaseLabel="Content"
                         legendSegmentLabel="Ad cuts"
                       />
@@ -414,9 +411,6 @@ export default function LLMProcessingStats({
                           variant="density"
                           itemNoun={{ one: 'bleep', other: 'bleeps' }}
                           segments={bleepTimelineSegments}
-                          metricAccentClassName="text-amber-600"
-                          percentageAccentClassName="text-amber-700"
-                          tooltipAccentClassName="text-amber-700"
                           segmentClassName="bg-amber-500"
                           legendSegmentLabel={`Bleeps · ${bleepTimelineSegments.length.toLocaleString()} total`}
                         />
@@ -425,41 +419,41 @@ export default function LLMProcessingStats({
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key metrics</h3>
                         <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-[rgb(30_64_175/0.7)] dark:from-blue-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold tabular-nums tracking-tight text-blue-600">
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
                               {(stats.processing_stats?.total_segments || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-blue-800">Transcript lines</div>
+                            <div className="text-sm text-gray-600">Transcript lines</div>
                           </div>
 
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-[rgb(22_101_52/0.7)] dark:from-green-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold tabular-nums tracking-tight text-green-600">
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
                               {(stats.processing_stats?.content_segments || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-green-800">Content lines</div>
+                            <div className="text-sm text-gray-600">Content lines</div>
                           </div>
 
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-[rgb(153_27_27/0.7)] dark:from-red-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold tabular-nums tracking-tight text-red-600">
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
                               {(stats.processing_stats?.ad_segments_count || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-red-800">Ad lines removed</div>
+                            <div className="text-sm text-gray-600">Ad lines removed</div>
                           </div>
                           {estimatedCost != null && (
-                            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
-                              <div className="text-2xl font-bold tabular-nums tracking-tight text-indigo-600 dark:text-indigo-200">
+                            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+                              <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
                                 ${estimatedCost.toFixed(4)}
                               </div>
-                              <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated Cost</div>
+                              <div className="text-sm text-gray-600" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated cost</div>
                             </div>
                           )}
                         </div>
                       </div>
 
                       {stats.debug_info && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                           <h3 className="font-semibold text-gray-900 mb-2 text-left">Debug details</h3>
-                          <p className="text-xs text-amber-700 mb-4 text-left">
+                          <p className="text-xs text-gray-600 mb-4 text-left">
                             Visible because <code>PODLY_STATS_DEBUG</code> is enabled.
                           </p>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
@@ -476,7 +470,7 @@ export default function LLMProcessingStats({
                               <span className="ml-2 text-gray-600 font-mono break-all">{stats.debug_info.download_url}</span>
                             </div>
                             <div className="text-left md:col-span-2">
-                              <span className="font-medium text-gray-700">Processed Audio Path:</span>
+                              <span className="font-medium text-gray-700">Processed audio path:</span>
                               <span className="ml-2 text-gray-600 font-mono break-all">
                                 {stats.debug_info.processed_audio.path || 'missing'}
                               </span>
@@ -487,7 +481,7 @@ export default function LLMProcessingStats({
                               </div>
                             </div>
                             <div className="text-left md:col-span-2">
-                              <span className="font-medium text-gray-700">Unprocessed Audio Path:</span>
+                              <span className="font-medium text-gray-700">Unprocessed audio path:</span>
                               <span className="ml-2 text-gray-600 font-mono break-all">
                                 {stats.debug_info.unprocessed_audio.path || 'missing'}
                               </span>
@@ -498,13 +492,13 @@ export default function LLMProcessingStats({
                               </div>
                             </div>
                             <div className="text-left md:col-span-2">
-                              <span className="font-medium text-gray-700">Data Roots:</span>
+                              <span className="font-medium text-gray-700">Data roots:</span>
                               <span className="ml-2 text-gray-600 font-mono break-all">
                                 in: {stats.debug_info.processing_roots.in_root} | srv: {stats.debug_info.processing_roots.srv_root}
                               </span>
                             </div>
                             <div className="text-left">
-                              <span className="font-medium text-gray-700">Record Counts:</span>
+                              <span className="font-medium text-gray-700">Record counts:</span>
                               <span className="ml-2 text-gray-600">
                                 segments {stats.debug_info.record_counts.transcript_segments}, calls {stats.debug_info.record_counts.model_calls}, ids {stats.debug_info.record_counts.identifications}
                               </span>
@@ -518,7 +512,7 @@ export default function LLMProcessingStats({
                             ) : (
                               <div className="space-y-2">
                                 {(stats.debug_info.processed_audio_path_candidates || []).map((candidate, idx) => (
-                                  <div key={`${candidate.path}-${idx}`} className="bg-surface border border-amber-100 rounded p-2">
+                                  <div key={`${candidate.path}-${idx}`} className="bg-surface rounded p-2">
                                     <div className="font-mono text-xs text-gray-700 break-all text-left">{candidate.path}</div>
                                     <div className="text-xs text-gray-500 mt-1 text-left">
                                       {candidate.exists ? `exists (${formatBytes(candidate.size_bytes)})` : 'missing'}
@@ -533,7 +527,7 @@ export default function LLMProcessingStats({
                       )}
 
                       <div>
-                        <h3 className="font-semibold text-gray-900 mb-4 text-left">AI model performance</h3>
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">LLM performance</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                           <div className="bg-surface border rounded-lg p-4">
                             <h4 className="font-medium text-gray-900 mb-3 text-left">Processing status</h4>
@@ -559,8 +553,8 @@ export default function LLMProcessingStats({
                               {Object.entries(stats.processing_stats?.model_types || {}).map(([model, count]) => (
                                 <div key={model} className="flex justify-between items-center">
                                   <span className="text-sm text-gray-600">{model}</span>
-                                  <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
-                                    {count} calls
+                                  <span className="px-2 py-1 bg-sky-100 text-sky-800 rounded-full text-xs font-medium">
+                                    {count} {count === 1 ? 'call' : 'calls'}
                                   </span>
                                 </div>
                               ))}
@@ -573,7 +567,7 @@ export default function LLMProcessingStats({
 
                   {activeTab === 'model-calls' && (
                     <div>
-                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Model Calls ({stats.model_calls?.length || 0})</h3>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Model calls ({stats.model_calls?.length || 0})</h3>
                       <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
@@ -581,7 +575,7 @@ export default function LLMProcessingStats({
                               <tr>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">ID</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Segment Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Segment range</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Status</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Tier</th>
                                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-600" title="prompt + cached prompt + completion = total tokens">Tokens</th>
@@ -605,8 +599,8 @@ export default function LLMProcessingStats({
                                         call.status === 'success' ? 'bg-green-100 text-green-800' :
                                         call.status === 'failed' || call.status === 'failed_permanent' || call.status === 'failed_retries' ? 'bg-red-100 text-red-800' :
                                         call.status === 'cancelled' ? 'bg-gray-200 text-gray-700' :
-                                        call.status === 'retrying' ? 'bg-orange-100 text-orange-800' :
-                                        'bg-yellow-100 text-yellow-800'
+                                        call.status === 'retrying' ? 'bg-amber-100 text-amber-800' :
+                                        'bg-amber-100 text-amber-800'
                                       }`}>
                                         {call.status}
                                       </span>
@@ -615,7 +609,7 @@ export default function LLMProcessingStats({
                                       {call.service_tier ? (
                                         <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
                                           call.service_tier === 'flex' ? 'bg-gray-200 text-gray-800' :
-                                          call.service_tier === 'priority' ? 'bg-blue-100 text-blue-800' :
+                                          call.service_tier === 'priority' ? 'bg-sky-100 text-sky-800' :
                                           'bg-gray-100 text-gray-700'
                                         }`}>
                                           {call.service_tier}
@@ -675,7 +669,7 @@ export default function LLMProcessingStats({
                                           )}
                                           {call.error_message && (
                                             <div>
-                                              <h5 className="font-medium text-red-900 mb-2 text-left">Error Message:</h5>
+                                              <h5 className="font-medium text-red-900 mb-2 text-left">Error message:</h5>
                                               <div className="bg-red-50 p-3 rounded text-sm font-mono whitespace-pre-wrap text-left">
                                                 {call.error_message}
                                               </div>
@@ -712,13 +706,13 @@ export default function LLMProcessingStats({
 
                   {activeTab === 'audio' && hasAudioSegments && (
                     <div>
-                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Audio Segments ({stats.audio_segments?.length || 0})</h3>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Audio segments ({stats.audio_segments?.length || 0})</h3>
                       <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time range</th>
                                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Duration</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
                               </tr>
@@ -748,19 +742,19 @@ export default function LLMProcessingStats({
 
                   {activeTab === 'transcript' && (
                     <div>
-                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Transcript Segments ({stats.transcript_segments?.length || 0})</h3>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Transcript segments ({stats.transcript_segments?.length || 0})</h3>
                       <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead>
                               <tr>
                                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Seq #</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time range</th>
                                 {hasSpeakerLabels && (
                                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Speaker</th>
                                 )}
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Ad Confidence</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Ad confidence</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Text</th>
                               </tr>
                             </thead>
@@ -793,7 +787,7 @@ export default function LLMProcessingStats({
                                     {hasSpeakerLabels && (
                                       <td className="px-4 py-3 text-sm text-gray-600">
                                         {segment.speaker_label ? (
-                                          <span className="inline-flex items-center rounded-full bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-xs font-medium text-indigo-700">
+                                          <span className="inline-flex items-center rounded-full bg-gray-100 border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-700">
                                             {segment.speaker_label}
                                           </span>
                                         ) : (
@@ -840,10 +834,10 @@ export default function LLMProcessingStats({
                               <tr>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">ID</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Segment ID</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time range</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
                                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Confidence</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model Call</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model call</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Text</th>
                               </tr>
                             </thead>
@@ -888,7 +882,7 @@ export default function LLMProcessingStats({
 
                   {activeTab === 'logs' && (
                     <div>
-                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Related Logs ({stats.related_logs?.entries.length || 0})</h3>
+                      <h3 className="font-semibold text-gray-900 mb-4 text-left">Related logs ({stats.related_logs?.entries.length || 0})</h3>
                       <ProcessingStageLogs relatedLogs={stats.related_logs} />
                     </div>
                   )}

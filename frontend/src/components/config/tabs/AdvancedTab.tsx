@@ -11,7 +11,7 @@ export default function AdvancedTab() {
   const { activeSubtab, setActiveSubtab } = useConfigContext();
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 lg:space-y-0">
       {/* From `lg` these subtabs live in the settings sidebar instead. */}
       <div className="flex flex-wrap gap-2 lg:hidden" role="tablist" aria-label="Advanced settings">
         {ADVANCED_SUBTABS.map((subtab) => {

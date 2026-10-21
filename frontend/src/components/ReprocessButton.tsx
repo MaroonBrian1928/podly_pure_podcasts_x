@@ -174,8 +174,8 @@ export default function ReprocessButton({
                   className={`btn ${keepTranscript ? 'btn-primary' : 'btn-danger'}`}
                 >
                   {keepTranscript
-                    ? 'Reprocess Episode (Keep Transcript)'
-                    : 'Reprocess Episode'}
+                    ? 'Reprocess episode (keep transcript)'
+                    : 'Reprocess episode'}
                 </button>
               </div>
             </div>

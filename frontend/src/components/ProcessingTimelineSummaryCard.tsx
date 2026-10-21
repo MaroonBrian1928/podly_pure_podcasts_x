@@ -29,9 +29,6 @@ interface ProcessingTimelineSummaryCardProps {
   minimumSegmentWidthPx?: number;
   minimumPointWidthPx?: number;
   segments: TimelineSegment[];
-  metricAccentClassName: string;
-  percentageAccentClassName: string;
-  tooltipAccentClassName?: string;
   segmentClassName: string;
   legendBaseLabel?: string;
   legendSegmentLabel: string;
@@ -86,9 +83,6 @@ export default function ProcessingTimelineSummaryCard({
   minimumSegmentWidthPx = 2,
   minimumPointWidthPx = 6,
   segments,
-  metricAccentClassName,
-  percentageAccentClassName,
-  tooltipAccentClassName = '',
   segmentClassName,
   legendBaseLabel,
   legendSegmentLabel,
@@ -439,20 +433,20 @@ export default function ProcessingTimelineSummaryCard({
       <h3 className="mb-5 text-left font-semibold text-gray-900">{title}</h3>
       <div className="grid grid-cols-1 gap-5 text-center md:grid-cols-3 md:gap-6">
         <div>
-          <div className={`text-2xl font-bold tabular-nums tracking-tight ${metricAccentClassName}`}>{itemCount.toLocaleString()}</div>
-          <div className="mt-1 text-sm text-gray-600 ">{itemLabel}</div>
+          <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">{itemCount.toLocaleString()}</div>
+          <div className="mt-1 text-sm text-gray-600">{itemLabel}</div>
         </div>
         <div>
-          <div className={`text-2xl font-bold tabular-nums tracking-tight ${metricAccentClassName}`}>
+          <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
             {formatDuration(totalTimeSeconds)}
           </div>
-          <div className="mt-1 text-sm text-gray-600 ">{totalTimeLabel}</div>
+          <div className="mt-1 text-sm text-gray-600">{totalTimeLabel}</div>
         </div>
         <div>
-          <div className={`text-2xl font-bold tabular-nums tracking-tight ${percentageAccentClassName}`}>
+          <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
             {percentage.toFixed(1)}%
           </div>
-          <div className="mt-1 text-sm text-gray-600 ">{percentageLabel}</div>
+          <div className="mt-1 text-sm text-gray-600">{percentageLabel}</div>
         </div>
       </div>
 
@@ -465,7 +459,7 @@ export default function ProcessingTimelineSummaryCard({
             >
               <div className="absolute w-max min-w-[13rem] max-w-[calc(100vw-3rem)]" style={tooltipStyle}>
               <div className={`animate-pop-in rounded-lg border border-gray-200 bg-surface p-3.5 text-left shadow-2xl ${tooltipOriginClass}`}>
-                <div className={`text-sm font-semibold text-gray-900 ${tooltipAccentClassName}`.trim()}>
+                <div className="text-sm font-semibold text-gray-900">
                   {tooltip.title}
                 </div>
                 <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5">
@@ -553,7 +547,7 @@ export default function ProcessingTimelineSummaryCard({
                     type="button"
                     aria-label={segment.ariaLabel ?? `${segment.tooltipTitle}: ${segment.tooltipRows.map((row) => `${row.label} ${row.value}`).join('. ')}`}
                     className={[
-                      'pointer-events-none absolute transition-transform duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 dark:focus-visible:ring-blue-300/70',
+                      'pointer-events-none absolute transition-transform duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70',
                       isPointSegment
                         ? '-top-1 h-5 rounded-full ring-2 ring-surface'
                         : 'top-0 h-full rounded-full',
