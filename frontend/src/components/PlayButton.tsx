@@ -43,7 +43,7 @@ export default function PlayButton({ episode, className = '' }: PlayButtonProps)
     <button
       onClick={handleClick}
       disabled={isDisabled}
-      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 ${
+      className={`touch-target inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 ${
         isDisabled 
           ? 'bg-gray-200 text-gray-600 cursor-not-allowed' 
           : 'bg-gray-900 text-surface hover:bg-gray-700'

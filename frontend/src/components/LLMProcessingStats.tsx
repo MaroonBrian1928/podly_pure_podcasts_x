@@ -279,7 +279,7 @@ export default function LLMProcessingStats({
     <>
       <button
         onClick={() => setShowModal(true)}
-        className={`px-3 py-1 text-xs rounded font-medium transition-colors border bg-surface text-gray-700 border-gray-300 hover:bg-gray-50 hover:border-gray-400 hover:text-gray-900 flex items-center gap-1 ${className}`}
+        className={`btn btn-secondary btn-sm ${className}`}
       >
         Stats
       </button>

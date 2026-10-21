@@ -181,7 +181,7 @@ function AppShell() {
               )}
               {showConfigLink && (
                 <NavLink to="/config" className={navItemClass}>
-                  Config
+                  Settings
                 </NavLink>
               )}
               {showReportIssueButton && (
@@ -239,7 +239,7 @@ function AppShell() {
                 <button
                   type="button"
                   onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                  className="p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                  className="touch-target p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
                   aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
                   aria-expanded={mobileMenuOpen}
                 >
@@ -268,7 +268,7 @@ function AppShell() {
                     )}
                     {showConfigLink && (
                       <NavLink to="/config" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
-                        Config
+                        Settings
                       </NavLink>
                     )}
                     {showReportIssueButton && (

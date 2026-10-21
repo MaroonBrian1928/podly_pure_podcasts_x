@@ -56,6 +56,27 @@
     @apply disabled:cursor-not-allowed;
   }
 
+  /* On touch screens, controls drawn smaller than 44px get an invisible 44px
+     hit area centered on them; their drawn size is unchanged. Utilities such as
+     `absolute` still win over the `position` set here. */
+  @media (pointer: coarse) {
+    .btn,
+    .touch-target {
+      position: relative;
+    }
+
+    .btn::after,
+    .touch-target::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 44px);
+      height: max(100%, 44px);
+      transform: translate(-50%, -50%);
+    }
+  }
+
   .btn-sm {
     @apply h-[30px] px-2.5 text-xs;
   }
@@ -94,9 +115,10 @@
     @apply disabled:bg-gray-200 disabled:text-gray-600;
   }
 
-  /* Single-class selector so utilities such as `pl-7` (currency adornments) win. */
+  /* Single-class selector so utilities such as `pl-7` (currency adornments) win.
+     16px text below `sm` stops iOS Safari zooming the page on focus. */
   .input {
-    @apply w-full rounded-md border border-gray-300 bg-surface px-3 py-2.5 text-sm text-gray-900;
+    @apply w-full rounded-md border border-gray-300 bg-surface px-3 py-2.5 text-base text-gray-900 sm:text-sm;
     @apply placeholder:text-gray-500;
     @apply focus:border-blue-500 focus:outline-none focus:ring-[3px] focus:ring-blue-500/20;
     @apply disabled:cursor-not-allowed disabled:border-gray-300 disabled:bg-gray-100 disabled:text-gray-700 disabled:opacity-100;

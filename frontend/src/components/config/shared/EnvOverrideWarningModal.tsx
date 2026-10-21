@@ -25,13 +25,14 @@ export default function EnvOverrideWarningModal({
       onClose={onCancel}
       panelClassName="w-full max-w-lg"
     >
-      <div className="space-y-4 rounded-lg border border-gray-200 bg-surface p-5">
+      <div className="space-y-4 rounded-xl border border-gray-200 bg-surface p-5 shadow-2xl">
         <div>
-          <h2 className="text-base font-semibold text-gray-900">Environment-managed settings</h2>
-          <p className="text-sm text-gray-600">
-            These fields are controlled by environment variables. Update the referenced variables in your
+          <h2 className="text-base font-semibold text-gray-900">These settings come from your environment</h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Your change will be saved, but the environment variable replaces it whenever that variable
+            changes. To keep it, update the variable in your
             <code className="mx-1 font-mono text-xs">.env</code>
-            (or deployment secrets) to make the change persistent. Your manual change will be saved, but will be overwritten if you modify your environment variables in the future.
+            file or deployment secrets.
           </p>
         </div>
         <ul className="space-y-3 text-sm">
@@ -39,11 +40,11 @@ export default function EnvOverrideWarningModal({
             const meta = overrides[path];
             const label = ENV_FIELD_LABELS[path] ?? path;
             return (
-              <li key={path} className="rounded border border-gray-200 bg-gray-50 p-3">
+              <li key={path} className="rounded-md bg-gray-50 p-3">
                 <div className="font-medium text-gray-900">{label}</div>
                 {meta?.env_var ? (
                   <p className="mt-1 text-xs text-gray-700">
-                    Managed by <code className="font-mono">{meta.env_var}</code>
+                    Set by <code className="font-mono">{meta.env_var}</code>
                     {meta?.value_preview && (
                       <span className="ml-1 text-gray-600">({meta.value_preview})</span>
                     )}
@@ -52,7 +53,7 @@ export default function EnvOverrideWarningModal({
                     )}
                   </p>
                 ) : (
-                  <p className="mt-1 text-xs text-gray-700">Managed by deployment environment</p>
+                  <p className="mt-1 text-xs text-gray-700">Set by your deployment environment</p>
                 )}
               </li>
             );

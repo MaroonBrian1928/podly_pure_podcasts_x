@@ -6,6 +6,7 @@ import { ChevronDownIcon } from '../../icons';
 import { costsApi } from '../../../services/api';
 import type { CostSummary, CallLog, EstimatedCostBackfillResult, TokenBackfillResult } from '../../../types';
 import { formatBackendDateTime } from '../../../utils/datetime';
+import { Section } from '../shared';
 
 function MonthSelector({
   year,
@@ -65,21 +66,21 @@ function costTokenTotal(call: CallLog['calls'][number]) {
 function EstimatedCostBackfillSummary({ result }: { result: EstimatedCostBackfillResult }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
-      <div className="border border-gray-200 rounded p-2">
-        <div className="text-xs text-gray-500">Scanned</div>
-        <div className="font-mono text-gray-900">{result.scanned.toLocaleString()}</div>
+      <div className="rounded bg-gray-50 p-2">
+        <div className="text-xs text-gray-600">Scanned</div>
+        <div className="font-mono tabular-nums text-gray-900">{result.scanned.toLocaleString()}</div>
       </div>
-      <div className="border border-gray-200 rounded p-2">
-        <div className="text-xs text-gray-500">Eligible (billable LLM)</div>
-        <div className="font-mono text-gray-900">{result.eligible.toLocaleString()}</div>
+      <div className="rounded bg-gray-50 p-2">
+        <div className="text-xs text-gray-600">Eligible (billable LLM calls)</div>
+        <div className="font-mono tabular-nums text-gray-900">{result.eligible.toLocaleString()}</div>
       </div>
-      <div className="border border-gray-200 rounded p-2">
-        <div className="text-xs text-gray-500">Non-billable</div>
-        <div className="font-mono text-gray-900">{result.skipped_non_billable.toLocaleString()}</div>
+      <div className="rounded bg-gray-50 p-2">
+        <div className="text-xs text-gray-600">Non-billable</div>
+        <div className="font-mono tabular-nums text-gray-900">{result.skipped_non_billable.toLocaleString()}</div>
       </div>
-      <div className="border border-gray-200 rounded p-2">
-        <div className="text-xs text-gray-500">Updated</div>
-        <div className="font-mono text-gray-900">{result.updated.toLocaleString()}</div>
+      <div className="rounded bg-gray-50 p-2">
+        <div className="text-xs text-gray-600">Updated</div>
+        <div className="font-mono tabular-nums text-gray-900">{result.updated.toLocaleString()}</div>
       </div>
     </div>
   );
@@ -90,30 +91,30 @@ function BackfillSummary({ result }: { result: TokenBackfillResult }) {
   return (
     <div className="space-y-3 text-sm">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <div className="border border-gray-200 rounded p-2">
-          <div className="text-xs text-gray-500">Scanned</div>
-          <div className="font-mono text-gray-900">{result.scanned.toLocaleString()}</div>
+        <div className="rounded bg-gray-50 p-2">
+          <div className="text-xs text-gray-600">Scanned</div>
+          <div className="font-mono tabular-nums text-gray-900">{result.scanned.toLocaleString()}</div>
         </div>
-        <div className="border border-gray-200 rounded p-2">
-          <div className="text-xs text-gray-500">Eligible</div>
-          <div className="font-mono text-gray-900">{result.eligible.toLocaleString()}</div>
+        <div className="rounded bg-gray-50 p-2">
+          <div className="text-xs text-gray-600">Eligible</div>
+          <div className="font-mono tabular-nums text-gray-900">{result.eligible.toLocaleString()}</div>
         </div>
-        <div className="border border-gray-200 rounded p-2">
-          <div className="text-xs text-gray-500">Would update</div>
-          <div className="font-mono text-gray-900">{result.would_update.toLocaleString()}</div>
+        <div className="rounded bg-gray-50 p-2">
+          <div className="text-xs text-gray-600">Would update</div>
+          <div className="font-mono tabular-nums text-gray-900">{result.would_update.toLocaleString()}</div>
         </div>
-        <div className="border border-gray-200 rounded p-2">
-          <div className="text-xs text-gray-500">Updated</div>
-          <div className="font-mono text-gray-900">{result.updated.toLocaleString()}</div>
+        <div className="rounded bg-gray-50 p-2">
+          <div className="text-xs text-gray-600">Updated</div>
+          <div className="font-mono tabular-nums text-gray-900">{result.updated.toLocaleString()}</div>
         </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-gray-600">
-        <div>Existing token data: <span className="font-mono">{result.skipped_existing.toLocaleString()}</span></div>
-        <div>Non-LLM calls: <span className="font-mono">{result.skipped_non_llm.toLocaleString()}</span></div>
-        <div>Missing text: <span className="font-mono">{result.skipped_missing_text.toLocaleString()}</span></div>
+        <div>Existing token data: <span className="font-mono tabular-nums">{result.skipped_existing.toLocaleString()}</span></div>
+        <div>Non-LLM calls: <span className="font-mono tabular-nums">{result.skipped_non_llm.toLocaleString()}</span></div>
+        <div>Missing text: <span className="font-mono tabular-nums">{result.skipped_missing_text.toLocaleString()}</span></div>
       </div>
       {modelEntries.length > 0 && (
-        <div className="border border-gray-200 rounded">
+        <div className="overflow-x-auto rounded border border-gray-200">
           <table className="min-w-full text-xs">
             <thead>
               <tr className="border-b border-gray-200">
@@ -126,8 +127,8 @@ function BackfillSummary({ result }: { result: TokenBackfillResult }) {
               {modelEntries.map(([modelName, stats]) => (
                 <tr key={modelName} className="border-b border-gray-100 last:border-b-0">
                   <td className="py-2 px-2 font-mono text-gray-700 truncate max-w-56">{modelName}</td>
-                  <td className="py-2 px-2 text-right font-mono">{stats.would_update}</td>
-                  <td className="py-2 px-2 text-right font-mono">{stats.updated}</td>
+                  <td className="py-2 px-2 text-right font-mono tabular-nums">{stats.would_update}</td>
+                  <td className="py-2 px-2 text-right font-mono tabular-nums">{stats.updated}</td>
                 </tr>
               ))}
             </tbody>
@@ -135,7 +136,7 @@ function BackfillSummary({ result }: { result: TokenBackfillResult }) {
         </div>
       )}
       {result.errors.length > 0 && (
-        <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+        <div className="text-xs text-red-700 bg-red-50 rounded p-2">
           {result.errors.length} tokenizer/update error(s); first: {result.errors[0].error}
         </div>
       )}
@@ -266,15 +267,8 @@ export default function CostsTab() {
   });
 
   return (
-    <div className="space-y-8">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-base font-semibold text-gray-900">Platform Costs</h3>
-          <p className="text-sm text-gray-500 mt-1">
-            <b>Platform logic:</b> LiteLLM token pricing + ${costs?.whisper_cost_rate_per_hour ?? 0.04}/hr Whisper + ${costs?.ina_cost_rate_per_hour ?? 0}/hr INA | <b>User attribution:</b> Divided by subscribers
-          </p>
-        </div>
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <MonthSelector
           year={year}
           month={month}
@@ -283,41 +277,41 @@ export default function CostsTab() {
             setMonth(m);
           }}
         />
+        <p className="min-w-0 text-sm text-gray-600">
+          Priced from LiteLLM token rates, Whisper at ${costs?.whisper_cost_rate_per_hour ?? 0.04}/hr and INA at ${costs?.ina_cost_rate_per_hour ?? 0}/hr. User costs split each feed&apos;s cost across its subscribers.
+        </p>
       </div>
 
-      {/* Summary */}
       {costsLoading ? (
-        <div className="text-sm text-gray-500">Loading cost data…</div>
+        <div className="text-sm text-gray-600">Loading cost data…</div>
       ) : costs ? (
         <>
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-            <div className="text-2xl font-semibold text-gray-900">
-              ${costs.total_cost.toFixed(2)}
+          <Section title="Total for the month">
+            <div>
+              <div className="text-2xl font-semibold tabular-nums text-gray-900">
+                ${costs.total_cost.toFixed(2)}
+              </div>
+              <div className="mt-1 text-sm tabular-nums text-gray-600">
+                {(costs.total_audio_hours ?? 0).toFixed(2)} hours of audio
+              </div>
             </div>
-            <div className="text-sm text-gray-600 mt-1">
-              Total processing cost this month
-              {' · '}
-              <span className="text-gray-700">{(costs.total_audio_hours ?? 0).toFixed(2)} hours of audio</span>
+            <div className="grid grid-cols-1 gap-2 text-sm text-gray-700 sm:grid-cols-3">
+              <div>LLM: <span className="font-mono tabular-nums">${costs.total_llm_cost.toFixed(2)}</span></div>
+              <div>Whisper: <span className="font-mono tabular-nums">${costs.total_whisper_cost.toFixed(2)}</span></div>
+              <div>INA: <span className="font-mono tabular-nums">${costs.total_ina_cost.toFixed(2)}</span></div>
             </div>
-            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-700">
-              <div>LLM: <span className="font-mono">${costs.total_llm_cost.toFixed(2)}</span></div>
-              <div>Whisper: <span className="font-mono">${costs.total_whisper_cost.toFixed(2)}</span></div>
-              <div>INA: <span className="font-mono">${costs.total_ina_cost.toFixed(2)}</span></div>
-            </div>
-          </div>
+          </Section>
 
-          {/* Per-feed breakdown */}
-          <section>
-            <h4 className="text-sm font-semibold text-gray-700 mb-3">Cost by Feed</h4>
+          <Section title="Cost by feed">
             {costs.feeds.length === 0 ? (
-              <p className="text-sm text-gray-500">No processed episodes this month.</p>
+              <p className="text-sm text-gray-600">No processed episodes this month.</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
+                <table className="min-w-full text-sm tabular-nums">
                   <thead>
                     <tr className="border-b border-gray-200">
                       <th className="text-left py-2 pr-4 font-medium text-gray-600">Feed</th>
-                      <th className="text-right py-2 pr-4 font-medium text-gray-600">Subs</th>
+                      <th className="text-right py-2 pr-4 font-medium text-gray-600">Subscribers</th>
                       <th className="text-right py-2 pr-4 font-medium text-gray-600">Episodes</th>
                       <th className="text-right py-2 pr-4 font-medium text-gray-600">LLM</th>
                       <th className="text-right py-2 pr-4 font-medium text-gray-600">Whisper</th>
@@ -343,22 +337,20 @@ export default function CostsTab() {
                 </table>
               </div>
             )}
-          </section>
+          </Section>
 
-          {/* Per-user breakdown */}
-          <section>
-            <h4 className="text-sm font-semibold text-gray-700 mb-3">Cost per User</h4>
+          <Section title="Cost by user">
             {costs.users.length === 0 ? (
-              <p className="text-sm text-gray-500">No users found.</p>
+              <p className="text-sm text-gray-600">No users found.</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
+                <table className="min-w-full text-sm tabular-nums">
                   <thead>
                     <tr className="border-b border-gray-200">
                       <th className="text-left py-2 pr-4 font-medium text-gray-600">User</th>
                       <th className="text-left py-2 pr-4 font-medium text-gray-600">Status</th>
                       <th className="text-right py-2 pr-4 font-medium text-gray-600">Feeds</th>
-                      <th className="text-right py-2 pr-4 font-medium text-gray-600">Sub $/mo</th>
+                      <th className="text-right py-2 pr-4 font-medium text-gray-600">Subscription $/month</th>
                       <th className="text-right py-2 font-medium text-gray-600">Cost</th>
                     </tr>
                   </thead>
@@ -369,8 +361,8 @@ export default function CostsTab() {
                         <td className="py-2 pr-4">
                           <span
                             className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${user.subscription_status === 'active'
-                              ? 'bg-green-100 text-green-700'
-                              : 'bg-gray-100 text-gray-500'
+                              ? 'bg-green-50 text-green-700'
+                              : 'bg-gray-100 text-gray-600'
                               }`}
                           >
                             {user.subscription_status}
@@ -391,19 +383,18 @@ export default function CostsTab() {
                 </table>
               </div>
             )}
-          </section>
+          </Section>
         </>
       ) : null}
 
       {/* API Call Log */}
-      <section>
-        <h4 className="text-sm font-semibold text-gray-700 mb-3">API Call Log</h4>
+      <Section title="API call log">
         {callsLoading ? (
-          <div className="text-sm text-gray-500">Loading call log…</div>
+          <div className="text-sm text-gray-600">Loading call log…</div>
         ) : calls ? (
           <>
             <div className="overflow-x-auto">
-              <table className="min-w-full text-sm">
+              <table className="min-w-full text-sm tabular-nums">
                 <thead>
                   <tr className="border-b border-gray-200">
                     <th className="text-left py-2 pr-4 font-medium text-gray-600">Model</th>
@@ -421,10 +412,10 @@ export default function CostsTab() {
                       <td className="py-2 pr-4">
                         <span
                           className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${c.status === 'completed'
-                            ? 'bg-green-100 text-green-700'
+                            ? 'bg-green-50 text-green-700'
                             : c.status === 'failed'
-                              ? 'bg-red-100 text-red-700'
-                              : 'bg-gray-100 text-gray-500'
+                              ? 'bg-red-50 text-red-700'
+                              : 'bg-gray-100 text-gray-600'
                             }`}
                         >
                           {c.status}
@@ -440,7 +431,7 @@ export default function CostsTab() {
                         {c.estimated_cost != null ? `$${c.estimated_cost.toFixed(4)}` : '—'}
                       </td>
                       <td className="py-2 pr-4 text-right text-gray-600">{c.retry_attempts}</td>
-                      <td className="py-2 text-right text-gray-500 text-xs">
+                      <td className="py-2 text-right text-gray-600 text-xs whitespace-nowrap">
                         {formatBackendDateTime(c.timestamp)}
                       </td>
                     </tr>
@@ -450,8 +441,8 @@ export default function CostsTab() {
             </div>
             {/* Pagination */}
             {calls.pages > 1 && (
-              <div className="flex items-center justify-between mt-3">
-                <span className="text-xs text-gray-500">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs tabular-nums text-gray-600">
                   Page {calls.page} of {calls.pages} ({calls.total} calls)
                 </span>
                 <div className="flex gap-2">
@@ -474,11 +465,9 @@ export default function CostsTab() {
             )}
           </>
         ) : null}
-      </section>
+      </Section>
 
-      {/* Cleanup utilities */}
-      <section>
-        <h4 className="text-sm font-semibold text-gray-700 mb-3">Cleanup Utilities</h4>
+      <Section title="Maintenance" collapsible>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={() => cleanupCancelledMutation.mutate()}
@@ -511,12 +500,12 @@ export default function CostsTab() {
               setCostBackfillNotice(null);
             }}
             className="btn btn-secondary"
-            title="Populate ModelCall.estimated_cost_usd for legacy rows so the stats page can render cost without importing LiteLLM into the web process."
+            title="Prices legacy model calls so cost can be shown without loading LiteLLM into the web process."
           >
             Backfill estimated cost
           </button>
         </div>
-      </section>
+      </Section>
 
       <ModalShell
         isOpen={showBackfillWizard}
@@ -526,14 +515,14 @@ export default function CostsTab() {
         <div className="space-y-5">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h4 className="text-base font-semibold text-gray-900">Backfill Token Usage</h4>
-              <p className="text-sm text-gray-500 mt-1">
+              <h4 className="text-base font-semibold text-gray-900">Backfill token usage</h4>
+              <p className="text-sm text-gray-600 mt-1">
                 Estimate missing prompt and completion tokens for legacy successful LLM calls. Cached prompt tokens stay blank.
               </p>
             </div>
             <button
               onClick={() => setShowBackfillWizard(false)}
-              className="text-gray-400 hover:text-gray-700"
+              className="btn btn-ghost btn-icon btn-sm"
               aria-label="Close"
             >
               ×
@@ -552,7 +541,7 @@ export default function CostsTab() {
                 setBackfillNotice(null);
               }}
               placeholder="All model calls"
-              className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="input mt-1.5"
             />
           </label>
 
@@ -603,19 +592,14 @@ export default function CostsTab() {
         <div className="space-y-5">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h4 className="text-base font-semibold text-gray-900">Backfill Estimated Cost</h4>
-              <p className="text-sm text-gray-500 mt-1">
-                Populate <code>ModelCall.estimated_cost_usd</code> for legacy
-                rows so the stats page can render per-call cost without
-                importing LiteLLM into the web process. This one call loads
-                LiteLLM into the current web process (~160 MiB); restart the
-                web service afterwards to release it. New calls are priced
-                automatically by the worker.
+              <h4 className="text-base font-semibold text-gray-900">Backfill estimated cost</h4>
+              <p className="text-sm text-gray-600 mt-1">
+                Prices legacy model calls so the stats page can show per-call cost. This loads LiteLLM into the web process (about 160 MiB), so restart the web service afterwards to release the memory. New calls are priced automatically.
               </p>
             </div>
             <button
               onClick={() => setShowCostBackfillWizard(false)}
-              className="text-gray-400 hover:text-gray-700"
+              className="btn btn-ghost btn-icon btn-sm"
               aria-label="Close"
             >
               ×
@@ -634,7 +618,7 @@ export default function CostsTab() {
                 setCostBackfillNotice(null);
               }}
               placeholder="All unpriced successful calls"
-              className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="input mt-1.5"
             />
           </label>
 

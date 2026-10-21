@@ -77,6 +77,8 @@ interface ProcessingEstimate {
 
 const EPISODES_PAGE_SIZE = 25;
 
+const htmlToPlainText = (html: string) => new DOMParser().parseFromString(html, 'text/html').body.textContent?.trim() ?? '';
+
 export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailProps) {
   const { requireAuth, isAuthenticated, user } = useAuth();
   const [sortBy, setSortBy] = useState<SortOption>('newest');
@@ -687,7 +689,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         </div>
 
         {/* Sticky Header - appears when scrolling */}
-        <div className={`absolute top-16 lg:top-0 left-0 right-0 z-10 bg-surface border-b transition-[opacity,transform] duration-300 ease-out ${
+        <div inert={!showStickyHeader} className={`absolute top-16 lg:top-0 left-0 right-0 z-10 bg-surface border-b transition-[opacity,transform] duration-300 ease-out ${
           showStickyHeader ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'
         }`}>
           <div className="p-4">
@@ -695,12 +697,12 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
               {currentFeed.image_url && (
                 <img
                   src={currentFeed.image_url}
-                  alt={currentFeed.title}
+                  alt=""
                   className="w-10 h-10 rounded-lg object-cover"
                 />
               )}
               <div className="flex-1 min-w-0">
-                <h2 className="font-semibold text-gray-900 truncate">{currentFeed.title}</h2>
+                <p className="font-semibold text-gray-900 truncate">{currentFeed.title}</p>
                 {currentFeed.author && (
                   <p className="text-sm text-gray-600 truncate">by {currentFeed.author}</p>
                 )}
@@ -708,7 +710,8 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as SortOption)}
-                className="text-sm border border-gray-300 rounded-md px-3 py-1 bg-surface"
+                aria-label="Sort episodes"
+                className="input w-auto py-1.5 pl-3 pr-8"
               >
                 <option value="newest">Newest First</option>
                 <option value="oldest">Oldest First</option>
@@ -732,7 +735,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                 {currentFeed.image_url ? (
                   <img
                     src={currentFeed.image_url}
-                    alt={currentFeed.title}
+                    alt=""
                     className="w-32 h-32 sm:w-40 sm:h-40 rounded-lg object-cover"
                   />
                 ) : (
@@ -786,7 +789,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                 <button
                   onClick={handleCopyRssToClipboard}
                   title="Copy Podly RSS feed URL"
-                  className="btn btn-dark w-full sm:w-auto"
+                  className="btn btn-dark w-full sm:w-auto h-auto min-h-9 whitespace-normal py-2 text-center"
                   disabled={!canSubscribe}
                 >
                   <img
@@ -801,7 +804,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                 </button>
               )}
 
-              <div className="flex w-full items-center gap-3 sm:w-auto sm:flex-1 sm:flex-wrap">
+              <div className="flex w-full items-center gap-3 sm:w-auto sm:flex-1 flex-wrap">
                 {requireAuth && isAdmin && !isMember && (
                   <button
                     onClick={() => joinFeedMutation.mutate()}
@@ -950,7 +953,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
             {/* Feed Description */}
             {currentFeed.description && (
               <div className="text-gray-700 leading-relaxed">
-                <p>{currentFeed.description.replace(/<[^>]*>/g, '')}</p>
+                <p>{htmlToPlainText(currentFeed.description)}</p>
               </div>
             )}
           </div>
@@ -976,7 +979,8 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortOption)}
-              className="text-sm border border-gray-300 rounded-md px-3 py-1 bg-surface"
+              aria-label="Sort episodes"
+              className="input w-auto py-1.5 pl-3 pr-8"
             >
               <option value="newest">Newest First</option>
               <option value="oldest">Oldest First</option>
@@ -1049,7 +1053,8 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                         {(episode.image_url || currentFeed.image_url) ? (
                           <img
                             src={episode.image_url || currentFeed.image_url}
-                            alt={episode.title}
+                            alt=""
+                            loading="lazy"
                             className="w-16 h-16 rounded-lg object-cover"
                           />
                         ) : (
@@ -1125,7 +1130,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                                       return next;
                                     });
                                   }}
-                                  className="mt-2 inline-flex items-center text-xs font-medium text-gray-500 underline-offset-2 transition hover:text-gray-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300/60"
+                                  className="touch-target mt-2 inline-flex items-center text-xs font-medium text-gray-500 underline-offset-2 transition hover:text-gray-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300/60"
                                 >
                                   {isExpanded ? 'Show less' : 'Show more'}
                                 </button>
@@ -1137,18 +1142,21 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                     )}
 
                     {/* Metadata: Status, Date and Duration */}
-                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
                       {showWhitelistUi && (
                         <>
                           <button
                             onClick={() => handleWhitelistToggle(episode)}
                             disabled={whitelistMutation.isPending}
-                            className={`px-2 py-1 text-xs font-medium rounded-full transition-colors flex items-center justify-center gap-1 ${
+                            role="switch"
+                            aria-checked={episode.whitelisted}
+                            className={`touch-target px-2 py-1 text-xs font-medium rounded-full transition-colors flex items-center justify-center gap-1 ${
                               episode.whitelisted
                                 ? 'bg-green-100 text-green-800 hover:bg-green-200'
                                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                             } ${whitelistMutation.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}
                           >
+                            <span className="sr-only">Process episode: </span>
                             {whitelistMutation.isPending ? (
                               <>
                                 <RefreshIcon className="h-3 w-3 animate-spin" />
@@ -1166,22 +1174,23 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
                               </>
                             )}
                           </button>
-                          <span>•</span>
                         </>
                       )}
-                      <span>{formatDate(episode.release_date)}</span>
+                      {/* Each separator leads its item so a wrapped line never ends on a bullet. */}
+                      <span className="whitespace-nowrap">
+                        {showWhitelistUi && <span aria-hidden="true" className="mr-2">•</span>}
+                        {formatDate(episode.release_date)}
+                      </span>
                       {episode.duration && (
-                        <>
-                          <span>•</span>
-                          <span>{formatDuration(episode.duration)}</span>
-                        </>
-                      )}
-                      <>
-                        <span>•</span>
-                        <span>
-                          {episode.download_count ? episode.download_count : 0} {episode.download_count === 1 ? 'download' : 'downloads'}
+                        <span className="whitespace-nowrap">
+                          <span aria-hidden="true" className="mr-2">•</span>
+                          {formatDuration(episode.duration)}
                         </span>
-                      </>
+                      )}
+                      <span className="whitespace-nowrap">
+                        <span aria-hidden="true" className="mr-2">•</span>
+                        {episode.download_count ? episode.download_count : 0} {episode.download_count === 1 ? 'download' : 'downloads'}
+                      </span>
                     </div>
 
                     {/* Bottom Controls - only show if episode is whitelisted */}

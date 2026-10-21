@@ -12,9 +12,9 @@ import CostsTab from './tabs/CostsTab';
 import NotificationsTab from './tabs/NotificationsTab';
 
 const TABS: { id: ConfigTabId; label: string; adminOnly?: boolean }[] = [
-  { id: 'default', label: 'Default' },
+  { id: 'default', label: 'Basics' },
   { id: 'advanced', label: 'Advanced' },
-  { id: 'users', label: 'User Management', adminOnly: true },
+  { id: 'users', label: 'Users', adminOnly: true },
   { id: 'discord', label: 'Discord', adminOnly: true },
   { id: 'costs', label: 'Costs', adminOnly: true },
   { id: 'notifications', label: 'Notifications', adminOnly: true },
@@ -103,19 +103,19 @@ export default function ConfigTabs() {
   });
 
   if (configState.isLoading || !configState.pending) {
-    return <div className="text-sm text-gray-700">Loading configuration...</div>;
+    return <div className="text-sm text-gray-700">Loading settings…</div>;
   }
 
   return (
     <ConfigContext.Provider value={contextValue}>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold text-gray-900">Configuration</h1>
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Settings</h1>
         </div>
 
         {/* Tab Navigation */}
         <div className="border-b border-gray-200 overflow-x-auto">
-          <nav className="flex space-x-8 min-w-max" role="tablist" aria-label="Config tabs">
+          <nav className="flex space-x-8 min-w-max" role="tablist" aria-label="Settings">
             {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -136,7 +136,8 @@ export default function ConfigTabs() {
         </div>
 
         {/* Tab Content */}
-        <div className="mt-4">
+        {/* Forms stay at a readable width; Costs keeps the full width for its tables. */}
+        <div className={`mt-4 ${activeTab === 'costs' ? '' : 'max-w-3xl'}`}>
           {activeTab === 'default' && <DefaultTab />}
           {activeTab === 'advanced' && <AdvancedTab />}
           {activeTab === 'users' && isAdmin && <UserManagementTab />}
@@ -155,7 +156,7 @@ export default function ConfigTabs() {
           />
         )}
 
-        {/* Extra padding to prevent audio player overlay from obscuring bottom settings */}
+        {/* Keeps the last settings clear of the audio player overlay. */}
         <div className="h-24"></div>
       </div>
     </ConfigContext.Provider>

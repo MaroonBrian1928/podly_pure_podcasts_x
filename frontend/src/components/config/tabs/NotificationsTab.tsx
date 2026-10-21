@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useConfigContext } from '../ConfigContext';
-import { Section, Field, SaveButton } from '../shared';
+import { Section, Field, ToggleField, SaveButton } from '../shared';
 import { configApi } from '../../../services/api';
 
 export default function NotificationsTab() {
@@ -20,12 +20,11 @@ export default function NotificationsTab() {
   };
 
   const urls = notifications.apprise_urls ?? [];
-  const enabled = !!notifications.enabled;
 
   const handleTest = async () => {
     const cleaned = urls.map((u) => u.trim()).filter(Boolean);
     if (cleaned.length === 0) {
-      toast.error('Add at least one Apprise URL first');
+      toast.error('Add at least one Apprise URL, then send the test again.');
       return;
     }
     setIsTesting(true);
@@ -36,12 +35,16 @@ export default function NotificationsTab() {
       if (res.ok) {
         toast.success(res.message || 'Test notification sent');
       } else {
-        toast.error(res.error || 'Failed to send test notification');
+        toast.error(
+          res.error || 'Could not send the test notification. Check your Apprise URLs.'
+        );
       }
     } catch (err: unknown) {
       const e = err as { response?: { data?: { error?: string } }; message?: string };
       toast.error(
-        e?.response?.data?.error || e?.message || 'Failed to send test notification'
+        e?.response?.data?.error ||
+          e?.message ||
+          'Could not send the test notification. Check your Apprise URLs.'
       );
     } finally {
       setIsTesting(false);
@@ -50,30 +53,31 @@ export default function NotificationsTab() {
 
   return (
     <div className="space-y-6">
-      <Section title="Notifications">
-        <p className="text-sm text-gray-600">
-          Get pushed a message when an episode fails to process. Podly uses{' '}
-          <a
-            href="https://github.com/caronc/apprise/wiki"
-            target="_blank"
-            rel="noreferrer"
-            className="text-blue-700 hover:text-blue-800 underline"
-          >
-            Apprise
-          </a>
-          , so you can deliver to Discord, Telegram, ntfy, Slack, email, Pushover, and
-          100+ other services by pasting their notification URLs below (one per line).
-        </p>
+      <Section title="Delivery">
+        <ToggleField
+          label="Send notifications"
+          hint="Push a message to your Apprise services when episodes need attention."
+          checked={!!notifications.enabled}
+          onChange={(checked) => setField(['notifications', 'enabled'], checked)}
+        />
 
-        <Field label="Enable notifications">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setField(['notifications', 'enabled'], e.target.checked)}
-          />
-        </Field>
-
-        <Field label="Apprise URLs (one per line)">
+        <Field
+          label="Apprise URLs (one per line)"
+          hint={
+            <>
+              Example: <code>ntfy://ntfy.sh/my-topic</code>. See the{' '}
+              <a
+                href="https://github.com/caronc/apprise/wiki"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-700 underline hover:text-blue-800"
+              >
+                Apprise docs
+              </a>{' '}
+              for Discord, Telegram, Slack, email and 100+ other services.
+            </>
+          }
+        >
           <textarea
             className="input font-mono text-xs"
             rows={4}
@@ -85,102 +89,56 @@ export default function NotificationsTab() {
           />
         </Field>
 
-        <div className="pt-2">
-          <span className="block text-sm font-medium text-gray-800 mb-2">
-            Notify me when&hellip;
-          </span>
-          <div className="space-y-2">
-            <label className="flex items-start gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={!!notifications.notify_on_failure}
-                onChange={(e) =>
-                  setField(['notifications', 'notify_on_failure'], e.target.checked)
-                }
-              />
-              <span>
-                An episode <strong>fails</strong> to process
-                <span className="block text-xs text-gray-500">
-                  Includes the episode/feed, failing step, and the error.
-                </span>
-              </span>
-            </label>
-
-            {notifications.notify_on_failure && (
-              <label className="flex items-start gap-2 text-sm text-gray-700 pl-6">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={!!notifications.include_llm_explanation}
-                  onChange={(e) =>
-                    setField(
-                      ['notifications', 'include_llm_explanation'],
-                      e.target.checked
-                    )
-                  }
-                />
-                <span>
-                  &hellip;and include an <strong>AI root-cause analysis</strong>
-                  <span className="block text-xs text-gray-500">
-                    Runs the same LLM &ldquo;Troubleshoot&rdquo; analysis; costs one
-                    extra LLM call per failure.
-                  </span>
-                </span>
-              </label>
-            )}
-
-            <label className="flex items-start gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={!!notifications.notify_on_success}
-                onChange={(e) =>
-                  setField(['notifications', 'notify_on_success'], e.target.checked)
-                }
-              />
-              <span>
-                An episode finishes processing <strong>successfully</strong>
-                <span className="block text-xs text-gray-500">
-                  Higher volume &mdash; one alert per completed episode.
-                </span>
-              </span>
-            </label>
-
-            <label className="flex items-start gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={!!notifications.notify_on_rust_fallback}
-                onChange={(e) =>
-                  setField(
-                    ['notifications', 'notify_on_rust_fallback'],
-                    e.target.checked
-                  )
-                }
-              />
-              <span>
-                The <strong>Rust sidecar</strong> fails and falls back to Python
-                <span className="block text-xs text-gray-500">
-                  Processing still works via Python; throttled per operation so it
-                  won&rsquo;t spam.
-                </span>
-              </span>
-            </label>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between gap-3">
+        <div>
           <button
+            type="button"
             onClick={handleTest}
             className="btn btn-secondary"
             disabled={isTesting}
           >
-            {isTesting ? 'Sending...' : 'Send test notification'}
+            {isTesting ? 'Sending…' : 'Send test notification'}
           </button>
-          <SaveButton onSave={handleSave} isPending={isSaving} />
         </div>
       </Section>
+
+      <Section title="Events">
+        <div className="space-y-4">
+          <ToggleField
+            label="Episode fails to process"
+            hint="Includes the episode or feed, the failing step and the error."
+            checked={!!notifications.notify_on_failure}
+            onChange={(checked) => setField(['notifications', 'notify_on_failure'], checked)}
+          />
+          {notifications.notify_on_failure && (
+            <div className="pl-6">
+              <ToggleField
+                label="Add LLM root-cause analysis to failures"
+                hint="Runs the LLM troubleshoot analysis; costs one extra LLM call per failure."
+                checked={!!notifications.include_llm_explanation}
+                onChange={(checked) =>
+                  setField(['notifications', 'include_llm_explanation'], checked)
+                }
+              />
+            </div>
+          )}
+          <ToggleField
+            label="Episode finishes processing"
+            hint="One alert per completed episode, so expect higher volume."
+            checked={!!notifications.notify_on_success}
+            onChange={(checked) => setField(['notifications', 'notify_on_success'], checked)}
+          />
+          <ToggleField
+            label="Rust sidecar falls back to Python"
+            hint="Processing still works; alerts are throttled per operation."
+            checked={!!notifications.notify_on_rust_fallback}
+            onChange={(checked) =>
+              setField(['notifications', 'notify_on_rust_fallback'], checked)
+            }
+          />
+        </div>
+      </Section>
+
+      <SaveButton onSave={handleSave} isPending={isSaving} />
     </div>
   );
 }
