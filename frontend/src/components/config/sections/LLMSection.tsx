@@ -3,6 +3,7 @@ import { toast } from 'react-hot-toast';
 import { configApi } from '../../../services/api';
 import { useConfigContext } from '../ConfigContext';
 import { Section, Field, SaveButton, TestButton, EnvVarHint } from '../shared';
+import { CheckIcon, GearIcon, InfoIcon } from '../../icons';
 import type { LLMConfig } from '../../../types';
 
 const LLM_MODEL_ALIASES: string[] = [
@@ -77,11 +78,12 @@ export default function LLMSection() {
               <span className="text-sm text-gray-700">OpenAI Base URL</span>
               <button
                 type="button"
-                className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50"
+                className="btn btn-ghost btn-icon btn-sm"
                 onClick={() => setShowBaseUrlInfo((v) => !v)}
                 title="When is this used?"
+                aria-label="When is this used?"
               >
-                ⓘ
+                <InfoIcon />
               </button>
             </div>
             <EnvVarHint meta={getEnvHint('llm.openai_base_url')} />
@@ -293,28 +295,28 @@ function BaseUrlInfoBox() {
         automatically routes provider-prefixed models to their respective APIs.
       </p>
       <div className="space-y-1">
-        <p className="font-medium">✅ Base URL is IGNORED for:</p>
+        <p className="font-medium flex items-center gap-1.5"><CheckIcon className="h-4 w-4 text-green-700" />Base URL is IGNORED for:</p>
         <ul className="list-disc pl-5 space-y-0.5">
           <li>
-            <code className="bg-white px-1 rounded">groq/openai/gpt-oss-120b</code> → Groq API
+            <code className="bg-surface px-1 rounded">groq/openai/gpt-oss-120b</code> → Groq API
           </li>
           <li>
-            <code className="bg-white px-1 rounded">anthropic/claude-3.5-sonnet</code> → Anthropic
+            <code className="bg-surface px-1 rounded">anthropic/claude-3.5-sonnet</code> → Anthropic
             API
           </li>
           <li>
-            <code className="bg-white px-1 rounded">gemini/gemini-3-flash-preview</code> → Google API
+            <code className="bg-surface px-1 rounded">gemini/gemini-3-flash-preview</code> → Google API
           </li>
           <li>
-            <code className="bg-white px-1 rounded">gemini/gemini-2.0-flash</code> → Google API
+            <code className="bg-surface px-1 rounded">gemini/gemini-2.0-flash</code> → Google API
           </li>
         </ul>
       </div>
       <div className="space-y-1">
-        <p className="font-medium">⚙️ Base URL is USED for:</p>
+        <p className="font-medium flex items-center gap-1.5"><GearIcon className="h-4 w-4 text-blue-700" />Base URL is USED for:</p>
         <ul className="list-disc pl-5 space-y-0.5">
           <li>
-            Unprefixed models like <code className="bg-white px-1 rounded">gpt-4o</code>
+            Unprefixed models like <code className="bg-surface px-1 rounded">gpt-4o</code>
           </li>
           <li>Self-hosted OpenAI-compatible endpoints</li>
           <li>LiteLLM proxy servers or local LLMs</li>

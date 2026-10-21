@@ -97,7 +97,7 @@ export default function LoginPage() {
       <div className="fixed right-4 top-4">
         <ThemeToggle />
       </div>
-      <div className="w-full max-w-md bg-white shadow-lg rounded-xl border border-gray-200 p-6">
+      <div className="w-full max-w-md bg-surface rounded-lg border border-gray-200 p-6">
         <div className="flex flex-col items-center gap-2 mb-6">
           <Link to="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
             <img src="/images/logos/logo.webp" alt="Podly" className="h-10 w-auto" />
@@ -117,7 +117,7 @@ export default function LoginPage() {
               type="button"
               onClick={handleDiscordLogin}
               disabled={discordLoading}
-              className="w-full flex justify-center items-center gap-2 rounded-md bg-[#5865F2] px-4 py-3 text-white font-semibold shadow hover:bg-[#4752C4] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              className="w-full flex justify-center items-center gap-2 rounded-md bg-[#5865F2] px-4 py-3 text-white font-semibold hover:bg-[#4752C4] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {discordLoading ? (
                 <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
@@ -156,7 +156,7 @@ export default function LoginPage() {
                 autoComplete="username"
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 disabled={submitting}
                 required
               />
@@ -173,7 +173,7 @@ export default function LoginPage() {
                 autoComplete="current-password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 disabled={submitting}
                 required
               />
@@ -182,7 +182,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={submitting}
-              className="w-full flex justify-center items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-white font-medium hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              className="btn btn-primary w-full"
             >
               {submitting && <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />}
               {submitting ? 'Signing in…' : 'Sign in'}
@@ -197,7 +197,7 @@ export default function LoginPage() {
             </a>
           )}
           {landingPageEnabled && (
-            <Link to="/" className="text-sm text-gray-500 hover:text-gray-700 transition-colors">
+            <Link to="/" className="text-sm text-gray-600 hover:text-gray-900 transition-colors">
               ← Back to home
             </Link>
           )}

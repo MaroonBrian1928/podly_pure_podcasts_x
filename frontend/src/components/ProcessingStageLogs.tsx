@@ -48,7 +48,7 @@ const STAGE_META: Record<string, { label: string; badgeClass: string }> = {
 };
 
 const LEVEL_BADGE_CLASS: Record<string, string> = {
-  DEBUG: 'bg-slate-100 text-slate-700',
+  DEBUG: 'bg-gray-100 text-gray-700',
   INFO: 'bg-blue-50 text-blue-700',
   WARNING: 'bg-amber-50 text-amber-700',
   ERROR: 'bg-red-50 text-red-700',
@@ -87,7 +87,7 @@ export default function ProcessingStageLogs({ relatedLogs }: ProcessingStageLogs
             {entries.length} related log {entries.length === 1 ? 'entry' : 'entries'}
           </span>
           {relatedLogs?.latest_job_id && (
-            <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1 font-mono text-xs text-gray-600">
+            <span className="inline-flex items-center rounded-full border border-gray-200 bg-surface px-3 py-1 font-mono text-xs text-gray-600">
               latest job {relatedLogs.latest_job_id}
             </span>
           )}
@@ -102,7 +102,7 @@ export default function ProcessingStageLogs({ relatedLogs }: ProcessingStageLogs
         const stageMeta = STAGE_META[stage] || STAGE_META.general;
 
         return (
-          <section key={stage} className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+          <section key={stage} className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-gray-50 px-4 py-3">
               <div className="flex items-center gap-3">
                 <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium ${stageMeta.badgeClass}`}>
@@ -121,12 +121,12 @@ export default function ProcessingStageLogs({ relatedLogs }: ProcessingStageLogs
                       {entry.level}
                     </span>
                     {entry.step_name && (
-                      <span className="inline-flex items-center rounded-full bg-white border border-gray-200 px-2 py-1 text-gray-600">
+                      <span className="inline-flex items-center rounded-full bg-surface border border-gray-200 px-2 py-1 text-gray-600">
                         {entry.step_name}
                       </span>
                     )}
                     {entry.job_id && (
-                      <span className="inline-flex items-center rounded-full bg-white border border-gray-200 px-2 py-1 font-mono text-gray-500">
+                      <span className="inline-flex items-center rounded-full bg-surface border border-gray-200 px-2 py-1 font-mono text-gray-500">
                         {entry.job_id}
                       </span>
                     )}

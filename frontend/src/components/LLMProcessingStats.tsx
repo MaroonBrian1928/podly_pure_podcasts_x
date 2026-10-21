@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
+import { BoltIcon, CloseIcon } from './icons';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import { formatBackendDateTime } from '../utils/datetime';
 import ProcessingStageLogs from './ProcessingStageLogs';
@@ -164,6 +165,11 @@ export default function LLMProcessingStats({
         ? stats.post.duration + adTimeSeconds
         : fallbackDurationSeconds
     );
+  const reportedOriginalSeconds = stats?.processing_stats?.original_duration_seconds;
+  const hasOriginalDuration =
+    reportedOriginalSeconds != null &&
+    stats?.post?.duration != null &&
+    Math.abs(reportedOriginalSeconds - stats.post.duration) > 1;
   const editedDurationSeconds = stats?.processing_stats?.edited_duration_seconds
     ?? Math.max(0, originalDurationSeconds - adTimeSeconds);
   const adPercent = stats?.processing_stats?.ad_percentage
@@ -177,18 +183,17 @@ export default function LLMProcessingStats({
     ? (bleepTimeSeconds / editedDurationSeconds) * 100
     : 0;
   const adTimelineSegments = (stats?.processing_stats?.edited_ad_markers || []).map((marker) => ({
-    startTime: marker.edited_start_time,
-    endTime: marker.edited_end_time,
-    kind: 'point' as const,
-    visualDurationSeconds: marker.removed_duration_seconds,
-    tooltipTitle: 'Removed Ad Block',
+    startTime: marker.original_start_time,
+    endTime: marker.original_end_time,
+    kind: 'range' as const,
+    tooltipTitle: 'Removed ad break',
     tooltipRows: [
       {
-        label: 'Edited',
+        label: 'Edited at',
         value: formatTimelineLabel(marker.edited_start_time),
       },
       {
-        label: 'Source Ad',
+        label: 'Original',
         value: formatTimelineRange(marker.original_start_time, marker.original_end_time),
       },
       {
@@ -197,25 +202,24 @@ export default function LLMProcessingStats({
       },
     ],
     ariaLabel: [
-      'Removed ad block.',
+      'Removed ad break.',
       `Edited splice ${formatTimelineLabel(marker.edited_start_time)}.`,
       `Original range ${formatTimelineRange(marker.original_start_time, marker.original_end_time)}.`,
       `Removed ${formatTimelineLabel(marker.removed_duration_seconds)}.`,
     ].join(' '),
   }));
   const bleepTimelineSegments = (stats?.processing_stats?.edited_bleep_windows || []).map((window) => ({
-    startTime: (window.edited_start_time + window.edited_end_time) / 2,
-    endTime: (window.edited_start_time + window.edited_end_time) / 2,
-    kind: 'point' as const,
-    visualDurationSeconds: Math.max(0, window.edited_end_time - window.edited_start_time),
-    tooltipTitle: 'Bleeped Section',
+    startTime: window.edited_start_time,
+    endTime: window.edited_end_time,
+    kind: 'range' as const,
+    tooltipTitle: 'Bleeped section',
     tooltipRows: [
       {
-        label: 'Edited',
+        label: 'Edited at',
         value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
       },
       {
-        label: 'Source',
+        label: 'Original',
         value: formatTimelineRange(window.original_start_time, window.original_end_time),
       },
     ],
@@ -240,7 +244,7 @@ export default function LLMProcessingStats({
       case 'noise':
         return 'bg-amber-100 text-amber-800';
       case 'noEnergy':
-        return 'bg-slate-100 text-slate-700';
+        return 'bg-gray-100 text-gray-700';
       default:
         return 'bg-gray-100 text-gray-700';
     }
@@ -252,7 +256,7 @@ export default function LLMProcessingStats({
       case 'noise':
         return 'bg-amber-50 text-amber-700';
       case 'noEnergy':
-        return 'bg-slate-100 text-slate-600';
+        return 'bg-gray-100 text-gray-600';
       default:
         return 'bg-gray-50 text-gray-600';
     }
@@ -275,7 +279,7 @@ export default function LLMProcessingStats({
     <>
       <button
         onClick={() => setShowModal(true)}
-        className={`px-3 py-1 text-xs rounded font-medium transition-colors border bg-white text-gray-700 border-gray-300 hover:bg-gray-50 hover:border-gray-400 hover:text-gray-900 flex items-center gap-1 ${className}`}
+        className={`px-3 py-1 text-xs rounded font-medium transition-colors border bg-surface text-gray-700 border-gray-300 hover:bg-gray-50 hover:border-gray-400 hover:text-gray-900 flex items-center gap-1 ${className}`}
       >
         Stats
       </button>
@@ -283,22 +287,22 @@ export default function LLMProcessingStats({
       <ModalShell
         isOpen={showModal}
         onClose={() => setShowModal(false)}
-        panelClassName="bg-white rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
+        panelClassName="bg-surface rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
       >
             <div className="flex items-center justify-between p-6 border-b">
-              <h2 className="text-xl font-bold text-gray-900 text-left">Processing Statistics & Debug</h2>
+              <h2 className="text-xl font-bold text-gray-900 text-left">Processing statistics & debug</h2>
               <button
+                type="button"
                 onClick={() => setShowModal(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                aria-label="Close"
+                className="btn btn-ghost btn-icon"
               >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                  <CloseIcon className="h-5 w-5" />
               </button>
             </div>
 
             <div className="border-b overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-              <nav className="flex min-w-max space-x-8 px-6">
+              <nav role="tablist" className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
                   ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
@@ -310,10 +314,13 @@ export default function LLMProcessingStats({
                 ].map((tab) => (
                   <button
                     key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === tab.id}
                     onClick={() => setActiveTab(tab.id as TabId)}
-                    className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                    className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
                       activeTab === tab.id
-                        ? 'border-blue-500 text-blue-600'
+                        ? 'border-blue-600 text-blue-700'
                         : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                     } shrink-0 whitespace-nowrap`}
                   >
@@ -348,16 +355,20 @@ export default function LLMProcessingStats({
                   {activeTab === 'overview' && (
                     <div className="space-y-6">
                       <div className="bg-gray-50 rounded-lg p-4">
-                        <h3 className="font-semibold text-gray-900 mb-2 text-left">Episode Information</h3>
+                        <h3 className="font-semibold text-gray-900 mb-2 text-left">Episode information</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                           <div className="text-left">
                             <span className="font-medium text-gray-700">Title:</span>
                             <span className="ml-2 text-gray-600">{stats.post?.title || 'Unknown'}</span>
                           </div>
                           <div className="text-left">
-                            <span className="font-medium text-gray-700">Duration:</span>
+                            <span className="font-medium text-gray-700">{hasOriginalDuration ? 'Length:' : 'Duration:'}</span>
                             <span className="ml-2 text-gray-600">
-                              {stats.post?.duration ? formatDuration(stats.post.duration) : 'Unknown'}
+                              {stats.post?.duration
+                                ? hasOriginalDuration
+                                  ? `${formatDuration(stats.post.duration)} after cuts (original ${formatTimelineLabel(originalDurationSeconds)})`
+                                  : formatDuration(stats.post.duration)
+                                : 'Unknown'}
                             </span>
                           </div>
                           <div className="text-left">
@@ -369,32 +380,74 @@ export default function LLMProcessingStats({
                         </div>
                       </div>
 
+                      <ProcessingTimelineSummaryCard
+                        title="Ad removal summary"
+                        itemCount={adBlocks.length}
+                        itemLabel="Ad breaks"
+                        totalTimeSeconds={adTimeSeconds}
+                        totalTimeLabel="Time removed"
+                        percentage={adPercent}
+                        percentageLabel="Of original audio"
+                        durationSeconds={originalDurationSeconds}
+                        timelineDurationSeconds={originalDurationSeconds}
+                        minimumSegmentWidthPx={10}
+                        segments={adTimelineSegments}
+                        metricAccentClassName="text-green-700"
+                        percentageAccentClassName="text-green-700"
+                        tooltipAccentClassName="text-green-700"
+                        segmentClassName="bg-rose-500 dark:bg-rose-400"
+                        legendBaseLabel="Content"
+                        legendSegmentLabel="Ad cuts"
+                      />
+
+                      {hasBleepWindows && (
+                        <ProcessingTimelineSummaryCard
+                          title="Bleeps added"
+                          itemCount={bleepTimelineSegments.length}
+                          itemLabel="Bleeped sections"
+                          totalTimeSeconds={bleepTimeSeconds}
+                          totalTimeLabel="Time bleeped"
+                          percentage={editedBleepPercent}
+                          percentageLabel="Of edited audio"
+                          durationSeconds={editedDurationSeconds}
+                          timelineDurationSeconds={editedDurationSeconds}
+                          variant="density"
+                          itemNoun={{ one: 'bleep', other: 'bleeps' }}
+                          segments={bleepTimelineSegments}
+                          metricAccentClassName="text-amber-600"
+                          percentageAccentClassName="text-amber-700"
+                          tooltipAccentClassName="text-amber-700"
+                          segmentClassName="bg-amber-500"
+                          legendSegmentLabel={`Bleeps · ${bleepTimelineSegments.length.toLocaleString()} total`}
+                        />
+                      )}
+
                       <div>
-                        <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">Key metrics</h3>
                         <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-blue-800/70 dark:from-blue-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold text-blue-600 dark:text-blue-200">
-                              {stats.processing_stats?.total_segments || 0}
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-[rgb(30_64_175/0.7)] dark:from-blue-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-blue-600">
+                              {(stats.processing_stats?.total_segments || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-blue-800 dark:text-blue-100">Transcript Segments</div>
+                            <div className="text-sm text-blue-800">Transcript lines</div>
                           </div>
 
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-green-800/70 dark:from-green-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold text-green-600 dark:text-green-200">
-                              {stats.processing_stats?.content_segments || 0}
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-[rgb(22_101_52/0.7)] dark:from-green-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-green-600">
+                              {(stats.processing_stats?.content_segments || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-green-800 dark:text-green-100">Content Segments</div>
+                            <div className="text-sm text-green-800">Content lines</div>
                           </div>
 
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-red-800/70 dark:from-red-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold text-red-600 dark:text-red-200">
-                              {stats.processing_stats?.ad_segments_count || 0}
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-[rgb(153_27_27/0.7)] dark:from-red-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-red-600">
+                              {(stats.processing_stats?.ad_segments_count || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-red-800 dark:text-red-100">Ad Segments Removed</div>
+                            <div className="text-sm text-red-800">Ad lines removed</div>
                           </div>
                           {estimatedCost != null && (
                             <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
-                              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-200">
+                              <div className="text-2xl font-bold tabular-nums tracking-tight text-indigo-600 dark:text-indigo-200">
                                 ${estimatedCost.toFixed(4)}
                               </div>
                               <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated Cost</div>
@@ -405,7 +458,7 @@ export default function LLMProcessingStats({
 
                       {stats.debug_info && (
                         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                          <h3 className="font-semibold text-gray-900 mb-2 text-left">Debug Details</h3>
+                          <h3 className="font-semibold text-gray-900 mb-2 text-left">Debug details</h3>
                           <p className="text-xs text-amber-700 mb-4 text-left">
                             Visible because <code>PODLY_STATS_DEBUG</code> is enabled.
                           </p>
@@ -459,13 +512,13 @@ export default function LLMProcessingStats({
                           </div>
 
                           <div className="mt-4">
-                            <h4 className="font-medium text-gray-900 mb-2 text-left">Processed Audio Path Candidates</h4>
+                            <h4 className="font-medium text-gray-900 mb-2 text-left">Processed audio path candidates</h4>
                             {(stats.debug_info.processed_audio_path_candidates || []).length === 0 ? (
                               <p className="text-xs text-gray-500 text-left">No candidates derived.</p>
                             ) : (
                               <div className="space-y-2">
                                 {(stats.debug_info.processed_audio_path_candidates || []).map((candidate, idx) => (
-                                  <div key={`${candidate.path}-${idx}`} className="bg-white border border-amber-100 rounded p-2">
+                                  <div key={`${candidate.path}-${idx}`} className="bg-surface border border-amber-100 rounded p-2">
                                     <div className="font-mono text-xs text-gray-700 break-all text-left">{candidate.path}</div>
                                     <div className="text-xs text-gray-500 mt-1 text-left">
                                       {candidate.exists ? `exists (${formatBytes(candidate.size_bytes)})` : 'missing'}
@@ -479,55 +532,11 @@ export default function LLMProcessingStats({
                         </div>
                       )}
 
-                      <ProcessingTimelineSummaryCard
-                        title="Advertisement Removal Summary"
-                        itemCount={adBlocks.length}
-                        itemLabel="Ad Blocks"
-                        totalTimeSeconds={adTimeSeconds}
-                        totalTimeLabel="Time Removed"
-                        percentage={adPercent}
-                        percentageLabel="Episode Reduced"
-                        durationSeconds={originalDurationSeconds}
-                        timelineDurationSeconds={originalDurationSeconds}
-                        minimumSegmentWidthPx={4}
-                        minimumPointWidthPx={7}
-                        segments={adTimelineSegments}
-                        metricAccentClassName="text-blue-600 dark:text-blue-200"
-                        percentageAccentClassName="text-rose-600 dark:text-rose-300"
-                        tooltipAccentClassName="text-rose-700 dark:text-rose-300"
-                        segmentClassName="bg-rose-500 dark:bg-rose-400"
-                        legendBaseLabel="Content"
-                        legendSegmentLabel="Ad cuts"
-                      />
-
-                      {hasBleepWindows && (
-                        <ProcessingTimelineSummaryCard
-                          title="Bleeps Added"
-                          itemCount={bleepTimelineSegments.length}
-                          itemLabel="Bleeped Sections"
-                          totalTimeSeconds={bleepTimeSeconds}
-                          totalTimeLabel="Time Bleeped"
-                          percentage={editedBleepPercent}
-                          percentageLabel="Edited Audio Bleeped"
-                          durationSeconds={editedDurationSeconds}
-                          timelineDurationSeconds={originalDurationSeconds}
-                          minimumSegmentWidthPx={2}
-                          minimumPointWidthPx={6}
-                          segments={bleepTimelineSegments}
-                          metricAccentClassName="text-amber-600 dark:text-amber-200"
-                          percentageAccentClassName="text-amber-700 dark:text-amber-300"
-                          tooltipAccentClassName="text-amber-700 dark:text-amber-300"
-                          segmentClassName="bg-amber-500 dark:bg-amber-400"
-                          legendBaseLabel="Unbleeped audio"
-                          legendSegmentLabel="Bleep markers"
-                        />
-                      )}
-
                       <div>
-                        <h3 className="font-semibold text-gray-900 mb-4 text-left">AI Model Performance</h3>
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">AI model performance</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                          <div className="bg-white border rounded-lg p-4">
-                            <h4 className="font-medium text-gray-900 mb-3 text-left">Processing Status</h4>
+                          <div className="bg-surface border rounded-lg p-4">
+                            <h4 className="font-medium text-gray-900 mb-3 text-left">Processing status</h4>
                             <div className="space-y-2">
                               {Object.entries(stats.processing_stats?.model_call_statuses || {}).map(([status, count]) => (
                                 <div key={status} className="flex justify-between items-center">
@@ -544,8 +553,8 @@ export default function LLMProcessingStats({
                             </div>
                           </div>
 
-                          <div className="bg-white border rounded-lg p-4">
-                            <h4 className="font-medium text-gray-900 mb-3 text-left">Models Used</h4>
+                          <div className="bg-surface border rounded-lg p-4">
+                            <h4 className="font-medium text-gray-900 mb-3 text-left">Models used</h4>
                             <div className="space-y-2">
                               {Object.entries(stats.processing_stats?.model_types || {}).map(([model, count]) => (
                                 <div key={model} className="flex justify-between items-center">
@@ -565,26 +574,26 @@ export default function LLMProcessingStats({
                   {activeTab === 'model-calls' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Model Calls ({stats.model_calls?.length || 0})</h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Segment Range</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + cached prompt + completion = total tokens">Tokens</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">ID</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Segment Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Tier</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600" title="prompt + cached prompt + completion = total tokens">Tokens</th>
                                 {showCostColumn && (
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="USD cost for this call (LLM = tokens × LiteLLM rate; Whisper/INA = hourly rate × episode duration, split across success rows of that type)">Cost</th>
+                                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600" title="USD cost for this call (LLM = tokens × LiteLLM rate; Whisper/INA = hourly rate × episode duration, split across success rows of that type)">Cost</th>
                                 )}
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Timestamp</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Retries</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Actions</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {(stats.model_calls || []).map((call) => (
                                 <>
                                   <tr key={call.id} className="hover:bg-gray-50">
@@ -605,7 +614,7 @@ export default function LLMProcessingStats({
                                     <td className="px-4 py-3 text-sm">
                                       {call.service_tier ? (
                                         <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                          call.service_tier === 'flex' ? 'bg-purple-100 text-purple-800' :
+                                          call.service_tier === 'flex' ? 'bg-gray-200 text-gray-800' :
                                           call.service_tier === 'priority' ? 'bg-blue-100 text-blue-800' :
                                           'bg-gray-100 text-gray-700'
                                         }`}>
@@ -615,14 +624,17 @@ export default function LLMProcessingStats({
                                         <span className="text-gray-400">—</span>
                                       )}
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                    <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                       {call.total_tokens != null ? (
                                         <span
                                           title={`prompt ${call.prompt_tokens ?? '—'} + cached prompt ${call.cached_prompt_tokens ?? '—'} + completion ${call.completion_tokens ?? '—'}${call.service_tier === 'flex' ? ' (flex)' : ''}`}
                                         >
                                           {call.total_tokens.toLocaleString()}
                                           {call.service_tier === 'flex' && (
-                                            <span className="ml-1 text-purple-700">⚡</span>
+                                            <span className="ml-1 inline-flex align-middle text-gray-600" title="Flex service tier">
+                                              <BoltIcon className="h-3.5 w-3.5" />
+                                              <span className="sr-only">Flex service tier</span>
+                                            </span>
                                           )}
                                         </span>
                                       ) : (
@@ -630,7 +642,7 @@ export default function LLMProcessingStats({
                                       )}
                                     </td>
                                     {showCostColumn && (
-                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                      <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                         {call.estimated_cost_usd != null ? (
                                           `$${call.estimated_cost_usd.toFixed(4)}`
                                         ) : (
@@ -639,11 +651,11 @@ export default function LLMProcessingStats({
                                       </td>
                                     )}
                                     <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
-                                    <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
+                                    <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">{call.retry_count}</td>
                                     <td className="px-4 py-3">
                                       <button
                                         onClick={() => toggleModelCallDetails(call.id)}
-                                        className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                                        className="btn btn-secondary btn-sm"
                                       >
                                         {expandedModelCalls.has(call.id) ? 'Hide' : 'Details'}
                                       </button>
@@ -656,7 +668,7 @@ export default function LLMProcessingStats({
                                           {call.prompt && (
                                             <div>
                                               <h5 className="font-medium text-gray-900 mb-2 text-left">Prompt:</h5>
-                                              <div className="bg-gray-100 p-3 rounded text-sm font-mono whitespace-pre-wrap max-h-40 overflow-y-auto text-left">
+                                              <div className="bg-gray-100 p-3 rounded text-sm whitespace-pre-wrap max-h-40 overflow-y-auto text-left">
                                                 {call.prompt}
                                               </div>
                                             </div>
@@ -672,7 +684,7 @@ export default function LLMProcessingStats({
                                           {call.response && (
                                             <div>
                                               <h5 className="font-medium text-gray-900 mb-2 text-left">Response:</h5>
-                                              <div className="bg-gray-100 p-3 rounded text-sm font-mono whitespace-pre-wrap max-h-40 overflow-y-auto text-left">
+                                              <div className="bg-gray-100 p-3 rounded text-sm whitespace-pre-wrap max-h-40 overflow-y-auto text-left">
                                                 {call.response}
                                               </div>
                                             </div>
@@ -701,23 +713,23 @@ export default function LLMProcessingStats({
                   {activeTab === 'audio' && hasAudioSegments && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Audio Segments ({stats.audio_segments?.length || 0})</h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {(stats.audio_segments || []).map((segment) => (
                                 <tr key={segment.id} className="hover:bg-gray-50">
                                   <td className="px-4 py-3 text-sm text-gray-600">
                                     {segment.start_time}s - {segment.end_time}s
                                   </td>
-                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                  <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                     {formatDuration(Math.max(0, segment.end_time - segment.start_time))}
                                   </td>
                                   <td className="px-4 py-3">
@@ -737,29 +749,29 @@ export default function LLMProcessingStats({
                   {activeTab === 'transcript' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Transcript Segments ({stats.transcript_segments?.length || 0})</h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Seq #</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Seq #</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
                                 {hasSpeakerLabels && (
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Speaker</th>
                                 )}
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ad Confidence</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Text</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Ad Confidence</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Text</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {mergedTranscriptRows.map((row) => {
                                 if (row.kind === 'audio') {
                                   return (
                                     <tr key={row.id} className={getAudioMarkerStyle(row.segment.label)}>
                                       <td
                                         colSpan={hasSpeakerLabels ? 6 : 5}
-                                        className="px-4 py-2 text-center text-xs font-medium uppercase tracking-wide"
+                                        className="px-4 py-2 text-center text-xs font-medium"
                                       >
                                         [{row.segment.label}] {row.segment.start_time}s - {row.segment.end_time}s
                                       </td>
@@ -800,7 +812,7 @@ export default function LLMProcessingStats({
                                           : 'Content'}
                                       </span>
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-gray-600">
+                                    <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                       {adConfidence !== null ? adConfidence.toFixed(2) : '-'}
                                     </td>
                                     <td className="px-4 py-3 text-sm text-gray-900 min-w-[28rem] max-w-4xl">
@@ -821,21 +833,21 @@ export default function LLMProcessingStats({
                   {activeTab === 'identifications' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Identifications ({stats.identifications?.length || 0})</h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Segment ID</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Confidence</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model Call</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Text</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">ID</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Segment ID</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Confidence</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model Call</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Text</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {(stats.identifications || []).map((identification) => (
                                 <tr key={identification.id} className={`hover:bg-gray-50 ${
                                   identification.label === 'ad' ? 'bg-red-50' : ''
@@ -856,7 +868,7 @@ export default function LLMProcessingStats({
                                         : identification.label}
                                     </span>
                                   </td>
-                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                  <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                     {identification.confidence ? identification.confidence.toFixed(2) : 'N/A'}
                                   </td>
                                   <td className="px-4 py-3 text-sm text-gray-600">{identification.model_call_id}</td>

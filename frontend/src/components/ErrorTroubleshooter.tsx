@@ -54,7 +54,7 @@ export default function ErrorTroubleshooter({
         type="button"
         onClick={handleClick}
         disabled={loading}
-        className="inline-flex items-center gap-1.5 rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+        className="btn btn-secondary btn-sm text-red-700"
       >
         {loading ? 'Analyzing logs…' : 'Explain this error'}
       </button>

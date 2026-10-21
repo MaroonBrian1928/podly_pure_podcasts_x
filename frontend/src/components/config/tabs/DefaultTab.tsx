@@ -83,14 +83,14 @@ export default function DefaultTab() {
           <span>Enter your Groq API key to use the recommended setup.</span>
           <button
             type="button"
-            className="text-indigo-600 hover:underline"
+            className="text-sm text-blue-700 hover:text-blue-800 hover:underline"
             onClick={() => setShowGroqHelp((v) => !v)}
           >
             {showGroqHelp ? 'Hide help' : '(need help getting a key?)'}
           </button>
           <button
             type="button"
-            className="text-indigo-600 hover:underline"
+            className="text-sm text-blue-700 hover:text-blue-800 hover:underline"
             onClick={() => setShowGroqPricing((v) => !v)}
           >
             {showGroqPricing ? 'Hide pricing' : '(pricing guide)'}
@@ -126,12 +126,12 @@ export default function DefaultTab() {
 
 function GroqHelpBox() {
   return (
-    <div className="text-sm text-gray-700 mb-2 bg-indigo-50 border border-indigo-200 rounded p-3 space-y-2">
+    <div className="text-sm text-gray-700 mb-2 bg-blue-50 border border-blue-200 rounded p-3 space-y-2">
       <ol className="list-decimal pl-5 space-y-1">
         <li>
           Visit the{' '}
           <a
-            className="text-indigo-700 underline"
+            className="text-blue-700 hover:text-blue-800 underline"
             href="https://console.groq.com/keys"
             target="_blank"
             rel="noreferrer"
@@ -147,7 +147,7 @@ function GroqHelpBox() {
         <li>
           <strong>Recommended:</strong> Set a billing limit at{' '}
           <a
-            className="text-indigo-700 underline"
+            className="text-blue-700 hover:text-blue-800 underline"
             href="https://console.groq.com/settings/billing"
             target="_blank"
             rel="noreferrer"
@@ -173,7 +173,7 @@ function GroqPricingBox() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-white border border-green-300 rounded p-3">
+        <div className="bg-surface border border-green-300 rounded p-3">
           <h5 className="font-medium text-green-800 mb-2">Whisper (Transcription)</h5>
           <ul className="space-y-1 text-green-700">
             <li>
@@ -184,7 +184,7 @@ function GroqPricingBox() {
           </ul>
         </div>
 
-        <div className="bg-white border border-green-300 rounded p-3">
+        <div className="bg-surface border border-green-300 rounded p-3">
           <h5 className="font-medium text-green-800 mb-2">LLM (Ad Detection)</h5>
           <ul className="space-y-1 text-green-700">
             <li>
@@ -197,7 +197,7 @@ function GroqPricingBox() {
         </div>
       </div>
 
-      <div className="bg-white border border-green-300 rounded p-3">
+      <div className="bg-surface border border-green-300 rounded p-3">
         <h5 className="font-medium text-green-800 mb-2">
           Estimated Monthly Cost (6 podcasts, 6 hours/week)
         </h5>

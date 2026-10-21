@@ -179,7 +179,7 @@ export default function DiscordTab() {
                 checked={form.allow_registration}
                 onChange={(e) => setForm({ ...form, allow_registration: e.target.checked })}
                 disabled={!!envOverrides.allow_registration}
-                className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
               />
               <span className="text-sm text-gray-700">
                 Allow new users to register via Discord
@@ -196,7 +196,7 @@ export default function DiscordTab() {
             <button
               type="submit"
               disabled={mutation.isPending}
-              className="px-4 py-2 rounded bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-60"
+              className="btn btn-primary"
             >
               {mutation.isPending ? 'Saving...' : 'Save Discord Settings'}
             </button>
@@ -241,7 +241,7 @@ function SetupInstructions() {
             href="https://discord.com/developers/applications"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-indigo-600 hover:text-indigo-800 underline"
+            className="text-blue-700 hover:text-blue-800 underline"
           >
             Discord Developer Portal
           </a>

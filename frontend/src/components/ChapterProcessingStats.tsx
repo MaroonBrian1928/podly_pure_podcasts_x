@@ -2,11 +2,13 @@ import { Fragment, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { feedsApi } from '../services/api';
 import ModalShell from './ModalShell';
+import { CloseIcon } from './icons';
 import ProcessingTimelineSummaryCard from './ProcessingTimelineSummaryCard';
 import ProcessingStageLogs from './ProcessingStageLogs';
 import SpeakerTimeBreakdown from './SpeakerTimeBreakdown';
 import { formatBackendDateTime } from '../utils/datetime';
 import {
+  formatTimelineLabel,
   formatTimelineRange,
 } from '../utils/processingTimeline';
 
@@ -132,24 +134,28 @@ export default function ChapterProcessingStats({
         ? stats.post.duration
         : fallbackDurationSeconds
     );
+  const reportedOriginalSeconds = stats?.processing_stats?.original_duration_seconds;
+  const hasOriginalDuration =
+    reportedOriginalSeconds != null &&
+    stats?.post?.duration != null &&
+    Math.abs(reportedOriginalSeconds - stats.post.duration) > 1;
   const editedDurationSeconds = stats?.processing_stats?.edited_duration_seconds
     ?? originalDurationSeconds;
   const editedBleepPercent = editedDurationSeconds > 0
     ? (bleepTimeSeconds / editedDurationSeconds) * 100
     : 0;
   const bleepTimelineSegments = (stats?.processing_stats?.edited_bleep_windows || []).map((window) => ({
-    startTime: (window.edited_start_time + window.edited_end_time) / 2,
-    endTime: (window.edited_start_time + window.edited_end_time) / 2,
-    kind: 'point' as const,
-    visualDurationSeconds: Math.max(0, window.edited_end_time - window.edited_start_time),
-    tooltipTitle: 'Bleeped Section',
+    startTime: window.edited_start_time,
+    endTime: window.edited_end_time,
+    kind: 'range' as const,
+    tooltipTitle: 'Bleeped section',
     tooltipRows: [
       {
-        label: 'Edited',
+        label: 'Edited at',
         value: formatTimelineRange(window.edited_start_time, window.edited_end_time),
       },
       {
-        label: 'Source',
+        label: 'Original',
         value: formatTimelineRange(window.original_start_time, window.original_end_time),
       },
     ],
@@ -171,7 +177,7 @@ export default function ChapterProcessingStats({
     <>
       <button
         onClick={() => setShowModal(true)}
-        className={`px-3 py-1 text-xs rounded font-medium transition-colors border bg-white text-gray-700 border-gray-300 hover:bg-gray-50 hover:border-gray-400 hover:text-gray-900 flex items-center gap-1 ${className}`}
+        className={`px-3 py-1 text-xs rounded font-medium transition-colors border bg-surface text-gray-700 border-gray-300 hover:bg-gray-50 hover:border-gray-400 hover:text-gray-900 flex items-center gap-1 ${className}`}
       >
         Stats
       </button>
@@ -179,22 +185,22 @@ export default function ChapterProcessingStats({
       <ModalShell
         isOpen={showModal}
         onClose={() => setShowModal(false)}
-        panelClassName="bg-white rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
+        panelClassName="bg-surface rounded-lg w-full max-w-7xl xl:max-w-[96rem] 2xl:max-w-[110rem] flex h-[85dvh] max-h-[85dvh] flex-col overflow-hidden sm:h-[82dvh] sm:max-h-[82dvh] lg:h-[min(88dvh,58rem)] lg:max-h-[min(88dvh,58rem)] xl:h-[min(90dvh,62rem)] xl:max-h-[min(90dvh,62rem)]"
       >
             <div className="flex items-center justify-between p-6 border-b">
-              <h2 className="text-xl font-bold text-gray-900 text-left">Processing Statistics & Debug</h2>
+              <h2 className="text-xl font-bold text-gray-900 text-left">Processing statistics & debug</h2>
               <button
+                type="button"
                 onClick={() => setShowModal(false)}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                aria-label="Close"
+                className="btn btn-ghost btn-icon"
               >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                  <CloseIcon className="h-5 w-5" />
               </button>
             </div>
 
             <div className="border-b overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-              <nav className="flex min-w-max space-x-8 px-6">
+              <nav role="tablist" className="flex min-w-max space-x-8 px-6">
                 {[
                   { id: 'overview', label: 'Overview' },
                   ...(hasAudioSegments ? [{ id: 'audio', label: 'Audio Segments' }] : []),
@@ -206,10 +212,13 @@ export default function ChapterProcessingStats({
                 ].map((tab) => (
                   <button
                     key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === tab.id}
                     onClick={() => setActiveTab(tab.id as TabId)}
-                    className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                    className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
                       activeTab === tab.id
-                        ? 'border-blue-500 text-blue-600'
+                        ? 'border-blue-600 text-blue-700'
                         : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                     } shrink-0 whitespace-nowrap`}
                   >
@@ -244,57 +253,83 @@ export default function ChapterProcessingStats({
                   {activeTab === 'overview' && (
                     <div className="space-y-6">
                       <div className="bg-gray-50 rounded-lg p-4">
-                        <h3 className="font-semibold text-gray-900 mb-2 text-left">Episode Information</h3>
+                        <h3 className="font-semibold text-gray-900 mb-2 text-left">Episode information</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                           <div className="text-left">
                             <span className="font-medium text-gray-700">Title:</span>
                             <span className="ml-2 text-gray-600">{stats.post?.title || 'Unknown'}</span>
                           </div>
                           <div className="text-left">
-                            <span className="font-medium text-gray-700">Duration:</span>
+                            <span className="font-medium text-gray-700">{hasOriginalDuration ? 'Length:' : 'Duration:'}</span>
                             <span className="ml-2 text-gray-600">
-                              {stats.post?.duration ? formatDuration(stats.post.duration) : 'Unknown'}
+                              {stats.post?.duration
+                                ? hasOriginalDuration
+                                  ? `${formatDuration(stats.post.duration)} after cuts (original ${formatTimelineLabel(originalDurationSeconds)})`
+                                  : formatDuration(stats.post.duration)
+                                : 'Unknown'}
                             </span>
                           </div>
                           <div className="text-left">
                             <span className="font-medium text-gray-700">Detection Method:</span>
-                            <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                            <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
                               {isChapterInsert ? 'Chapter insertion only' : 'Chapter-based removal'}
                             </span>
                           </div>
                         </div>
                       </div>
 
+                      {isChapterInsert && hasBleepWindows && (
+                        <ProcessingTimelineSummaryCard
+                          title="Bleeps added"
+                          itemCount={bleepTimelineSegments.length}
+                          itemLabel="Bleeped sections"
+                          totalTimeSeconds={bleepTimeSeconds}
+                          totalTimeLabel="Time bleeped"
+                          percentage={editedBleepPercent}
+                          percentageLabel="Of edited audio"
+                          durationSeconds={editedDurationSeconds}
+                          timelineDurationSeconds={editedDurationSeconds}
+                          variant="density"
+                          itemNoun={{ one: 'bleep', other: 'bleeps' }}
+                          segments={bleepTimelineSegments}
+                          metricAccentClassName="text-amber-600"
+                          percentageAccentClassName="text-amber-700"
+                          tooltipAccentClassName="text-amber-700"
+                          segmentClassName="bg-amber-500"
+                          legendSegmentLabel={`Bleeps · ${bleepTimelineSegments.length.toLocaleString()} total`}
+                        />
+                      )}
+
                       <div>
-                        <h3 className="font-semibold text-gray-900 mb-4 text-left">Key Metrics</h3>
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">Key metrics</h3>
                         <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
                           <div className="rounded-lg border border-transparent bg-gradient-to-br from-purple-50 to-purple-100 p-4 text-center dark:border-purple-800/70 dark:from-purple-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold text-purple-600 dark:text-purple-200">
-                              {stats.chapters?.total_chapters || 0}
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-purple-600 dark:text-purple-200">
+                              {(stats.chapters?.total_chapters || 0).toLocaleString()}
                             </div>
                             <div className="text-sm text-purple-800 dark:text-purple-100">Total Chapters</div>
                           </div>
 
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-green-800/70 dark:from-green-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold text-green-600 dark:text-green-200">
-                              {stats.chapters?.chapters_kept || 0}
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-[rgb(22_101_52/0.7)] dark:from-green-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-green-600">
+                              {(stats.chapters?.chapters_kept || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-green-800 dark:text-green-100">
+                            <div className="text-sm text-green-800">
                               {isChapterInsert ? 'Chapters Inserted' : 'Chapters Kept'}
                             </div>
                           </div>
 
-                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-red-800/70 dark:from-red-950 dark:to-slate-900">
-                            <div className="text-2xl font-bold text-red-600 dark:text-red-200">
-                              {stats.chapters?.chapters_removed || 0}
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-[rgb(153_27_27/0.7)] dark:from-red-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-red-600">
+                              {(stats.chapters?.chapters_removed || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-red-800 dark:text-red-100">
+                            <div className="text-sm text-red-800">
                               {isChapterInsert ? 'Chapters Removed (N/A)' : 'Chapters Removed'}
                             </div>
                           </div>
                           {estimatedCost != null && (
                             <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
-                              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-200">
+                              <div className="text-2xl font-bold tabular-nums tracking-tight text-indigo-600 dark:text-indigo-200">
                                 ${estimatedCost.toFixed(4)}
                               </div>
                               <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated Cost</div>
@@ -309,34 +344,11 @@ export default function ChapterProcessingStats({
                         </div>
                       )}
 
-                      {isChapterInsert && hasBleepWindows && (
-                        <ProcessingTimelineSummaryCard
-                          title="Bleeps Added"
-                          itemCount={bleepTimelineSegments.length}
-                          itemLabel="Bleeped Sections"
-                          totalTimeSeconds={bleepTimeSeconds}
-                          totalTimeLabel="Time Bleeped"
-                          percentage={editedBleepPercent}
-                          percentageLabel="Edited Audio Bleeped"
-                          durationSeconds={editedDurationSeconds}
-                          timelineDurationSeconds={originalDurationSeconds}
-                          minimumSegmentWidthPx={2}
-                          minimumPointWidthPx={6}
-                          segments={bleepTimelineSegments}
-                          metricAccentClassName="text-amber-600 dark:text-amber-200"
-                          percentageAccentClassName="text-amber-700 dark:text-amber-300"
-                          tooltipAccentClassName="text-amber-700 dark:text-amber-300"
-                          segmentClassName="bg-amber-500 dark:bg-amber-400"
-                          legendBaseLabel="Unbleeped audio"
-                          legendSegmentLabel="Bleep markers"
-                        />
-                      )}
-
                       <div>
-                        <h3 className="font-semibold text-gray-900 mb-4 text-left">AI Model Performance</h3>
+                        <h3 className="font-semibold text-gray-900 mb-4 text-left">AI model performance</h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                          <div className="bg-white border rounded-lg p-4">
-                            <h4 className="font-medium text-gray-900 mb-3 text-left">Processing Status</h4>
+                          <div className="bg-surface border rounded-lg p-4">
+                            <h4 className="font-medium text-gray-900 mb-3 text-left">Processing status</h4>
                             <div className="space-y-2">
                               {Object.entries(stats.processing_stats?.model_call_statuses || {}).map(([status, count]) => (
                                 <div key={status} className="flex justify-between items-center">
@@ -358,9 +370,9 @@ export default function ChapterProcessingStats({
                             </div>
                           </div>
 
-                          <div className="bg-white border rounded-lg p-4">
+                          <div className="bg-surface border rounded-lg p-4">
                             <h4 className="font-medium text-gray-900 mb-3 text-left">
-                              Models Used ({stats.processing_stats?.total_model_calls || 0} calls)
+                              Models used ({stats.processing_stats?.total_model_calls || 0} calls)
                             </h4>
                             <div className="space-y-2">
                               {modelEntries.map(([model, count]) => (
@@ -382,7 +394,7 @@ export default function ChapterProcessingStats({
                       {!isChapterInsert && (stats.chapters?.filter_strings ?? []).length > 0 && (
                         <div>
                           <h3 className="font-semibold text-gray-900 mb-4 text-left">Filter Strings</h3>
-                          <div className="bg-white border rounded-lg p-4">
+                          <div className="bg-surface border rounded-lg p-4">
                             <div className="flex flex-wrap gap-2">
                               {(stats.chapters?.filter_strings ?? []).map((filter: string, idx: number) => (
                                 <span key={idx} className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm">
@@ -456,7 +468,7 @@ export default function ChapterProcessingStats({
                             ) : (
                               <div className="space-y-2">
                                 {(stats.debug_info.processed_audio_path_candidates || []).map((candidate, idx) => (
-                                  <div key={`${candidate.path}-${idx}`} className="bg-white border border-amber-100 rounded p-2">
+                                  <div key={`${candidate.path}-${idx}`} className="bg-surface border border-amber-100 rounded p-2">
                                     <div className="font-mono text-xs text-gray-700 break-all text-left">{candidate.path}</div>
                                     <div className="text-xs text-gray-500 mt-1 text-left">
                                       {candidate.exists ? `exists (${formatBytes(candidate.size_bytes)})` : 'missing'}
@@ -475,19 +487,19 @@ export default function ChapterProcessingStats({
                   {activeTab === 'chapters' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Chapters ({stats.chapters?.chapters?.length || 0})</h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">#</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Title</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">#</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Title</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Status</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {(stats.chapters?.chapters || []).map((chapter: { title: string; start_time: number; end_time: number; label: string }, idx: number) => (
                                 <tr key={idx} className={`hover:bg-gray-50 ${
                                   chapter.label === 'ad' && !isChapterInsert ? 'bg-red-50' : ''
@@ -533,26 +545,26 @@ export default function ChapterProcessingStats({
                   {activeTab === 'model-calls' && (
                     <div>
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">Model Calls ({stats.model_calls?.length || 0})</h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Range / Phase</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="prompt + cached prompt + completion = total tokens">Tokens</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">ID</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Range / Phase</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Tier</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600" title="prompt + cached prompt + completion = total tokens">Tokens</th>
                                 {showCostColumn && (
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" title="USD cost for this call (LLM = tokens × LiteLLM rate; Whisper/INA = hourly rate × episode duration, split across success rows of that type)">Cost</th>
+                                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600" title="USD cost for this call (LLM = tokens × LiteLLM rate; Whisper/INA = hourly rate × episode duration, split across success rows of that type)">Cost</th>
                                 )}
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Timestamp</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Retries</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Actions</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {(stats.model_calls || []).map((call) => {
                                 const tokenTotal = call.prompt_tokens != null || call.cached_prompt_tokens != null || call.completion_tokens != null
                                   ? (call.prompt_tokens ?? 0) + (call.cached_prompt_tokens ?? 0) + (call.completion_tokens ?? 0)
@@ -578,7 +590,7 @@ export default function ChapterProcessingStats({
                                       <td className="px-4 py-3 text-sm">
                                         {call.service_tier ? (
                                           <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                            call.service_tier === 'flex' ? 'bg-purple-100 text-purple-800' :
+                                            call.service_tier === 'flex' ? 'bg-gray-200 text-gray-800' :
                                             call.service_tier === 'priority' ? 'bg-blue-100 text-blue-800' :
                                             'bg-gray-100 text-gray-700'
                                           }`}>
@@ -598,7 +610,7 @@ export default function ChapterProcessingStats({
                                         )}
                                       </td>
                                       {showCostColumn && (
-                                        <td className="px-4 py-3 text-sm text-gray-600">
+                                        <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                           {call.estimated_cost_usd != null ? (
                                             `$${call.estimated_cost_usd.toFixed(4)}`
                                           ) : (
@@ -607,11 +619,11 @@ export default function ChapterProcessingStats({
                                         </td>
                                       )}
                                       <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
-                                      <td className="px-4 py-3 text-sm text-gray-600">{call.retry_count}</td>
+                                      <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">{call.retry_count}</td>
                                       <td className="px-4 py-3">
                                         <button
                                           onClick={() => toggleModelCallDetails(call.id)}
-                                          className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                                          className="btn btn-secondary btn-sm"
                                         >
                                           {expandedModelCalls.has(call.id) ? 'Hide' : 'Details'}
                                         </button>
@@ -664,27 +676,27 @@ export default function ChapterProcessingStats({
                       <h3 className="font-semibold text-gray-900 mb-4 text-left">
                         Audio Segments ({stats.audio_segments?.length || 0})
                       </h3>
-                      <div className="bg-white border rounded-lg overflow-hidden">
+                      <div className="bg-surface border rounded-lg overflow-hidden">
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                            <thead>
                               <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time Range</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Label</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Time Range</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Duration</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Label</th>
                               </tr>
                             </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
+                            <tbody className="bg-surface divide-y divide-gray-200">
                               {(stats.audio_segments || []).map((segment) => (
                                 <tr key={segment.id} className="hover:bg-gray-50">
                                   <td className="px-4 py-3 text-sm text-gray-600">
                                     {segment.start_time}s - {segment.end_time}s
                                   </td>
-                                  <td className="px-4 py-3 text-sm text-gray-600">
+                                  <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                     {formatDuration(Math.max(0, segment.end_time - segment.start_time))}
                                   </td>
                                   <td className="px-4 py-3">
-                                    <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-slate-100 text-slate-700">
+                                    <span className="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700">
                                       {segment.label}
                                     </span>
                                   </td>
@@ -724,22 +736,22 @@ export default function ChapterProcessingStats({
                           No transcript segments were generated for this episode.
                         </div>
                       ) : (
-                        <div className="bg-white border rounded-lg overflow-hidden">
+                        <div className="bg-surface border rounded-lg overflow-hidden">
                           <div className="overflow-x-auto">
                             <table className="min-w-full divide-y divide-gray-200">
-                              <thead className="bg-gray-50">
+                              <thead>
                                 <tr>
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">#</th>
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Start</th>
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">End</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">#</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Start</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">End</th>
                                   {hasSpeakerLabels && (
-                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speaker</th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Speaker</th>
                                   )}
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ad Confidence</th>
-                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Text</th>
+                                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Ad Confidence</th>
+                                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Text</th>
                                 </tr>
                               </thead>
-                              <tbody className="bg-white divide-y divide-gray-200">
+                              <tbody className="bg-surface divide-y divide-gray-200">
                                 {(stats.transcript_segments || []).map((segment, idx) => {
                                   const adConfidence = getAdConfidence(segment);
 
@@ -759,7 +771,7 @@ export default function ChapterProcessingStats({
                                           )}
                                         </td>
                                       )}
-                                      <td className="px-4 py-3 text-sm text-gray-600">
+                                      <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                                         {adConfidence !== null ? adConfidence.toFixed(2) : '-'}
                                       </td>
                                       <td className="px-4 py-3 text-sm text-gray-700 min-w-[28rem] max-w-4xl">

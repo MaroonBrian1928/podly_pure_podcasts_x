@@ -46,7 +46,7 @@ export default function SpeakerTimeBreakdown({
     <div>
       <div className="mb-4 flex flex-col gap-2 text-left sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h3 className="font-semibold text-gray-900">Speaker Speaking Time</h3>
+          <h3 className="font-semibold text-gray-900">Speaker speaking time</h3>
           <p className="text-sm text-gray-500">
             Derived from transcript segment durations in the LLM transcription flow.
           </p>
@@ -56,18 +56,18 @@ export default function SpeakerTimeBreakdown({
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+      <div className="overflow-hidden rounded-lg border border-gray-200 bg-surface">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+            <thead>
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Speaker</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Speaking Time</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Share</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Segments</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Speaker</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Speaking time</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Share</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Segments</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200 bg-white">
+            <tbody className="divide-y divide-gray-200 bg-surface">
               {speakerBreakdown.map((speaker) => {
                 const label = speaker.speaker_label || 'Unlabeled speaker';
 
@@ -82,13 +82,13 @@ export default function SpeakerTimeBreakdown({
                         {label}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                    <td className="px-4 py-3 text-right text-sm font-medium tabular-nums text-gray-900">
                       {formatSpeakingTime(speaker.speaking_time_seconds)}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-600">
+                    <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                       {speaker.speaking_percentage.toFixed(1)}%
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-600">
+                    <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">
                       {speaker.segment_count}
                     </td>
                   </tr>

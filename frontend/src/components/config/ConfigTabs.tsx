@@ -110,20 +110,23 @@ export default function ConfigTabs() {
     <ConfigContext.Provider value={contextValue}>
       <div className="space-y-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Configuration</h2>
+          <h1 className="text-2xl font-semibold text-gray-900">Configuration</h1>
         </div>
 
         {/* Tab Navigation */}
         <div className="border-b border-gray-200 overflow-x-auto">
-          <nav className="flex space-x-8 min-w-max" aria-label="Config tabs">
+          <nav className="flex space-x-8 min-w-max" role="tablist" aria-label="Config tabs">
             {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`py-3 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-3 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
                   activeTab === tab.id
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    ? 'border-blue-600 text-gray-900'
+                    : 'border-transparent text-gray-600 hover:text-gray-900'
                 }`}
               >
                 {tab.label}

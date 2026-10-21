@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
-import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { AudioPlayerProvider } from './contexts/AudioPlayerContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useQuery } from '@tanstack/react-query';
@@ -17,8 +17,16 @@ import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsConte
 import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
 import PageTransitionFrame from './components/PageTransitionFrame';
-import { ThemeProvider, useTheme } from './contexts/ThemeContext';
-import './App.css';
+import { ThemeProvider } from './contexts/ThemeContext';
+import { CloseIcon, MenuIcon } from './components/icons';
+
+const navItemBase = 'rounded-md px-3 py-1.5 text-sm font-medium';
+const navItemInactive = 'text-gray-700 hover:text-gray-900 hover:bg-gray-50';
+const navItemActive = 'bg-gray-100 text-gray-900';
+
+function navItemClass({ isActive }: { isActive: boolean }) {
+  return `${navItemBase} ${isActive ? navItemActive : navItemInactive}`;
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,7 +55,6 @@ function AppShell() {
     showReportIssueButton,
   } = useAuth();
   const { open: openDiagnostics } = useDiagnostics();
-  const { isDark } = useTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
@@ -136,57 +143,59 @@ function AppShell() {
 
   return (
     <div className="h-dvh bg-gray-50 flex flex-col overflow-hidden">
-      <header className="bg-white shadow-sm border-b flex-shrink-0">
+      <header className="bg-surface border-b flex-shrink-0">
         <div className="px-2 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-12">
             <div className="flex items-center">
               <Link to="/" state={homeNavigationState} className="flex items-center">
-                <img 
-                  src="/images/logos/logo.webp" 
-                  alt="Podly" 
+                <img
+                  src="/images/logos/logo.webp"
+                  alt="Podly"
                   className="h-6 w-auto"
                 />
-                <h1 className="ml-2 text-lg font-semibold text-gray-900">
+                <span className="ml-2 text-lg font-semibold text-gray-900">
                   Podly
-                </h1>
+                </span>
               </Link>
             </div>
 
             {/* Desktop Navigation */}
-            <nav className="hidden md:flex items-center space-x-4">
-              <Link to="/" state={homeNavigationState} className="text-sm font-medium text-gray-700 hover:text-gray-900">
+            <nav className="hidden md:flex items-center space-x-2">
+              <NavLink
+                to="/"
+                state={homeNavigationState}
+                className={`${navItemBase} ${isHomeRoute(location.pathname) ? navItemActive : navItemInactive}`}
+                aria-current={isHomeRoute(location.pathname) ? 'page' : undefined}
+              >
                 Home
-              </Link>
+              </NavLink>
               {showBillingLink && (
-                <Link to="/billing" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <NavLink to="/billing" className={navItemClass}>
                   Billing
-                </Link>
+                </NavLink>
               )}
               {showJobsLink && (
-                <Link to="/jobs" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <NavLink to="/jobs" className={navItemClass}>
                   Jobs
-                </Link>
+                </NavLink>
               )}
               {showConfigLink && (
-                <Link
-                  to="/config"
-                  className="text-sm font-medium text-gray-700 hover:text-gray-900"
-                >
+                <NavLink to="/config" className={navItemClass}>
                   Config
-                </Link>
+                </NavLink>
               )}
               {showReportIssueButton && (
                 <button
                   type="button"
                   onClick={() => openDiagnostics()}
-                  className="text-sm font-medium text-gray-700 hover:text-gray-900"
+                  className={`${navItemBase} ${navItemInactive}`}
                 >
                   Report issue
                 </button>
               )}
-              <ThemeToggle />
+              <ThemeToggle className="ml-2" />
               {requireAuth && user && (
-                <div className="flex items-center gap-3 text-sm text-gray-600 flex-shrink-0">
+                <div className="flex items-center gap-3 ml-2 text-sm text-gray-600 flex-shrink-0">
                   {billingSummary && !isAdmin && (
                     <>
                       <div
@@ -195,19 +204,13 @@ function AppShell() {
                       >
                         Feeds {billingSummary.feeds_in_use}/{billingSummary.feed_allowance}
                       </div>
-                      <Link
-                        to="/billing"
-                        className="px-2 py-1 rounded-md border border-blue-200 text-blue-700 bg-white hover:bg-blue-50 text-xs whitespace-nowrap transition-colors"
-                      >
+                      <Link to="/billing" className="btn btn-secondary whitespace-nowrap">
                         Change plan
                       </Link>
                     </>
                   )}
                   <span className="hidden sm:inline whitespace-nowrap">{user.username}</span>
-                  <button
-                    onClick={logout}
-                    className="px-3 py-1 border border-gray-200 rounded-md hover:bg-gray-100 transition-colors whitespace-nowrap"
-                  >
+                  <button onClick={logout} className="btn btn-secondary whitespace-nowrap">
                     Logout
                   </button>
                 </div>
@@ -224,10 +227,7 @@ function AppShell() {
                   >
                     Feeds {billingSummary.feeds_in_use}/{billingSummary.feed_allowance}
                   </div>
-                  <Link
-                    to="/billing"
-                    className="px-2 py-1 rounded-md border border-blue-200 text-blue-700 bg-white text-xs whitespace-nowrap"
-                  >
+                  <Link to="/billing" className="btn btn-secondary btn-sm whitespace-nowrap">
                     Change plan
                   </Link>
                 </>
@@ -235,57 +235,41 @@ function AppShell() {
 
               <ThemeToggle />
 
-              {/* Hamburger Button */}
               <div className="relative" ref={mobileMenuRef}>
                 <button
+                  type="button"
                   onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
                   className="p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
-                  aria-label="Toggle menu"
+                  aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+                  aria-expanded={mobileMenuOpen}
                 >
-                  {mobileMenuOpen ? (
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  ) : (
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                    </svg>
-                  )}
+                  {mobileMenuOpen ? <CloseIcon className="h-6 w-6" /> : <MenuIcon className="h-6 w-6" />}
                 </button>
 
-                {/* Mobile Menu Dropdown */}
                 {mobileMenuOpen && (
-                  <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-2 z-50">
-                    <Link
+                  <div className="animate-pop-in origin-top-right absolute right-0 top-full mt-2 w-56 bg-surface rounded-lg shadow-lg border border-gray-200 p-2 z-50">
+                    <NavLink
                       to="/"
                       state={homeNavigationState}
-                      className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                      className={`block ${navItemBase} ${isHomeRoute(location.pathname) ? navItemActive : navItemInactive}`}
+                      aria-current={isHomeRoute(location.pathname) ? 'page' : undefined}
                     >
                       Home
-                    </Link>
+                    </NavLink>
                     {showBillingLink && (
-                      <Link
-                        to="/billing"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      >
+                      <NavLink to="/billing" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
                         Billing
-                      </Link>
+                      </NavLink>
                     )}
                     {showJobsLink && (
-                      <Link
-                        to="/jobs"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      >
+                      <NavLink to="/jobs" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
                         Jobs
-                      </Link>
+                      </NavLink>
                     )}
                     {showConfigLink && (
-                      <Link
-                        to="/config"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      >
+                      <NavLink to="/config" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
                         Config
-                      </Link>
+                      </NavLink>
                     )}
                     {showReportIssueButton && (
                       <button
@@ -294,7 +278,7 @@ function AppShell() {
                           openDiagnostics();
                           setMobileMenuOpen(false);
                         }}
-                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        className={`block w-full text-left ${navItemBase} ${navItemInactive}`}
                       >
                         Report issue
                       </button>
@@ -302,7 +286,7 @@ function AppShell() {
                     {requireAuth && user && (
                       <>
                         <div className="border-t border-gray-100 my-2" />
-                        <div className="px-4 py-2 text-sm text-gray-500">
+                        <div className="px-3 py-1.5 text-sm text-gray-600">
                           {user.username}
                         </div>
                         <button
@@ -310,7 +294,7 @@ function AppShell() {
                             logout();
                             setMobileMenuOpen(false);
                           }}
-                          className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                          className="btn btn-secondary btn-sm w-full mt-1"
                         >
                           Logout
                         </button>
@@ -368,17 +352,11 @@ function AppShell() {
         position="top-center"
         toastOptions={{
           duration: 3000,
-          style: isDark
-            ? {
-                background: '#0f172a',
-                color: '#e2e8f0',
-                border: '1px solid #334155',
-              }
-            : {
-                background: '#ffffff',
-                color: '#111827',
-                border: '1px solid #e5e7eb',
-              },
+          style: {
+            background: 'rgb(var(--surface))',
+            color: 'rgb(var(--gray-900))',
+            border: '1px solid rgb(var(--gray-200))',
+          },
         }}
       />
     </div>

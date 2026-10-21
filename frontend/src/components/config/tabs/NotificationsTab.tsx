@@ -57,7 +57,7 @@ export default function NotificationsTab() {
             href="https://github.com/caronc/apprise/wiki"
             target="_blank"
             rel="noreferrer"
-            className="text-indigo-600 hover:underline"
+            className="text-blue-700 hover:text-blue-800 underline"
           >
             Apprise
           </a>
@@ -173,7 +173,7 @@ export default function NotificationsTab() {
         <div className="flex items-center justify-between gap-3">
           <button
             onClick={handleTest}
-            className="px-3 py-2 text-sm rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+            className="btn btn-secondary"
             disabled={isTesting}
           >
             {isTesting ? 'Sending...' : 'Send test notification'}

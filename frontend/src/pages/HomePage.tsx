@@ -17,11 +17,15 @@ import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
+import { useDelayedFlag } from '../hooks/useDelayedFlag';
+import { LinkIcon, PlusIcon, RefreshIcon, SlidersIcon, CheckIcon, CloseIcon } from '../components/icons';
 
-const MOBILE_FEED_DETAIL_TRANSITION_MS = 440;
+const MOBILE_FEED_DETAIL_ENTER_MS = 440;
+const MOBILE_FEED_DETAIL_EXIT_MS = 440;
 const HOME_ROUTE_QUERY_GC_TIME_MS = 5 * 60 * 1000;
 
 type MobileFeedTransitionState = 'idle' | 'entering' | 'exiting';
+type MobileFeedDetailPosition = 'onscreen' | 'offscreen';
 
 interface MobileTransitionViewport {
   height: number;
@@ -64,6 +68,9 @@ export default function HomePage() {
   const [mobileTransitionFeed, setMobileTransitionFeed] = useState<Feed | null>(null);
   const [mobileTransitionViewport, setMobileTransitionViewport] =
     useState<MobileTransitionViewport | null>(null);
+  const [mobileDetailPosition, setMobileDetailPosition] =
+    useState<MobileFeedDetailPosition>('onscreen');
+  const mobileDetailFrameRef = useRef<number | null>(null);
   const [showSortMenu, setShowSortMenu] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const [feedSortBy, setFeedSortBy] = useState<FeedSortOption>(() =>
@@ -79,6 +86,7 @@ export default function HomePage() {
     queryFn: feedsApi.getFeeds,
     gcTime: HOME_ROUTE_QUERY_GC_TIME_MS,
   });
+  const showSkeleton = useDelayedFlag(isLoading);
 
   const { data: billingSummary, refetch: refetchBilling } = useQuery({
     queryKey: ['billing', 'summary'],
@@ -141,8 +149,23 @@ export default function HomePage() {
       window.clearTimeout(mobileFeedTransitionTimeoutRef.current);
       mobileFeedTransitionTimeoutRef.current = null;
     }
+    if (mobileDetailFrameRef.current !== null) {
+      window.cancelAnimationFrame(mobileDetailFrameRef.current);
+      mobileDetailFrameRef.current = null;
+    }
+
+    const beginEnter = () => {
+      setMobileDetailPosition('offscreen');
+      mobileDetailFrameRef.current = window.requestAnimationFrame(() => {
+        mobileDetailFrameRef.current = window.requestAnimationFrame(() => {
+          mobileDetailFrameRef.current = null;
+          setMobileDetailPosition('onscreen');
+        });
+      });
+    };
 
     if (!isMobileFeedViewport()) {
+      setMobileDetailPosition('onscreen');
       setMobileFeedTransitionState('idle');
       setMobileTransitionFeed(null);
       setMobileTransitionViewport(null);
@@ -157,24 +180,26 @@ export default function HomePage() {
       );
       setMobileTransitionFeed(selectedFeed);
       setMobileFeedTransitionState('entering');
+      beginEnter();
       mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
         setMobileFeedTransitionState('idle');
         setMobileTransitionFeed(null);
         setMobileTransitionViewport(null);
         mobileFeedTransitionTimeoutRef.current = null;
-      }, MOBILE_FEED_DETAIL_TRANSITION_MS);
+      }, MOBILE_FEED_DETAIL_ENTER_MS);
     } else if (previousSelectedFeedId !== null && nextSelectedFeedId === null && previousSelectedFeed) {
       setMobileTransitionViewport(
         captureMobileTransitionViewport(pageContainerRef.current)
       );
       setMobileTransitionFeed(previousSelectedFeed);
       setMobileFeedTransitionState('exiting');
+      setMobileDetailPosition('offscreen');
       mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
         setMobileFeedTransitionState('idle');
         setMobileTransitionFeed(null);
         setMobileTransitionViewport(null);
         mobileFeedTransitionTimeoutRef.current = null;
-      }, MOBILE_FEED_DETAIL_TRANSITION_MS);
+      }, MOBILE_FEED_DETAIL_EXIT_MS);
     } else if (
       previousSelectedFeedId !== null &&
       nextSelectedFeedId !== null &&
@@ -187,12 +212,13 @@ export default function HomePage() {
       );
       setMobileTransitionFeed(selectedFeed);
       setMobileFeedTransitionState('entering');
+      beginEnter();
       mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
         setMobileFeedTransitionState('idle');
         setMobileTransitionFeed(null);
         setMobileTransitionViewport(null);
         mobileFeedTransitionTimeoutRef.current = null;
-      }, MOBILE_FEED_DETAIL_TRANSITION_MS);
+      }, MOBILE_FEED_DETAIL_ENTER_MS);
     } else {
       setMobileFeedTransitionState('idle');
       setMobileTransitionFeed(null);
@@ -207,35 +233,22 @@ export default function HomePage() {
       if (mobileFeedTransitionTimeoutRef.current !== null) {
         window.clearTimeout(mobileFeedTransitionTimeoutRef.current);
       }
+      if (mobileDetailFrameRef.current !== null) {
+        window.cancelAnimationFrame(mobileDetailFrameRef.current);
+      }
     };
   }, []);
 
   useEffect(() => {
     if (!showSortMenu) return;
-    const handlePointerDown = (event: MouseEvent) => {
+    const handlePointerDown = (event: PointerEvent) => {
       if (!sortMenuRef.current?.contains(event.target as Node)) {
         setShowSortMenu(false);
       }
     };
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [showSortMenu]);
-
-  if (isLoading) {
-    return (
-      <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-md p-4">
-        <p className="text-red-800">Error loading feeds. Please try again.</p>
-      </div>
-    );
-  }
 
   const planLimitReached =
     !!billingSummary &&
@@ -251,12 +264,6 @@ export default function HomePage() {
   const feedNotFound = feedIdIsValid && !selectedFeed;
   const detailFeed = selectedFeed ?? mobileTransitionFeed;
   const isMobileFeedTransitioning = mobileFeedTransitionState !== 'idle';
-  const mobileFeedDetailAnimationClass =
-    mobileFeedTransitionState === 'entering'
-      ? 'podly-mobile-feed-detail-enter'
-      : mobileFeedTransitionState === 'exiting'
-        ? 'podly-mobile-feed-detail-exit'
-        : '';
   const mobileFeedTransitionStyle =
     isMobileFeedTransitioning && mobileTransitionViewport
       ? {
@@ -272,6 +279,14 @@ export default function HomePage() {
     } catch (err) {
       console.error('Failed to get aggregate link', err);
       toast.error('Failed to get aggregate feed link');
+    }
+  };
+
+  const handleAddFeedClick = () => {
+    if (planLimitReached) {
+      navigate('/billing');
+    } else {
+      setShowAddForm((prev) => !prev);
     }
   };
 
@@ -296,42 +311,27 @@ export default function HomePage() {
       <div className={`flex-1 lg:max-w-md xl:max-w-lg flex flex-col ${
         selectedFeed && !isMobileFeedTransitioning ? 'hidden lg:flex' : 'flex'
       }`}>
-        <div className="mb-6 flex min-w-0 items-center gap-3">
-          <h2 className="shrink-0 text-2xl font-bold text-gray-900">
+        <div className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-3">
+          <h1 className="w-full text-2xl font-semibold text-gray-900 sm:w-auto sm:flex-1">
             Podcast Feeds
-          </h2>
-          <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-            <div ref={sortMenuRef} className="relative shrink-0">
+          </h1>
+          <div className="flex items-center gap-2">
+            <div ref={sortMenuRef} className="relative">
               <button
                 type="button"
                 onClick={() => setShowSortMenu((prev) => !prev)}
                 title="Sort podcast feeds"
+                aria-label="Sort feeds"
                 aria-haspopup="menu"
                 aria-expanded={showSortMenu}
-                className="h-10 w-10 flex items-center justify-center rounded-md border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors"
+                className="btn btn-secondary btn-icon"
               >
-                <svg
-                  className="w-4 h-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M3 6h13" />
-                  <path d="M3 12h9" />
-                  <path d="M3 18h5" />
-                  <path d="M17 8V4m0 0l-3 3m3-3l3 3" />
-                  <path d="M17 16v4m0 0l-3-3m3 3l3-3" />
-                </svg>
-                <span className="sr-only">Sort feeds</span>
+                <SlidersIcon className="w-4 h-4" />
               </button>
               {showSortMenu && (
                 <div
                   role="menu"
-                  className="absolute right-0 top-full mt-1 w-48 rounded-md border border-gray-200 bg-white py-1 shadow-lg z-20 max-w-[calc(100vw-2rem)]"
+                  className="absolute right-0 top-full mt-1 w-48 origin-top-right animate-pop-in rounded-md border border-gray-200 bg-surface py-1 shadow-lg z-20 max-w-[calc(100vw-2rem)]"
                 >
                   {feedSortOptions.map((option) => {
                     const isActive = option.value === feedSortBy;
@@ -344,25 +344,12 @@ export default function HomePage() {
                         onClick={() => handleFeedSortChange(option.value)}
                         className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm leading-5 transition-colors ${
                           isActive
-                            ? 'font-medium text-blue-600'
+                            ? 'font-medium text-blue-700'
                             : 'text-gray-700 hover:bg-gray-50'
                         }`}
                       >
                         <span>{option.label}</span>
-                        {isActive && (
-                          <svg
-                            className="h-3.5 w-3.5 shrink-0 text-blue-600"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            aria-hidden="true"
-                          >
-                            <polyline points="20 6 9 17 4 12" />
-                          </svg>
-                        )}
+                        {isActive && <CheckIcon className="h-3.5 w-3.5 shrink-0 text-blue-700" />}
                       </button>
                     );
                   })}
@@ -371,62 +358,73 @@ export default function HomePage() {
             </div>
             {canRefreshAll && (
               <button
+                type="button"
                 onClick={() => refreshAllMutation.mutate()}
                 disabled={refreshAllMutation.isPending}
                 title="Refresh all feeds"
-                className={`h-10 w-10 shrink-0 flex items-center justify-center rounded-md border transition-colors ${
-                  refreshAllMutation.isPending
-                    ? 'border-gray-200 text-gray-400 cursor-not-allowed'
-                    : 'border-gray-200 text-gray-600 hover:bg-gray-100'
-                }`}
+                aria-label="Refresh all feeds"
+                className="btn btn-secondary btn-icon"
               >
-                <svg
+                <RefreshIcon
                   className={`w-4 h-4 ${refreshAllMutation.isPending ? 'animate-spin' : ''}`}
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-                  <path d="M21 3v6h-6" />
-                </svg>
-                <span className="sr-only">Refresh all</span>
+                />
               </button>
             )}
             <button
+              type="button"
               onClick={handleCopyAggregateLink}
-              className="h-10 w-10 shrink-0 flex items-center justify-center rounded-md border border-gray-200 text-gray-600 hover:bg-gray-100 transition-colors"
+              className="btn btn-secondary btn-icon"
+              aria-label="Copy aggregate feed link"
               title="Copy your aggregate feed URL (last 3 episodes from each feed)"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-              </svg>
+              <LinkIcon className="w-4 h-4" />
             </button>
             <button
-              onClick={() => {
-                if (planLimitReached) {
-                  navigate('/billing');
-                } else {
-                  setShowAddForm((prev) => !prev);
-                }
-              }}
-              className={`h-10 shrink-0 inline-flex items-center justify-center rounded-md px-4 font-medium transition-colors ${
-                planLimitReached
-                  ? 'bg-amber-600 hover:bg-amber-700 text-white'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
-              }`}
+              type="button"
+              onClick={handleAddFeedClick}
+              className="btn btn-primary"
               title={planLimitReached ? 'Your plan is full. Click to upgrade.' : undefined}
             >
+              <PlusIcon className="w-4 h-4" />
               {planLimitReached ? 'Plan full' : showAddForm ? 'Close' : 'Add Feed'}
             </button>
           </div>
         </div>
 
         <div className="flex-1 min-h-0 overflow-hidden">
-          <FeedList 
+          {isLoading ? (
+            showSkeleton && (
+            <div className="space-y-2" aria-hidden="true">
+              {Array.from({ length: 6 }, (_, index) => (
+                <div
+                  key={index}
+                  className="flex items-start gap-3 rounded-lg border border-gray-200 bg-surface p-4"
+                >
+                  <div className="h-12 w-12 shrink-0 rounded-md bg-gray-200" />
+                  <div className="flex-1 space-y-2 pt-1">
+                    <div className="h-4 w-3/4 rounded bg-gray-200" />
+                    <div className="h-3 w-1/2 rounded bg-gray-200" />
+                  </div>
+                </div>
+              ))}
+            </div>
+            )
+          ) : error ? (
+            <div
+              role="alert"
+              className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-4"
+            >
+              <p className="text-sm text-red-800">Error loading feeds.</p>
+              <button
+                type="button"
+                onClick={() => refetch()}
+                className="btn btn-ghost btn-sm"
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <FeedList 
             feeds={feeds || []} 
             onFeedDeleted={refetch}
             onFeedSelected={(feed) => {
@@ -439,13 +437,15 @@ export default function HomePage() {
             }
             sortBy={feedSortBy}
           />
+          )}
         </div>
       </div>
 
       {/* Right Panel - Feed Detail */}
       {detailFeed && (
         <div
-          className={`${mobileFeedDetailAnimationClass} flex flex-1 flex-col bg-white rounded-lg shadow border overflow-hidden lg:flex-[2] ${
+          data-state={mobileDetailPosition}
+          className={`podly-mobile-feed-detail flex flex-1 flex-col bg-surface rounded-lg border border-gray-200 shadow-sm overflow-hidden lg:flex-[2] ${
             isMobileFeedTransitioning
               ? 'absolute left-0 right-0 z-10 lg:static lg:z-auto'
               : ''
@@ -468,27 +468,41 @@ export default function HomePage() {
       )}
 
       {/* Empty State for Desktop */}
-      {!selectedFeed && !feedNotFound && (
-        <div className="hidden lg:flex flex-[2] items-center justify-center bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
-          <div className="text-center">
-            <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-            </svg>
-            <h3 className="mt-2 text-sm font-medium text-gray-900">No podcast selected</h3>
-            <p className="mt-1 text-sm text-gray-500">Select a podcast from the list to view details and episodes.</p>
-          </div>
+      {!selectedFeed && !feedNotFound && feeds && (
+        <div className="hidden lg:flex flex-[2] flex-col items-start gap-4 self-start rounded-lg border border-gray-200 bg-surface p-6 shadow-sm">
+          {feeds.length === 0 ? (
+            <>
+              <h2 className="text-lg font-semibold text-gray-900">No podcasts yet</h2>
+              <p className="text-sm text-gray-600">Add a feed to start removing ads from your shows.</p>
+              <button type="button" onClick={handleAddFeedClick} className="btn btn-primary">
+                <PlusIcon className="w-4 h-4" />
+                Add Feed
+              </button>
+            </>
+          ) : (
+            <>
+              <h2 className="text-lg font-semibold text-gray-900">Select a podcast to see its episodes</h2>
+              <p className="text-sm text-gray-600">
+                <span className="tabular-nums">{feeds.length}</span>{' '}
+                {feeds.length === 1 ? 'podcast' : 'podcasts'},{' '}
+                <span className="tabular-nums">
+                  {feeds.reduce((sum, feed) => sum + (feed.posts_count ?? 0), 0).toLocaleString()}
+                </span>{' '}
+                episodes in total
+              </p>
+              <button type="button" onClick={handleCopyAggregateLink} className="btn btn-secondary">
+                <LinkIcon className="w-4 h-4" />
+                Copy combined RSS link
+              </button>
+            </>
+          )}
         </div>
       )}
 
       {feedNotFound && (
-        <div className="hidden lg:flex flex-[2] items-center justify-center bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
-          <div className="text-center">
-            <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <h3 className="mt-2 text-sm font-medium text-gray-900">Feed not found</h3>
-            <p className="mt-1 text-sm text-gray-500">Pick a feed from the list to continue.</p>
-          </div>
+        <div className="hidden lg:flex flex-[2] flex-col items-start gap-1 self-start rounded-lg border border-gray-200 bg-surface p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-gray-900">Feed not found</h2>
+          <p className="text-sm text-gray-600">Pick a feed from the list to continue.</p>
         </div>
       )}
 
@@ -496,7 +510,7 @@ export default function HomePage() {
         isOpen={showAddForm}
         onClose={() => setShowAddForm(false)}
         containerClassName="items-start p-4 sm:items-center sm:p-6"
-        panelClassName="w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col max-h-[90vh]"
+        panelClassName="w-full max-w-3xl bg-surface rounded-lg shadow-2xl border border-gray-200 flex flex-col max-h-[90vh]"
       >
             <div className="flex items-center justify-between border-b border-gray-200 px-4 sm:px-6 py-4">
               <div>
@@ -510,9 +524,7 @@ export default function HomePage() {
                 className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
                 aria-label="Close add feed modal"
               >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                <CloseIcon className="w-6 h-6" />
               </button>
             </div>
 

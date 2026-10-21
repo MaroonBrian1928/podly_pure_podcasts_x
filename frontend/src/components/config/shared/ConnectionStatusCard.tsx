@@ -28,14 +28,14 @@ export default function ConnectionStatusCard({
       : error || `${title} connection failed`;
 
   return (
-    <div className="flex items-start justify-between border rounded p-3">
+    <div className="flex items-start justify-between border border-gray-200 rounded-md p-3">
       <div>
         <div className="text-sm font-medium text-gray-900">{title}</div>
         <div className={`text-xs ${statusColor}`}>{displayMessage}</div>
       </div>
       <button
         type="button"
-        className="text-xs text-indigo-600 hover:underline"
+        className="btn btn-ghost btn-sm"
         onClick={onRetry}
       >
         Retry

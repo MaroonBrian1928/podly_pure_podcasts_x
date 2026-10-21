@@ -133,7 +133,7 @@ function AccountSecuritySection({ changePassword, refreshUser }: AccountSecurity
         <div className="flex items-center gap-3">
           <button
             type="submit"
-            className="px-4 py-2 rounded bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-60"
+            className="btn btn-secondary"
             disabled={passwordSubmitting}
           >
             {passwordSubmitting ? 'Updating…' : 'Update password'}
@@ -367,7 +367,7 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
           <div className="md:col-span-2 flex items-center justify-start">
             <button
               type="submit"
-              className="px-4 py-2 rounded bg-green-600 text-white text-sm font-medium hover:bg-green-700"
+              className="btn btn-secondary"
             >
               Add user
             </button>
@@ -392,7 +392,7 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
                 return (
                   <div
                     key={managed.id}
-                    className="border border-gray-200 rounded-lg p-3 space-y-3 bg-white"
+                    className="border border-gray-200 rounded-lg p-3 space-y-3 bg-surface"
                   >
                     <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                       <div>
@@ -498,7 +498,7 @@ function UserManagementSection({ currentUser, refreshUser, logout, managedUsers,
                         <div className="md:col-span-1 flex items-end gap-2">
                           <button
                             type="submit"
-                            className="px-4 py-2 rounded bg-indigo-600 text-white text-sm hover:bg-indigo-700"
+                            className="btn btn-secondary"
                           >
                             Update
                           </button>

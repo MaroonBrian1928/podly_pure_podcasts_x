@@ -9,7 +9,7 @@ export default function TestButton({ onClick, label, className = '' }: TestButto
     <div className={`flex justify-center ${className}`}>
       <button
         onClick={onClick}
-        className="mt-2 px-3 py-2 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700"
+        className="btn btn-secondary"
       >
         {label}
       </button>
