@@ -129,7 +129,7 @@ components:
 
 **Creative North Star: "The Quiet Control Room"**
 
-Podly is somewhere you check in, not somewhere you stay. Someone adds a feed, copies a link, sees that last night's episodes processed, and leaves. The interface is a calm room of neutral surfaces with a single blue accent. Color shows up only when something needs a decision or has gone wrong. Brand character lives in precise details: tabular numerals, a short press response on every control, and motion that settles instead of bouncing.
+Podly is somewhere you check in, not somewhere you stay. Someone adds a feed, copies a link, sees that last night's episodes processed, and leaves. The interface is a calm room of neutral surfaces with a single blue accent. Color shows up when something needs a decision, when something has gone wrong, or when Podly shows you what it did for you. Brand character lives in precise details: tabular numerals, a short press response on every control, motion that settles instead of bouncing, and small touches of life at the moments that pay off (see Touches of Life under Components).
 
 Density is moderate and leans compact. Controls are small (36px default, 30px compact), and body copy is 14px. A split view puts feeds next to episodes on desktop, and on a phone the episode view slides over the list. There are two themes with equal standing, light paper and Midnight Navy. Both come from one set of role variables, so any class means the same role in either theme.
 
@@ -139,6 +139,7 @@ Density is moderate and leans compact. Controls are small (36px default, 30px co
 - System sans for everything, with monospace and tabular numerals for timings, counts and logs.
 - Flat surfaces with hairline borders, plus a soft shadow on cards and floating layers.
 - Quick, damped motion that always respects `prefers-reduced-motion`.
+- Quiet controls, warm results: forms, navigation and chrome stay neutral, while summaries of what Podly did may carry one meaning-coded touch of color or motion.
 
 ## Colors
 
@@ -164,7 +165,9 @@ A cool-gray neutral system with one confident blue, and status hues used as tint
 ### Named Rules
 **The Role, Not Shade, Rule.** Gray and status classes resolve to CSS variables (`--gray-*`, `--amber-*`, …), generated in `tailwind.config.js` for `:root` and `html.dark`. Write `bg-gray-50` or `text-amber-800` and the role flips with the theme. Never add `dark:` overrides per class. Shades 400 and 500 are mid-tones and stay fixed.
 
-**The One Accent Rule.** Blue means "act here" or "you are here". It appears on the primary action, the focused control and the selected item, and nowhere else.
+**The One Accent Rule.** Blue means "act here" or "you are here". It appears on the primary action, the focused control and the selected item, and nowhere else. Inside a touch of life, hues name data categories instead (see the Meaning Hues table), and that is not an accent.
+
+**The Quiet Room, Warm Corners Rule.** Everything you operate (controls, forms, navigation, chrome) stays quiet. The places where Podly reports a result (summaries, totals, completions, live progress, empty states) may each carry one small touch of life.
 
 ## Typography
 
@@ -250,11 +253,44 @@ Built from `frontend/src/components/config/shared/`. Below `lg` (1024px), tabs r
 ### Modal Shell
 The panel rises 10px and fades in (320–380ms, `cubic-bezier(0.22, 1, 0.36, 1)`) over a navy backdrop that blurs to 4px. Under reduced motion it appears without moving.
 
-### Stats Metric Tiles
-The episode Stats pop-up's "Key metrics" row is a deliberate, owner-approved signature: one soft gradient tile per metric (`bg-gradient-to-br from-{hue}-50 to-{hue}-100`, bold `{hue}-600` number, `{hue}-800` label), with its own dark treatment (`dark:from-{hue}-950 dark:to-slate-900` and a tinted border). Hues: blue for transcript lines, green for content lines, red for ad lines removed, indigo for estimated cost, purple for chapters. It is the one place multiple accent hues and gradients are allowed. Keep it when polishing or auditing, and do not spread it to other surfaces.
+### Touches of Life
+Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it. The reference examples are the Stats pop-up's key-metric tiles and the live timer digits.
+
+**What counts as a touch**
+- **Meaning-coded color:** a soft same-hue tint behind a result, keyed to what the number means. Reference: the Stats key-metric tiles, `bg-gradient-to-br from-{hue}-50 to-{hue}-100` with a bold `{hue}-600` number and `{hue}-800` label, and in dark mode `dark:from-{hue}-950 dark:to-slate-900` with a 70% `{hue}-800` border and lighter number and label tints.
+- **Live motion:** a value that changes animates into place instead of snapping. Reference: `digit-tick`, a 350ms blur-and-rise with slight overshoot on live processing counters.
+- **Arrival and feedback:** a control or result acknowledges the moment. Reference: the 0.96 press scale on every button and the 220ms `pop-in` on popovers.
+
+**Meaning hues.** In a touch, a hue names a kind of thing, and it means the same thing everywhere:
+
+| Hue | Means |
+|---|---|
+| blue | input: transcripts, segments, what Podly read |
+| green | content kept, success |
+| red | ads removed, audio cut |
+| amber | bleeps, warnings, things held back |
+| indigo | cost and spend |
+| purple | chapters and structure |
+| sky | informational, in progress |
+
+**Guardrails**
+- **Place:** only on result, summary, status and empty-state surfaces. Never on form fields, settings, navigation, tables of raw data or page backgrounds.
+- **Budget:** one kind of touch per view region. The view must still read as the Quiet Control Room at a glance.
+- **Meaning first:** pick the hue from the table; never add a hue for variety. Labels always say what the number is, so color never carries the message alone.
+- **Gradients:** soft same-hue tints only (50 to 100, or 950 to slate in dark). No multi-hue gradients, no gradient text, no glow.
+- **Both themes:** design the dark treatment on purpose, and keep numbers and labels at 4.5:1 or better. Touch hues outside the themed set (indigo, purple) need explicit `dark:` classes; that is the one sanctioned use of `dark:` overrides.
+- **Motion:** 400ms or less, settles into place, and has a `prefers-reduced-motion` fallback that still shows the change.
+- **Keep them:** polish and audit passes preserve existing touches. Remove one only when the owner agrees.
+
+**Good next candidates**
+- Costs "Total for the month": tint the LLM, Whisper and INA breakdown with the cost hue (indigo), matching the Stats tiles.
+- Feed detail header: a small "ads removed" summary for the feed (red) beside the episode count.
+- Episode rows: a compact "N ads cut, M min saved" chip once processing finishes.
+- Jobs: animate a job's progress and give a completed job a brief green settle.
+- Empty states (no feeds, no episodes): one warm line and a single tinted illustration-free mark instead of plain gray text.
 
 ### Live Timer Digits
-Each digit that changes re-enters with `digit-tick`, a 350ms blur-and-rise with slight overshoot. This is the system's only deliberate flourish, and it's kept for live processing counters.
+Each digit that changes re-enters with `digit-tick`, a 350ms blur-and-rise with slight overshoot. It is the motion reference for Touches of Life and the only place overshoot is allowed.
 
 ## Do's and Don'ts
 
@@ -264,10 +300,11 @@ Each digit that changes re-enters with `digit-tick`, a 350ms blur-and-rise with 
 - **Do** use `tabular-nums` (and `font-mono` for timings and logs) on any changing or columnar number.
 - **Do** give every animation a `prefers-reduced-motion: reduce` fallback, as `index.css` does.
 - **Do** keep layouts working at phone width first. The slide-over feed detail is the reference pattern.
+- **Do** add a touch of life where Podly reports a result, using the meaning hues and one touch per view region.
 
 ### Don't:
 - **Don't** add `dark:` overrides for themed hues or grays. Fix the role variable instead.
 - **Don't** use Signal Blue for decoration, headings or navigation states.
-- **Don't** add a second accent hue, or use status colors outside chips, banners and inline state. The Stats metric tiles are the one sanctioned exception.
+- **Don't** add a second accent hue, or use status colors outside chips, banners and inline state. Touches of Life are the sanctioned exception, and only within their guardrails.
 - **Don't** use heavy shadows on resting surfaces. Save `shadow-lg` and above for layers that float.
 - **Don't** use bouncy or overshooting easing outside the live-digit tick.

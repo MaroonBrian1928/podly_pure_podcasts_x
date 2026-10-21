@@ -1,52 +1,234 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-21T00:00:00Z",
+  "generatedAt": "2026-10-21T07:17:15Z",
   "title": "Design System: Podly",
   "extensions": {
     "colorMeta": {
-      "signal-blue": { "role": "primary", "displayName": "Signal Blue", "canonical": "#2563eb", "tonalRamp": ["#172554", "#1e3a8a", "#1d4ed8", "#2563eb", "#3b82f6", "#93c5fd", "#bfdbfe", "#eff6ff"] },
-      "signal-blue-deep": { "role": "primary", "displayName": "Signal Blue Deep", "canonical": "#1d4ed8" },
-      "cut-red": { "role": "secondary", "displayName": "Cut Red", "canonical": "#dc2626", "tonalRamp": ["#450a0a", "#7f1d1d", "#b91c1c", "#dc2626", "#ef4444", "#fca5a5", "#fecaca", "#fef2f2"] },
-      "cut-red-deep": { "role": "secondary", "displayName": "Cut Red Deep", "canonical": "#b91c1c" },
-      "pause-amber-tint": { "role": "tertiary", "displayName": "Pause Amber Tint", "canonical": "#fef3c7", "tonalRamp": ["#451a03", "#78350f", "#92400e", "#d97706", "#f59e0b", "#fcd34d", "#fde68a", "#fffbeb"] },
-      "pause-amber-ink": { "role": "tertiary", "displayName": "Pause Amber Ink", "canonical": "#92400e" },
-      "paper-canvas": { "role": "neutral", "displayName": "Paper Canvas", "canonical": "#f9fafb", "tonalRamp": ["#030712", "#111827", "#374151", "#4b5563", "#9ca3af", "#d1d5db", "#e5e7eb", "#f9fafb"] },
-      "paper-surface": { "role": "neutral", "displayName": "Paper Surface", "canonical": "#ffffff" },
-      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#111827" },
-      "ink-muted": { "role": "neutral", "displayName": "Ink Muted", "canonical": "#4b5563" },
-      "hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#e5e7eb" },
-      "hairline-strong": { "role": "neutral", "displayName": "Hairline Strong", "canonical": "#d1d5db" },
-      "midnight-canvas": { "role": "neutral", "displayName": "Midnight Canvas", "canonical": "#040a18", "tonalRamp": ["#040a18", "#0f172a", "#131c2f", "#233045", "#313f56", "#64748b", "#a7b4c6", "#e2e8f0"] },
-      "midnight-surface": { "role": "neutral", "displayName": "Midnight Surface", "canonical": "#0f172a" },
-      "midnight-ink": { "role": "neutral", "displayName": "Midnight Ink", "canonical": "#f8fafc" },
-      "midnight-ink-muted": { "role": "neutral", "displayName": "Midnight Ink Muted", "canonical": "#d6dfec" },
-      "subscribe-black": { "role": "neutral", "displayName": "Subscribe Black", "canonical": "#000000" }
+      "signal-blue": {
+        "role": "primary",
+        "displayName": "Signal Blue",
+        "canonical": "#2563eb",
+        "tonalRamp": [
+          "#172554",
+          "#1e3a8a",
+          "#1d4ed8",
+          "#2563eb",
+          "#3b82f6",
+          "#93c5fd",
+          "#bfdbfe",
+          "#eff6ff"
+        ]
+      },
+      "signal-blue-deep": {
+        "role": "primary",
+        "displayName": "Signal Blue Deep",
+        "canonical": "#1d4ed8"
+      },
+      "cut-red": {
+        "role": "secondary",
+        "displayName": "Cut Red",
+        "canonical": "#dc2626",
+        "tonalRamp": [
+          "#450a0a",
+          "#7f1d1d",
+          "#b91c1c",
+          "#dc2626",
+          "#ef4444",
+          "#fca5a5",
+          "#fecaca",
+          "#fef2f2"
+        ]
+      },
+      "cut-red-deep": {
+        "role": "secondary",
+        "displayName": "Cut Red Deep",
+        "canonical": "#b91c1c"
+      },
+      "pause-amber-tint": {
+        "role": "tertiary",
+        "displayName": "Pause Amber Tint",
+        "canonical": "#fef3c7",
+        "tonalRamp": [
+          "#451a03",
+          "#78350f",
+          "#92400e",
+          "#d97706",
+          "#f59e0b",
+          "#fcd34d",
+          "#fde68a",
+          "#fffbeb"
+        ]
+      },
+      "pause-amber-ink": {
+        "role": "tertiary",
+        "displayName": "Pause Amber Ink",
+        "canonical": "#92400e"
+      },
+      "paper-canvas": {
+        "role": "neutral",
+        "displayName": "Paper Canvas",
+        "canonical": "#f9fafb",
+        "tonalRamp": [
+          "#030712",
+          "#111827",
+          "#374151",
+          "#4b5563",
+          "#9ca3af",
+          "#d1d5db",
+          "#e5e7eb",
+          "#f9fafb"
+        ]
+      },
+      "paper-surface": {
+        "role": "neutral",
+        "displayName": "Paper Surface",
+        "canonical": "#ffffff"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#111827"
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Ink Muted",
+        "canonical": "#4b5563"
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#e5e7eb"
+      },
+      "hairline-strong": {
+        "role": "neutral",
+        "displayName": "Hairline Strong",
+        "canonical": "#d1d5db"
+      },
+      "midnight-canvas": {
+        "role": "neutral",
+        "displayName": "Midnight Canvas",
+        "canonical": "#040a18",
+        "tonalRamp": [
+          "#040a18",
+          "#0f172a",
+          "#131c2f",
+          "#233045",
+          "#313f56",
+          "#64748b",
+          "#a7b4c6",
+          "#e2e8f0"
+        ]
+      },
+      "midnight-surface": {
+        "role": "neutral",
+        "displayName": "Midnight Surface",
+        "canonical": "#0f172a"
+      },
+      "midnight-ink": {
+        "role": "neutral",
+        "displayName": "Midnight Ink",
+        "canonical": "#f8fafc"
+      },
+      "midnight-ink-muted": {
+        "role": "neutral",
+        "displayName": "Midnight Ink Muted",
+        "canonical": "#d6dfec"
+      },
+      "subscribe-black": {
+        "role": "neutral",
+        "displayName": "Subscribe Black",
+        "canonical": "#000000"
+      }
     },
     "typographyMeta": {
-      "headline": { "displayName": "Headline", "purpose": "Page titles: Jobs, Billing, feed name." },
-      "title": { "displayName": "Title", "purpose": "Section and empty-state headings, stat values." },
-      "body": { "displayName": "Body", "purpose": "Default text; medium weight for labels, nav and buttons." },
-      "label": { "displayName": "Label", "purpose": "Metadata, chips, compact buttons." },
-      "data": { "displayName": "Data", "purpose": "Timings, durations, timestamps and logs with tabular numerals." }
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page titles: Jobs, Billing, feed name."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Section and empty-state headings, stat values."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default text; medium weight for labels, nav and buttons."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Metadata, chips, compact buttons."
+      },
+      "data": {
+        "displayName": "Data",
+        "purpose": "Timings, durations, timestamps and logs with tabular numerals."
+      }
     },
     "shadows": [
-      { "name": "card-rest", "value": "0 1px 2px 0 rgb(0 0 0 / 0.05)", "purpose": "Feed cards and stat tiles at rest." },
-      { "name": "card-hover", "value": "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)", "purpose": "Feed card under the pointer." },
-      { "name": "floating", "value": "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)", "purpose": "Menus, popovers, audio player." },
-      { "name": "modal", "value": "0 25px 50px -12px rgb(0 0 0 / 0.25)", "purpose": "Modal panels over the blurred navy backdrop." }
+      {
+        "name": "card-rest",
+        "value": "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+        "purpose": "Feed cards and stat tiles at rest."
+      },
+      {
+        "name": "card-hover",
+        "value": "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)",
+        "purpose": "Feed card under the pointer."
+      },
+      {
+        "name": "floating",
+        "value": "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)",
+        "purpose": "Menus, popovers, audio player."
+      },
+      {
+        "name": "modal",
+        "value": "0 25px 50px -12px rgb(0 0 0 / 0.25)",
+        "purpose": "Modal panels over the blurred navy backdrop."
+      }
     ],
     "motion": [
-      { "name": "ease-out", "value": "cubic-bezier(0.23, 1, 0.32, 1)", "purpose": "Default entrance easing (pop-in, menus)." },
-      { "name": "ease-drawer", "value": "cubic-bezier(0.32, 0.72, 0, 1)", "purpose": "Phone feed-detail slide-over, 440ms." },
-      { "name": "press", "value": "scale 0.96, 80ms in / 360ms cubic-bezier(0.33, 1, 0.68, 1) out", "purpose": "Press feedback on every button." },
-      { "name": "page-transition", "value": "320ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Page slide-and-unblur on route change." },
-      { "name": "modal", "value": "320–380ms cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Modal panel rise and fade." },
-      { "name": "digit-tick", "value": "350ms cubic-bezier(0.34, 1.56, 0.64, 1)", "purpose": "Per-digit entrance on live timers; the only overshoot in the system." }
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.23, 1, 0.32, 1)",
+        "purpose": "Default entrance easing (pop-in, menus)."
+      },
+      {
+        "name": "ease-drawer",
+        "value": "cubic-bezier(0.32, 0.72, 0, 1)",
+        "purpose": "Phone feed-detail slide-over, 440ms."
+      },
+      {
+        "name": "press",
+        "value": "scale 0.96, 80ms in / 360ms cubic-bezier(0.33, 1, 0.68, 1) out",
+        "purpose": "Press feedback on every button."
+      },
+      {
+        "name": "page-transition",
+        "value": "320ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Page slide-and-unblur on route change."
+      },
+      {
+        "name": "modal",
+        "value": "320–380ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Modal panel rise and fade."
+      },
+      {
+        "name": "digit-tick",
+        "value": "350ms cubic-bezier(0.34, 1.56, 0.64, 1)",
+        "purpose": "Per-digit entrance on live timers; the only overshoot in the system."
+      }
     ],
     "breakpoints": [
-      { "name": "sm", "value": "640px" },
-      { "name": "md", "value": "768px" },
-      { "name": "lg", "value": "1024px" }
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      }
     ]
   },
   "components": [
@@ -113,35 +295,66 @@
       "description": "Selectable feed row with artwork; blue border and inset ring when selected.",
       "html": "<button class=\"ds-feed-card\" aria-current=\"true\"><span class=\"ds-feed-art\"></span><span class=\"ds-feed-body\"><span class=\"ds-feed-title\">The Daily Example</span><span class=\"ds-feed-meta\">by Example Media</span><span class=\"ds-feed-count\">214 episodes</span></span></button>",
       "css": ".ds-feed-card { display: flex; gap: 12px; width: 320px; padding: 16px; text-align: left; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); cursor: pointer; font-family: ui-sans-serif, system-ui, sans-serif; transition: background-color 150ms, border-color 150ms, box-shadow 150ms; } .ds-feed-card:hover { background: #f9fafb; border-color: #d1d5db; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1); } .ds-feed-card:focus-visible { outline: none; box-shadow: 0 0 0 2px #3b82f6; } .ds-feed-card[aria-current='true'] { border-color: #3b82f6; box-shadow: inset 0 0 0 1px #3b82f6; } .ds-feed-art { flex: none; width: 48px; height: 48px; border-radius: 6px; background: #e5e7eb; } .ds-feed-body { display: flex; flex-direction: column; min-width: 0; } .ds-feed-title { font-weight: 500; font-size: 16px; line-height: 24px; color: #111827; } .ds-feed-meta { margin-top: 4px; font-size: 14px; line-height: 20px; color: #4b5563; } .ds-feed-count { margin-top: 8px; font-size: 12px; line-height: 16px; color: #4b5563; font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Stats Metric Tile",
+      "kind": "custom",
+      "refersTo": "touch-of-life",
+      "description": "Touch of life: a meaning-coded tint behind a result number (blue input, green content, red ads removed, indigo cost).",
+      "html": "<div class=\"ds-tiles\"><div class=\"ds-tile ds-blue\"><b>14</b><span>Transcript lines</span></div><div class=\"ds-tile ds-green\"><b>12</b><span>Content lines</span></div><div class=\"ds-tile ds-red\"><b>2</b><span>Ad lines removed</span></div><div class=\"ds-tile ds-indigo\"><b>$0.0003</b><span>Estimated cost</span></div></div>",
+      "css": ".ds-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;font-family:ui-sans-serif,system-ui,sans-serif}.ds-tile{border-radius:8px;padding:16px;text-align:center;border:1px solid transparent}.ds-tile b{display:block;font-size:24px;line-height:32px;font-weight:700;font-variant-numeric:tabular-nums}.ds-tile span{font-size:14px}.ds-blue{background:linear-gradient(to bottom right,#eff6ff,#dbeafe)}.ds-blue b{color:#2563eb}.ds-blue span{color:#1e40af}.ds-green{background:linear-gradient(to bottom right,#f0fdf4,#dcfce7)}.ds-green b{color:#16a34a}.ds-green span{color:#166534}.ds-red{background:linear-gradient(to bottom right,#fef2f2,#fee2e2)}.ds-red b{color:#dc2626}.ds-red span{color:#991b1b}.ds-indigo{background:linear-gradient(to bottom right,#eef2ff,#e0e7ff)}.ds-indigo b{color:#4f46e5}.ds-indigo span{color:#3730a3}"
     }
   ],
   "narrative": {
     "northStar": "The Quiet Control Room",
-    "overview": "Podly is somewhere you check in, not somewhere you stay. Someone adds a feed, copies a link, sees that last night's episodes processed, and leaves. The interface is a calm room of neutral surfaces with a single blue accent. Color shows up only when something needs a decision or has gone wrong. Brand character lives in precise details: tabular numerals, a short press response on every control, and motion that settles instead of bouncing.\n\nDensity is moderate and leans compact. Controls are small (36px default, 30px compact), and body copy is 14px. A split view puts feeds next to episodes on desktop, and on a phone the episode view slides over the list. There are two themes with equal standing, light paper and Midnight Navy. Both come from one set of role variables, so any class means the same role in either theme.",
+    "overview": "Podly is somewhere you check in, not somewhere you stay. Someone adds a feed, copies a link, sees that last night's episodes processed, and leaves. The interface is a calm room of neutral surfaces with a single blue accent. Color shows up when something needs a decision, when something has gone wrong, or when Podly shows you what it did for you. Brand character lives in precise details: tabular numerals, a short press response on every control, motion that settles instead of bouncing, and small touches of life at the moments that pay off (see Touches of Life under Components).\n\nDensity is moderate and leans compact. Controls are small (36px default, 30px compact), and body copy is 14px. A split view puts feeds next to episodes on desktop, and on a phone the episode view slides over the list. There are two themes with equal standing, light paper and Midnight Navy. Both come from one set of role variables, so any class means the same role in either theme.",
     "keyCharacteristics": [
       "Neutral-first surfaces, with one blue accent for primary action, focus and selection.",
       "Status hues (amber, red, green, sky) appear only as tinted chips and banners, never as decoration.",
       "System sans for everything, with monospace and tabular numerals for timings, counts and logs.",
       "Flat surfaces with hairline borders, plus a soft shadow on cards and floating layers.",
-      "Quick, damped motion that always respects `prefers-reduced-motion`."
+      "Quick, damped motion that always respects `prefers-reduced-motion`.",
+      "Quiet controls, warm results: forms, navigation and chrome stay neutral, while summaries of what Podly did may carry one meaning-coded touch of color or motion."
     ],
     "rules": [
-      { "name": "The Role, Not Shade, Rule", "body": "Gray and status classes resolve to CSS variables (`--gray-*`, `--amber-*`, …), generated in `tailwind.config.js` for `:root` and `html.dark`. Write `bg-gray-50` or `text-amber-800` and the role flips with the theme. Never add `dark:` overrides per class. Shades 400 and 500 are mid-tones and stay fixed.", "section": "colors" },
-      { "name": "The One Accent Rule", "body": "Blue means \"act here\" or \"you are here\". It appears on the primary action, the focused control and the selected item, and nowhere else.", "section": "colors" },
-      { "name": "The Tabular Rule", "body": "Any number that updates live or sits in a column uses `tabular-nums`, so digits never shift.", "section": "typography" },
-      { "name": "The Border-First Rule", "body": "Separate surfaces with a hairline before reaching for a shadow. A shadow means \"this lifts or floats\".", "section": "elevation" }
+      {
+        "name": "The Role, Not Shade, Rule",
+        "body": "Gray and status classes resolve to CSS variables (`--gray-*`, `--amber-*`, …), generated in `tailwind.config.js` for `:root` and `html.dark`. Write `bg-gray-50` or `text-amber-800` and the role flips with the theme. Never add `dark:` overrides per class. Shades 400 and 500 are mid-tones and stay fixed.",
+        "section": "elevation"
+      },
+      {
+        "name": "The One Accent Rule",
+        "body": "Blue means \"act here\" or \"you are here\". It appears on the primary action, the focused control and the selected item, and nowhere else. Inside a touch of life, hues name data categories instead (see the Meaning Hues table), and that is not an accent.",
+        "section": "colors"
+      },
+      {
+        "name": "The Quiet Room, Warm Corners Rule",
+        "body": "Everything you operate (controls, forms, navigation, chrome) stays quiet. The places where Podly reports a result (summaries, totals, completions, live progress, empty states) may each carry one small touch of life.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Rule",
+        "body": "Any number that updates live or sits in a column uses `tabular-nums`, so digits never shift.",
+        "section": "typography"
+      },
+      {
+        "name": "The Border-First Rule",
+        "body": "Separate surfaces with a hairline before reaching for a shadow. A shadow means \"this lifts or floats\".",
+        "section": "elevation"
+      }
     ],
     "dos": [
       "**Do** use the `.btn`, `.btn-*` and `.input` component classes in `index.css` instead of rebuilding controls with ad-hoc utilities.",
       "**Do** write gray and status colors as role classes (`bg-gray-50`, `text-amber-800`) and let the variables handle dark mode.",
       "**Do** use `tabular-nums` (and `font-mono` for timings and logs) on any changing or columnar number.",
       "**Do** give every animation a `prefers-reduced-motion: reduce` fallback, as `index.css` does.",
-      "**Do** keep layouts working at phone width first. The slide-over feed detail is the reference pattern."
+      "**Do** keep layouts working at phone width first. The slide-over feed detail is the reference pattern.",
+      "**Do** add a touch of life where Podly reports a result, using the meaning hues and one touch per view region."
     ],
     "donts": [
       "**Don't** add `dark:` overrides for themed hues or grays. Fix the role variable instead.",
       "**Don't** use Signal Blue for decoration, headings or navigation states.",
-      "**Don't** add a second accent hue, or use status colors outside chips, banners and inline state.",
+      "**Don't** add a second accent hue, or use status colors outside chips, banners and inline state. Touches of Life are the sanctioned exception, and only within their guardrails.",
       "**Don't** use heavy shadows on resting surfaces. Save `shadow-lg` and above for layers that float.",
       "**Don't** use bouncy or overshooting easing outside the live-digit tick."
     ]
