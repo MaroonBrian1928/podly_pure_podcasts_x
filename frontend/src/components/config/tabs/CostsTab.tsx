@@ -286,7 +286,7 @@ export default function CostsTab() {
         <div className="text-sm text-gray-600">Loading cost data…</div>
       ) : costs ? (
         <>
-          <Section title="Total for the month">
+          <Section title="Total for the month" stacked>
             <div>
               <div className="text-2xl font-semibold tabular-nums text-gray-900">
                 ${costs.total_cost.toFixed(2)}
@@ -302,7 +302,7 @@ export default function CostsTab() {
             </div>
           </Section>
 
-          <Section title="Cost by feed">
+          <Section title="Cost by feed" stacked>
             {costs.feeds.length === 0 ? (
               <p className="text-sm text-gray-600">No processed episodes this month.</p>
             ) : (
@@ -339,7 +339,7 @@ export default function CostsTab() {
             )}
           </Section>
 
-          <Section title="Cost by user">
+          <Section title="Cost by user" stacked>
             {costs.users.length === 0 ? (
               <p className="text-sm text-gray-600">No users found.</p>
             ) : (
@@ -388,7 +388,7 @@ export default function CostsTab() {
       ) : null}
 
       {/* API Call Log */}
-      <Section title="API call log">
+      <Section title="API call log" stacked>
         {callsLoading ? (
           <div className="text-sm text-gray-600">Loading call log…</div>
         ) : calls ? (
@@ -467,7 +467,7 @@ export default function CostsTab() {
         ) : null}
       </Section>
 
-      <Section title="Maintenance" collapsible>
+      <Section title="Maintenance" collapsible stacked>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={() => cleanupCancelledMutation.mutate()}

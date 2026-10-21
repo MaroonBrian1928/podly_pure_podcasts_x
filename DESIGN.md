@@ -235,7 +235,7 @@ Quiet, tactile, precise.
 - **Disabled:** gray-100 fill and gray-700 text at full opacity, so the value stays readable.
 
 ### Settings Forms
-Built from `frontend/src/components/config/shared/`. Form tabs are capped at `max-w-3xl`.
+Built from `frontend/src/components/config/shared/`. Below `lg` (1024px), tabs run across the top and each Section is a card. From `lg`, the tabs and Advanced subtabs move into a sticky 12rem sidebar, and each Section becomes a hairline-separated row: heading in a 15rem column, fields beside it, capped at `max-w-5xl`. Dashboards and tables (Costs) pass `stacked` to keep full-width cards.
 - **Field:** label above the control (14px medium), optional one-sentence hint between them (12px gray-600).
 - **ToggleField:** label and hint on the left, checkbox on the right; the whole row is the tap target. Every on/off setting uses it.
 - **Section:** a card with a 16px semibold title and an optional description. `collapsible` sections start closed and hold limits and tuning most people never touch. Never nest a card inside a Section.

@@ -2,7 +2,12 @@ import { useMemo, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import useConfigState from '../../hooks/useConfigState';
-import { ConfigContext, type ConfigTabId, type AdvancedSubtab } from './ConfigContext';
+import {
+  ADVANCED_SUBTABS,
+  ConfigContext,
+  type ConfigTabId,
+  type AdvancedSubtab,
+} from './ConfigContext';
 import { EnvOverrideWarningModal } from './shared';
 import DefaultTab from './tabs/DefaultTab';
 import AdvancedTab from './tabs/AdvancedTab';
@@ -19,6 +24,10 @@ const TABS: { id: ConfigTabId; label: string; adminOnly?: boolean }[] = [
   { id: 'costs', label: 'Costs', adminOnly: true },
   { id: 'notifications', label: 'Notifications', adminOnly: true },
 ];
+
+const sidebarItem = 'block w-full rounded-md px-3 py-1.5 text-left text-sm font-medium transition-colors';
+const sidebarActive = 'bg-gray-100 text-gray-900';
+const sidebarInactive = 'text-gray-600 hover:bg-gray-50 hover:text-gray-900';
 
 export default function ConfigTabs() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -109,13 +118,11 @@ export default function ConfigTabs() {
   return (
     <ConfigContext.Provider value={contextValue}>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Settings</h1>
-        </div>
+        <h1 className="text-2xl font-semibold text-gray-900">Settings</h1>
 
-        {/* Tab Navigation */}
-        <div className="border-b border-gray-200 overflow-x-auto">
-          <nav className="flex space-x-8 min-w-max" role="tablist" aria-label="Settings">
+        {/* Below `lg`: tabs across the top. */}
+        <div className="overflow-x-auto border-b border-gray-200 lg:hidden">
+          <nav className="flex min-w-max space-x-8" role="tablist" aria-label="Settings">
             {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -135,15 +142,58 @@ export default function ConfigTabs() {
           </nav>
         </div>
 
-        {/* Tab Content */}
-        {/* Forms stay at a readable width; Costs keeps the full width for its tables. */}
-        <div className={`mt-4 ${activeTab === 'costs' ? '' : 'max-w-3xl'}`}>
-          {activeTab === 'default' && <DefaultTab />}
-          {activeTab === 'advanced' && <AdvancedTab />}
-          {activeTab === 'users' && isAdmin && <UserManagementTab />}
-          {activeTab === 'discord' && isAdmin && showDiscordIntegration && <DiscordTab />}
-          {activeTab === 'costs' && isAdmin && <CostsTab />}
-          {activeTab === 'notifications' && isAdmin && <NotificationsTab />}
+        <div className="lg:grid lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-12">
+          {/* From `lg`: a sticky sidebar with the Advanced subtabs nested under Advanced. */}
+          <nav className="hidden lg:block" aria-label="Settings">
+            <ul className="sticky top-6 space-y-0.5">
+              {visibleTabs.map((tab) => {
+                const tabActive = activeTab === tab.id;
+                return (
+                  <li key={tab.id}>
+                    <button
+                      type="button"
+                      aria-current={tabActive && tab.id !== 'advanced' ? 'page' : undefined}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`${sidebarItem} ${
+                        tabActive && tab.id !== 'advanced' ? sidebarActive : sidebarInactive
+                      } ${tabActive && tab.id === 'advanced' ? 'text-gray-900' : ''}`}
+                    >
+                      {tab.label}
+                    </button>
+                    {tab.id === 'advanced' && tabActive && (
+                      <ul className="mb-1 ml-3 mt-0.5 space-y-0.5 border-l border-gray-200 pl-2">
+                        {ADVANCED_SUBTABS.map((subtab) => {
+                          const subActive = activeSubtab === subtab.id;
+                          return (
+                            <li key={subtab.id}>
+                              <button
+                                type="button"
+                                aria-current={subActive ? 'page' : undefined}
+                                onClick={() => setActiveSubtab(subtab.id)}
+                                className={`${sidebarItem} ${subActive ? sidebarActive : sidebarInactive}`}
+                              >
+                                {subtab.label}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </nav>
+
+          {/* Forms stay at a readable width; Costs keeps the full width for its tables. */}
+          <div className={`min-w-0 ${activeTab === 'costs' ? '' : 'max-w-5xl'}`}>
+            {activeTab === 'default' && <DefaultTab />}
+            {activeTab === 'advanced' && <AdvancedTab />}
+            {activeTab === 'users' && isAdmin && <UserManagementTab />}
+            {activeTab === 'discord' && isAdmin && showDiscordIntegration && <DiscordTab />}
+            {activeTab === 'costs' && isAdmin && <CostsTab />}
+            {activeTab === 'notifications' && isAdmin && <NotificationsTab />}
+          </div>
         </div>
 
         {/* Env Warning Modal */}

@@ -8,9 +8,16 @@ interface SectionProps {
   className?: string;
   /** Starts collapsed; for settings most people never change. */
   collapsible?: boolean;
+  /** Keep the card and full-width body on desktop, for tables and dashboards. */
+  stacked?: boolean;
 }
 
-const frame = 'rounded-lg border border-gray-200 bg-surface p-4 shadow-sm sm:p-5';
+const card = 'rounded-lg border border-gray-200 bg-surface p-4 shadow-sm sm:p-5';
+// From `lg` a settings section drops its card and becomes a hairline-separated row:
+// heading in a 15rem column, fields beside it.
+const row =
+  'lg:rounded-none lg:border-0 lg:border-t lg:bg-transparent lg:px-0 lg:pb-0 lg:pt-6 lg:shadow-none lg:first:border-t-0 lg:first:pt-0';
+const split = 'lg:grid lg:grid-cols-[15rem_minmax(0,1fr)] lg:gap-10';
 
 export default function Section({
   title,
@@ -18,14 +25,16 @@ export default function Section({
   children,
   className = '',
   collapsible = false,
+  stacked = false,
 }: SectionProps) {
+  const frame = stacked ? card : `${card} ${row}`;
   const heading = (
     <div className="min-w-0">
       <h3 className="text-base font-semibold text-gray-900">{title}</h3>
       {description ? <p className="mt-0.5 text-sm text-gray-600">{description}</p> : null}
     </div>
   );
-  const body = <div className="space-y-5">{children}</div>;
+  const body = <div className="min-w-0 space-y-5">{children}</div>;
 
   if (collapsible) {
     return (
@@ -34,14 +43,14 @@ export default function Section({
           {heading}
           <ChevronDownIcon className="mt-0.5 h-5 w-5 shrink-0 text-gray-500 transition-transform duration-200 group-open:rotate-180" />
         </summary>
-        <div className="mt-5">{body}</div>
+        <div className={`mt-5 ${stacked ? '' : 'lg:ml-[17.5rem]'}`}>{body}</div>
       </details>
     );
   }
 
   return (
-    <section className={`${frame} ${className}`}>
-      <div className="mb-5">{heading}</div>
+    <section className={`${frame} ${stacked ? '' : split} ${className}`}>
+      <div className={stacked ? 'mb-5' : 'mb-5 lg:mb-0'}>{heading}</div>
       {body}
     </section>
   );
