@@ -317,6 +317,59 @@ mod tests {
         );
         transaction.rollback().unwrap();
     }
+
+    #[test]
+    fn post_update_accepts_recorded_cut_columns() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE post(id INTEGER PRIMARY KEY, removed_ad_windows JSON,
+                    original_duration_seconds REAL, cut_stats_source TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO post(id) VALUES (1)", [])
+            .unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        let operation = Operation::Update {
+            model: "Post".to_owned(),
+            id: json!(1),
+            data: serde_json::Map::from_iter([
+                ("removed_ad_windows".to_owned(), json!([[1.25, 2.5]])),
+                ("original_duration_seconds".to_owned(), json!(600.123)),
+                ("cut_stats_source".to_owned(), json!("recorded")),
+            ]),
+        };
+        ActionRegistry::default()
+            .execute(&transaction, &operation)
+            .unwrap();
+        let row: (String, f64, String) = transaction
+            .query_row(
+                "SELECT removed_ad_windows,original_duration_seconds,cut_stats_source FROM post",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("[[1.25,2.5]]".to_owned(), 600.123, "recorded".to_owned())
+        );
+
+        let clear = Operation::Update {
+            model: "Post".to_owned(),
+            id: json!(1),
+            data: serde_json::Map::from_iter([("removed_ad_windows".to_owned(), Value::Null)]),
+        };
+        ActionRegistry::default()
+            .execute(&transaction, &clear)
+            .unwrap();
+        let cleared: String = transaction
+            .query_row("SELECT removed_ad_windows FROM post", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cleared, "null");
+        transaction.rollback().unwrap();
+    }
 }
 
 pub fn error(code: &str, message: &str) -> RpcError {
@@ -421,6 +474,9 @@ fn model_spec(model: &str) -> Option<ModelSpec> {
         ("whitelisted", ColumnKind::Boolean),
         ("chapter_data", ColumnKind::Text),
         ("bleep_windows", ColumnKind::Json),
+        ("removed_ad_windows", ColumnKind::Json),
+        ("original_duration_seconds", ColumnKind::Numeric),
+        ("cut_stats_source", ColumnKind::Text),
         ("transcript_word_timestamps", ColumnKind::Json),
         ("refined_ad_boundaries", ColumnKind::Json),
         ("refined_ad_boundaries_updated_at", ColumnKind::Text),

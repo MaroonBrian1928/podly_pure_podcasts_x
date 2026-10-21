@@ -1568,7 +1568,7 @@ def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
             post_id=post.id,
             sequence_num=0,
             start_time=10.0,
-            end_time=20.0,
+            end_time=30.0,
             text="Sponsored message",
         )
         model_call = ModelCall(
@@ -1599,21 +1599,21 @@ def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload is not None
-    assert payload["processing_stats"]["original_duration_seconds"] == 110.0
+    assert payload["processing_stats"]["original_duration_seconds"] == 120.0
     assert payload["processing_stats"]["edited_duration_seconds"] == 100.0
-    assert payload["processing_stats"]["estimated_ad_time_seconds"] == 10.0
-    assert payload["processing_stats"]["ad_percentage"] == 9.1
+    assert payload["processing_stats"]["estimated_ad_time_seconds"] == 20.0
+    assert payload["processing_stats"]["ad_percentage"] == 16.7
     assert payload["processing_stats"]["edited_ad_markers"] == [
         {
             "edited_start_time": 10.0,
             "edited_end_time": 10.0,
             "original_start_time": 10.0,
-            "original_end_time": 20.0,
-            "removed_duration_seconds": 10.0,
+            "original_end_time": 30.0,
+            "removed_duration_seconds": 20.0,
         }
     ]
     assert payload["processing_stats"]["bleeped_time_seconds"] == 2.0
-    assert payload["processing_stats"]["bleeped_percentage"] == 1.8
+    assert payload["processing_stats"]["bleeped_percentage"] == 1.7
     assert payload["processing_stats"]["edited_bleep_windows"] == [
         {
             "edited_start_time": 4.0,
@@ -1622,8 +1622,8 @@ def test_post_stats_use_original_duration_for_ad_and_bleep_percentages(app):
             "original_end_time": 5.0,
         },
         {
-            "edited_start_time": 34.0,
-            "edited_end_time": 35.0,
+            "edited_start_time": 24.0,
+            "edited_end_time": 25.0,
             "original_start_time": 44.0,
             "original_end_time": 45.0,
         },
@@ -2102,8 +2102,8 @@ def test_post_stats_expand_preroll_ad_block_with_edge_audio(app):
             "edited_start_time": 0.0,
             "edited_end_time": 0.0,
             "original_start_time": 0.0,
-            "original_end_time": 65.374,
-            "removed_duration_seconds": 65.374,
+            "original_end_time": 65.4,
+            "removed_duration_seconds": 65.4,
         }
     ]
 
@@ -2517,3 +2517,156 @@ def test_post_stats_original_length_is_at_least_transcript_end(app):
     payload = _admin_stats(app, guid)
 
     assert payload["processing_stats"]["original_duration_seconds"] == 3600.0
+
+
+def _stats_for_ad_windows(
+    app, *, guid, windows, transcript_end, post_duration, post_kwargs=None
+):
+    app.testing = True
+    app.register_blueprint(post_bp)
+    with app.app_context():
+        feed = Feed(title="Merge Feed", rss_url=f"https://example.com/{guid}.xml")
+        db.session.add(feed)
+        db.session.flush()
+        post = Post(
+            feed_id=feed.id,
+            guid=guid,
+            title="Merge Episode",
+            download_url="https://example.com/audio.mp3",
+            duration=post_duration,
+            **(post_kwargs or {}),
+        )
+        db.session.add(post)
+        db.session.flush()
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=0.0,
+                end_time=transcript_end,
+                text="hello",
+            )
+        )
+        db.session.commit()
+
+    with (
+        mock.patch("app.routes.post_routes.try_render_post_stats", return_value=None),
+        mock.patch(
+            "podcast_processor.audio_processor.AudioProcessor.get_ad_segments",
+            return_value=windows,
+        ),
+    ):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
+    assert response.status_code == 200
+    return response.get_json()["processing_stats"]
+
+
+def test_post_stats_prefers_stored_cut_windows(app):
+    stats = _stats_for_ad_windows(
+        app,
+        guid="stats-stored",
+        windows=[(1.0, 2.0)],
+        transcript_end=900.0,
+        post_duration=90.0,
+        post_kwargs={
+            "removed_ad_windows": [[10.5, 20.5], [30.0, 40.0]],
+            "original_duration_seconds": 100.5,
+            "cut_stats_source": "recorded",
+        },
+    )
+
+    assert stats["cut_stats_source"] == "recorded"
+    assert stats["ad_blocks"] == [
+        {"start_time": 10.5, "end_time": 20.5},
+        {"start_time": 30.0, "end_time": 40.0},
+    ]
+    assert stats["original_duration_seconds"] == 100.5
+    assert stats["estimated_ad_time_seconds"] == 20.0
+    assert stats["edited_duration_seconds"] == 80.5
+
+
+def test_post_stats_stored_empty_windows_means_nothing_removed(app):
+    stats = _stats_for_ad_windows(
+        app,
+        guid="stats-stored-empty",
+        windows=[(1.0, 2.0)],
+        transcript_end=900.0,
+        post_duration=60.0,
+        post_kwargs={
+            "removed_ad_windows": [],
+            "original_duration_seconds": 60.0,
+            "cut_stats_source": "recorded",
+        },
+    )
+
+    assert stats["ad_blocks"] == []
+    assert stats["edited_duration_seconds"] == 60.0
+
+
+def test_post_stats_without_stored_windows_rebuilds_and_reports_no_source(app):
+    stats = _stats_for_ad_windows(
+        app,
+        guid="stats-unstored",
+        windows=[(100.0, 200.0)],
+        transcript_end=1000.0,
+        post_duration=900.0,
+    )
+
+    assert stats["cut_stats_source"] is None
+    assert stats["ad_blocks"] == [{"start_time": 100.0, "end_time": 200.0}]
+    assert stats["original_duration_seconds"] == 1000.0
+
+
+def test_post_stats_unverified_rebuilds_and_reports_source(app):
+    stats = _stats_for_ad_windows(
+        app,
+        guid="stats-unverified",
+        windows=[(100.0, 200.0)],
+        transcript_end=1000.0,
+        post_duration=900.0,
+        post_kwargs={"cut_stats_source": "unverified"},
+    )
+
+    assert stats["cut_stats_source"] == "unverified"
+    assert stats["ad_blocks"] == [{"start_time": 100.0, "end_time": 200.0}]
+    assert stats["original_duration_seconds"] == 1000.0
+
+
+def test_post_stats_extends_last_ad_to_end_like_cutter(app):
+    transcript_end = 11176.1
+    windows = [(100.0, 200.0), (11020.5, 11120.5)]
+    pre_merge_ad_time = 200.0
+    tail = transcript_end - 11120.5
+    stats = _stats_for_ad_windows(
+        app,
+        guid="stats-merge-tail",
+        windows=windows,
+        transcript_end=transcript_end,
+        post_duration=transcript_end - (pre_merge_ad_time + tail),
+    )
+
+    assert stats["estimated_ad_time_seconds"] == pytest.approx(
+        pre_merge_ad_time + tail, abs=0.1
+    )
+    assert stats["original_duration_seconds"] == pytest.approx(transcript_end, abs=0.1)
+    assert stats["edited_duration_seconds"] == pytest.approx(
+        transcript_end - (pre_merge_ad_time + tail), abs=0.1
+    )
+    assert stats["edited_ad_markers"][-1]["original_end_time"] == pytest.approx(
+        transcript_end, abs=0.1
+    )
+
+
+def test_post_stats_merges_close_ads_into_one_marker(app):
+    windows = [(100.0, 160.0), (170.0, 230.0)]
+    stats = _stats_for_ad_windows(
+        app,
+        guid="stats-merge-close",
+        windows=windows,
+        transcript_end=1000.0,
+        post_duration=1000.0 - 130.0,
+    )
+
+    assert len(stats["edited_ad_markers"]) == 1
+    assert len(stats["ad_blocks"]) == 1
+    assert stats["estimated_ad_time_seconds"] == pytest.approx(130.0, abs=0.1)

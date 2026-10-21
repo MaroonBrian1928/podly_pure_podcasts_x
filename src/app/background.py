@@ -110,3 +110,36 @@ def schedule_memory_trim_job() -> None:
         misfire_grace_time=None,
         coalesce=True,
     )
+
+
+CUT_WINDOW_BACKFILL_JOB_ID = "backfill_cut_windows"
+CUT_WINDOW_BACKFILL_DELAY_SECONDS = 60
+
+
+def scheduled_cut_window_backfill() -> None:
+    """One-off job: verify and store cut windows for already-processed posts."""
+    from app.cut_stats import backfill_cut_windows
+
+    if scheduler.app is None:
+        _memory_trim_logger.warning("cut window backfill skipped: no app")
+        return
+    try:
+        with scheduler.app.app_context():
+            result = backfill_cut_windows(apply=True)
+        _memory_trim_logger.info("cut window backfill: %s", result)
+    except Exception:
+        _memory_trim_logger.exception("cut window backfill: failed")
+
+
+def schedule_cut_window_backfill_job() -> None:
+    """Run the cut-window backfill once shortly after startup."""
+    scheduler.add_job(
+        id=CUT_WINDOW_BACKFILL_JOB_ID,
+        func=scheduled_cut_window_backfill,
+        trigger="date",
+        run_date=datetime.now(UTC).replace(tzinfo=None)
+        + timedelta(seconds=CUT_WINDOW_BACKFILL_DELAY_SECONDS),
+        replace_existing=True,
+        misfire_grace_time=None,
+        max_instances=1,
+    )

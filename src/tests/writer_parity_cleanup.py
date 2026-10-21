@@ -336,7 +336,8 @@ def _seed_backend(  # noqa: PLR0912 - scenario-specific isolated fixture setup
         connection.execute(
             """UPDATE post SET whitelisted=1,unprocessed_audio_path=?,
                processed_audio_path=?,duration=123.5,chapter_data='[1]',
-               bleep_windows='[[1,2]]',transcript_word_timestamps='[{\"word\":\"kept\"}]',
+               bleep_windows='[[1,2]]',removed_ad_windows='[[3.5,4.5]]',original_duration_seconds=300.5,
+               cut_stats_source='recorded',transcript_word_timestamps='[{\"word\":\"kept\"}]',
                refined_ad_boundaries='[{\"start\":1,\"end\":2}]',
                refined_ad_boundaries_updated_at='2026-01-02 03:04:05.000000'
                WHERE id=?""",

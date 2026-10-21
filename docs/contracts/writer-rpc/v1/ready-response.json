@@ -1,7 +1,7 @@
 {
   "version": 1,
   "backend": "rust",
-  "schema_revision": "080b5181e23a",
+  "schema_revision": "589f07c55324",
   "ready": true,
   "executor_ready": true,
   "queue_capacity": {

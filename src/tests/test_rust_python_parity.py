@@ -140,7 +140,10 @@ def _seed_fixture(db_path: Path) -> None:
             download_count INTEGER,
             chapter_data TEXT,
             bleep_windows TEXT,
-            refined_ad_boundaries TEXT
+            refined_ad_boundaries TEXT,
+            removed_ad_windows TEXT,
+            original_duration_seconds REAL,
+            cut_stats_source TEXT
         );
         CREATE TABLE processing_job (
             id TEXT PRIMARY KEY,
@@ -208,7 +211,8 @@ def _seed_fixture(db_path: Path) -> None:
             1, 1, 'parity-guid', 'Parity Episode',
             'https://example.com/audio.mp3',
             '/tmp/in.mp3', '/tmp/out.mp3',
-            '2026-05-26 12:00:00.000000', 90.0, 1, 2, NULL, NULL, NULL
+            '2026-05-26 12:00:00.000000', 90.0, 1, 2, NULL, NULL, NULL,
+            NULL, NULL, NULL
         );
         INSERT INTO processing_job VALUES (
             'job-parity', 'parity-guid', 'running',
@@ -311,6 +315,8 @@ def test_rust_stats_model_calls_include_all_python_serializer_fields(
             "0.8",
             "--min-ad-segment-separation-seconds",
             "60",
+            "--min-ad-segment-length-seconds",
+            "10.0",
             "--enable-boundary-refinement",
             "true",
             "--stats-debug",
@@ -395,6 +401,8 @@ def test_rust_stats_uses_sentinel_segment_range_labels(
             "0.8",
             "--min-ad-segment-separation-seconds",
             "60",
+            "--min-ad-segment-length-seconds",
+            "10.0",
             "--enable-boundary-refinement",
             "true",
             "--stats-debug",
@@ -415,3 +423,160 @@ def test_rust_stats_uses_sentinel_segment_range_labels(
         "Rust render_stats leaked a raw sentinel range. format_segment_range_label "
         "should translate (-100,-100) to 'chapter titles (LLM)'."
     )
+
+
+def _seed_merge_fixture(
+    db_path: Path, *, guid: str, post_duration: float, transcript: list, ad_idx: list
+) -> None:
+    _seed_fixture(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM identification")
+    conn.execute("DELETE FROM audio_segment")
+    conn.execute("DELETE FROM transcript_segment")
+    conn.execute(
+        "UPDATE post SET guid = ?, duration = ?, refined_ad_boundaries = NULL",
+        (guid, post_duration),
+    )
+    for i, (start, end) in enumerate(transcript):
+        conn.execute(
+            "INSERT INTO transcript_segment VALUES (?, 1, ?, ?, ?, 'text', 'A')",
+            (i + 1, i, start, end),
+        )
+    for n, i in enumerate(ad_idx):
+        conn.execute(
+            "INSERT INTO identification VALUES (?, ?, 1, 0.99, 'ad')", (n + 1, i + 1)
+        )
+    conn.commit()
+    conn.close()
+
+
+def _rust_stats_via_wrapper(
+    monkeypatch: pytest.MonkeyPatch, rust_bin: Path, tmp_path: Path, guid: str
+) -> dict:
+    from shared import rust_sidecar
+
+    monkeypatch.setenv("PODLY_RUST_TOOLS_BIN", str(rust_bin))
+    monkeypatch.setenv("PODLY_RUST_STATS_ENABLED", "true")
+    log_path = tmp_path / "app.log"
+    log_path.write_text("")
+    stats = rust_sidecar.try_render_post_stats(
+        db_path=tmp_path / "parity.sqlite",
+        post_guid=guid,
+        min_confidence=0.8,
+        min_ad_segment_separation_seconds=60.0,
+        min_ad_segment_length_seconds=10.0,
+        enable_boundary_refinement=False,
+        stats_debug=False,
+        log_path=log_path,
+        in_root=tmp_path / "in",
+        srv_root=tmp_path / "srv",
+    )
+    # None means the wrapper fell back to Python; the Rust path must run.
+    assert isinstance(stats, dict), "Rust stats render fell back to Python"
+    return stats["processing_stats"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["tail", "close"],
+)
+def test_rust_stats_match_python_cutter_merge(
+    app, tmp_path: Path, rust_bin: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from app.runtime_config import config as runtime_config
+    from tests.test_post_routes import _stats_for_ad_windows
+
+    if case == "tail":
+        end = 11176.1
+        windows = [(100.0, 200.0), (11020.5, 11120.5)]
+        transcript = [(0.0, 100.0), *windows[:1], (200.0, 11020.5), windows[1]]
+        transcript.append((11120.5, end))
+        ad_idx = [1, 3]
+        post_duration = end - (200.0 + (end - 11120.5))
+    else:
+        end = 1000.0
+        windows = [(100.0, 160.0), (170.0, 230.0)]
+        transcript = [(0.0, 100.0), windows[0], windows[1], (230.0, end)]
+        ad_idx = [1, 2]
+        post_duration = end - 130.0
+    guid = f"parity-merge-{case}"
+
+    runtime_config.output.min_ad_segment_length_seconds = 10
+    runtime_config.output.min_ad_segment_separation_seconds = 60
+    py = _stats_for_ad_windows(
+        app,
+        guid=guid,
+        windows=windows,
+        transcript_end=end,
+        post_duration=post_duration,
+    )
+
+    _seed_merge_fixture(
+        tmp_path / "parity.sqlite",
+        guid=guid,
+        post_duration=post_duration,
+        transcript=transcript,
+        ad_idx=ad_idx,
+    )
+    rs = _rust_stats_via_wrapper(monkeypatch, rust_bin, tmp_path, guid)
+
+    for key in (
+        "estimated_ad_time_seconds",
+        "original_duration_seconds",
+        "edited_duration_seconds",
+    ):
+        assert rs[key] == pytest.approx(py[key], abs=0.1), key
+    assert len(rs["edited_ad_markers"]) == len(py["edited_ad_markers"])
+    for r, p in zip(rs["edited_ad_markers"], py["edited_ad_markers"], strict=True):
+        for field, value in p.items():
+            if isinstance(value, float):
+                assert r[field] == pytest.approx(value, abs=0.1), field
+            else:
+                assert r[field] == value, field
+
+
+def test_rust_stats_prefer_stored_cut_windows_like_python(
+    app, tmp_path: Path, rust_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_post_routes import _stats_for_ad_windows
+
+    guid = "parity-stored-cut"
+    windows = [[100.5, 160.5], [300.0, 330.5]]
+    original = 1000.5
+    post_kwargs = {
+        "removed_ad_windows": windows,
+        "original_duration_seconds": original,
+        "cut_stats_source": "backfilled",
+    }
+    py = _stats_for_ad_windows(
+        app,
+        guid=guid,
+        windows=[(1.0, 2.0)],
+        transcript_end=900.0,
+        post_duration=original - 90.5,
+        post_kwargs=post_kwargs,
+    )
+
+    _seed_merge_fixture(
+        tmp_path / "parity.sqlite",
+        guid=guid,
+        post_duration=original - 90.5,
+        transcript=[(0.0, 900.0)],
+        ad_idx=[],
+    )
+    conn = sqlite3.connect(tmp_path / "parity.sqlite")
+    conn.execute(
+        "UPDATE post SET removed_ad_windows = ?, original_duration_seconds = ?, "
+        "cut_stats_source = ?",
+        (json.dumps(windows), original, "backfilled"),
+    )
+    conn.commit()
+    conn.close()
+    rs = _rust_stats_via_wrapper(monkeypatch, rust_bin, tmp_path, guid)
+
+    assert rs["cut_stats_source"] == py["cut_stats_source"] == "backfilled"
+    assert rs["original_duration_seconds"] == py["original_duration_seconds"]
+    assert rs["edited_duration_seconds"] == py["edited_duration_seconds"]
+    assert rs["estimated_ad_time_seconds"] == py["estimated_ad_time_seconds"]
+    assert rs["ad_blocks"] == py["ad_blocks"]
+    assert rs["edited_ad_markers"] == py["edited_ad_markers"]

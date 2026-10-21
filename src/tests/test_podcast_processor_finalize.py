@@ -55,3 +55,45 @@ def test_finalize_keeps_stored_duration_when_probe_fails() -> None:
 
     assert "duration" not in writer.update.call_args.args[2]
     assert post.duration == 3723
+
+
+def _finalize_update(**kwargs) -> dict:
+    with (
+        patch(
+            "podcast_processor.podcast_processor.get_audio_duration_ms",
+            return_value=1000,
+        ),
+        patch("podcast_processor.podcast_processor.writer_client") as writer,
+    ):
+        writer.update.return_value = SimpleNamespace(success=True)
+        _processor()._finalize_processing(
+            _post(), ProcessingJob(total_steps=4), "/out/ep.mp3", **kwargs
+        )
+    return writer.update.call_args.args[2]
+
+
+def test_finalize_records_cut_stats() -> None:
+    update_data = _finalize_update(
+        removed_ad_windows=[[10.0, 20.5]], original_duration_seconds=600.123
+    )
+
+    assert update_data["removed_ad_windows"] == [[10.0, 20.5]]
+    assert update_data["original_duration_seconds"] == 600.123
+    assert update_data["cut_stats_source"] == "recorded"
+
+
+def test_finalize_without_cutter_clears_cut_stats() -> None:
+    update_data = _finalize_update()
+
+    assert update_data["removed_ad_windows"] is None
+    assert update_data["original_duration_seconds"] is None
+    assert update_data["cut_stats_source"] is None
+
+
+def test_finalize_records_empty_cut_list_as_recorded() -> None:
+    update_data = _finalize_update(
+        removed_ad_windows=[], original_duration_seconds=60.0
+    )
+
+    assert update_data["removed_ad_windows"] == []
+    assert update_data["cut_stats_source"] == "recorded"

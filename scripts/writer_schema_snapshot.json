@@ -1,5 +1,5 @@
 {
-  "revision": "080b5181e23a",
+  "revision": "589f07c55324",
   "tables": {
     "app_settings": {
       "id": {
@@ -1073,6 +1073,27 @@
       },
       "bleep_windows": {
         "type": "JSON",
+        "nullable": true,
+        "primary_key": false,
+        "python_default": false,
+        "server_default": false
+      },
+      "removed_ad_windows": {
+        "type": "JSON",
+        "nullable": true,
+        "primary_key": false,
+        "python_default": false,
+        "server_default": false
+      },
+      "original_duration_seconds": {
+        "type": "FLOAT",
+        "nullable": true,
+        "primary_key": false,
+        "python_default": false,
+        "server_default": false
+      },
+      "cut_stats_source": {
+        "type": "TEXT",
         "nullable": true,
         "primary_key": false,
         "python_default": false,

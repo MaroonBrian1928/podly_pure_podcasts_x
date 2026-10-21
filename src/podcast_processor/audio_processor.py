@@ -29,6 +29,17 @@ class TimeWindow:
 
 
 @dataclass(frozen=True)
+class AudioProcessResult:
+    """Windows removed by the cutter and the source length it measured."""
+
+    removed_segments_ms: list[tuple[int, int]]
+    source_duration_ms: int
+    # Audio actually removed: the fade cutters keep fade_ms of ad audio at each
+    # window edge. None means the windows were removed exactly as given.
+    effective_removed_windows_ms: list[tuple[int, int]] | None = None
+
+
+@dataclass(frozen=True)
 class RefinedBoundary:
     orig_start: float
     orig_end: float
@@ -551,7 +562,11 @@ class AudioProcessor:
     ) -> list[tuple[float, float]]:
         if last_segment is None:
             return ad_segments
-        if not ad_segments or ad_segments[-1] != last_segment:
+        covered = any(
+            start <= last_segment[0] and end >= last_segment[1]
+            for start, end in ad_segments
+        )
+        if not covered:
             return [*ad_segments, last_segment]
         return ad_segments
 
@@ -574,7 +589,7 @@ class AudioProcessor:
         output_path: str,
         *,
         input_audio_path: str | None = None,
-    ) -> list[tuple[int, int]]:
+    ) -> AudioProcessResult:
         """
         Process the podcast audio by removing ad segments.
 
@@ -582,7 +597,8 @@ class AudioProcessor:
             post: The Post object containing the podcast to process
             output_path: Path where the processed audio file should be saved
         Returns:
-            The merged ad segments that were removed, as millisecond windows.
+            The merged ad segments that were removed (millisecond windows) and
+            the source audio duration the cutter measured.
         """
         ad_segments = self.get_ad_segments(post)
         source_audio_path = input_audio_path or post.unprocessed_audio_path
@@ -623,12 +639,23 @@ class AudioProcessor:
 
         # Persist the final MP3 runtime so downstream RSS/stats reflect ad-removed
         # audio rather than the source episode length.
+        fade_ms = int(self.config.output.fade_ms)
+        effective_windows = self._effective_removed_windows(merged_ad_segments, fade_ms)
         post.duration = processed_duration_ms / 1000.0
         post.processed_audio_path = output_path
         result = writer_client.update(
             "Post",
             post.id,
-            {"processed_audio_path": output_path, "duration": post.duration},
+            {
+                "processed_audio_path": output_path,
+                "duration": post.duration,
+                "removed_ad_windows": [
+                    [round(start / 1000.0, 3), round(end / 1000.0, 3)]
+                    for start, end in effective_windows
+                ],
+                "original_duration_seconds": round(duration_ms / 1000.0, 3),
+                "cut_stats_source": "recorded",
+            },
             wait=True,
         )
         if not result or not result.success:
@@ -641,4 +668,19 @@ class AudioProcessor:
         self.logger.info(
             f"Audio processing complete for post {post.id}, saved to {output_path}"
         )
-        return merged_ad_segments
+        return AudioProcessResult(
+            removed_segments_ms=merged_ad_segments,
+            source_duration_ms=duration_ms,
+            effective_removed_windows_ms=effective_windows,
+        )
+
+    @staticmethod
+    def _effective_removed_windows(
+        windows_ms: list[tuple[int, int]], fade_ms: int
+    ) -> list[tuple[int, int]]:
+        """Inset each window by fade_ms per side, as the fade cutters keep that audio."""
+        fade = max(0, fade_ms)
+        return [
+            (start + fade, end - fade) if (end - start) > 2 * fade else (start, end)
+            for start, end in windows_ms
+        ]

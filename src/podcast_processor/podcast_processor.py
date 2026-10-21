@@ -1385,12 +1385,12 @@ class PodcastProcessor:
         )
         try:
             if profanity_source_audio_path == unprocessed_audio_path:
-                removed_segments_ms = self.audio_processor.process_audio(
+                audio_result = self.audio_processor.process_audio(
                     post,
                     processed_audio_path,
                 )
             else:
-                removed_segments_ms = self.audio_processor.process_audio(
+                audio_result = self.audio_processor.process_audio(
                     post,
                     processed_audio_path,
                     input_audio_path=profanity_source_audio_path,
@@ -1400,9 +1400,15 @@ class PodcastProcessor:
                 profanity_source_audio_path,
                 original_audio_path=unprocessed_audio_path,
             )
+        removed_segments_ms = audio_result.removed_segments_ms
+        effective_removed_ms = (
+            audio_result.effective_removed_windows_ms
+            if audio_result.effective_removed_windows_ms is not None
+            else removed_segments_ms
+        )
         removed_segments_sec = [
             (start_ms / 1000.0, end_ms / 1000.0)
-            for start_ms, end_ms in removed_segments_ms
+            for start_ms, end_ms in effective_removed_ms
         ]
 
         # Zero-ads guard: the LLM strategy occasionally yields zero ad
@@ -1520,6 +1526,12 @@ class PodcastProcessor:
             processed_audio_path,
             chapter_data=chapter_data_json,
             bleep_windows=bleep_windows,
+            removed_ad_windows=[
+                [round(start, 3), round(end, 3)] for start, end in removed_segments_sec
+            ],
+            original_duration_seconds=round(
+                audio_result.source_duration_ms / 1000.0, 3
+            ),
         )
 
     def _get_llm_classification_model_call_counts(self, post_id: int) -> Any | None:
@@ -2016,6 +2028,8 @@ class PodcastProcessor:
         processed_audio_path: str,
         chapter_data: str | None = None,
         bleep_windows: list[dict[str, float]] | None = None,
+        removed_ad_windows: list[list[float]] | None = None,
+        original_duration_seconds: float | None = None,
     ) -> None:
         """
         Finalize processing: update database and mark job complete.
@@ -2033,6 +2047,13 @@ class PodcastProcessor:
         update_data: dict[str, Any] = {
             "processed_audio_path": processed_audio_path,
             "bleep_windows": bleep_windows,
+            # Strategies that don't cut through AudioProcessor pass None,
+            # which clears values left by an earlier run.
+            "removed_ad_windows": removed_ad_windows,
+            "original_duration_seconds": original_duration_seconds,
+            "cut_stats_source": (
+                "recorded" if removed_ad_windows is not None else None
+            ),
         }
         # For the auto-retry handoff we keep the unprocessed path pointed at
         # the original download. Setting it to None here would force the
@@ -2315,7 +2336,13 @@ class PodcastProcessor:
         result = writer_client.update(
             "Post",
             post.id,
-            {"unprocessed_audio_path": None, "processed_audio_path": None},
+            {
+                "unprocessed_audio_path": None,
+                "processed_audio_path": None,
+                "removed_ad_windows": None,
+                "original_duration_seconds": None,
+                "cut_stats_source": None,
+            },
             wait=True,
         )
         if not result or not result.success:

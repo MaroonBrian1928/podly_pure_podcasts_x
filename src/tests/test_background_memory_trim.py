@@ -93,3 +93,29 @@ def test_schedule_memory_trim_job_falls_back_to_default_for_bad_value(
 
     add_mock.assert_called_once()
     assert add_mock.call_args.kwargs["minutes"] == 15
+
+
+def test_cut_window_backfill_job_registered_once_with_fixed_id() -> None:
+    with mock.patch.object(background, "scheduler") as sched:
+        background.schedule_cut_window_backfill_job()
+        background.schedule_cut_window_backfill_job()
+
+    for call in sched.add_job.call_args_list:
+        assert call.kwargs["id"] == "backfill_cut_windows"
+        assert call.kwargs["trigger"] == "date"
+        assert call.kwargs["replace_existing"] is True
+
+
+def test_cut_window_backfill_job_runs_apply_and_swallows_errors() -> None:
+    with (
+        mock.patch.object(background, "scheduler") as sched,
+        mock.patch(
+            "app.cut_stats.backfill_cut_windows", return_value={"stored": 1}
+        ) as backfill,
+    ):
+        background.scheduled_cut_window_backfill()
+        backfill.assert_called_once_with(apply=True)
+        sched.app.app_context.assert_called_once()
+
+        backfill.side_effect = RuntimeError("boom")
+        background.scheduled_cut_window_backfill()

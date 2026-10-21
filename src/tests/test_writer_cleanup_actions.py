@@ -35,6 +35,9 @@ def test_clear_post_processing_data_action_clears_chapter_data(app) -> None:
             unprocessed_audio_path="/tmp/in.mp3",
             processed_audio_path="/tmp/out.mp3",
             duration=123,
+            removed_ad_windows=[[1.0, 2.0]],
+            original_duration_seconds=300.0,
+            cut_stats_source="recorded",
             chapter_data='{"chapter_source":"transcript","chapters_for_output":[]}',
             transcript_word_timestamps=[
                 {
@@ -63,6 +66,9 @@ def test_clear_post_processing_data_action_clears_chapter_data(app) -> None:
         assert post.unprocessed_audio_path is None
         assert post.processed_audio_path is None
         assert post.duration is None
+        assert post.removed_ad_windows is None
+        assert post.original_duration_seconds is None
+        assert post.cut_stats_source is None
         assert post.chapter_data is None
         assert post.transcript_word_timestamps is None
         assert AudioSegment.query.filter_by(post_id=post.id).count() == 0
@@ -87,6 +93,9 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
             unprocessed_audio_path="/tmp/in.mp3",
             processed_audio_path="/tmp/out.mp3",
             duration=321,
+            removed_ad_windows=[[1.0, 2.0]],
+            original_duration_seconds=300.0,
+            cut_stats_source="recorded",
             chapter_data='{"chapter_source":"transcript","chapters_for_output":[]}',
             bleep_windows=[{"start_time": 1.25, "end_time": 1.75}],
             transcript_word_timestamps=[
@@ -170,6 +179,9 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
         assert post.duration is None
         assert post.chapter_data is None
         assert post.bleep_windows is None
+        assert post.removed_ad_windows is None
+        assert post.original_duration_seconds is None
+        assert post.cut_stats_source is None
         assert post.transcript_word_timestamps == [
             {
                 "sequence_num": 0,
@@ -204,3 +216,36 @@ def test_clear_post_processing_data_keep_transcript_preserves_transcript(app) ->
         )
         assert Identification.query.count() == 0
         assert ProcessingJob.query.filter_by(post_guid=post.guid).count() == 0
+
+
+def test_prepare_post_for_auto_retry_clears_cut_stats(app) -> None:
+    from app.writer.actions.cleanup import prepare_post_for_auto_retry_action
+
+    with app.app_context():
+        feed = Feed(
+            title="Test Feed",
+            description="d",
+            author="a",
+            rss_url="https://example.com/retry.xml",
+        )
+        db.session.add(feed)
+        db.session.commit()
+        post = Post(
+            guid="cleanup-retry-guid",
+            title="Retry Episode",
+            download_url="https://example.com/episode.mp3",
+            feed_id=feed.id,
+            removed_ad_windows=[[1.0, 2.0]],
+            original_duration_seconds=300.0,
+            cut_stats_source="recorded",
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        prepare_post_for_auto_retry_action({"post_id": post.id})
+        db.session.commit()
+        db.session.refresh(post)
+
+        assert post.removed_ad_windows is None
+        assert post.original_duration_seconds is None
+        assert post.cut_stats_source is None

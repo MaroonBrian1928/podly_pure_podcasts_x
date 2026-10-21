@@ -197,6 +197,7 @@ fn clear_post_processing_data_inner(
         .execute(
             "UPDATE post SET unprocessed_audio_path=NULL,processed_audio_path=NULL,
                 duration=NULL,chapter_data=NULL,bleep_windows=?1,
+                removed_ad_windows=?1,original_duration_seconds=NULL,cut_stats_source=NULL,
                 transcript_word_timestamps=?1,refined_ad_boundaries=?1,
                 refined_ad_boundaries_updated_at=NULL WHERE id=?2",
             rusqlite::params![SQLALCHEMY_JSON_NULL, post_id],
@@ -223,6 +224,7 @@ fn clear_post_processing_data_keep_transcript(
         .execute(
             "UPDATE post SET unprocessed_audio_path=NULL,processed_audio_path=NULL,
                 duration=NULL,chapter_data=NULL,bleep_windows=?1,
+                removed_ad_windows=?1,original_duration_seconds=NULL,cut_stats_source=NULL,
                 refined_ad_boundaries=?1,refined_ad_boundaries_updated_at=NULL WHERE id=?2",
             rusqlite::params![SQLALCHEMY_JSON_NULL, post_id],
         )
@@ -247,7 +249,8 @@ fn prepare_post_for_auto_retry(
     transaction
         .execute(
             "UPDATE post SET processed_audio_path=NULL,duration=NULL,chapter_data=NULL,
-                bleep_windows=?1,refined_ad_boundaries=?1,
+                bleep_windows=?1,removed_ad_windows=?1,original_duration_seconds=NULL,
+                cut_stats_source=NULL,refined_ad_boundaries=?1,
                 refined_ad_boundaries_updated_at=NULL WHERE id=?2",
             rusqlite::params![SQLALCHEMY_JSON_NULL, post_id],
         )
@@ -523,7 +526,9 @@ mod tests {
                     id INTEGER PRIMARY KEY,feed_id INTEGER,guid TEXT NOT NULL,title TEXT NOT NULL,
                     whitelisted BOOLEAN NOT NULL,unprocessed_audio_path TEXT,
                     processed_audio_path TEXT,duration INTEGER,chapter_data TEXT,
-                    bleep_windows JSON,transcript_word_timestamps JSON,
+                    bleep_windows JSON,removed_ad_windows JSON,
+                    original_duration_seconds REAL,cut_stats_source TEXT,
+                    transcript_word_timestamps JSON,
                     refined_ad_boundaries JSON,refined_ad_boundaries_updated_at DATETIME
                  );
                  CREATE TABLE transcript_segment(
@@ -554,7 +559,7 @@ mod tests {
                  INSERT INTO feed VALUES (1,'A Feed');
                  INSERT INTO post VALUES (
                     1,1,'guid','A Post',1,'/missing/input.mp3','/missing/output.mp3',
-                    42,'chapters','[]','[]','[]','2026-01-01'
+                    42,'chapters','[]','[[1.0,2.0]]',300.5,'recorded','[]','[]','2026-01-01'
                  );",
             )
             .unwrap();
@@ -614,6 +619,17 @@ mod tests {
                 ("text", "null"),
                 "{column}"
             );
+        }
+        if columns.contains(&"removed_ad_windows") {
+            let scalars_null: bool = connection
+                .query_row(
+                    "SELECT original_duration_seconds IS NULL AND cut_stats_source IS NULL
+                     FROM post WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(scalars_null);
         }
     }
 
@@ -720,6 +736,7 @@ mod tests {
             &connection,
             &[
                 "bleep_windows",
+                "removed_ad_windows",
                 "transcript_word_timestamps",
                 "refined_ad_boundaries",
             ],
@@ -772,7 +789,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(words, "[]");
-        assert_json_null_columns(&connection, &["bleep_windows", "refined_ad_boundaries"]);
+        assert_json_null_columns(
+            &connection,
+            &[
+                "bleep_windows",
+                "removed_ad_windows",
+                "refined_ad_boundaries",
+            ],
+        );
     }
 
     #[test]
@@ -830,7 +854,14 @@ mod tests {
         )
         .unwrap();
         transaction.commit().unwrap();
-        assert_json_null_columns(&connection, &["bleep_windows", "refined_ad_boundaries"]);
+        assert_json_null_columns(
+            &connection,
+            &[
+                "bleep_windows",
+                "removed_ad_windows",
+                "refined_ad_boundaries",
+            ],
+        );
         let words_are_preserved: bool = connection
             .query_row(
                 "SELECT transcript_word_timestamps='[]' FROM post",
@@ -920,6 +951,7 @@ mod tests {
             &connection,
             &[
                 "bleep_windows",
+                "removed_ad_windows",
                 "transcript_word_timestamps",
                 "refined_ad_boundaries",
             ],

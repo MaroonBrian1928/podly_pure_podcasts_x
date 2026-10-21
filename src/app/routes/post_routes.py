@@ -14,6 +14,11 @@ from sqlalchemy.orm import defer
 
 from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
+from app.cut_stats import (
+    CUT_STATS_UNVERIFIED,
+    merge_like_cutter,
+    stored_cut_windows,
+)
 from app.extensions import db
 from app.failure_explainer import (
     build_troubleshoot_context,
@@ -834,6 +839,41 @@ def _resolve_original_duration_seconds(
     )
 
 
+def _rebuild_cut_windows(
+    audio_processor: Any,
+    post: Post,
+    transcript_segments: list[TranscriptSegment],
+    bleep_windows: list[tuple[float, float]],
+) -> tuple[list[tuple[float, float]], float, float]:
+    """Estimate cut windows and source length for posts without recorded values."""
+    ad_blocks = audio_processor.get_ad_segments(post)
+    ad_time_seconds = sum(end - start for start, end in ad_blocks if end > start)
+
+    original_duration_seconds = _resolve_original_duration_seconds(
+        post_duration=post.duration,
+        transcript_segments=transcript_segments,
+        bleep_windows=bleep_windows,
+        ad_time_seconds=ad_time_seconds,
+    )
+
+    if ad_blocks:
+        # Apply the cutter's merge so stats match the windows actually removed.
+        ad_blocks = merge_like_cutter(
+            audio_processor,
+            runtime_config,
+            ad_blocks,
+            original_duration_seconds,
+        )
+        ad_time_seconds = sum(end - start for start, end in ad_blocks if end > start)
+        original_duration_seconds = _resolve_original_duration_seconds(
+            post_duration=post.duration,
+            transcript_segments=transcript_segments,
+            bleep_windows=bleep_windows,
+            ad_time_seconds=ad_time_seconds,
+        )
+    return ad_blocks, ad_time_seconds, original_duration_seconds
+
+
 @post_bp.route("/api/posts/<path:p_guid>/stats", methods=["GET"])
 def api_post_stats(p_guid: str) -> flask.Response:
     """Get processing statistics for a post in JSON format."""
@@ -855,6 +895,9 @@ def api_post_stats(p_guid: str) -> flask.Response:
         min_confidence=float(runtime_config.output.min_confidence),
         min_ad_segment_separation_seconds=float(
             runtime_config.output.min_ad_segment_separation_seconds
+        ),
+        min_ad_segment_length_seconds=float(
+            runtime_config.output.min_ad_segment_length_seconds
         ),
         enable_boundary_refinement=bool(runtime_config.enable_boundary_refinement),
         stats_debug=_env_bool("PODLY_STATS_DEBUG", default=False),
@@ -1033,19 +1076,21 @@ def api_post_stats(p_guid: str) -> flask.Response:
     # Keep stats aligned with the audio cutter's final cut-ready windows.
     from podcast_processor.audio_processor import AudioProcessor
 
-    ad_blocks = AudioProcessor(
+    audio_processor = AudioProcessor(
         config=runtime_config,
         logger=logger,
         db_session=db.session,
-    ).get_ad_segments(post)
-    ad_time_seconds = sum(end - start for start, end in ad_blocks if end > start)
-
-    original_duration_seconds = _resolve_original_duration_seconds(
-        post_duration=post.duration,
-        transcript_segments=transcript_segments,
-        bleep_windows=bleep_windows,
-        ad_time_seconds=ad_time_seconds,
     )
+    stored_cut = stored_cut_windows(post)
+    if stored_cut is not None:
+        ad_blocks, original_duration_seconds = stored_cut
+        ad_time_seconds = sum(end - start for start, end in ad_blocks if end > start)
+        edited_duration_seconds = max(0.0, original_duration_seconds - ad_time_seconds)
+    else:
+        ad_blocks, ad_time_seconds, original_duration_seconds = _rebuild_cut_windows(
+            audio_processor, post, transcript_segments, bleep_windows
+        )
+        edited_duration_seconds = max(0.0, original_duration_seconds - ad_time_seconds)
 
     ad_percentage = (
         (ad_time_seconds / original_duration_seconds) * 100
@@ -1058,7 +1103,6 @@ def api_post_stats(p_guid: str) -> flask.Response:
         if original_duration_seconds > 0
         else 0.0
     )
-    edited_duration_seconds = max(0.0, original_duration_seconds - ad_time_seconds)
     edited_ad_markers = build_edited_timeline_ad_markers(ad_blocks)
     edited_bleep_windows = build_edited_timeline_bleep_windows(
         bleep_windows,
@@ -1089,6 +1133,12 @@ def api_post_stats(p_guid: str) -> flask.Response:
             "estimated_ad_time_seconds": round(ad_time_seconds, 1),
             "original_duration_seconds": round(original_duration_seconds, 1),
             "edited_duration_seconds": round(edited_duration_seconds, 1),
+            "cut_stats_source": (
+                post.cut_stats_source
+                if stored_cut is not None
+                or post.cut_stats_source == CUT_STATS_UNVERIFIED
+                else None
+            ),
             "ad_blocks": [
                 {
                     "start_time": round(start, 1),

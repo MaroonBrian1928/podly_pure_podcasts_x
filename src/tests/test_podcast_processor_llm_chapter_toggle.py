@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 from app.models import Post, ProcessingJob
 from app.runtime_config import config as runtime_config
+from podcast_processor.audio_processor import AudioProcessResult
 from podcast_processor.chapter_reader import Chapter
 from podcast_processor.podcast_processor import PodcastProcessor, ProfanityBleepResult
 from shared.config import RemoteWhisperConfig
@@ -22,7 +23,9 @@ def test_llm_chapter_fallback_tagging_disabled_skips_resolver_and_writer() -> No
     transcription_manager.transcribe.return_value = transcript_segments
 
     audio_processor = MagicMock()
-    audio_processor.process_audio.return_value = [(1000, 2000)]
+    audio_processor.process_audio.return_value = AudioProcessResult(
+        [(1000, 2000)], 600_000
+    )
 
     status_manager = MagicMock()
 
@@ -60,6 +63,9 @@ def test_llm_chapter_fallback_tagging_disabled_skips_resolver_and_writer() -> No
     resolve_mock.assert_not_called()
     write_mock.assert_not_called()
     audio_processor.process_audio.assert_called_once_with(post, "/tmp/output.mp3")
+    finalize_kwargs = processor._finalize_processing.call_args.kwargs
+    assert finalize_kwargs["removed_ad_windows"] == [[1.0, 2.0]]
+    assert finalize_kwargs["original_duration_seconds"] == 600.0
 
 
 def test_llm_description_chapters_skip_word_refiner_and_write_unmodified() -> None:
@@ -86,7 +92,7 @@ def test_llm_description_chapters_skip_word_refiner_and_write_unmodified() -> No
     transcription_manager.transcribe.return_value = transcript_segments
 
     audio_processor = MagicMock()
-    audio_processor.process_audio.return_value = []
+    audio_processor.process_audio.return_value = AudioProcessResult([], 600_000)
 
     status_manager = MagicMock()
 
@@ -145,7 +151,7 @@ def test_llm_description_chapters_refined_when_word_level_enabled() -> None:
     transcription_manager.transcribe.return_value = transcript_segments
 
     audio_processor = MagicMock()
-    audio_processor.process_audio.return_value = []
+    audio_processor.process_audio.return_value = AudioProcessResult([], 600_000)
 
     processor = object.__new__(PodcastProcessor)
     processor.config = config
@@ -213,7 +219,9 @@ def test_llm_transcript_chapters_exclude_removed_ad_overlap_segments() -> None:
     transcription_manager.transcribe.return_value = transcript_segments
 
     audio_processor = MagicMock()
-    audio_processor.process_audio.return_value = [(10_000, 20_000)]
+    audio_processor.process_audio.return_value = AudioProcessResult(
+        [(10_000, 20_000)], 600_000
+    )
 
     status_manager = MagicMock()
 
@@ -346,7 +354,9 @@ def test_llm_embedded_chapters_adjust_each_marker_by_prior_removed_audio() -> No
     ]
 
     audio_processor = MagicMock()
-    audio_processor.process_audio.return_value = [(10_000, 20_000), (50_000, 70_000)]
+    audio_processor.process_audio.return_value = AudioProcessResult(
+        [(10_000, 20_000), (50_000, 70_000)], 600_000
+    )
 
     processor = object.__new__(PodcastProcessor)
     processor.config = config
@@ -410,7 +420,9 @@ def test_llm_processing_persists_bleep_windows_when_enabled() -> None:
     processor.logger = MagicMock()
     processor.status_manager = MagicMock()
     processor.audio_processor = MagicMock()
-    processor.audio_processor.process_audio.return_value = []
+    processor.audio_processor.process_audio.return_value = AudioProcessResult(
+        [], 600_000
+    )
     processor._classify_ad_segments = MagicMock()
     processor._transcribe_for_processing = MagicMock(
         return_value=(
@@ -506,7 +518,9 @@ def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> 
     processor.logger = MagicMock()
     processor.status_manager = MagicMock()
     processor.audio_processor = MagicMock()
-    processor.audio_processor.process_audio.return_value = []
+    processor.audio_processor.process_audio.return_value = AudioProcessResult(
+        [], 600_000
+    )
     processor._classify_ad_segments = MagicMock()
     processor._transcribe_for_processing = MagicMock(
         return_value=(
@@ -562,7 +576,9 @@ def test_llm_processing_requests_word_timestamps_for_word_level_refiner() -> Non
     processor.logger = MagicMock()
     processor.status_manager = MagicMock()
     processor.audio_processor = MagicMock()
-    processor.audio_processor.process_audio.return_value = []
+    processor.audio_processor.process_audio.return_value = AudioProcessResult(
+        [], 600_000
+    )
     processor._classify_ad_segments = MagicMock()
     processor._transcribe_for_processing = MagicMock(
         return_value=(
@@ -611,7 +627,9 @@ def test_llm_processing_reuses_saved_word_timestamps_for_word_level_refiner() ->
     processor.logger = MagicMock()
     processor.status_manager = MagicMock()
     processor.audio_processor = MagicMock()
-    processor.audio_processor.process_audio.return_value = []
+    processor.audio_processor.process_audio.return_value = AudioProcessResult(
+        [], 600_000
+    )
     processor._classify_ad_segments = MagicMock()
     processor._transcribe_for_processing = MagicMock(
         return_value=(
@@ -982,7 +1000,7 @@ def test_llm_path_declares_chapter_generation_stage() -> None:
     transcription_manager.transcribe.return_value = transcript_segments
 
     audio_processor = MagicMock()
-    audio_processor.process_audio.return_value = []
+    audio_processor.process_audio.return_value = AudioProcessResult([], 600_000)
 
     processor = object.__new__(PodcastProcessor)
     processor.config = config

@@ -115,6 +115,12 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     chapter_data = db.Column(db.Text, nullable=True)
     # Exact censor windows applied to the processed audio for this post.
     bleep_windows = db.Column(db.JSON, nullable=True)
+    # Ad cuts as applied by the cutter: [[start, end], ...] in original-audio
+    # seconds, the source length it measured, and who wrote them
+    # ("recorded" by the processor, "backfilled" by a verified backfill).
+    removed_ad_windows = db.Column(db.JSON, nullable=True)
+    original_duration_seconds = db.Column(db.Float, nullable=True)
+    cut_stats_source = db.Column(db.Text, nullable=True)
     # Optional per-segment word timestamps from WhisperX-compatible transcription.
     # Stored as reusable transcript metadata for exact intra-segment refinement.
     transcript_word_timestamps = db.Column(db.JSON, nullable=True)
