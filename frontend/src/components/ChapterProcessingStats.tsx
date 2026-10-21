@@ -300,36 +300,36 @@ export default function ChapterProcessingStats({
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key metrics</h3>
                         <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-purple-50 to-purple-100 p-4 text-center dark:border-purple-800/70 dark:from-purple-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-purple-600 dark:text-purple-200">
                               {(stats.chapters?.total_chapters || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-gray-600">Total chapters</div>
+                            <div className="text-sm text-purple-800 dark:text-purple-100">Total chapters</div>
                           </div>
 
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-[rgb(22_101_52/0.7)] dark:from-green-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-green-600">
                               {(stats.chapters?.chapters_kept || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-gray-600">
+                            <div className="text-sm text-green-800">
                               {isChapterInsert ? 'Chapters inserted' : 'Chapters kept'}
                             </div>
                           </div>
 
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-[rgb(153_27_27/0.7)] dark:from-red-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-red-600">
                               {(stats.chapters?.chapters_removed || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-gray-600">
+                            <div className="text-sm text-red-800">
                               {isChapterInsert ? 'Chapters removed (N/A)' : 'Chapters removed'}
                             </div>
                           </div>
                           {estimatedCost != null && (
-                            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                              <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
+                              <div className="text-2xl font-bold tabular-nums tracking-tight text-indigo-600 dark:text-indigo-200">
                                 ${estimatedCost.toFixed(4)}
                               </div>
-                              <div className="text-sm text-gray-600" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated cost</div>
+                              <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated cost</div>
                             </div>
                           )}
                         </div>

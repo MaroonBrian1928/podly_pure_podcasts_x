@@ -419,32 +419,32 @@ export default function LLMProcessingStats({
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-4 text-left">Key metrics</h3>
                         <div className={`grid grid-cols-2 ${estimatedCost != null ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4`}>
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-blue-50 to-blue-100 p-4 text-center dark:border-[rgb(30_64_175/0.7)] dark:from-blue-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-blue-600">
                               {(stats.processing_stats?.total_segments || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-gray-600">Transcript lines</div>
+                            <div className="text-sm text-blue-800">Transcript lines</div>
                           </div>
 
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-green-50 to-green-100 p-4 text-center dark:border-[rgb(22_101_52/0.7)] dark:from-green-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-green-600">
                               {(stats.processing_stats?.content_segments || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-gray-600">Content lines</div>
+                            <div className="text-sm text-green-800">Content lines</div>
                           </div>
 
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                            <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                          <div className="rounded-lg border border-transparent bg-gradient-to-br from-red-50 to-red-100 p-4 text-center dark:border-[rgb(153_27_27/0.7)] dark:from-red-950 dark:to-slate-900">
+                            <div className="text-2xl font-bold tabular-nums tracking-tight text-red-600">
                               {(stats.processing_stats?.ad_segments_count || 0).toLocaleString()}
                             </div>
-                            <div className="text-sm text-gray-600">Ad lines removed</div>
+                            <div className="text-sm text-red-800">Ad lines removed</div>
                           </div>
                           {estimatedCost != null && (
-                            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-                              <div className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900">
+                            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 text-center dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900">
+                              <div className="text-2xl font-bold tabular-nums tracking-tight text-indigo-600 dark:text-indigo-200">
                                 ${estimatedCost.toFixed(4)}
                               </div>
-                              <div className="text-sm text-gray-600" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated cost</div>
+                              <div className="text-sm text-indigo-800 dark:text-indigo-100" title="Total compute cost = LLM (tokens × LiteLLM rate) + Whisper (hourly rate × episode duration) + INA (hourly rate × episode duration)">Estimated cost</div>
                             </div>
                           )}
                         </div>

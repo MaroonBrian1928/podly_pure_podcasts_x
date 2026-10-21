@@ -250,6 +250,9 @@ Built from `frontend/src/components/config/shared/`. Below `lg` (1024px), tabs r
 ### Modal Shell
 The panel rises 10px and fades in (320–380ms, `cubic-bezier(0.22, 1, 0.36, 1)`) over a navy backdrop that blurs to 4px. Under reduced motion it appears without moving.
 
+### Stats Metric Tiles
+The episode Stats pop-up's "Key metrics" row is a deliberate, owner-approved signature: one soft gradient tile per metric (`bg-gradient-to-br from-{hue}-50 to-{hue}-100`, bold `{hue}-600` number, `{hue}-800` label), with its own dark treatment (`dark:from-{hue}-950 dark:to-slate-900` and a tinted border). Hues: blue for transcript lines, green for content lines, red for ad lines removed, indigo for estimated cost, purple for chapters. It is the one place multiple accent hues and gradients are allowed. Keep it when polishing or auditing, and do not spread it to other surfaces.
+
 ### Live Timer Digits
 Each digit that changes re-enters with `digit-tick`, a 350ms blur-and-rise with slight overshoot. This is the system's only deliberate flourish, and it's kept for live processing counters.
 
@@ -265,6 +268,6 @@ Each digit that changes re-enters with `digit-tick`, a 350ms blur-and-rise with 
 ### Don't:
 - **Don't** add `dark:` overrides for themed hues or grays. Fix the role variable instead.
 - **Don't** use Signal Blue for decoration, headings or navigation states.
-- **Don't** add a second accent hue, or use status colors outside chips, banners and inline state.
+- **Don't** add a second accent hue, or use status colors outside chips, banners and inline state. The Stats metric tiles are the one sanctioned exception.
 - **Don't** use heavy shadows on resting surfaces. Save `shadow-lg` and above for layers that float.
 - **Don't** use bouncy or overshooting easing outside the live-digit tick.
