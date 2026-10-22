@@ -254,7 +254,7 @@ Built from `frontend/src/components/config/shared/`. Below `lg` (1024px), tabs r
 The panel rises 10px and fades in (320–380ms, `cubic-bezier(0.22, 1, 0.36, 1)`) over a navy backdrop that blurs to 4px. Under reduced motion it appears without moving.
 
 ### Touches of Life
-Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it. The reference examples are the Stats pop-up's key-metric tiles, the Costs tab's monthly total tile (indigo), the sky RSS mark on the no-feeds empty state, and the live timer digits.
+Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it. The reference examples are the Stats pop-up's key-metric tiles, the Costs tab's monthly total card (indigo, the whole card), the sky RSS mark on the no-feeds empty state, and the live timer digits.
 
 **What counts as a touch**
 - **Meaning-coded color:** a soft same-hue tint behind a result, keyed to what the number means. Reference: the Stats key-metric tiles, `bg-gradient-to-br from-{hue}-50 to-{hue}-100` with a bold `{hue}-600` number and `{hue}-800` label, and in dark mode `dark:from-{hue}-950 dark:to-slate-900` with a 70% `{hue}-800` border and lighter number and label tints.
@@ -277,6 +277,7 @@ Small moments of warmth that make the control room feel alive without making it 
 - **Place:** only on result, summary, status and empty-state surfaces. Never on form fields, settings, navigation, tables of raw data or page backgrounds.
 - **Budget:** one kind of touch per view region. The view must still read as the Quiet Control Room at a glance.
 - **Meaning first:** pick the hue from the table; never add a hue for variety. Labels always say what the number is, so color never carries the message alone.
+- **Whole surfaces:** a touch colors an entire card or tile, title included. Never set a tinted tile inside a neutral card; that reads as a card in a card.
 - **Gradients:** soft same-hue tints only (50 to 100, or 950 to slate in dark). No multi-hue gradients, no gradient text, no glow.
 - **Both themes:** design the dark treatment on purpose, and keep numbers and labels at 4.5:1 or better. Touch hues outside the themed set (indigo, purple) need explicit `dark:` classes; that is the one sanctioned use of `dark:` overrides.
 - **Motion:** 400ms or less, settles into place, and has a `prefers-reduced-motion` fallback that still shows the change.
