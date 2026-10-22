@@ -254,7 +254,7 @@ Built from `frontend/src/components/config/shared/`. Below `lg` (1024px), tabs r
 The panel rises 10px and fades in (320–380ms, `cubic-bezier(0.22, 1, 0.36, 1)`) over a navy backdrop that blurs to 4px. Under reduced motion it appears without moving.
 
 ### Touches of Life
-Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it. The reference examples are the Stats pop-up's key-metric tiles and the live timer digits.
+Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it. The reference examples are the Stats pop-up's key-metric tiles, the Costs tab's monthly total tile (indigo), the sky RSS mark on the no-feeds empty state, and the live timer digits.
 
 **What counts as a touch**
 - **Meaning-coded color:** a soft same-hue tint behind a result, keyed to what the number means. Reference: the Stats key-metric tiles, `bg-gradient-to-br from-{hue}-50 to-{hue}-100` with a bold `{hue}-600` number and `{hue}-800` label, and in dark mode `dark:from-{hue}-950 dark:to-slate-900` with a 70% `{hue}-800` border and lighter number and label tints.
@@ -283,11 +283,10 @@ Small moments of warmth that make the control room feel alive without making it 
 - **Keep them:** polish and audit passes preserve existing touches. Remove one only when the owner agrees.
 
 **Good next candidates**
-- Costs "Total for the month": tint the LLM, Whisper and INA breakdown with the cost hue (indigo), matching the Stats tiles.
-- Feed detail header: a small "ads removed" summary for the feed (red) beside the episode count.
-- Episode rows: a compact "N ads cut, M min saved" chip once processing finishes.
+- Feed detail header: a small "ads removed" summary for the feed (red) beside the episode count. Needs per-episode ad totals in the episodes API (Python and Rust sidecar).
+- Episode rows: a compact "N ads cut, M min saved" chip once processing finishes. Same API dependency.
 - Jobs: animate a job's progress and give a completed job a brief green settle.
-- Empty states (no feeds, no episodes): one warm line and a single tinted illustration-free mark instead of plain gray text.
+- The no-episodes empty state, following the no-feeds one.
 
 ### Live Timer Digits
 Each digit that changes re-enters with `digit-tick`, a 350ms blur-and-rise with slight overshoot. It is the motion reference for Touches of Life and the only place overshoot is allowed.

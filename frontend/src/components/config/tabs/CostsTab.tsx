@@ -287,18 +287,28 @@ export default function CostsTab() {
       ) : costs ? (
         <>
           <Section title="Total for the month" stacked>
-            <div>
-              <div className="text-2xl font-semibold tabular-nums text-gray-900">
+            {/* Touch of life: cost hue (indigo), matching the Stats pop-up's cost tile. */}
+            <div className="rounded-lg border border-transparent bg-gradient-to-br from-indigo-50 to-indigo-100 p-4 dark:border-indigo-800/70 dark:from-indigo-950 dark:to-slate-900 sm:p-5">
+              <div className="text-3xl font-bold tabular-nums tracking-tight text-indigo-600 dark:text-indigo-200">
                 ${costs.total_cost.toFixed(2)}
               </div>
-              <div className="mt-1 text-sm tabular-nums text-gray-600">
+              <div className="mt-1 text-sm tabular-nums text-indigo-800 dark:text-indigo-100">
                 {(costs.total_audio_hours ?? 0).toFixed(2)} hours of audio
               </div>
-            </div>
-            <div className="grid grid-cols-1 gap-2 text-sm text-gray-700 sm:grid-cols-3">
-              <div>LLM: <span className="font-mono tabular-nums">${costs.total_llm_cost.toFixed(2)}</span></div>
-              <div>Whisper: <span className="font-mono tabular-nums">${costs.total_whisper_cost.toFixed(2)}</span></div>
-              <div>INA: <span className="font-mono tabular-nums">${costs.total_ina_cost.toFixed(2)}</span></div>
+              <dl className="mt-4 grid grid-cols-3 gap-3 border-t border-indigo-200 pt-3 dark:border-indigo-800/60">
+                {[
+                  ['LLM', costs.total_llm_cost],
+                  ['Whisper', costs.total_whisper_cost],
+                  ['INA', costs.total_ina_cost],
+                ].map(([label, value]) => (
+                  <div key={label as string}>
+                    <dt className="text-xs text-indigo-800 dark:text-indigo-100">{label}</dt>
+                    <dd className="font-semibold tabular-nums text-indigo-900 dark:text-indigo-50">
+                      ${(value as number).toFixed(2)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
             </div>
           </Section>
 

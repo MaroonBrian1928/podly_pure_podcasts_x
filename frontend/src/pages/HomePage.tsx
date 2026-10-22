@@ -18,7 +18,7 @@ import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
 import { useDelayedFlag } from '../hooks/useDelayedFlag';
-import { LinkIcon, PlusIcon, RefreshIcon, SlidersIcon, CheckIcon, CloseIcon } from '../components/icons';
+import { LinkIcon, PlusIcon, RefreshIcon, RssIcon, SlidersIcon, CheckIcon, CloseIcon } from '../components/icons';
 
 const MOBILE_FEED_DETAIL_ENTER_MS = 440;
 const MOBILE_FEED_DETAIL_EXIT_MS = 440;
@@ -472,11 +472,14 @@ export default function HomePage() {
         <div className="hidden lg:flex flex-[2] flex-col items-start gap-4 self-start rounded-lg border border-gray-200 bg-surface p-6 shadow-sm">
           {feeds.length === 0 ? (
             <>
+              <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-sky-50 to-sky-100 text-sky-700" aria-hidden="true">
+                <RssIcon className="h-5 w-5" />
+              </span>
               <h2 className="text-lg font-semibold text-gray-900">No podcasts yet</h2>
               <p className="text-sm text-gray-600">Add a feed to start removing ads from your shows.</p>
               <button type="button" onClick={handleAddFeedClick} className="btn btn-primary">
                 <PlusIcon className="w-4 h-4" />
-                Add Feed
+                Add feed
               </button>
             </>
           ) : (

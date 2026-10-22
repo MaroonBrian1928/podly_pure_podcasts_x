@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { MusicIcon } from './icons';
+import { MusicIcon, RssIcon } from './icons';
 import type { Feed } from '../types';
 import type { FeedSortOption } from '../utils/feedListSort';
 
@@ -149,9 +149,12 @@ export default function FeedList({
 
   if (feedsArray.length === 0) {
     return (
-      <div className="text-center py-12">
-        <p className="text-gray-500 text-lg">No podcast feeds added yet.</p>
-        <p className="text-gray-400 mt-2">Click "Add Feed" to get started.</p>
+      <div className="flex flex-col items-center gap-3 py-12 text-center">
+        <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-sky-50 to-sky-100 text-sky-700" aria-hidden="true">
+          <RssIcon className="h-5 w-5" />
+        </span>
+        <h2 className="text-lg font-semibold text-gray-900">No podcasts yet</h2>
+        <p className="text-sm text-gray-600">Add a feed to start removing ads from your shows.</p>
       </div>
     );
   }
