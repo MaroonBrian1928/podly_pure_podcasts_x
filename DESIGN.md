@@ -254,7 +254,7 @@ Built from `frontend/src/components/config/shared/`. Below `lg` (1024px), tabs r
 The panel rises 10px and fades in (320–380ms, `cubic-bezier(0.22, 1, 0.36, 1)`) over a navy backdrop that blurs to 4px. Under reduced motion it appears without moving.
 
 ### Touches of Life
-Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it. The reference examples are the Stats pop-up's key-metric tiles, the Costs tab's monthly total card (indigo, the whole card), the sky RSS mark on the no-feeds empty state, and the live timer digits.
+Small moments of warmth that make the control room feel alive without making it loud. They belong where Podly shows what it did for you, never where you operate it; Settings, Costs included, stays neutral. The reference examples are the Stats pop-up's key-metric tiles, the sky RSS mark on the no-feeds empty state, and the live timer digits.
 
 **What counts as a touch**
 - **Meaning-coded color:** a soft same-hue tint behind a result, keyed to what the number means. Reference: the Stats key-metric tiles, `bg-gradient-to-br from-{hue}-50 to-{hue}-100` with a bold `{hue}-600` number and `{hue}-800` label, and in dark mode `dark:from-{hue}-950 dark:to-slate-900` with a 70% `{hue}-800` border and lighter number and label tints.
