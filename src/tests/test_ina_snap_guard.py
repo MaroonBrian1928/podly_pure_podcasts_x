@@ -153,3 +153,89 @@ def test_only_qualifying_block_adjusts_among_many() -> None:
     assert adjustments[0].block_index == 1
     assert result[0]["refined_end"] == 100.0
     assert result[1]["refined_end"] == 302.0
+
+
+# --- Deferral to the sting anchor -------------------------------------
+# These segments mirror post 2397's composition failure: the refiner
+# ended the block at 753.6, the sting tier anchored the end to 742.76,
+# and the snap guard then shrank it further to the in-ad silence ending
+# at 735.08. The end 742.76 sits mid-speech with that silence a valid
+# snap candidate (7.68s back), so without deferral the guard fires.
+
+
+def composition_segments() -> list[AcousticSegment]:
+    return [
+        seg(600.0, 734.3, "speech"),
+        seg(734.3, 735.08, "noEnergy"),  # in-ad silence
+        seg(735.08, 760.0, "speech"),
+    ]
+
+
+def sting_end_entry() -> dict:
+    return {"role": "end", "score": 0.99, "onset": 743.76, "original_end": 753.6}
+
+
+def sting_start_entry() -> dict:
+    return {
+        "role": "start",
+        "score": 0.98,
+        "onset": 598.0,
+        "original_start": 605.0,
+    }
+
+
+def test_composition_case_snaps_without_sting_anchor() -> None:
+    # Control: the same boundary with no sting audit key snaps to the
+    # in-ad silence -- the candidate the deferral must suppress.
+    result, adjustments = apply_ina_snap_guard(
+        [boundary(600.0, 742.76)], composition_segments()
+    )
+    assert len(adjustments) == 1
+    assert result[0]["refined_end"] == 735.08
+
+
+def test_sting_end_anchor_defers_snap() -> None:
+    b = boundary(600.0, 742.76)
+    b["sting_anchor"] = sting_end_entry()
+
+    result, adjustments = apply_ina_snap_guard([b], composition_segments())
+
+    assert adjustments == []
+    assert result[0]["refined_end"] == 742.76
+    assert "ina_snap" not in result[0]
+
+
+def test_sting_start_anchor_does_not_defer_end_snap() -> None:
+    # Only the START was sting-anchored (post 2409's composition): the
+    # end stays fully eligible and snaps as usual.
+    b = boundary(600.0, 742.76)
+    b["sting_anchor"] = sting_start_entry()
+
+    result, adjustments = apply_ina_snap_guard([b], composition_segments())
+
+    assert len(adjustments) == 1
+    assert result[0]["refined_end"] == 735.08
+    assert result[0]["ina_snap"]["original_end"] == 742.76
+
+
+def test_sting_anchor_list_with_end_entry_defers() -> None:
+    # Both edges moved: the audit value is a list of two dicts, and the
+    # END entry in it still defers the end.
+    b = boundary(600.0, 742.76)
+    b["sting_anchor"] = [sting_start_entry(), sting_end_entry()]
+
+    result, adjustments = apply_ina_snap_guard([b], composition_segments())
+
+    assert adjustments == []
+    assert result[0]["refined_end"] == 742.76
+    assert "ina_snap" not in result[0]
+
+
+def test_sting_anchor_list_start_only_does_not_defer() -> None:
+    b = boundary(600.0, 742.76)
+    b["sting_anchor"] = [sting_start_entry()]
+
+    result, adjustments = apply_ina_snap_guard([b], composition_segments())
+
+    assert len(adjustments) == 1
+    assert result[0]["refined_end"] == 735.08

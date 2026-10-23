@@ -27,6 +27,17 @@ resurrect an ad sign-off that sits at a block's start). The guard never
 expands a cut (shrink-only), so it can only recover content the refiner
 over-cut, never eat more of it.
 
+Deferral to the sting anchor: when the sting tier already adjusted a
+block's END earlier in the same pass, the boundary dict carries a
+"sting_anchor" audit entry with an "original_end" key, and this guard
+leaves that end alone -- the sting's measured onset is the stronger
+signal, and snapping again can only shrink the cut into an in-ad
+silence, undoing the anchor's fix (the 2397 composition failure). The
+deferral is edge-precise: a block whose START was sting-anchored but
+whose end was not still receives end-snapping (the 2409 composition,
+where the two tiers fix opposite edges of one break). Without the
+sting tier the audit key never appears, so this is a no-op there.
+
 Every adjustment is returned to the caller, which records it on the
 stored boundary under the "ina_snap" key and logs it, so a later
 "why did this cut land here?" can be attributed exactly:
@@ -36,8 +47,11 @@ snap guard (refined_end).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger("global_logger")
 
 TOLERANCE_SECONDS = 8.0
 MIN_MOVE_SECONDS = 1.0
@@ -70,6 +84,27 @@ class SnapAdjustment:
     silence_end: float
 
 
+def _sting_end_anchor(boundary: dict[str, Any]) -> dict[str, Any] | None:
+    """The boundary's sting END-anchor audit entry, if one was applied.
+
+    The sting tier stores its audit under "sting_anchor": a single dict
+    when one edge moved, or a list of two dicts when both did. An entry
+    is an END anchor iff it carries "original_end" (START anchors carry
+    "original_start" instead).
+    """
+    anchor = boundary.get("sting_anchor")
+    if isinstance(anchor, dict):
+        entries = [anchor]
+    elif isinstance(anchor, list):
+        entries = [entry for entry in anchor if isinstance(entry, dict)]
+    else:
+        return None
+    for entry in entries:
+        if "original_end" in entry:
+            return entry
+    return None
+
+
 def apply_ina_snap_guard(
     boundaries: list[dict[str, Any]],
     segments: list[AcousticSegment],
@@ -82,6 +117,9 @@ def apply_ina_snap_guard(
     (inputs are not mutated) and the adjustments that were applied.
     Adjusted boundaries gain an ``ina_snap`` audit key holding the
     pre-snap end and the silence segment that justified the move.
+    A boundary whose END the sting tier already anchored (a
+    ``sting_anchor`` entry with ``original_end``) is deferred to and
+    left untouched; a sting START anchor alone does not defer the end.
     """
     if not boundaries or not segments:
         return [dict(b) for b in boundaries], []
@@ -95,6 +133,22 @@ def apply_ina_snap_guard(
         result.append(new_boundary)
         start = float(boundary["refined_start"])
         end = float(boundary["refined_end"])
+
+        # Deferral: the sting tier already anchored this block's end in
+        # the same pass; its measured onset outranks INA silence, and
+        # snapping here would shrink the cut past the anchor's fix.
+        sting_end = _sting_end_anchor(boundary)
+        if sting_end is not None:
+            logger.info(
+                "INA snap guard: block %d end %.2f deferred to sting anchor "
+                "(sting original end %.2f, score %.2f, onset %.2f)",
+                index,
+                end,
+                float(sting_end.get("original_end", end)),
+                float(sting_end.get("score", 0.0)),
+                float(sting_end.get("onset", 0.0)),
+            )
+            continue
 
         # Trigger: the end must fall strictly inside a speech segment.
         if not any(
