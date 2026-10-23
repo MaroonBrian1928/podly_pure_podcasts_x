@@ -25,6 +25,7 @@ from app.writer.batching import (
 from app.writer.client import writer_client
 from podcast_processor.boundary_refiner import BoundaryRefiner
 from podcast_processor.cue_detector import CueDetector
+from podcast_processor.ina_snap_guard import AcousticSegment, apply_ina_snap_guard
 from podcast_processor.llm_concurrency_limiter import (
     ConcurrencyContext,
     LLMConcurrencyLimiter,
@@ -63,6 +64,7 @@ from shared.llm_utils import (
     model_uses_max_completion_tokens,
     normalize_completion_args_for_model,
 )
+from shared.rust_sidecar import env_flag_enabled
 
 
 class ClassifyParams:
@@ -1959,6 +1961,18 @@ class AdClassifier:
                     }
                 )
 
+        # INA snap guard (deterministic, shrink-only): pull refined ends
+        # that landed mid-speech back to the longest INA silence gap in
+        # the block. Runs on the full boundary list so the guard's
+        # cluster veto can see neighbouring blocks. Applied adjustments
+        # are stored on the boundaries ("ina_snap" key) and logged, so
+        # any later boundary question can be attributed exactly.
+        # Kill switch: PODLY_INA_SNAP_GUARD_ENABLED=0.
+        if refined_boundaries and env_flag_enabled(
+            "PODLY_INA_SNAP_GUARD_ENABLED", default=True
+        ):
+            refined_boundaries = self._apply_ina_snap_guard(post, refined_boundaries)
+
         # Store latest refined boundaries on the post so audio processing can cut
         # using refined timestamps (including word-level refined start times).
         # Clear the value when we have no refined boundaries so stale data doesn't
@@ -1986,6 +2000,52 @@ class AdClassifier:
                 post.id,
                 exc,
             )
+
+    def _apply_ina_snap_guard(
+        self,
+        post: Post,
+        refined_boundaries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Run the INA snap guard over a post's refined boundaries.
+
+        Best-effort: any failure (including a post with no INA
+        segmentation) returns the boundaries unchanged -- the guard is
+        an assist, never a gate on persistence.
+        """
+        try:
+            rows = (
+                self.db_session.query(AudioSegment)
+                .filter(AudioSegment.post_id == post.id)
+                .order_by(AudioSegment.start_time.asc())
+                .all()
+            )
+            segments = [
+                AcousticSegment(
+                    start=float(row.start_time),
+                    end=float(row.end_time),
+                    label=str(row.label),
+                )
+                for row in rows
+            ]
+            adjusted, adjustments = apply_ina_snap_guard(refined_boundaries, segments)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "INA snap guard failed for post %s (boundaries unchanged): %s",
+                post.id,
+                exc,
+            )
+            return refined_boundaries
+        for adj in adjustments:
+            self.logger.info(
+                "INA snap guard: post %s block %d end %.2f -> %.2f (silence %.2f-%.2f)",
+                post.id,
+                adj.block_index,
+                adj.original_end,
+                adj.snapped_end,
+                adj.silence_start,
+                adj.silence_end,
+            )
+        return adjusted
 
     @staticmethod
     def _segment_payload_for_boundary_refinement(
