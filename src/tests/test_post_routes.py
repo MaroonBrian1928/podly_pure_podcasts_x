@@ -2109,6 +2109,21 @@ def test_post_stats_expand_preroll_ad_block_with_edge_audio(app):
 
 
 def test_post_stats_use_cut_ready_windows_with_unrefined_trailing_fragment(app):
+    """Fix 2 deliberate behavior change (2026-10-23): this fixture's trailing
+    fragment (a lone 3.0s segment, 72.0-75.0, 11.15s after the refined end)
+    used to extend the stats' cut-ready window to 75.0. Under the
+    unmatched-block substance guard the fragment is a sliver -- 1 segment,
+    3.0 ad-seconds, failing both arms (>= 2 segments OR >= 10s of ad
+    audio) -- so it is dropped and the stats report the refined window:
+    ad_blocks end at 60.9 (not 75.0) and the edited marker ends at the
+    refined 60.85 with removed_duration_seconds 45.791 (not 59.941).
+    This is the stats-endpoint mirror of the post-2412 failure (AI Daily
+    Brief, "The AI vs AI Battle for the Internet"), where a lone
+    mislabeled segment dragged a cut window into episode content. Kill
+    switch: PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED=0 restores the
+    pre-Fix-2 distance-only keep (ad_blocks end 75.0, removed 59.941
+    again).
+    """
     app.testing = True
     app.register_blueprint(post_bp)
 
@@ -2195,7 +2210,7 @@ def test_post_stats_use_cut_ready_windows_with_unrefined_trailing_fragment(app):
     assert payload["processing_stats"]["ad_blocks"] == [
         {
             "start_time": 15.1,
-            "end_time": 75.0,
+            "end_time": 60.9,
         }
     ]
     assert payload["processing_stats"]["edited_ad_markers"] == [
@@ -2203,8 +2218,8 @@ def test_post_stats_use_cut_ready_windows_with_unrefined_trailing_fragment(app):
             "edited_start_time": 15.059,
             "edited_end_time": 15.059,
             "original_start_time": 15.059,
-            "original_end_time": 75.0,
-            "removed_duration_seconds": 59.941,
+            "original_end_time": 60.85,
+            "removed_duration_seconds": 45.791,
         }
     ]
 

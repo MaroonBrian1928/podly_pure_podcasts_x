@@ -4192,7 +4192,7 @@ fn build_stats_ad_blocks(
     };
     let mut ad_windows: Vec<(f64, f64)> = groups
         .iter()
-        .map(|group| cut_window_for_stats_ad_group(group, &refined_boundaries))
+        .map(|group| cut_window_for_stats_ad_group(post.id, group, &refined_boundaries))
         .collect();
     let bridgeable_audio = extract_audio_windows(audio_segments, false);
     if !bridgeable_audio.is_empty() {
@@ -4383,31 +4383,148 @@ fn is_valid_stats_ad_group(group: &StatsAdGroup) -> bool {
     true
 }
 
+// Matches Python's REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS (0.75).
+const REFINED_BOUNDARY_MATCH_TOLERANCE: f64 = 0.75;
+// Matches Python's UNMATCHED_BLOCK_MAX_GAP_SECONDS (30.0).
+const UNMATCHED_BLOCK_MAX_GAP_SECONDS: f64 = 30.0;
+// Matches Python's UNMATCHED_BLOCK_MIN_SEGMENTS (2) and
+// UNMATCHED_BLOCK_MIN_AD_SECONDS (10.0): the Fix 2 substance guard. An
+// unmatched block inside the gap window is kept only if it has at least
+// this many ad segments OR at least this many seconds of ad-labeled audio
+// (sum of its segments' durations); a block failing both is a sliver and
+// is dropped regardless of distance. Motivating case: AI Daily Brief
+// post 2412 break 2, where a lone 3.8s content segment (orig 561.5-565.3)
+// sat 19.7s before the refined start, was kept, and dragged the cut start
+// from 585.0 to 561.5, deleting ~19s of real episode content.
+const UNMATCHED_BLOCK_MIN_SEGMENTS: usize = 2;
+const UNMATCHED_BLOCK_MIN_AD_SECONDS: f64 = 10.0;
+
+/// One maximal run of ad-labeled segments (gaps <= 10s), with the segment
+/// count and total ad-labeled seconds the substance guard needs.
+#[derive(Clone, Copy)]
+struct AtomicAdBlock {
+    start: f64,
+    end: f64,
+    segment_count: usize,
+    ad_seconds: f64,
+}
+
+fn unmatched_block_is_substantial(block: &AtomicAdBlock) -> bool {
+    block.segment_count >= UNMATCHED_BLOCK_MIN_SEGMENTS
+        || block.ad_seconds >= UNMATCHED_BLOCK_MIN_AD_SECONDS
+}
+
+/// Mirrors Python's env_flag_enabled for
+/// PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED with default true: the Fix 2
+/// kill switch. "0"/"false"/"no"/"off" (anything not truthy) disables the
+/// substance guard and restores the distance-only keep rule.
+fn unmatched_substance_guard_enabled_from(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(raw) => {
+            let normalized = raw.trim().to_lowercase();
+            if normalized.is_empty() {
+                true
+            } else {
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            }
+        }
+    }
+}
+
+fn unmatched_substance_guard_enabled() -> bool {
+    unmatched_substance_guard_enabled_from(
+        std::env::var("PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED")
+            .ok()
+            .as_deref(),
+    )
+}
+
 fn cut_window_for_stats_ad_group(
+    post_id: i64,
     group: &StatsAdGroup,
     refined: &[RefinedBoundaryRow],
+) -> (f64, f64) {
+    cut_window_for_stats_ad_group_with_guard(
+        post_id,
+        group,
+        refined,
+        unmatched_substance_guard_enabled(),
+    )
+}
+
+fn cut_window_for_stats_ad_group_with_guard(
+    post_id: i64,
+    group: &StatsAdGroup,
+    refined: &[RefinedBoundaryRow],
+    substance_guard: bool,
 ) -> (f64, f64) {
     let blocks = atomic_ad_blocks_for_group(group);
     if blocks.is_empty() {
         return (group.start_time, group.end_time);
     }
     let projected: Vec<(f64, f64)> = blocks
-        .into_iter()
-        .map(|block| project_atomic_block(block, refined))
+        .iter()
+        .map(|block| project_atomic_block((block.start, block.end), refined))
         .collect();
+    // Drop far unmatched blocks, matching the Python fix (f6bb450). An atomic
+    // block the refiner deliberately ignored (often a classifier false
+    // positive) must not drag the cut window via min()/max() and delete real
+    // episode content. Blocks within UNMATCHED_BLOCK_MAX_GAP_SECONDS are kept,
+    // since the refiner may have missed the true edge by a few segments.
+    let mut kept: Vec<(f64, f64)> = Vec::new();
+    if !refined.is_empty() {
+        let refined_start = refined
+            .iter()
+            .map(|r| r.refined_start)
+            .fold(f64::INFINITY, f64::min);
+        let refined_end = refined
+            .iter()
+            .map(|r| r.refined_end)
+            .fold(f64::NEG_INFINITY, f64::max);
+        for (proj, block) in projected.iter().zip(blocks.iter()) {
+            if refined_boundaries_matching_block((block.start, block.end), refined) {
+                kept.push(*proj);
+                continue;
+            }
+            let gap = if block.end < refined_start {
+                refined_start - block.end
+            } else if block.start > refined_end {
+                block.start - refined_end
+            } else {
+                0.0
+            };
+            if gap > UNMATCHED_BLOCK_MAX_GAP_SECONDS {
+                continue;
+            }
+            // Fix 2 substance guard, matching the Python cutter: a
+            // close-but-tiny unmatched block is a sliver (classically one
+            // stray mislabeled segment), not a missed piece of the ad.
+            // Drop it so it cannot drag the window either.
+            if substance_guard && !unmatched_block_is_substantial(block) {
+                eprintln!(
+                    "Unmatched substance guard: post {} dropped sliver block {:.1}-{:.1} (segments={}, ad_seconds={:.1}, gap={:.1}s)",
+                    post_id, block.start, block.end, block.segment_count, block.ad_seconds, gap
+                );
+                continue;
+            }
+            kept.push(*proj);
+        }
+    }
+    let final_projected = if kept.is_empty() { projected } else { kept };
     (
-        projected
+        final_projected
             .iter()
             .map(|item| item.0)
             .fold(f64::INFINITY, f64::min),
-        projected
+        final_projected
             .iter()
             .map(|item| item.1)
             .fold(f64::NEG_INFINITY, f64::max),
     )
 }
 
-fn atomic_ad_blocks_for_group(group: &StatsAdGroup) -> Vec<(f64, f64)> {
+fn atomic_ad_blocks_for_group(group: &StatsAdGroup) -> Vec<AtomicAdBlock> {
     let mut segments = group.segments.clone();
     segments.sort_by(|a, b| {
         a.start_time
@@ -4420,16 +4537,32 @@ fn atomic_ad_blocks_for_group(group: &StatsAdGroup) -> Vec<(f64, f64)> {
     let mut blocks = Vec::new();
     let mut current_start = segments[0].start_time;
     let mut current_end = segments[0].end_time;
+    let mut current_count: usize = 1;
+    let mut current_ad_seconds = segments[0].end_time - segments[0].start_time;
     for segment in segments.iter().skip(1) {
         if segment.start_time - current_end <= 10.0 {
             current_end = current_end.max(segment.end_time);
+            current_count += 1;
+            current_ad_seconds += segment.end_time - segment.start_time;
         } else {
-            blocks.push((current_start, current_end));
+            blocks.push(AtomicAdBlock {
+                start: current_start,
+                end: current_end,
+                segment_count: current_count,
+                ad_seconds: current_ad_seconds,
+            });
             current_start = segment.start_time;
             current_end = segment.end_time;
+            current_count = 1;
+            current_ad_seconds = segment.end_time - segment.start_time;
         }
     }
-    blocks.push((current_start, current_end));
+    blocks.push(AtomicAdBlock {
+        start: current_start,
+        end: current_end,
+        segment_count: current_count,
+        ad_seconds: current_ad_seconds,
+    });
     blocks
 }
 
@@ -4447,6 +4580,16 @@ fn project_atomic_block(block: (f64, f64), refined: &[RefinedBoundaryRow]) -> (f
     best.filter(|_| best_overlap > 0.0)
         .map(|boundary| (boundary.refined_start, boundary.refined_end))
         .unwrap_or(block)
+}
+
+fn refined_boundaries_matching_block(block: (f64, f64), refined: &[RefinedBoundaryRow]) -> bool {
+    refined.iter().any(|boundary| {
+        let overlap = (block.1 + REFINED_BOUNDARY_MATCH_TOLERANCE)
+            .min(boundary.orig_end + REFINED_BOUNDARY_MATCH_TOLERANCE)
+            - (block.0 - REFINED_BOUNDARY_MATCH_TOLERANCE)
+                .max(boundary.orig_start - REFINED_BOUNDARY_MATCH_TOLERANCE);
+        overlap > 0.0
+    })
 }
 
 fn parse_refined_boundaries_full(raw: Option<&str>) -> Vec<RefinedBoundaryRow> {
@@ -7489,6 +7632,131 @@ mod tests {
         assert_eq!(
             merge_windows(vec![(300, 400), (100, 200), (180, 250), (500, 550)]),
             vec![(100, 250), (300, 400), (500, 550)]
+        );
+    }
+
+    // Fix 2: unmatched-block substance guard (mirrors the Python tests in
+    // test_audio_processor.py). An unmatched block within 30s of the refined
+    // ad is kept only if it has >= 2 segments or >= 10s of ad-labeled audio.
+    fn stats_group_from_windows(windows: &[(f64, f64)]) -> StatsAdGroup {
+        let segments: Vec<StatsTranscriptSegmentRow> = windows
+            .iter()
+            .enumerate()
+            .map(|(index, (start, end))| StatsTranscriptSegmentRow {
+                id: index as i64 + 1,
+                sequence_num: index as i64,
+                start_time: *start,
+                end_time: *end,
+                text: String::new(),
+                speaker_label: None,
+            })
+            .collect();
+        StatsAdGroup {
+            start_time: segments.first().map(|s| s.start_time).unwrap_or(0.0),
+            end_time: segments.last().map(|s| s.end_time).unwrap_or(0.0),
+            segments,
+            identifications: Vec::new(),
+            confidence_avg: 0.9,
+            keywords: Vec::new(),
+        }
+    }
+
+    fn fix2_refined() -> Vec<RefinedBoundaryRow> {
+        vec![RefinedBoundaryRow {
+            orig_start: 577.9,
+            orig_end: 770.4,
+            refined_start: 585.0,
+            refined_end: 758.0,
+        }]
+    }
+
+    #[test]
+    fn substance_guard_predicate_and_kill_switch_parsing() {
+        let sliver = AtomicAdBlock {
+            start: 561.5,
+            end: 565.3,
+            segment_count: 1,
+            ad_seconds: 3.8,
+        };
+        let lone_long = AtomicAdBlock {
+            start: 560.0,
+            end: 572.0,
+            segment_count: 1,
+            ad_seconds: 12.0,
+        };
+        let two_tiny = AtomicAdBlock {
+            start: 566.0,
+            end: 572.0,
+            segment_count: 2,
+            ad_seconds: 5.5,
+        };
+        assert!(!unmatched_block_is_substantial(&sliver));
+        assert!(unmatched_block_is_substantial(&lone_long));
+        assert!(unmatched_block_is_substantial(&two_tiny));
+
+        assert!(unmatched_substance_guard_enabled_from(None));
+        assert!(unmatched_substance_guard_enabled_from(Some("")));
+        assert!(unmatched_substance_guard_enabled_from(Some("true")));
+        assert!(unmatched_substance_guard_enabled_from(Some("1")));
+        assert!(!unmatched_substance_guard_enabled_from(Some("0")));
+        assert!(!unmatched_substance_guard_enabled_from(Some("false")));
+        assert!(!unmatched_substance_guard_enabled_from(Some("off")));
+    }
+
+    #[test]
+    fn cut_window_drops_lone_sliver_unmatched_block() {
+        // Post 2412 break 2 shape: a lone 3.8s segment 19.7s before the
+        // refined start no longer drags the window from 585.0 to 561.5.
+        let group = stats_group_from_windows(&[(561.5, 565.3), (584.6, 650.0), (650.5, 758.3)]);
+        assert_eq!(
+            cut_window_for_stats_ad_group_with_guard(2412, &group, &fix2_refined(), true),
+            (585.0, 758.0)
+        );
+    }
+
+    #[test]
+    fn cut_window_keeps_lone_long_unmatched_segment() {
+        let group = stats_group_from_windows(&[(560.0, 572.0), (584.6, 650.0), (650.5, 758.3)]);
+        assert_eq!(
+            cut_window_for_stats_ad_group_with_guard(1, &group, &fix2_refined(), true),
+            (560.0, 758.0)
+        );
+    }
+
+    #[test]
+    fn cut_window_keeps_two_tiny_segments_unmatched_block() {
+        let group = stats_group_from_windows(&[
+            (566.0, 569.0),
+            (569.5, 572.0),
+            (584.6, 650.0),
+            (650.5, 758.3),
+        ]);
+        assert_eq!(
+            cut_window_for_stats_ad_group_with_guard(1, &group, &fix2_refined(), true),
+            (566.0, 758.0)
+        );
+    }
+
+    #[test]
+    fn cut_window_still_drops_far_substantial_unmatched_block() {
+        let group = stats_group_from_windows(&[
+            (505.0, 520.0),
+            (520.5, 540.0),
+            (584.6, 650.0),
+            (650.5, 758.3),
+        ]);
+        assert_eq!(
+            cut_window_for_stats_ad_group_with_guard(1, &group, &fix2_refined(), true),
+            (585.0, 758.0)
+        );
+    }
+
+    #[test]
+    fn cut_window_kill_switch_restores_distance_only_rule() {
+        let group = stats_group_from_windows(&[(561.5, 565.3), (584.6, 650.0), (650.5, 758.3)]);
+        assert_eq!(
+            cut_window_for_stats_ad_group_with_guard(2412, &group, &fix2_refined(), false),
+            (561.5, 758.0)
         );
     }
 

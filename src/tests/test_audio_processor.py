@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,7 +14,7 @@ from app.models import (
     Post,
     TranscriptSegment,
 )
-from podcast_processor.audio_processor import AudioProcessor
+from podcast_processor.audio_processor import AtomicAdBlock, AudioProcessor
 from shared.config import Config
 from shared.test_utils import create_standard_test_config
 
@@ -648,10 +649,48 @@ def test_get_ad_segments_does_not_expand_over_transcribed_intro_content(
 
 
 def test_get_ad_segments_preserves_unrefined_trailing_edge(app: Flask) -> None:
+    # Fix 2 (2026-10-23) note: this test's trailing block is now TWO
+    # segments. A lone short trailing segment is a "sliver" under the
+    # unmatched-block substance guard and is dropped instead -- see
+    # test_get_ad_segments_drops_unrefined_trailing_sliver below. A
+    # substantial trailing block (>= 2 segments OR >= 10s of ad audio)
+    # is still preserved, as here.
     with app.app_context():
         processor = _processor_with_refinement()
         post = _create_post_with_ad_segments(
             guid="preserve-trailing-edge",
+            segment_windows=[(15.1, 21.1), (57.0, 60.9), (72.0, 74.0), (74.5, 78.0)],
+            refined_ad_boundaries=[
+                {
+                    "orig_start": 15.1,
+                    "orig_end": 60.9,
+                    "refined_start": 15.059,
+                    "refined_end": 60.85,
+                }
+            ],
+        )
+
+        assert processor.get_ad_segments(post) == [(15.059, 78.0)]
+
+
+def test_get_ad_segments_drops_unrefined_trailing_sliver(app: Flask) -> None:
+    """Fix 2 deliberate behavior change (2026-10-23): the fixture below is
+    the pre-Fix-2 `preserves_unrefined_trailing_edge` case verbatim. Its
+    lone 3.0s trailing segment (72.0-75.0, 11.15s after the refined end)
+    used to extend the cut window to 75.0. Under the unmatched-block
+    substance guard it is a sliver -- 1 segment, 3.0 ad-seconds, failing
+    both arms (>= 2 segments OR >= 10s of ad audio) -- so it is dropped
+    and the window is exactly the refined boundary. This is the trailing
+    mirror of the post-2412 failure (AI Daily Brief, "The AI vs AI Battle
+    for the Internet"), where a lone mislabeled segment dragged a cut
+    window into episode content. Kill switch:
+    PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED=0 restores the pre-Fix-2
+    distance-only keep (window extends to 75.0 again).
+    """
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="drop-trailing-sliver",
             segment_windows=[(15.1, 21.1), (57.0, 60.9), (72.0, 75.0)],
             refined_ad_boundaries=[
                 {
@@ -663,7 +702,7 @@ def test_get_ad_segments_preserves_unrefined_trailing_edge(app: Flask) -> None:
             ],
         )
 
-        assert processor.get_ad_segments(post) == [(15.059, 75.0)]
+        assert processor.get_ad_segments(post) == [(15.059, 60.85)]
 
 
 def test_get_ad_segments_projects_multiple_refined_sub_blocks(app: Flask) -> None:
@@ -720,3 +759,264 @@ def test_get_ad_segments_ignores_malformed_refinement_data(app: Flask) -> None:
         )
 
         assert processor.get_ad_segments(post) == [(15.1, 65.4)]
+
+
+def test_get_ad_segments_drops_unmatched_block_before_refined_ad(
+    app: Flask,
+) -> None:
+    """Regression test: an atomic ad block the refiner ignored must not drag
+    the cut window away from the refined boundaries.
+
+    Reproduces the AI Daily Brief episode "Agent Wars!" (2026-09-22): the
+    classifier falsely labeled segment 572.9-578.1 as an ad (editorial AI
+    safety discussion, confidence 0.8). When the block merges with the real
+    ad group (gap 40.9s), matching no refined boundary, the old min()/max()
+    projection pulls the cut start back from 619.0 to 572.9, deleting ~46s
+    of episode content. That merge path is reproducible with the default
+    separation setting; the production setting in effect for the published
+    cut was not conclusively established, so this test pins the unsafe code
+    path rather than a specific configuration. The false-positive block
+    sits 40.9s from the refined ad -- beyond
+    UNMATCHED_BLOCK_MAX_GAP_SECONDS (30s) -- so it is dropped from the cut
+    window, while closer unmatched blocks (see the preserved
+    preroll/trailing edge tests) stay.
+    """
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="agent-wars-false-positive-block",
+            segment_windows=[
+                (572.9, 578.1),  # classifier false positive, ignored by refiner
+                (619.0, 700.0),
+                (700.5, 777.4),
+            ],
+            refined_ad_boundaries=[
+                {
+                    "orig_start": 598.4,
+                    "orig_end": 786.3,
+                    "refined_start": 619.0,
+                    "refined_end": 775.6,
+                },
+            ],
+        )
+
+        assert processor.get_ad_segments(post) == [(619.0, 775.6)]
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: unmatched-block substance guard.
+#
+# An unmatched atomic block within UNMATCHED_BLOCK_MAX_GAP_SECONDS of the
+# refined ad is kept only if it is substantial (>= 2 ad segments OR >= 10s
+# of ad-labeled audio). A lone short block is a sliver -- classically one
+# stray mislabeled segment -- and is dropped so it cannot drag the cut
+# window into episode content. Kill switch:
+# PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED=0 restores the distance-only rule.
+# ---------------------------------------------------------------------------
+
+_FIX2_REFINED: list[dict[str, object]] = [
+    {
+        "orig_start": 577.9,
+        "orig_end": 770.4,
+        "refined_start": 585.0,
+        "refined_end": 758.0,
+    }
+]
+_FIX2_MAIN_SEGMENTS = [(584.6, 650.0), (650.5, 758.3)]
+
+
+def test_atomic_ad_blocks_carry_segment_stats() -> None:
+    group = SimpleNamespace(
+        segments=[
+            SimpleNamespace(start_time=10.0, end_time=14.0, post_id=7),
+            SimpleNamespace(start_time=40.0, end_time=46.0, post_id=7),
+            SimpleNamespace(start_time=46.5, end_time=52.0, post_id=7),
+        ]
+    )
+
+    blocks = AudioProcessor._atomic_ad_blocks_for_group(group)
+
+    assert blocks == [
+        AtomicAdBlock(start=10.0, end=14.0, segment_count=1, ad_seconds=4.0),
+        AtomicAdBlock(start=40.0, end=52.0, segment_count=2, ad_seconds=11.5),
+    ]
+    assert not blocks[0].is_substantial()
+    assert blocks[1].is_substantial()
+
+
+def test_get_ad_segments_drops_lone_sliver_unmatched_block(app: Flask) -> None:
+    """A single 3.8s unmatched segment 19.7s before the refined ad is a
+    sliver: dropped by the substance guard, so the window is exactly the
+    refined boundaries (the post-2412 shape, minimized)."""
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-lone-sliver",
+            segment_windows=[(561.5, 565.3), *_FIX2_MAIN_SEGMENTS],
+            refined_ad_boundaries=_FIX2_REFINED,
+        )
+
+        assert processor.get_ad_segments(post) == [(585.0, 758.0)]
+
+
+def test_get_ad_segments_keeps_lone_long_unmatched_segment(app: Flask) -> None:
+    """A single segment with >= 10s of ad audio is substantial on the
+    ad-seconds arm of the OR and is kept (a real missed ad read can be one
+    long Whisper segment)."""
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-lone-long-segment",
+            segment_windows=[(560.0, 572.0), *_FIX2_MAIN_SEGMENTS],
+            refined_ad_boundaries=_FIX2_REFINED,
+        )
+
+        assert processor.get_ad_segments(post) == [(560.0, 758.0)]
+
+
+def test_get_ad_segments_keeps_multi_segment_unmatched_block(app: Flask) -> None:
+    """Two+ segments totaling >= 10 ad-seconds: substantial, kept."""
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-multi-segment-block",
+            segment_windows=[(555.0, 562.0), (562.5, 570.0), *_FIX2_MAIN_SEGMENTS],
+            refined_ad_boundaries=_FIX2_REFINED,
+        )
+
+        assert processor.get_ad_segments(post) == [(555.0, 758.0)]
+
+
+def test_get_ad_segments_keeps_two_tiny_segments_unmatched_block(
+    app: Flask,
+) -> None:
+    """Two tiny segments totaling < 10 ad-seconds are still kept: the
+    segment-count arm of the OR suffices on its own."""
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-two-tiny-segments",
+            segment_windows=[(566.0, 569.0), (569.5, 572.0), *_FIX2_MAIN_SEGMENTS],
+            refined_ad_boundaries=_FIX2_REFINED,
+        )
+
+        assert processor.get_ad_segments(post) == [(566.0, 758.0)]
+
+
+def test_get_ad_segments_still_drops_far_substantial_unmatched_block(
+    app: Flask,
+) -> None:
+    """The substance guard does not widen the distance rule: a substantial
+    unmatched block more than 30s from the refined ad is still dropped."""
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-far-substantial-block",
+            segment_windows=[(505.0, 520.0), (520.5, 540.0), *_FIX2_MAIN_SEGMENTS],
+            refined_ad_boundaries=_FIX2_REFINED,
+        )
+
+        assert processor.get_ad_segments(post) == [(585.0, 758.0)]
+
+
+def test_get_ad_segments_substance_guard_kill_switch(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED=0 restores the pre-Fix-2
+    distance-only rule: the lone sliver is kept and drags the window."""
+    monkeypatch.setenv("PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED", "0")
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-guard-disabled",
+            segment_windows=[(561.5, 565.3), *_FIX2_MAIN_SEGMENTS],
+            refined_ad_boundaries=_FIX2_REFINED,
+        )
+
+        assert processor.get_ad_segments(post) == [(561.5, 758.0)]
+
+
+def test_get_ad_segments_post_2412_break_2_fixture(app: Flask) -> None:
+    """Post 2412 (AI Daily Brief, "The AI vs AI Battle for the Internet")
+    break 2 with its actual stored segment layout and refined boundary.
+
+    The lone segment at 561.5-565.3 is mid-sentence episode content ("to
+    deal with some dilution for now...") labeled "ad" at confidence 0.80.
+    Before Fix 2 it was kept (gap 19.7s <= 30s) and dragged the cut start
+    to 561.5, deleting the ~19s headlines wrap-up before the real KPMG ad
+    (segments from 584.6). With the substance guard the window is exactly
+    the refiner's [584.98332, 757.96797].
+    """
+    with app.app_context():
+        processor = _processor_with_refinement()
+        post = _create_post_with_ad_segments(
+            guid="fix2-post-2412-break-2",
+            segment_windows=[
+                (561.5, 565.3),
+                (584.6, 596.2),
+                (596.2, 600.0),
+                (600.0, 603.2),
+                (603.7, 606.0),
+                (606.3, 608.1),
+                (608.3, 610.4),
+                (610.9, 614.0),
+                (614.0, 618.5),
+                (619.8, 621.0),
+                (621.4, 623.1),
+                (623.1, 624.9),
+                (624.9, 627.0),
+                (627.6, 629.0),
+                (629.2, 631.0),
+                (631.4, 632.8),
+                (632.8, 633.9),
+                (634.4, 636.0),
+                (636.0, 637.6),
+                (638.2, 639.9),
+                (639.9, 642.1),
+                (642.1, 647.1),
+                (647.1, 650.0),
+                (650.5, 651.0),
+                (651.2, 654.2),
+                (654.5, 657.7),
+                (658.1, 659.4),
+                (660.1, 662.0),
+                (662.5, 664.5),
+                (664.8, 668.2),
+                (669.3, 671.6),
+                (671.6, 674.6),
+                (674.6, 677.6),
+                (677.6, 680.6),
+                (680.6, 681.6),
+                (681.6, 694.0),
+                (694.1, 699.0),
+                (699.4, 704.0),
+                (704.5, 708.6),
+                (708.6, 711.9),
+                (713.1, 717.3),
+                (717.5, 721.3),
+                (721.6, 726.3),
+                (726.3, 730.3),
+                (730.3, 733.7),
+                (734.1, 738.3),
+                (738.5, 741.4),
+                (741.4, 746.0),
+                (746.5, 748.5),
+                (748.9, 751.2),
+                (751.5, 753.6),
+                (753.9, 755.8),
+                (756.0, 758.3),
+            ],
+            refined_ad_boundaries=[
+                {
+                    "orig_start": 577.9,
+                    "orig_end": 770.4,
+                    "refined_start": 584.98332,
+                    "refined_end": 757.96797,
+                }
+            ],
+        )
+
+        result = processor.get_ad_segments(post)
+
+        assert len(result) == 1
+        assert result[0] == pytest.approx((584.98332, 757.96797))
