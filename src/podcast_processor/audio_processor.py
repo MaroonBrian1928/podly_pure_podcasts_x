@@ -17,6 +17,28 @@ from shared.config import Config
 
 ATOMIC_AD_BLOCK_GAP_SECONDS = 10.0
 REFINED_BOUNDARY_MATCH_TOLERANCE_SECONDS = 0.75
+# An atomic ad block that matched no refined boundary is dropped from the cut
+# window only when it sits farther than this from the refined ad. Closer than
+# this, it is preserved: the refiner may have missed the true ad edge by a
+# few segments, and cutting a little extra stays fail-safe toward ad removal.
+# 30s mirrors the live min_ad_segment_separation_seconds -- the system's own
+# definition of "too far apart to be one ad break".
+UNMATCHED_BLOCK_MAX_GAP_SECONDS = 30.0
+# Fix 2 -- unmatched-block substance guard (2026-10-23): an unmatched block
+# inside the gap window above is kept only if it is substantial -- at least
+# UNMATCHED_BLOCK_MIN_SEGMENTS ad segments OR at least
+# UNMATCHED_BLOCK_MIN_AD_SECONDS seconds of ad-labeled audio (the sum of its
+# segments' durations). A block failing both is a sliver and is dropped
+# regardless of distance. Motivating case: AI Daily Brief post 2412 break 2,
+# where a lone 3.8s content segment (orig 561.5-565.3, labeled "ad" at
+# confidence 0.80) sat 19.7s before the refined start, was kept, and dragged
+# the cut start from 585.0 to 561.5, deleting ~19s of real episode content.
+# Replay over posts 2394-2414: 12 of 13 kept unmatched blocks are substantial
+# chunks (3-41 segments, 13.7-131.4 ad-seconds); only the 2412 sliver drops.
+# Kill switch: PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED=0 restores the
+# distance-only rule above.
+UNMATCHED_BLOCK_MIN_SEGMENTS = 2
+UNMATCHED_BLOCK_MIN_AD_SECONDS = 10.0
 EPISODE_EDGE_FRAGMENT_WINDOW_SECONDS = 30.0
 SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS = 20.0
 MIN_NEIGHBOR_AD_DURATION_FOR_EDGE_MERGE_SECONDS = 15.0
@@ -26,6 +48,30 @@ MIN_NEIGHBOR_AD_DURATION_FOR_EDGE_MERGE_SECONDS = 15.0
 class TimeWindow:
     start: float
     end: float
+
+
+@dataclass(frozen=True)
+class AtomicAdBlock:
+    """A maximal run of ad-labeled segments (gaps <= ATOMIC_AD_BLOCK_GAP_SECONDS).
+
+    Carries the segment count and total ad-labeled seconds alongside the
+    span so the unmatched-block keep decision can apply the Fix 2 substance
+    guard without re-walking the group's segments.
+    """
+
+    start: float
+    end: float
+    segment_count: int
+    ad_seconds: float
+
+    def as_window(self) -> TimeWindow:
+        return TimeWindow(start=self.start, end=self.end)
+
+    def is_substantial(self) -> bool:
+        return (
+            self.segment_count >= UNMATCHED_BLOCK_MIN_SEGMENTS
+            or self.ad_seconds >= UNMATCHED_BLOCK_MIN_AD_SECONDS
+        )
 
 
 @dataclass(frozen=True)
@@ -280,6 +326,14 @@ class AudioProcessor:
         refined = getattr(post_row, "refined_ad_boundaries", None) if post_row else None
         return self._parse_refined_boundaries(refined)
 
+    @staticmethod
+    def _unmatched_substance_guard_enabled() -> bool:
+        # Kill switch: PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED=0 restores
+        # the pre-Fix-2 distance-only keep rule for unmatched blocks.
+        from shared.rust_sidecar import env_flag_enabled
+
+        return env_flag_enabled("PODLY_UNMATCHED_SUBSTANCE_GUARD_ENABLED", default=True)
+
     def _cut_window_for_ad_group(
         self,
         group: Any,
@@ -290,16 +344,74 @@ class AudioProcessor:
             return (float(group.start_time), float(group.end_time))
 
         projected_blocks = [
-            self._project_atomic_block(block, refined_boundaries)
+            self._project_atomic_block(block.as_window(), refined_boundaries)
             for block in atomic_blocks
         ]
+        if refined_boundaries:
+            refined_start = min(r.refined_start for r in refined_boundaries)
+            refined_end = max(r.refined_end for r in refined_boundaries)
+            substance_guard = self._unmatched_substance_guard_enabled()
+            kept_blocks = []
+            for projected, block in zip(projected_blocks, atomic_blocks, strict=True):
+                if (
+                    self._best_refined_boundary_match(
+                        block.as_window(), refined_boundaries
+                    )
+                    is not None
+                ):
+                    kept_blocks.append(projected)
+                    continue
+                # Unmatched block: the refiner deliberately ignored this coarse
+                # transcript position (often a classifier false positive).
+                # Preserve it only if it sits close to the refined ad -- the
+                # refiner may have missed the true edge by a few segments.
+                # Farther than UNMATCHED_BLOCK_MAX_GAP_SECONDS away, it is not
+                # part of this ad break: drop it so it cannot drag the cut
+                # window via min()/max() and delete real episode content.
+                gap = (
+                    refined_start - block.end
+                    if block.end < refined_start
+                    else block.start - refined_end
+                    if block.start > refined_end
+                    else 0.0
+                )
+                if gap > UNMATCHED_BLOCK_MAX_GAP_SECONDS:
+                    continue
+                # Fix 2 substance guard: a close-but-tiny unmatched block is
+                # a sliver (classically one stray mislabeled segment), not a
+                # missed piece of the ad. Drop it so it cannot drag the
+                # window either -- post 2412's lone 3.8s segment cost ~19s
+                # of episode content exactly this way.
+                if substance_guard and not block.is_substantial():
+                    self.logger.info(
+                        "Unmatched substance guard: post %s dropped sliver "
+                        "block %.1f-%.1f (segments=%d, ad_seconds=%.1f, "
+                        "gap=%.1fs)",
+                        self._group_post_id(group),
+                        block.start,
+                        block.end,
+                        block.segment_count,
+                        block.ad_seconds,
+                        gap,
+                    )
+                    continue
+                kept_blocks.append(projected)
+            if kept_blocks:
+                projected_blocks = kept_blocks
         return (
             min(block.start for block in projected_blocks),
             max(block.end for block in projected_blocks),
         )
 
     @staticmethod
-    def _atomic_ad_blocks_for_group(group: Any) -> list[TimeWindow]:
+    def _group_post_id(group: Any) -> Any:
+        segments = getattr(group, "segments", None) or []
+        if segments:
+            return getattr(segments[0], "post_id", "unknown")
+        return "unknown"
+
+    @staticmethod
+    def _atomic_ad_blocks_for_group(group: Any) -> list[AtomicAdBlock]:
         segments = sorted(
             list(getattr(group, "segments", []) or []),
             key=lambda segment: float(getattr(segment, "start_time", 0.0) or 0.0),
@@ -307,22 +419,42 @@ class AudioProcessor:
         if not segments:
             return []
 
-        blocks: list[TimeWindow] = []
+        blocks: list[AtomicAdBlock] = []
         current_start = float(segments[0].start_time)
         current_end = float(segments[0].end_time)
+        current_count = 1
+        current_ad_seconds = current_end - current_start
 
         for segment in segments[1:]:
             segment_start = float(segment.start_time)
             segment_end = float(segment.end_time)
             if segment_start - current_end <= ATOMIC_AD_BLOCK_GAP_SECONDS:
                 current_end = max(current_end, segment_end)
+                current_count += 1
+                current_ad_seconds += segment_end - segment_start
                 continue
 
-            blocks.append(TimeWindow(start=current_start, end=current_end))
+            blocks.append(
+                AtomicAdBlock(
+                    start=current_start,
+                    end=current_end,
+                    segment_count=current_count,
+                    ad_seconds=current_ad_seconds,
+                )
+            )
             current_start = segment_start
             current_end = segment_end
+            current_count = 1
+            current_ad_seconds = segment_end - segment_start
 
-        blocks.append(TimeWindow(start=current_start, end=current_end))
+        blocks.append(
+            AtomicAdBlock(
+                start=current_start,
+                end=current_end,
+                segment_count=current_count,
+                ad_seconds=current_ad_seconds,
+            )
+        )
         return blocks
 
     def _project_atomic_block(
