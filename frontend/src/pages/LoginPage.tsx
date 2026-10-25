@@ -1,10 +1,11 @@
 import type { FormEvent } from 'react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { discordApi } from '../services/api';
 import ThemeToggle from '../components/ThemeToggle';
+import { gsap, prefersFullMotion, SETTLE_EASE, useGSAP } from '../utils/gsap';
 
 export default function LoginPage() {
   const { login, landingPageEnabled, showDiscordIntegration } = useAuth();
@@ -92,17 +93,42 @@ export default function LoginPage() {
     }
   };
 
+  // The card pops in with the logo bouncing after it; a failed sign-in shakes it.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useGSAP(
+    () => {
+      if (!prefersFullMotion()) return;
+      gsap
+        .timeline()
+        .from(cardRef.current, { autoAlpha: 0, scale: 0.94, y: 18, duration: 0.5, ease: 'back.out(1.5)', clearProps: 'transform' })
+        .from('[data-login-logo]', { scale: 0.4, rotate: -12, duration: 0.6, ease: 'back.out(2.4)', clearProps: 'transform' }, 0.12)
+        .from('[data-login-rise]', { autoAlpha: 0, y: 10, duration: 0.35, ease: SETTLE_EASE, stagger: 0.05, clearProps: 'transform' }, 0.18);
+    },
+    { scope: cardRef }
+  );
+  useGSAP(
+    () => {
+      if (!error || !prefersFullMotion()) return;
+      gsap.fromTo(
+        cardRef.current,
+        { x: 0 },
+        { keyframes: { x: [-10, 9, -6, 4, -2, 0] }, duration: 0.42, ease: 'power1.out', clearProps: 'x' }
+      );
+    },
+    { dependencies: [error] }
+  );
+
   return (
     <div className="min-h-dvh bg-gray-50 flex items-center justify-center px-4">
       <div className="fixed right-4 top-4">
         <ThemeToggle />
       </div>
-      <div className="w-full max-w-md bg-surface rounded-lg border border-gray-200 p-6">
+      <div ref={cardRef} className="w-full max-w-md bg-surface rounded-lg border border-gray-200 p-6">
         <div className="flex flex-col items-center gap-2 mb-6">
           <Link to="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-            <img src="/images/logos/logo.webp" alt="Podly" className="h-10 w-auto" />
+            <img data-login-logo src="/images/logos/logo.webp" alt="Podly" className="h-10 w-auto" />
           </Link>
-          <h1 className="text-xl font-semibold text-gray-900">Sign in to Podly</h1>
+          <h1 data-login-rise className="text-xl font-semibold text-gray-900">Sign in to Podly</h1>
         </div>
 
         {error && (
@@ -141,7 +167,7 @@ export default function LoginPage() {
         )}
 
         {(!discordEnabled || showPasswordLogin) && (
-          <form
+          <form data-login-rise
             className={`space-y-4 ${discordEnabled ? 'pt-4 border-t border-gray-200' : ''}`}
             onSubmit={handleSubmit}
           >

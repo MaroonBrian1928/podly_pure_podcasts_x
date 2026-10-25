@@ -1,11 +1,10 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { feedsApi, billingApi } from '../services/api';
 import FeedList from '../components/FeedList';
 import FeedDetail from '../components/FeedDetail';
 import AddFeedForm from '../components/AddFeedForm';
 import ModalShell from '../components/ModalShell';
-import type { Feed } from '../types';
 import {
   loadFeedListSortPreference,
   persistFeedListSortPreference,
@@ -13,72 +12,53 @@ import {
 import type { FeedSortOption } from '../utils/feedListSort';
 import { toast } from 'react-hot-toast';
 import { useAuth } from '../contexts/AuthContext';
-import { useNavigate, useParams, useLocation } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
 import { useDelayedFlag } from '../hooks/useDelayedFlag';
+import { gsap, prefersFullMotion } from '../utils/gsap';
+import { EASE } from '../utils/nativeMotion';
 import { LinkIcon, PlusIcon, RefreshIcon, RssIcon, SlidersIcon, CheckIcon, CloseIcon } from '../components/icons';
 
-const MOBILE_FEED_DETAIL_ENTER_MS = 440;
-const MOBILE_FEED_DETAIL_EXIT_MS = 440;
 const HOME_ROUTE_QUERY_GC_TIME_MS = 5 * 60 * 1000;
 
-type MobileFeedTransitionState = 'idle' | 'entering' | 'exiting';
-type MobileFeedDetailPosition = 'onscreen' | 'offscreen';
-
-interface MobileTransitionViewport {
-  height: number;
-  top: number;
-}
+const MOBILE_FEED_QUERY = '(max-width: 1023px)';
+const SHEET_OPEN_MS = 420;
+const SHEET_CLOSE_MS = 300;
 
 function isMobileFeedViewport(): boolean {
-  return typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches;
+  return typeof window !== 'undefined' && window.matchMedia(MOBILE_FEED_QUERY).matches;
 }
 
-function captureMobileTransitionViewport(
-  container: HTMLDivElement | null
-): MobileTransitionViewport | null {
-  const mainElement = container?.closest('main');
-  if (!(mainElement instanceof HTMLElement)) {
-    return null;
-  }
-
-  return {
-    top: mainElement.scrollTop,
-    height: mainElement.clientHeight,
-  };
-}
-
-function scrollMobileMainToTop(container: HTMLDivElement | null): void {
-  const mainElement = container?.closest('main');
-  if (mainElement instanceof HTMLElement) {
-    mainElement.scrollTop = 0;
-  }
+function subscribeMobileFeedViewport(onChange: () => void): () => void {
+  const query = window.matchMedia(MOBILE_FEED_QUERY);
+  query.addEventListener('change', onChange);
+  return () => query.removeEventListener('change', onChange);
 }
 
 export default function HomePage() {
   const navigate = useNavigate();
   const { feedId } = useParams();
-  const location = useLocation();
   const [showAddForm, setShowAddForm] = useState(false);
-  const [selectedFeed, setSelectedFeed] = useState<Feed | null>(null);
-  const [mobileFeedTransitionState, setMobileFeedTransitionState] =
-    useState<MobileFeedTransitionState>('idle');
-  const [mobileTransitionFeed, setMobileTransitionFeed] = useState<Feed | null>(null);
-  const [mobileTransitionViewport, setMobileTransitionViewport] =
-    useState<MobileTransitionViewport | null>(null);
-  const [mobileDetailPosition, setMobileDetailPosition] =
-    useState<MobileFeedDetailPosition>('onscreen');
-  const mobileDetailFrameRef = useRef<number | null>(null);
   const [showSortMenu, setShowSortMenu] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const [feedSortBy, setFeedSortBy] = useState<FeedSortOption>(() =>
     loadFeedListSortPreference()
   );
-  const pageContainerRef = useRef<HTMLDivElement>(null);
-  const previousSelectedFeedRef = useRef<Feed | null>(null);
-  const mobileFeedTransitionTimeoutRef = useRef<number | null>(null);
+  const isMobileViewport = useSyncExternalStore(subscribeMobileFeedViewport, isMobileFeedViewport, () => false);
+  // Phone detail panel: a tap in the list slides it in over the list (which keeps
+  // its scroll), and the episode rows wait until the slide settles so no heavy
+  // render lands mid-animation. A feed opened from its URL appears in place.
+  const listPaneRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelSlides, setPanelSlides] = useState(false);
+  const [panelSettled, setPanelSettled] = useState(true);
+  const closingRef = useRef(false);
+  const settleCallRef = useRef<gsap.core.Tween | null>(null);
+  const slideStartedRef = useRef(false);
+  const panelAnimRef = useRef<Animation | null>(null);
+  const listAnimRef = useRef<Animation | null>(null);
   const { requireAuth, user } = useAuth();
 
   const { data: feeds, isLoading, error, refetch } = useQuery({
@@ -118,126 +98,8 @@ export default function HomePage() {
     },
   });
 
-  useEffect(() => {
-    if (!feeds || !feedId) {
-      if (location.pathname === '/' && selectedFeed !== null) {
-        setSelectedFeed(null);
-      }
-      return;
-    }
 
-    const parsedId = Number(feedId);
-    if (!Number.isFinite(parsedId)) {
-      if (selectedFeed !== null) {
-        setSelectedFeed(null);
-      }
-      return;
-    }
 
-    const matchingFeed = feeds.find((feed) => feed.id === parsedId) || null;
-    if (matchingFeed?.id !== selectedFeed?.id) {
-      setSelectedFeed(matchingFeed);
-    }
-  }, [feeds, feedId, location.pathname, selectedFeed]);
-
-  useLayoutEffect(() => {
-    const previousSelectedFeed = previousSelectedFeedRef.current;
-    const previousSelectedFeedId = previousSelectedFeed?.id ?? null;
-    const nextSelectedFeedId = selectedFeed?.id ?? null;
-
-    if (mobileFeedTransitionTimeoutRef.current !== null) {
-      window.clearTimeout(mobileFeedTransitionTimeoutRef.current);
-      mobileFeedTransitionTimeoutRef.current = null;
-    }
-    if (mobileDetailFrameRef.current !== null) {
-      window.cancelAnimationFrame(mobileDetailFrameRef.current);
-      mobileDetailFrameRef.current = null;
-    }
-
-    const beginEnter = () => {
-      setMobileDetailPosition('offscreen');
-      mobileDetailFrameRef.current = window.requestAnimationFrame(() => {
-        mobileDetailFrameRef.current = window.requestAnimationFrame(() => {
-          mobileDetailFrameRef.current = null;
-          setMobileDetailPosition('onscreen');
-        });
-      });
-    };
-
-    if (!isMobileFeedViewport()) {
-      setMobileDetailPosition('onscreen');
-      setMobileFeedTransitionState('idle');
-      setMobileTransitionFeed(null);
-      setMobileTransitionViewport(null);
-      previousSelectedFeedRef.current = selectedFeed;
-      return;
-    }
-
-    if (previousSelectedFeedId === null && nextSelectedFeedId !== null && selectedFeed) {
-      scrollMobileMainToTop(pageContainerRef.current);
-      setMobileTransitionViewport(
-        captureMobileTransitionViewport(pageContainerRef.current)
-      );
-      setMobileTransitionFeed(selectedFeed);
-      setMobileFeedTransitionState('entering');
-      beginEnter();
-      mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
-        setMobileFeedTransitionState('idle');
-        setMobileTransitionFeed(null);
-        setMobileTransitionViewport(null);
-        mobileFeedTransitionTimeoutRef.current = null;
-      }, MOBILE_FEED_DETAIL_ENTER_MS);
-    } else if (previousSelectedFeedId !== null && nextSelectedFeedId === null && previousSelectedFeed) {
-      setMobileTransitionViewport(
-        captureMobileTransitionViewport(pageContainerRef.current)
-      );
-      setMobileTransitionFeed(previousSelectedFeed);
-      setMobileFeedTransitionState('exiting');
-      setMobileDetailPosition('offscreen');
-      mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
-        setMobileFeedTransitionState('idle');
-        setMobileTransitionFeed(null);
-        setMobileTransitionViewport(null);
-        mobileFeedTransitionTimeoutRef.current = null;
-      }, MOBILE_FEED_DETAIL_EXIT_MS);
-    } else if (
-      previousSelectedFeedId !== null &&
-      nextSelectedFeedId !== null &&
-      previousSelectedFeedId !== nextSelectedFeedId &&
-      selectedFeed
-    ) {
-      scrollMobileMainToTop(pageContainerRef.current);
-      setMobileTransitionViewport(
-        captureMobileTransitionViewport(pageContainerRef.current)
-      );
-      setMobileTransitionFeed(selectedFeed);
-      setMobileFeedTransitionState('entering');
-      beginEnter();
-      mobileFeedTransitionTimeoutRef.current = window.setTimeout(() => {
-        setMobileFeedTransitionState('idle');
-        setMobileTransitionFeed(null);
-        setMobileTransitionViewport(null);
-        mobileFeedTransitionTimeoutRef.current = null;
-      }, MOBILE_FEED_DETAIL_ENTER_MS);
-    } else {
-      setMobileFeedTransitionState('idle');
-      setMobileTransitionFeed(null);
-      setMobileTransitionViewport(null);
-    }
-
-    previousSelectedFeedRef.current = selectedFeed;
-  }, [selectedFeed]);
-
-  useEffect(() => {
-    return () => {
-      if (mobileFeedTransitionTimeoutRef.current !== null) {
-        window.clearTimeout(mobileFeedTransitionTimeoutRef.current);
-      }
-      if (mobileDetailFrameRef.current !== null) {
-        window.cancelAnimationFrame(mobileDetailFrameRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (!showSortMenu) return;
@@ -261,16 +123,99 @@ export default function HomePage() {
 
   const parsedFeedId = feedId ? Number(feedId) : null;
   const feedIdIsValid = parsedFeedId !== null && Number.isFinite(parsedFeedId);
-  const feedNotFound = feedIdIsValid && !selectedFeed;
-  const detailFeed = selectedFeed ?? mobileTransitionFeed;
-  const isMobileFeedTransitioning = mobileFeedTransitionState !== 'idle';
-  const mobileFeedTransitionStyle =
-    isMobileFeedTransitioning && mobileTransitionViewport
-      ? {
-          top: mobileTransitionViewport.top,
-          height: mobileTransitionViewport.height,
-        }
-      : undefined;
+  // The URL is the only source of the open feed: a second copy in state lags
+  // the router by a render and fights it, remounting the panel mid-animation.
+  const selectedFeed = useMemo(
+    () => (feedIdIsValid && feeds ? feeds.find((feed) => feed.id === parsedFeedId) ?? null : null),
+    [feeds, feedIdIsValid, parsedFeedId]
+  );
+  const feedNotFound = feedIdIsValid && !!feeds && !selectedFeed;
+  const detailFeed = selectedFeed;
+  const panelWasOpenRef = useRef(false);
+
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const list = listPaneRef.current;
+    if (!selectedFeed) {
+      // A tap sets the slide flags a render before the URL opens the panel,
+      // so they only reset once a panel that was open has closed.
+      slideStartedRef.current = false;
+      if (panelWasOpenRef.current) {
+        listAnimRef.current?.cancel();
+        listAnimRef.current = null;
+        setPanelSlides(false);
+        setPanelSettled(true);
+      }
+      panelWasOpenRef.current = false;
+      return;
+    }
+    panelWasOpenRef.current = true;
+    // A feeds refetch gives the selected feed a new identity and re-runs this
+    // effect; the slide for an opening starts only once.
+    if (!panel || !panelSlides || panelSettled || slideStartedRef.current) return;
+    slideStartedRef.current = true;
+    // The sheet slide runs as a Web Animation on the compositor, so a busy main
+    // thread can't freeze or skip it. Created before paint with fill 'both', its
+    // first frame is already off screen; its clock starts once that frame is
+    // committed, so a slow first paint doesn't make it jump.
+    panelAnimRef.current?.cancel();
+    panelAnimRef.current = panel.animate(
+      [{ transform: 'translateX(100%)' }, { transform: 'translateX(0)' }],
+      { duration: SHEET_OPEN_MS, easing: EASE.settle, fill: 'both' }
+    );
+    if (list) {
+      listAnimRef.current?.cancel();
+      listAnimRef.current = list.animate(
+        [{ transform: 'none', opacity: 1 }, { transform: 'translateX(-18%)', opacity: 0.45 }],
+        { duration: SHEET_OPEN_MS, easing: EASE.settle, fill: 'forwards' }
+      );
+    }
+    // The ease has covered ~98.5% of the distance by 80% of the duration; the
+    // rows' render lands there, where the remaining movement is a few px.
+    settleCallRef.current?.kill();
+    settleCallRef.current = gsap.delayedCall((SHEET_OPEN_MS * 0.8) / 1000, () => setPanelSettled(true));
+  }, [selectedFeed, panelSlides, panelSettled]);
+
+  useEffect(() => {
+    if (!isMobileViewport) {
+      panelAnimRef.current?.cancel();
+      listAnimRef.current?.cancel();
+    }
+  }, [isMobileViewport]);
+
+  // The slide-out runs first and the route changes after it, so nothing heavy
+  // renders while the panel moves.
+  const closePanel = () => {
+    const panel = panelRef.current;
+    const list = listPaneRef.current;
+    const finish = () => {
+      closingRef.current = false;
+      navigate('/');
+    };
+    if (!panel || closingRef.current || !isMobileFeedViewport() || !prefersFullMotion()) {
+      finish();
+      return;
+    }
+    closingRef.current = true;
+    settleCallRef.current?.kill();
+    // Start from wherever the sheet and list are, so closing mid-open doesn't jump.
+    const panelFrom = getComputedStyle(panel).transform;
+    panelAnimRef.current?.cancel();
+    panelAnimRef.current = panel.animate(
+      [{ transform: panelFrom }, { transform: 'translateX(100%)' }],
+      { duration: SHEET_CLOSE_MS, easing: EASE.in, fill: 'forwards' }
+    );
+    panelAnimRef.current.finished.then(finish, () => {});
+    if (list) {
+      const listStyle = getComputedStyle(list);
+      const listFrom = { transform: listStyle.transform, opacity: listStyle.opacity };
+      listAnimRef.current?.cancel();
+      listAnimRef.current = list.animate(
+        [listFrom, { transform: 'none', opacity: 1 }],
+        { duration: SHEET_CLOSE_MS, easing: EASE.out, fill: 'forwards' }
+      );
+    }
+  };
 
   const handleCopyAggregateLink = async () => {
     try {
@@ -306,11 +251,15 @@ export default function HomePage() {
   ];
 
   return (
-    <div ref={pageContainerRef} className="relative h-full flex flex-col lg:flex-row gap-6">
-      {/* Left Panel - Feed List (hidden on mobile when feed is selected) */}
-      <div className={`flex-1 lg:max-w-md xl:max-w-lg flex flex-col ${
-        selectedFeed && !isMobileFeedTransitioning ? 'hidden lg:flex' : 'flex'
-      }`}>
+    <div className="relative h-full flex flex-col lg:flex-row gap-6">
+      {/* Left Panel - Feed List (behind the detail panel on phones) */}
+      <div
+        ref={listPaneRef}
+        inert={isMobileViewport && !!selectedFeed}
+        className={`flex-1 lg:max-w-md xl:max-w-lg flex flex-col ${
+          feedIdIsValid && isLoading ? 'hidden lg:flex' : 'flex'
+        }`}
+      >
         <div className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-3">
           <h1 className="w-full text-2xl font-semibold text-gray-900 sm:w-auto sm:flex-1">
             Podcast feeds
@@ -428,13 +377,13 @@ export default function HomePage() {
             feeds={feeds || []} 
             onFeedDeleted={refetch}
             onFeedSelected={(feed) => {
-              setSelectedFeed(feed);
+              if (isMobileFeedViewport() && prefersFullMotion()) {
+                setPanelSlides(true);
+                setPanelSettled(false);
+              }
               navigate(`/feeds/${feed.id}`);
             }}
-            selectedFeedId={
-              selectedFeed?.id ??
-              (mobileFeedTransitionState === 'exiting' ? mobileTransitionFeed?.id : undefined)
-            }
+            selectedFeedId={selectedFeed?.id}
             sortBy={feedSortBy}
           />
           )}
@@ -444,22 +393,15 @@ export default function HomePage() {
       {/* Right Panel - Feed Detail */}
       {detailFeed && (
         <div
-          data-state={mobileDetailPosition}
-          className={`podly-mobile-feed-detail flex flex-1 flex-col bg-surface rounded-lg border border-gray-200 shadow-sm overflow-hidden lg:flex-[2] ${
-            isMobileFeedTransitioning
-              ? 'absolute left-0 right-0 z-10 lg:static lg:z-auto'
-              : ''
-          }`}
-          style={mobileFeedTransitionStyle}
+          ref={panelRef}
+          className="fixed inset-x-0 top-[49px] bottom-0 z-30 flex flex-col overflow-hidden bg-surface shadow-[-12px_0_32px_rgba(0,0,0,0.28)] lg:static lg:inset-auto lg:z-auto lg:flex-1 lg:flex-[2] lg:rounded-lg lg:border lg:border-gray-200 lg:shadow-sm"
         >
           <FeedDetail 
             feed={detailFeed}
-            onClose={() => {
-              setSelectedFeed(null);
-              navigate('/');
-            }}
+            slidesIn={panelSlides}
+            holdContent={!panelSettled}
+            onClose={closePanel}
             onFeedDeleted={() => {
-              setSelectedFeed(null);
               navigate('/');
               refetch();
             }}

@@ -116,13 +116,14 @@ module.exports = {
           '100%': { transform: 'translateY(0) scale(1)', opacity: '1', filter: 'blur(0)' },
         },
         'pop-in': {
-          '0%': { transform: 'scale(0.97)', opacity: '0' },
+          '0%': { transform: 'scale(0.88)', opacity: '0' },
+          '60%': { opacity: '1' },
           '100%': { transform: 'scale(1)', opacity: '1' },
         },
       },
       animation: {
         'digit-tick': 'digit-tick 350ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-        'pop-in': 'pop-in 220ms cubic-bezier(0.23, 1, 0.32, 1)',
+        'pop-in': 'pop-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1)',
       },
     },
   },

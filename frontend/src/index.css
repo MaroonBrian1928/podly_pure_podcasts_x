@@ -150,19 +150,24 @@
     backdrop-filter: blur(4px);
   }
 
+  /* Opening pops with a slight overshoot; closing shrinks away without one.
+     Each state carries the transition used to arrive in it. */
   .podly-modal-panel {
     opacity: 0;
-    transform: translate3d(0, 10px, 0) scale(0.996);
-    transform-origin: center top;
+    transform: translate3d(0, 16px, 0) scale(0.94);
+    transform-origin: center;
     will-change: transform, opacity;
     transition:
-      opacity 320ms ease,
-      transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+      opacity 180ms ease,
+      transform 200ms cubic-bezier(0.4, 0, 1, 1);
   }
 
   .podly-modal-panel[data-state='open'] {
     opacity: 1;
     transform: translate3d(0, 0, 0) scale(1);
+    transition:
+      opacity 240ms ease,
+      transform 480ms cubic-bezier(0.34, 1.45, 0.64, 1);
   }
 
   .podly-tab-panel-enter {
@@ -180,23 +185,14 @@
     transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
+  /* A settled page carries no transform, filter or will-change: any of them
+     makes it the containing block for position:fixed descendants, which would
+     pin the phone feed panel to the scrolled page instead of the viewport. */
   .podly-page-transition[data-state='open'] {
     opacity: 1;
-    transform: translate3d(0, 0, 0);
-    filter: blur(0);
-  }
-
-  /* Phone feed detail slides over the list. A transition (not keyframes) so a
-     back tap mid-slide reverses from where the panel is. */
-  @media (max-width: 1023px) {
-    .podly-mobile-feed-detail {
-      transform: translate3d(0, 0, 0);
-      transition: transform 440ms cubic-bezier(0.32, 0.72, 0, 1);
-    }
-
-    .podly-mobile-feed-detail[data-state='offscreen'] {
-      transform: translate3d(100%, 0, 0);
-    }
+    transform: none;
+    filter: none;
+    will-change: auto;
   }
 
   @keyframes podly-tab-panel-enter {
@@ -247,11 +243,6 @@
   .podly-page-transition {
     transition: none;
     filter: none;
-  }
-
-  .podly-mobile-feed-detail,
-  .podly-mobile-feed-detail[data-state='offscreen'] {
-    transition: none;
   }
 
   .animate-ping,

@@ -6,48 +6,14 @@ import type {
   JobManagerRun,
   JobManagerStatus,
 } from '../types';
+import { JobProgressBar } from '../components/JobProgress';
+import { formatBackendDateTime } from '../utils/datetime';
+import { useCascade } from '../hooks/useCascade';
+import { JobCard } from '../components/jobs/JobCard';
 import {
-  JobProgressBar,
-  JobProgressCaption,
-  JobStageRail,
-  ServiceTierChip,
-} from '../components/JobProgress';
-import {
-  backendDateMs,
-  formatBackendDateTime,
-  formatDuration,
-} from '../utils/datetime';
-import { computeStageDurationMs } from '../utils/jobStageDurations';
-import { buildProcessingProgressModel } from '../utils/processingProgress';
-import ErrorTroubleshooter from '../components/ErrorTroubleshooter';
-
-function getStatusColor(status: string) {
-  switch (status) {
-    case 'running':
-      return 'bg-green-100 text-green-800';
-    case 'pending':
-      return 'bg-yellow-100 text-yellow-800';
-    case 'failed':
-      return 'bg-red-100 text-red-800';
-    case 'completed':
-      return 'bg-blue-100 text-blue-800';
-    case 'skipped':
-      return 'bg-sky-100 text-sky-800';
-    case 'cancelled':
-      return 'bg-gray-100 text-gray-800';
-    default:
-      return 'bg-gray-100 text-gray-800';
-  }
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const color = getStatusColor(status);
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color}`}>
-      {status}
-    </span>
-  );
-}
+  reconcileJobs,
+  reconcileValue,
+} from '../components/jobs/reconcile';
 
 function RunStat({ label, value }: { label: string; value: number }) {
   return (
@@ -59,9 +25,6 @@ function RunStat({ label, value }: { label: string; value: number }) {
 }
 
 const formatDateTime = formatBackendDateTime;
-
-// computeStageDurationMs moved to utils/jobStageDurations.ts so the
-// EpisodeProcessingStatus indicator can share the same logic.
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -78,12 +41,13 @@ export default function JobsPage() {
   const [cleanupError, setCleanupError] = useState<string | null>(null);
   const [cleanupRunning, setCleanupRunning] = useState(false);
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
-  const [now, setNow] = useState<number>(() => Date.now());
+  const jobGridRef = useRef<HTMLDivElement>(null);
+  useCascade(jobGridRef, { playKey: mode, ready: jobs.length > 0, pop: true });
 
   const loadStatus = useCallback(async () => {
     try {
       const data = await jobsApi.getJobManagerStatus();
-      setManagerStatus(data);
+      setManagerStatus(prev => reconcileValue(prev, data));
       setStatusError(null);
     } catch (e) {
       console.error('Failed to load job manager status:', e);
@@ -96,7 +60,7 @@ export default function JobsPage() {
     setError(null);
     try {
       const data = await jobsApi.getActiveJobs(100);
-      setJobs(data);
+      setJobs(prev => reconcileJobs(prev, data));
     } catch (e) {
       console.error('Failed to load active jobs:', e);
       setError('Failed to load jobs');
@@ -110,7 +74,7 @@ export default function JobsPage() {
     setError(null);
     try {
       const data = await jobsApi.getAllJobs(200);
-      setJobs(data);
+      setJobs(prev => reconcileJobs(prev, data));
     } catch (e) {
       console.error('Failed to load all jobs:', e);
       setError('Failed to load jobs');
@@ -128,7 +92,7 @@ export default function JobsPage() {
         mode === 'active'
           ? await jobsApi.getActiveJobs(100)
           : await jobsApi.getAllJobs(200);
-      setJobs(data);
+      setJobs(prev => reconcileJobs(prev, data));
     } catch (e) {
       console.error('Background jobs refresh failed:', e);
     }
@@ -282,18 +246,6 @@ export default function JobsPage() {
     loadStatus,
     silentLoadJobs,
   ]);
-
-  // Tick once per second while there's an active running job so elapsed timers
-  // and the pulse animations stay live without re-fetching from the server.
-  useEffect(() => {
-    const hasRunningJob = jobs.some(job => job.status === 'running');
-    if (!hasRunningJob) {
-      return undefined;
-    }
-    const tick = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(tick);
-  }, [jobs]);
-
 
   useEffect(() => {
     const queued = managerStatus?.run?.queued_jobs ?? 0;
@@ -479,147 +431,15 @@ export default function JobsPage() {
         <div className="text-sm text-gray-600">No jobs to display.</div>
       ) : null}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {jobs.map((job) => {
-          const progressModel = buildProcessingProgressModel({
-            status: job.status,
-            step: job.step,
-            totalSteps: job.total_steps,
-            stepName: job.step_name,
-            progressPercentage: job.progress_percentage,
-          });
-          const progressColorClass =
-            job.status === 'failed' || job.status === 'cancelled'
-              ? 'bg-red-600'
-              : job.status === 'completed' || job.status === 'skipped'
-                ? 'bg-green-600'
-                : 'bg-blue-600';
-
-          return (
-            <div key={job.job_id} className="bg-surface border border-gray-200 rounded-lg p-4 space-y-3 shadow-sm">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium text-gray-900 truncate">
-                  {job.post_title || 'Untitled episode'}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  {/* Zero-ads guard badge: surfaces when a terminal job
-                      yielded no ad windows. Amber if the run was clean
-                      (probably ad-free episode), red if a parse error
-                      contributed (likely classifier miss). The Retried
-                      variant signals an auto-retry was already used. */}
-                  {(job.status === 'completed' || job.status === 'skipped') &&
-                  job.ad_windows_count === 0 ? (
-                    <span
-                      title={
-                        job.had_classification_parse_error
-                          ? 'No ads removed and at least one LLM batch failed to parse — likely classifier miss.'
-                          : 'No ads removed for this episode.'
-                      }
-                      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium ${
-                        job.had_classification_parse_error
-                          ? 'bg-red-100 text-red-800'
-                          : 'bg-amber-100 text-amber-800'
-                      }`}
-                    >
-                      {job.had_classification_parse_error
-                        ? job.auto_retry_attempted
-                          ? '0 ads · retried'
-                          : '0 ads · parse error'
-                        : '0 ads'}
-                    </span>
-                  ) : null}
-                  {job.service_tier ? <ServiceTierChip tier={job.service_tier} /> : null}
-                  <StatusBadge status={job.status} />
-                </div>
-              </div>
-              <div className="text-xs text-gray-600 truncate">{job.feed_title || 'Unknown feed'}</div>
-
-              <div className="space-y-2">
-                <JobProgressBar
-                  value={progressModel.progress}
-                  colorClass={progressColorClass}
-                />
-                <JobStageRail
-                  stages={progressModel.stages}
-                  stageDurationsMs={progressModel.stages.map((stage) =>
-                    computeStageDurationMs(job.stage_history ?? [], stage.index, job, now)
-                  )}
-                />
-                <JobProgressCaption
-                  stageLabel={progressModel.currentStageLabel}
-                  percent={progressModel.progress}
-                  tier={job.service_tier}
-                  hideChip
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
-                <div>
-                  <div className="text-gray-600">Job ID</div>
-                  <div className="truncate" title={job.job_id}>{job.job_id}</div>
-                </div>
-                <div>
-                  <div className="text-gray-600">Post GUID</div>
-                  <div className="truncate" title={job.post_guid}>{job.post_guid}</div>
-                </div>
-                <div>
-                  <div className="text-gray-600">Created</div>
-                  <div>{job.created_at ? formatDateTime(job.created_at) : '—'}</div>
-                </div>
-                <div>
-                  <div className="text-gray-600">Started</div>
-                  <div>{job.started_at ? formatDateTime(job.started_at) : '—'}</div>
-                </div>
-                {(() => {
-                  const isTerminal =
-                    job.status === 'completed' ||
-                    job.status === 'skipped' ||
-                    job.status === 'failed' ||
-                    job.status === 'cancelled';
-                  const startedMs = backendDateMs(job.started_at);
-                  const endMs = isTerminal
-                    ? backendDateMs(job.completed_at) || now
-                    : now;
-                  if (!Number.isFinite(startedMs)) {
-                    return null;
-                  }
-                  return (
-                    <div className="col-span-2">
-                      <div className="text-gray-600">Total time</div>
-                      <div className="font-mono tabular-nums">
-                        {formatDuration(endMs - startedMs)}
-                      </div>
-                    </div>
-                  );
-                })()}
-                {job.error_message ? (
-                  <div className="col-span-2">
-                    <div className="text-gray-600">Message</div>
-                    <div className="text-red-700 truncate" title={job.error_message}>{job.error_message}</div>
-                  </div>
-                ) : null}
-              </div>
-
-              {(job.status === 'failed' || job.status === 'error') && job.post_guid && (
-                <div className="pt-3 border-t border-gray-200">
-                  <ErrorTroubleshooter episodeGuid={job.post_guid} jobId={job.job_id} />
-                </div>
-              )}
-
-              {(job.status === 'pending' || job.status === 'running') && (
-                <div className="mt-3 pt-3 border-t border-gray-200">
-                  <button
-                    onClick={() => { void cancelJob(job.job_id); }}
-                    disabled={cancellingJobs.has(job.job_id)}
-                    className="btn btn-danger w-full"
-                  >
-                    {cancellingJobs.has(job.job_id) ? 'Cancelling...' : 'Cancel Job'}
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
+      <div ref={jobGridRef} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {jobs.map((job) => (
+          <JobCard
+            key={job.job_id}
+            job={job}
+            isCancelling={cancellingJobs.has(job.job_id)}
+            onCancel={cancelJob}
+          />
+        ))}
       </div>
     </div>
   );

@@ -38,7 +38,7 @@ export function JobProgressBar({
   return (
     <div className={`relative w-full bg-gray-200 ${radius} ${height} overflow-hidden ${className}`}>
       <div
-        className={`absolute inset-y-0 left-0 ${colorClass} ${radius} transition-[width] duration-300 ease-out`}
+        className={`absolute inset-y-0 left-0 ${colorClass} ${radius} transition-[width,background-color] duration-300 ease-out`}
         style={{ width: `${clamped}%` }}
       />
     </div>

@@ -1,8 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { MusicIcon, RssIcon } from './icons';
 import type { Feed } from '../types';
 import type { FeedSortOption } from '../utils/feedListSort';
+import { useCascade } from '../hooks/useCascade';
+import { prefersFullMotion } from '../utils/gsap';
+import { EASE } from '../utils/nativeMotion';
 
 function getLatestEpisodeTimestamp(feed: Feed): number | null {
   if (!feed.latest_episode_release_date) {
@@ -147,6 +150,21 @@ export default function FeedList({
       .map(({ feed }) => feed);
   }, [feedsArray, searchTerm, sortBy]);
 
+  const listRef = useRef<HTMLDivElement>(null);
+  useCascade(listRef, { ready: displayedFeeds.length > 0, pop: true, limit: 10 });
+
+  // The picked card gives a small bounce, so the choice registers before the
+  // detail panel catches up.
+  const lastSelectedId = useRef(selectedFeedId);
+  useEffect(() => {
+    const previous = lastSelectedId.current;
+    lastSelectedId.current = selectedFeedId;
+    if (selectedFeedId == null || previous === selectedFeedId || !prefersFullMotion()) return;
+    const card = listRef.current?.querySelector(`[data-feed-id="${selectedFeedId}"]`);
+    // Native, because the click that triggers it also starts the route change.
+    card?.animate([{ transform: 'scale(0.96)' }, { transform: 'scale(1)' }], { duration: 450, easing: EASE.pop });
+  }, [selectedFeedId]);
+
   if (feedsArray.length === 0) {
     return (
       <div className="flex flex-col items-center gap-3 py-12 text-center">
@@ -174,7 +192,7 @@ export default function FeedList({
           className="input"
         />
       </div>
-      <div className="space-y-2 overflow-y-auto h-full pb-20">
+      <div ref={listRef} className="space-y-2 overflow-y-auto h-full pb-20">
         {displayedFeeds.length === 0 ? (
           <div className="flex h-full items-center justify-center rounded-lg border border-gray-200 px-4 py-8 text-center">
             <p className="text-sm text-gray-600">
@@ -186,6 +204,7 @@ export default function FeedList({
             <button
               type="button"
               key={feed.id}
+              data-feed-id={feed.id}
               aria-current={selectedFeedId === feed.id ? 'true' : undefined}
               onClick={() => onFeedSelected(feed)}
               className={`block w-full rounded-lg border p-4 text-left shadow-sm transition-[background-color,border-color,box-shadow] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${

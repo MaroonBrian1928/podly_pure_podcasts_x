@@ -1,12 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { toast } from 'react-hot-toast';
 import type { Feed, Episode, PagedResult, ConfigResponse } from '../types';
 import { feedsApi, configApi } from '../services/api';
-import DownloadButton from './DownloadButton';
-import PlayButton from './PlayButton';
-import ProcessingStatsButton from './ProcessingStatsButton';
-import EpisodeProcessingStatus from './EpisodeProcessingStatus';
+import EpisodeRow, { EpisodeRowSkeleton, type EpisodeDescriptionView } from './EpisodeRow';
+import FadeImage from './FadeImage';
 import FeedSettingsModal from './FeedSettingsModal';
 import FeedSubscribersModal from './FeedSubscribersModal';
 import ModalShell from './ModalShell';
@@ -15,6 +13,8 @@ import { copyToClipboard } from '../utils/clipboard';
 import { emitDiagnosticError } from '../utils/diagnostics';
 import { getHttpErrorInfo } from '../utils/httpError';
 import { useDelayedFlag } from '../hooks/useDelayedFlag';
+import { gsap, prefersFullMotion, SETTLE_EASE, useGSAP } from '../utils/gsap';
+import { EASE } from '../utils/nativeMotion';
 import {
   BlockedIcon,
   CheckIcon,
@@ -34,10 +34,13 @@ interface FeedDetailProps {
   feed: Feed;
   onClose?: () => void;
   onFeedDeleted?: () => void;
+  /** The phone panel is sliding in, which already serves as the first entrance. */
+  slidesIn?: boolean;
+  /** Hold the episode rows back while the phone panel slides, so their render doesn't land mid-animation. */
+  holdContent?: boolean;
 }
 
 type SortOption = 'newest' | 'oldest' | 'title';
-type EpisodeDescriptionView = 'source' | 'podly';
 
 const EPISODE_DESCRIPTION_VIEW_STORAGE_KEY_PREFIX = 'podly:episode-description-view:feed:';
 
@@ -79,7 +82,7 @@ const EPISODES_PAGE_SIZE = 25;
 
 const htmlToPlainText = (html: string) => new DOMParser().parseFromString(html, 'text/html').body.textContent?.trim() ?? '';
 
-export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailProps) {
+export default function FeedDetail({ feed, onClose, onFeedDeleted, slidesIn = false, holdContent = false }: FeedDetailProps) {
   const { requireAuth, isAuthenticated, user } = useAuth();
   const [sortBy, setSortBy] = useState<SortOption>('newest');
   const [showStickyHeader, setShowStickyHeader] = useState(false);
@@ -98,6 +101,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const [page, setPage] = useState(1);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [isFeedTransitionActive, setIsFeedTransitionActive] = useState(false);
+  // The old feed fades out at once, but the skeleton only appears for a slow
+  // load, so a fast switch goes straight to the new feed's entrance.
+  const showFeedSkeleton = useDelayedFlag(isFeedTransitionActive, 250);
   const [episodeDescriptionView, setEpisodeDescriptionView] =
     useState<EpisodeDescriptionView>(() => loadEpisodeDescriptionView(feed.id));
   const handleEpisodeDescriptionViewChange = (view: EpisodeDescriptionView) => {
@@ -109,158 +115,6 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   const isAdmin = !requireAuth || user?.role === 'admin';
   const whitelistedOnly = requireAuth && !isAdmin;
 
-  type DescriptionToken =
-    | { type: 'text'; value: string }
-    | { type: 'link'; href: string; text: string }
-    | { type: 'newline' };
-
-  const tokenizeDescription = (rawDescription: string): DescriptionToken[] => {
-    if (typeof document === 'undefined') {
-      return [{ type: 'text', value: rawDescription }];
-    }
-
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(rawDescription, 'text/html');
-    const tokens: DescriptionToken[] = [];
-    const blockTags = new Set(['p', 'div', 'li', 'ul', 'ol']);
-
-    const pushText = (text: string) => {
-      if (!text) {
-        return;
-      }
-      const parts = text.split(/\r?\n/);
-      parts.forEach((part, index) => {
-        if (part) {
-          tokens.push({ type: 'text', value: part });
-        }
-        if (index < parts.length - 1) {
-          tokens.push({ type: 'newline' });
-        }
-      });
-    };
-
-    const visitNode = (node: Node) => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        pushText(node.textContent ?? '');
-        return;
-      }
-
-      if (node.nodeType !== Node.ELEMENT_NODE) {
-        return;
-      }
-
-      const element = node as HTMLElement;
-      const tag = element.tagName.toLowerCase();
-
-      if (tag === 'br') {
-        tokens.push({ type: 'newline' });
-        return;
-      }
-
-      if (tag === 'a') {
-        const href = element.getAttribute('href');
-        const text = element.textContent ?? '';
-        if (href) {
-          tokens.push({ type: 'link', href, text: text || href });
-        } else {
-          pushText(text);
-        }
-        return;
-      }
-
-      if (blockTags.has(tag)) {
-        tokens.push({ type: 'newline' });
-        element.childNodes.forEach(visitNode);
-        tokens.push({ type: 'newline' });
-        return;
-      }
-
-      element.childNodes.forEach(visitNode);
-    };
-
-    doc.body.childNodes.forEach(visitNode);
-
-    const normalized: DescriptionToken[] = [];
-    for (const token of tokens) {
-      const last = normalized[normalized.length - 1];
-      if (token.type === 'text') {
-        const cleaned = token.value.replace(/[ \t]+/g, ' ');
-        if (!cleaned) {
-          continue;
-        }
-        if (last?.type === 'text') {
-          last.value += cleaned;
-        } else {
-          normalized.push({ type: 'text', value: cleaned });
-        }
-        continue;
-      }
-
-      if (token.type === 'newline') {
-        if (last?.type !== 'newline') {
-          normalized.push(token);
-        }
-        continue;
-      }
-
-      normalized.push(token);
-    }
-
-    while (normalized[0]?.type === 'newline') {
-      normalized.shift();
-    }
-    while (normalized[normalized.length - 1]?.type === 'newline') {
-      normalized.pop();
-    }
-
-    return normalized;
-  };
-
-  const renderDescriptionTokens = (tokens: DescriptionToken[]) =>
-    tokens.map((token, index) => {
-      if (token.type === 'newline') {
-        return (
-          <span key={`newline-${index}`}>
-            {'\n'}
-          </span>
-        );
-      }
-
-      if (token.type === 'link') {
-        return (
-          <a
-            key={`link-${index}`}
-            href={token.href}
-            target="_blank"
-            rel="noreferrer"
-            className="text-blue-600 hover:underline"
-          >
-            {token.text}
-          </a>
-        );
-      }
-
-      return (
-        <span key={`text-${index}`}>
-          {token.value}
-        </span>
-      );
-    });
-
-  const tokensToPlainText = (tokens: DescriptionToken[]) =>
-    tokens
-      .map((token) => {
-        if (token.type === 'text') {
-          return token.value;
-        }
-        if (token.type === 'link') {
-          return token.text;
-        }
-        return ' • ';
-      })
-      .join('')
-      .replace(/\s+/g, ' ')
-      .trim();
 
   const { data: configResponse } = useQuery<ConfigResponse>({
     queryKey: ['config'],
@@ -291,6 +145,21 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     },
   });
   const showSkeleton = useDelayedFlag(isLoading);
+  const skeletonVisible = holdContent || (isLoading && showSkeleton);
+  // When rows replace a visible skeleton, the skeleton stays mounted over them
+  // just long enough to fade out; the rows rise in only once it is gone, so the
+  // two never show at the same time.
+  const [dissolveFor, setDissolveFor] = useState<number | null>(null);
+  useEffect(() => {
+    if (skeletonVisible) setDissolveFor(currentFeed.id);
+  }, [skeletonVisible, currentFeed.id]);
+  const showDissolveOverlay = !skeletonVisible && dissolveFor === currentFeed.id;
+  useEffect(() => {
+    if (!showDissolveOverlay) return;
+    // Fallback so the overlay can never outlive a dissolve that didn't run.
+    const timeout = window.setTimeout(() => setDissolveFor(null), 1500);
+    return () => window.clearTimeout(timeout);
+  }, [showDissolveOverlay]);
 
   const whitelistMutation = useMutation({
     mutationFn: ({ guid, whitelisted, triggerProcessing }: { guid: string; whitelisted: boolean; triggerProcessing?: boolean }) =>
@@ -415,24 +284,63 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     },
   });
 
-  useEffect(() => {
-    if (feed.id !== currentFeed.id) {
-      setIsFeedTransitionActive(true);
-    }
-    setCurrentFeed(feed);
-  }, [feed, currentFeed.id]);
+  // Switching feeds: the old feed exits first, and only then does the panel
+  // swap to the new one, so new content is never seen before its entrance.
+  // Episodes are prefetched at the click so the exit overlaps the request.
+  const contentRef = useRef<HTMLDivElement>(null);
+  const latestFeedRef = useRef(feed);
+  latestFeedRef.current = feed;
+  const exitingRef = useRef(false);
+  // Holds the content hidden from the exit until the entrance reveals it.
+  const exitAnimRef = useRef<Animation | null>(null);
+  const { contextSafe } = useGSAP();
+  const swapToLatestFeed = contextSafe(() => {
+    exitingRef.current = false;
+    setCurrentFeed(latestFeedRef.current);
+  });
 
   useEffect(() => {
-    if (!isFeedTransitionActive) {
+    if (feed.id === currentFeed.id) {
+      setCurrentFeed(feed);
+      return;
+    }
+    void queryClient.prefetchQuery({
+      queryKey: ['episodes', feed.id, 1, whitelistedOnly],
+      queryFn: () =>
+        feedsApi.getFeedPosts(feed.id, { page: 1, pageSize: EPISODES_PAGE_SIZE, whitelistedOnly }),
+    });
+    setIsFeedTransitionActive(true);
+    if (exitingRef.current) return;
+    const content = contentRef.current;
+    const alreadyHidden = exitAnimRef.current !== null;
+    if (!content || alreadyHidden || !prefersFullMotion()) {
+      if (content && !alreadyHidden) {
+        exitAnimRef.current = content.animate([{ opacity: 0 }, { opacity: 0 }], { duration: 0, fill: 'forwards' });
+      }
+      swapToLatestFeed();
+      return;
+    }
+    exitingRef.current = true;
+    // Native, because it runs while the click's route change renders.
+    const exit = content.animate(
+      [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(10px)' }],
+      { duration: 140, easing: EASE.in, fill: 'forwards' }
+    );
+    exitAnimRef.current = exit;
+    exit.finished.then(swapToLatestFeed, () => {});
+  }, [feed, currentFeed.id, queryClient, whitelistedOnly, swapToLatestFeed]);
+
+  useEffect(() => {
+    if (!isFeedTransitionActive || feed.id !== currentFeed.id) {
       return;
     }
 
-    if (isLoading || isFetching) {
+    if (isLoading) {
       return;
     }
 
     setIsFeedTransitionActive(false);
-  }, [isFeedTransitionActive, isFetching, isLoading]);
+  }, [isFeedTransitionActive, isLoading, feed.id, currentFeed.id]);
 
   useEffect(() => {
     setEpisodeDescriptionView(loadEpisodeDescriptionView(currentFeed.id));
@@ -440,15 +348,15 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
   useEffect(() => {
     setExpandedDescriptions(new Set());
-  }, [feed.id, episodeDescriptionView]);
+  }, [currentFeed.id, episodeDescriptionView]);
 
   useEffect(() => {
     setPage(1);
-  }, [feed.id, whitelistedOnly]);
+  }, [currentFeed.id, whitelistedOnly]);
 
   useEffect(() => {
     scrollContainerRef.current?.scrollTo({ top: 0 });
-  }, [feed.id]);
+  }, [currentFeed.id]);
 
   // Show/hide sticky header
   useEffect(() => {
@@ -478,7 +386,20 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showMenu]);
 
-  const handleWhitelistToggle = (episode: Episode) => {
+  const handleToggleExpanded = useCallback((guid: string) => {
+    setExpandedDescriptions((prev) => {
+      const next = new Set(prev);
+      if (next.has(guid)) {
+        next.delete(guid);
+      } else {
+        next.add(guid);
+      }
+      return next;
+    });
+  }, []);
+
+  const { mutate: mutateWhitelist } = whitelistMutation;
+  const handleWhitelistToggle = useCallback((episode: Episode) => {
     if (!episode.whitelisted) {
       setPendingEpisode(episode);
       setShowProcessingModal(true);
@@ -509,11 +430,11 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
       return;
     }
 
-    whitelistMutation.mutate({
+    mutateWhitelist({
       guid: episode.guid,
       whitelisted: false,
     });
-  };
+  }, [mutateWhitelist]);
 
   const handleConfirmProcessing = () => {
     if (!pendingEpisode) return;
@@ -554,7 +475,9 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     configResponse?.config?.app?.automatically_whitelist_new_episodes;
 
   const episodes = useMemo(() => episodesPage?.items ?? [], [episodesPage?.items]);
-  const totalCount = episodesPage?.total ?? 0;
+  // Before the first page lands, the list's count stands in so the header
+  // doesn't jump from 0. Non-admins see only enabled episodes, so they wait.
+  const totalCount = episodesPage?.total ?? (whitelistedOnly ? 0 : currentFeed.posts_count ?? 0);
   const whitelistedCount =
     episodesPage?.whitelisted_total ?? episodes.filter((ep: Episode) => ep.whitelisted).length;
   const totalPages = Math.max(
@@ -604,25 +527,6 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
   // Calculate whitelist status for bulk button
   const allWhitelisted = totalCount > 0 && whitelistedCount === totalCount;
 
-  const formatDate = (dateString: string | null) => {
-    if (!dateString) return 'Unknown date';
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric'
-    });
-  };
-
-  const formatDuration = (seconds: number | null) => {
-    if (!seconds) return '';
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    if (hours > 0) {
-      return `${hours}h ${minutes}m`;
-    }
-    return `${minutes}m`;
-  };
-
   const handleCopyRssToClipboard = async () => {
     if (requireAuth && !isAuthenticated) {
       toast.error('Please sign in to copy a protected RSS URL.');
@@ -657,6 +561,72 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
     }
   };
 
+  // Entrance once a feed's content is actually on screen: the header when the
+  // switch skeleton lifts (or on first open, unless the phone panel is sliding
+  // in), and the first rows when its episodes arrive.
+  const openedBySlide = useRef(slidesIn).current;
+  const revealRootRef = useRef<HTMLDivElement>(null);
+  const headerRevealedFor = useRef<number | null>(null);
+  const rowsRevealedFor = useRef<number | null>(null);
+  const isFirstReveal = headerRevealedFor.current === null;
+  const headerReady = !isFeedTransitionActive;
+  const rowsReady = headerReady && !holdContent && !isLoading && sortedEpisodes.length > 0;
+  const { contextSafe: revealSafe } = useGSAP({ scope: revealRootRef });
+  const endDissolve = revealSafe(() => setDissolveFor(null));
+  useGSAP(
+    () => {
+      // The switch exit leaves the wrapper hidden; show it before any entrance.
+      if (headerReady) {
+        exitAnimRef.current?.cancel();
+        exitAnimRef.current = null;
+      }
+      if (!prefersFullMotion()) {
+        if (rowsReady) endDissolve();
+        return;
+      }
+      let headerAnimating = false;
+      if (headerReady && headerRevealedFor.current !== currentFeed.id) {
+        headerRevealedFor.current = currentFeed.id;
+        if (!isFirstReveal || !openedBySlide) {
+          headerAnimating = true;
+          gsap
+            .timeline()
+            .from('[data-reveal="art"]', {
+              autoAlpha: 0, scale: 0.9, rotate: -3, duration: 0.5, ease: 'back.out(1.6)', clearProps: 'transform',
+            })
+            .from('[data-reveal="text"]', {
+              autoAlpha: 0, y: 14, filter: 'blur(6px)', duration: 0.4, ease: SETTLE_EASE, stagger: 0.06,
+              clearProps: 'transform,filter',
+            }, 0.08);
+        }
+      }
+      if (rowsReady && rowsRevealedFor.current !== currentFeed.id) {
+        rowsRevealedFor.current = currentFeed.id;
+        const rows = gsap.utils.toArray<HTMLElement>('[data-reveal-row]').slice(0, 8);
+        const placeholders = gsap.utils.toArray<HTMLElement>('[data-dissolve-overlay] > *');
+        if (placeholders.length) {
+          gsap.set(rows, { autoAlpha: 0 });
+          gsap
+            .timeline()
+            .to(placeholders, { autoAlpha: 0, duration: 0.15, ease: 'power1.in' })
+            .call(endDissolve)
+            .fromTo(rows, { autoAlpha: 0, y: 18 }, {
+              autoAlpha: 1, y: 0, duration: 0.45, ease: SETTLE_EASE, stagger: 0.045, clearProps: 'transform',
+            });
+          return;
+        }
+        gsap.from(rows, {
+          // Rows follow a header that is animating in this same pass; otherwise
+          // (after the phone slide, or a late data arrival) they start at once.
+          autoAlpha: 0, y: 18, duration: 0.45, ease: SETTLE_EASE, stagger: 0.045,
+          delay: headerAnimating ? 0.3 : 0.05,
+          clearProps: 'transform',
+        });
+      }
+    },
+    { scope: revealRootRef, dependencies: [currentFeed.id, headerReady, rowsReady] }
+  );
+
   const transitionSkeletonClass =
     'rounded-full bg-gray-200';
   const transitionSkeletonSoftClass =
@@ -664,13 +634,13 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
   return (
     <div
+      ref={revealRootRef}
       className="h-full flex flex-col bg-surface relative"
       aria-busy={isFeedTransitionActive}
     >
       <div
-        className={`flex h-full flex-col transition-opacity duration-150 ${
-          isFeedTransitionActive ? 'pointer-events-none opacity-0' : 'opacity-100'
-        }`}
+        ref={contentRef}
+        className={`flex h-full flex-col ${isFeedTransitionActive ? 'pointer-events-none' : ''}`}
       >
         {/* Mobile Header */}
         <div className="flex items-center justify-between p-4 border-b lg:hidden">
@@ -722,16 +692,16 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         </div>
 
         {/* Scrollable Content */}
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overscroll-contain">
         {/* Feed Info Header */}
         <div ref={feedHeaderRef} className="p-6 border-b">
           <div className="flex flex-col gap-6">
             {/* Top Section: Image and Title */}
             <div className="flex items-end gap-6">
               {/* Podcast Image */}
-              <div className="flex-shrink-0">
+              <div className="flex-shrink-0" data-reveal="art">
                 {currentFeed.image_url ? (
-                  <img
+                  <FadeImage
                     src={currentFeed.image_url}
                     alt=""
                     className="w-32 h-32 sm:w-40 sm:h-40 rounded-lg object-cover"
@@ -745,15 +715,15 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
               {/* Title aligned to bottom-left of image */}
               <div className="flex-1 min-w-0 pb-2">
-                <h2 className="text-2xl font-bold text-gray-900 mb-1">{currentFeed.title}</h2>
+                <h2 data-reveal="text" className="text-2xl font-bold text-gray-900 mb-1">{currentFeed.title}</h2>
                 {currentFeed.author && (
-                  <p className="text-lg text-gray-600">by {currentFeed.author}</p>
+                  <p data-reveal="text" className="text-lg text-gray-600">by {currentFeed.author}</p>
                 )}
-                <div className="mt-2 text-sm text-gray-500">
+                <div data-reveal="text" className="mt-2 text-sm text-gray-500">
                   <span>{totalCount} episodes visible</span>
                 </div>
                 {requireAuth && isAdmin && (
-                  <div className="mt-2 flex items-center gap-2 flex-wrap text-sm">
+                  <div data-reveal="text" className="mt-2 flex items-center gap-2 flex-wrap text-sm">
                     <button
                       onClick={() => setShowSubscribersModal(true)}
                       className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
@@ -781,7 +751,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
             </div>
 
             {/* RSS Button and Menu */}
-            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <div data-reveal="text" className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
               {/* Podly RSS Subscribe Button */}
               {showPodlyRssButton && (
                 <button
@@ -950,7 +920,7 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
             {/* Feed Description */}
             {currentFeed.description && (
-              <div className="text-gray-700 leading-relaxed">
+              <div data-reveal="text" className="text-gray-700 leading-relaxed">
                 <p>{htmlToPlainText(currentFeed.description)}</p>
               </div>
             )}
@@ -1017,217 +987,56 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
         )}
 
         {/* Episodes List */}
-        <div className="min-h-[32rem]">
-          {isLoading ? (
-            showSkeleton && (
-            <div className="p-6">
-              <div className="animate-pulse space-y-4">
-                {[...Array(5)].map((_, i) => (
-                  <div
-                    key={i}
-                    className="h-28 rounded-lg border border-gray-200 bg-gray-100"
-                  ></div>
-                ))}
-              </div>
+        <div className="relative min-h-[32rem]">
+          {showDissolveOverlay && (
+            <div data-dissolve-overlay className="pointer-events-none absolute inset-x-0 top-0 z-10 divide-y divide-gray-200" aria-hidden="true">
+              {[0, 1, 2, 3].map((i) => (
+                <EpisodeRowSkeleton key={i} />
+              ))}
             </div>
-            )
-          ) : error ? (
+          )}
+          {skeletonVisible ? (
+            <div className="animate-pulse divide-y divide-gray-200">
+              {[0, 1, 2, 3].map((i) => (
+                <EpisodeRowSkeleton key={i} />
+              ))}
+            </div>
+          ) : isLoading ? null : error ? (
             <div className="p-6">
               <p className="text-red-600">Failed to load episodes</p>
             </div>
           ) : sortedEpisodes.length === 0 ? (
-            <div className="p-6 text-center">
-              <p className="text-gray-500">No episodes found</p>
+            <div className="flex animate-pop-in flex-col items-center gap-3 px-6 py-12 text-center">
+              <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-sky-50 to-sky-100 text-sky-700" aria-hidden="true">
+                <MusicIcon className="h-5 w-5" />
+              </span>
+              <h2 className="text-lg font-semibold text-gray-900">
+                {whitelistedOnly ? 'No episodes enabled yet' : 'No episodes yet'}
+              </h2>
+              <p className="max-w-sm text-sm text-gray-600">
+                {whitelistedOnly
+                  ? 'Episodes show up here once an admin enables them for ad removal.'
+                  : 'Refresh the feed to pull in its latest episodes.'}
+              </p>
             </div>
           ) : (
             <div className="divide-y divide-gray-200">
               {sortedEpisodes.map((episode) => (
-                <div key={episode.id} className="p-4 hover:bg-gray-50">
-                  <div className={`flex flex-col ${episode.whitelisted ? 'gap-3' : 'gap-2'}`}>
-                    {/* Top Section: Thumbnail and Title */}
-                    <div className="flex items-start gap-3">
-                      {/* Episode/Podcast Thumbnail */}
-                      <div className="flex-shrink-0">
-                        {(episode.image_url || currentFeed.image_url) ? (
-                          <img
-                            src={episode.image_url || currentFeed.image_url}
-                            alt=""
-                            loading="lazy"
-                            className="w-16 h-16 rounded-lg object-cover"
-                          />
-                        ) : (
-                          <div className="w-16 h-16 rounded-lg bg-gray-200 flex items-center justify-center">
-                            <MusicIcon className="h-8 w-8 text-gray-400" />
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Title and Feed Name */}
-                      <div className="flex-1 min-w-0 text-left">
-                        <h4 className="font-medium text-gray-900 mb-1 line-clamp-2 text-left">
-                          {episode.title}
-                        </h4>
-                        <p className="text-sm text-gray-600 text-left">
-                          {currentFeed.title}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Episode Description */}
-                    {(
-                      episodeDescriptionView === 'podly'
-                        ? (episode.podly_description_html || episode.description)
-                        : episode.description
-                    ) && (
-                      <div className="text-left">
-                        {(() => {
-                          const descriptionHtml =
-                            episodeDescriptionView === 'podly'
-                              ? (episode.podly_description_html || episode.description)
-                              : episode.description;
-                          const descriptionTokens = tokenizeDescription(descriptionHtml);
-                          const descriptionLength = descriptionTokens.reduce((total, token) => {
-                            if (token.type === 'text') {
-                              return total + token.value.length;
-                            }
-                            if (token.type === 'link') {
-                              return total + token.text.length;
-                            }
-                            return total + 1;
-                          }, 0);
-                          const isExpanded = expandedDescriptions.has(episode.guid);
-                          const shouldTruncate = descriptionLength > 300;
-                          const isTruncated = !isExpanded && shouldTruncate;
-                          const plainText = tokensToPlainText(descriptionTokens);
-                          const truncatedText = isTruncated
-                            ? `${plainText.slice(0, 300)}…`
-                            : plainText;
-                          return (
-                            <>
-                              {isExpanded ? (
-                                <p className="text-sm text-gray-500 whitespace-pre-line">
-                                  {renderDescriptionTokens(descriptionTokens)}
-                                </p>
-                              ) : (
-                                <p className="text-sm text-gray-500 line-clamp-3">
-                                  {truncatedText}
-                                </p>
-                              )}
-                              {shouldTruncate && (
-                                <button
-                                  type="button"
-                                  aria-expanded={isExpanded}
-                                  onClick={() => {
-                                    setExpandedDescriptions((prev) => {
-                                      const next = new Set(prev);
-                                      if (isExpanded) {
-                                        next.delete(episode.guid);
-                                      } else {
-                                        next.add(episode.guid);
-                                      }
-                                      return next;
-                                    });
-                                  }}
-                                  className="touch-target mt-2 inline-flex items-center text-xs font-medium text-gray-500 underline-offset-2 transition hover:text-gray-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300/60"
-                                >
-                                  {isExpanded ? 'Show less' : 'Show more'}
-                                </button>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    )}
-
-                    {/* Metadata: Status, Date and Duration */}
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
-                      {showWhitelistUi && (
-                        <>
-                          <button
-                            onClick={() => handleWhitelistToggle(episode)}
-                            disabled={whitelistMutation.isPending}
-                            role="switch"
-                            aria-checked={episode.whitelisted}
-                            className={`touch-target px-2 py-1 text-xs font-medium rounded-full transition-colors flex items-center justify-center gap-1 ${
-                              episode.whitelisted
-                                ? 'bg-green-100 text-green-800 hover:bg-green-200'
-                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                            } ${whitelistMutation.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}
-                          >
-                            <span className="sr-only">Process episode: </span>
-                            {whitelistMutation.isPending ? (
-                              <>
-                                <RefreshIcon className="h-3 w-3 animate-spin" />
-                                <span>...</span>
-                              </>
-                            ) : episode.whitelisted ? (
-                              <>
-                                <CheckIcon className="h-3 w-3" />
-                                <span>Enabled</span>
-                              </>
-                            ) : (
-                              <>
-                                <BlockedIcon className="h-3 w-3" />
-                                <span>Disabled</span>
-                              </>
-                            )}
-                          </button>
-                        </>
-                      )}
-                      {/* Each separator leads its item so a wrapped line never ends on a bullet. */}
-                      <span className="whitespace-nowrap">
-                        {showWhitelistUi && <span aria-hidden="true" className="mr-2">•</span>}
-                        {formatDate(episode.release_date)}
-                      </span>
-                      {episode.duration && (
-                        <span className="whitespace-nowrap">
-                          <span aria-hidden="true" className="mr-2">•</span>
-                          {formatDuration(episode.duration)}
-                        </span>
-                      )}
-                      <span className="whitespace-nowrap">
-                        <span aria-hidden="true" className="mr-2">•</span>
-                        {episode.download_count ? episode.download_count : 0} {episode.download_count === 1 ? 'download' : 'downloads'}
-                      </span>
-                    </div>
-
-                    {/* Bottom Controls - only show if episode is whitelisted */}
-                    {episode.whitelisted && (
-                      <div className="flex items-center gap-2">
-                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                          <DownloadButton
-                            episodeGuid={episode.guid}
-                            isWhitelisted={episode.whitelisted}
-                            hasProcessedAudio={episode.has_processed_audio}
-                            feedId={currentFeed.id}
-                            canModifyEpisodes={canModifyEpisodes}
-                            className="min-w-[100px] shrink-0"
-                          />
-
-                          <EpisodeProcessingStatus
-                            episodeGuid={episode.guid}
-                            isWhitelisted={episode.whitelisted}
-                            hasProcessedAudio={episode.has_processed_audio}
-                            feedId={currentFeed.id}
-                          />
-
-                          <ProcessingStatsButton
-                            episodeGuid={episode.guid}
-                            hasProcessedAudio={episode.has_processed_audio}
-                            adDetectionStrategy={currentFeed.ad_detection_strategy}
-                          />
-                        </div>
-
-                        {episode.has_processed_audio && (
-                          <PlayButton
-                            episode={episode}
-                            className="ml-auto shrink-0"
-                          />
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <EpisodeRow
+                  key={episode.id}
+                  episode={episode}
+                  feedId={currentFeed.id}
+                  feedTitle={currentFeed.title}
+                  feedImageUrl={currentFeed.image_url}
+                  adDetectionStrategy={currentFeed.ad_detection_strategy}
+                  descriptionView={episodeDescriptionView}
+                  isExpanded={expandedDescriptions.has(episode.guid)}
+                  showWhitelistUi={showWhitelistUi}
+                  canModifyEpisodes={canModifyEpisodes}
+                  isWhitelistPending={whitelistMutation.isPending}
+                  onToggleExpanded={handleToggleExpanded}
+                  onWhitelistToggle={handleWhitelistToggle}
+                />
               ))}
             </div>
           )}
@@ -1264,11 +1073,11 @@ export default function FeedDetail({ feed, onClose, onFeedDeleted }: FeedDetailP
 
       <div
         className={`absolute inset-0 z-20 transition-opacity duration-200 ${
-          isFeedTransitionActive
+          showFeedSkeleton
             ? 'opacity-100'
             : 'pointer-events-none opacity-0'
         }`}
-        aria-hidden={!isFeedTransitionActive}
+        aria-hidden={!showFeedSkeleton}
       >
         <div className="absolute inset-0 bg-surface/95 backdrop-blur-[3px]" />
         <div className="absolute inset-0 overflow-hidden">

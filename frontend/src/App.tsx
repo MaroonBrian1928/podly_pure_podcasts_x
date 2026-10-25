@@ -4,21 +4,30 @@ import { BrowserRouter as Router, Routes, Route, Link, NavLink, Navigate, useLoc
 import { AudioPlayerProvider } from './contexts/AudioPlayerContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useQuery } from '@tanstack/react-query';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import HomePage from './pages/HomePage';
-import JobsPage from './pages/JobsPage';
-import ConfigPage from './pages/ConfigPage';
 import LoginPage from './pages/LoginPage';
-import LandingPage from './pages/LandingPage';
-import BillingPage from './pages/BillingPage';
 import AudioPlayer from './components/AudioPlayer';
 import { billingApi } from './services/api';
 import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsContext';
-import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
 import PageTransitionFrame from './components/PageTransitionFrame';
+import NavHighlight from './components/NavHighlight';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { CloseIcon, MenuIcon } from './components/icons';
+
+// Shared between lazy() and the idle prefetch so each chunk is requested once.
+const loadJobsPage = () => import('./pages/JobsPage');
+const loadConfigPage = () => import('./pages/ConfigPage');
+const loadBillingPage = () => import('./pages/BillingPage');
+const loadLandingPage = () => import('./pages/LandingPage');
+const loadDiagnosticsModal = () => import('./components/DiagnosticsModal');
+
+const JobsPage = lazy(loadJobsPage);
+const ConfigPage = lazy(loadConfigPage);
+const BillingPage = lazy(loadBillingPage);
+const LandingPage = lazy(loadLandingPage);
+const DiagnosticsModal = lazy(loadDiagnosticsModal);
 
 const navItemBase = 'rounded-md px-3 py-1.5 text-sm font-medium';
 const navItemInactive = 'text-gray-700 hover:text-gray-900 hover:bg-gray-50';
@@ -28,11 +37,22 @@ function navItemClass({ isActive }: { isActive: boolean }) {
   return `${navItemBase} ${isActive ? navItemActive : navItemInactive}`;
 }
 
+// Desktop items draw no fill of their own; NavHighlight slides one behind the current item.
+const deskItemBase = `relative ${navItemBase}`;
+const deskItemActive = 'text-gray-900';
+
+function deskItemClass({ isActive }: { isActive: boolean }) {
+  return `${deskItemBase} ${isActive ? deskItemActive : navItemInactive}`;
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
+      // Data is always stale and refetches on mount/focus/reconnect; inactive
+      // results are kept for five minutes so returning to a view shows the last
+      // copy at once while that refetch runs.
       staleTime: 0,
-      gcTime: 0,
+      gcTime: 5 * 60_000,
       refetchOnMount: 'always',
       refetchOnWindowFocus: 'always',
       refetchOnReconnect: 'always',
@@ -55,8 +75,32 @@ function AppShell() {
     showReportIssueButton,
   } = useAuth();
   const { open: openDiagnostics } = useDiagnostics();
+  useEffect(() => {
+    const prefetch = () => {
+      void loadJobsPage();
+      void loadConfigPage();
+      void loadBillingPage();
+      void loadDiagnosticsModal();
+    };
+    // Prefetch keeps the first navigation from waiting on a chunk fetch. It
+    // waits out the first page's render: parsing these chunks mid-render
+    // measurably stalls slow phones.
+    let idleId: number | undefined;
+    const timeoutId = window.setTimeout(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(prefetch);
+      } else {
+        prefetch();
+      }
+    }, 5000);
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (idleId !== undefined) window.cancelIdleCallback(idleId);
+    };
+  }, []);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
+  const desktopNavRef = useRef<HTMLElement>(null);
   const location = useLocation();
   const previousPathnameRef = useRef<string | null>(null);
   const { data: billingSummary } = useQuery({
@@ -106,7 +150,7 @@ function AppShell() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         {landingPageEnabled ? (
-          <Route path="*" element={<LandingPage />} />
+          <Route path="*" element={<Suspense fallback={null}><LandingPage /></Suspense>} />
         ) : (
           <>
             <Route path="/" element={<Navigate to="/login" replace />} />
@@ -160,27 +204,28 @@ function AppShell() {
             </div>
 
             {/* Desktop Navigation */}
-            <nav className="hidden md:flex items-center space-x-2">
+            <nav ref={desktopNavRef} className="relative hidden md:flex items-center space-x-2">
+              <NavHighlight navRef={desktopNavRef} activeKey={location.pathname} />
               <NavLink
                 to="/"
                 state={homeNavigationState}
-                className={`${navItemBase} ${isHomeRoute(location.pathname) ? navItemActive : navItemInactive}`}
+                className={`${deskItemBase} ${isHomeRoute(location.pathname) ? deskItemActive : navItemInactive}`}
                 aria-current={isHomeRoute(location.pathname) ? 'page' : undefined}
               >
                 Home
               </NavLink>
               {showBillingLink && (
-                <NavLink to="/billing" className={navItemClass}>
+                <NavLink to="/billing" className={deskItemClass}>
                   Billing
                 </NavLink>
               )}
               {showJobsLink && (
-                <NavLink to="/jobs" className={navItemClass}>
+                <NavLink to="/jobs" className={deskItemClass}>
                   Jobs
                 </NavLink>
               )}
               {showConfigLink && (
-                <NavLink to="/config" className={navItemClass}>
+                <NavLink to="/config" className={deskItemClass}>
                   Settings
                 </NavLink>
               )}
@@ -188,7 +233,7 @@ function AppShell() {
                 <button
                   type="button"
                   onClick={() => openDiagnostics()}
-                  className={`${navItemBase} ${navItemInactive}`}
+                  className={`${deskItemBase} ${navItemInactive}`}
                 >
                   Report issue
                 </button>
@@ -317,7 +362,9 @@ function AppShell() {
               path="/billing"
               element={
                 <PageTransitionFrame key="billing" transitionKey="billing">
-                  <BillingPage />
+                  <Suspense fallback={null}>
+                    <BillingPage />
+                  </Suspense>
                 </PageTransitionFrame>
               }
             />
@@ -327,7 +374,9 @@ function AppShell() {
               path="/jobs"
               element={
                 <PageTransitionFrame key="jobs" transitionKey="jobs">
-                  <JobsPage />
+                  <Suspense fallback={null}>
+                    <JobsPage />
+                  </Suspense>
                 </PageTransitionFrame>
               }
             />
@@ -337,7 +386,9 @@ function AppShell() {
               path="/config"
               element={
                 <PageTransitionFrame key="config" transitionKey="config">
-                  <ConfigPage />
+                  <Suspense fallback={null}>
+                    <ConfigPage />
+                  </Suspense>
                 </PageTransitionFrame>
               }
             />
@@ -347,7 +398,9 @@ function AppShell() {
       </main>
 
       <AudioPlayer />
-      <DiagnosticsModal />
+      <Suspense fallback={null}>
+        <DiagnosticsModal />
+      </Suspense>
       <Toaster
         position="top-center"
         toastOptions={{

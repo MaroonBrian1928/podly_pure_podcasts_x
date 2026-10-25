@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAudioPlayer } from '../contexts/AudioPlayerContext';
+import { useAudioTime } from '../contexts/AudioTimeContext';
 import { feedsApi } from '../services/api';
 import { CloseIcon, MusicIcon, PauseIcon, PlayIcon, SpeakerMuteIcon, SpeakerWaveIcon } from './icons';
 
@@ -129,7 +130,6 @@ export default function AudioPlayer() {
   const {
     currentEpisode,
     isPlaying,
-    currentTime,
     duration,
     volume,
     isLoading,
@@ -138,6 +138,7 @@ export default function AudioPlayer() {
     seekTo,
     setVolume
   } = useAudioPlayer();
+  const currentTime = useAudioTime();
 
   const [dragTime, setDragTime] = useState<number | null>(null);
   const [showVolume, setShowVolume] = useState(false);

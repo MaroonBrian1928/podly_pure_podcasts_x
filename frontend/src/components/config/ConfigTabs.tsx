@@ -1,4 +1,5 @@
-import { useMemo, useEffect, useCallback } from 'react';
+import { useMemo, useEffect, useCallback, useRef } from 'react';
+import { useCascade } from '../../hooks/useCascade';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import useConfigState from '../../hooks/useConfigState';
@@ -15,6 +16,7 @@ import UserManagementTab from './tabs/UserManagementTab';
 import DiscordTab from './tabs/DiscordTab';
 import CostsTab from './tabs/CostsTab';
 import NotificationsTab from './tabs/NotificationsTab';
+import BranchedMenu, { type BranchedMenuItem } from '../reactbits/BranchedMenu/BranchedMenu';
 
 const TABS: { id: ConfigTabId; label: string; adminOnly?: boolean }[] = [
   { id: 'default', label: 'Basics' },
@@ -25,10 +27,7 @@ const TABS: { id: ConfigTabId; label: string; adminOnly?: boolean }[] = [
   { id: 'notifications', label: 'Notifications', adminOnly: true },
 ];
 
-const sidebarItem =
-  'block w-full rounded-md px-3 py-1.5 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500';
-const sidebarActive = 'bg-gray-100 text-gray-900';
-const sidebarInactive = 'text-gray-600 hover:bg-gray-50 hover:text-gray-900';
+const ADVANCED_SUBTAB_IDS = new Set<string>(ADVANCED_SUBTABS.map((subtab) => subtab.id));
 
 export default function ConfigTabs() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -106,11 +105,41 @@ export default function ConfigTabs() {
     [configState, activeTab, setActiveTab, activeSubtab, setActiveSubtab, isAdmin, showSecurityControls]
   );
 
+  const contentRef = useRef<HTMLDivElement>(null);
+  // The page transition covers the first arrival; tab changes cascade.
+  useCascade(contentRef, {
+    playKey: activeTab === 'advanced' ? `advanced:${activeSubtab}` : activeTab,
+    ready: !configState.isLoading && !!configState.pending,
+    selector: 'section, details',
+    skipFirst: true,
+  });
+
   const visibleTabs = TABS.filter((tab) => {
     if (tab.id === 'users' && !requireAuth) return false;
     if (tab.id === 'discord' && !showDiscordIntegration) return false;
     return !tab.adminOnly || isAdmin;
   });
+
+  const sidebarItems: BranchedMenuItem[] = visibleTabs.map((tab) =>
+    tab.id === 'advanced'
+      ? { label: tab.label, children: ADVANCED_SUBTABS.map(({ id, label }) => ({ value: id, label })) }
+      : { label: tab.label, value: tab.id }
+  );
+  const advancedIndex = visibleTabs.findIndex((tab) => tab.id === 'advanced');
+
+  // One URL update, so picking a subtab from another tab doesn't race two setters.
+  const selectSidebarItem = (value: string) => {
+    if (!ADVANCED_SUBTAB_IDS.has(value)) {
+      setActiveTab(value as ConfigTabId);
+      return;
+    }
+    setSearchParams((prev) => {
+      const newParams = new URLSearchParams(prev);
+      newParams.set('tab', 'advanced');
+      newParams.set('section', value);
+      return newParams;
+    }, { replace: true });
+  };
 
   if (configState.isLoading || !configState.pending) {
     return <div className="text-sm text-gray-700">Loading settings…</div>;
@@ -144,50 +173,36 @@ export default function ConfigTabs() {
         </div>
 
         <div className="lg:grid lg:grid-cols-[12rem_minmax(0,1fr)] lg:gap-12">
-          {/* From `lg`: a sticky sidebar with the Advanced subtabs nested under Advanced. */}
-          <nav className="hidden lg:block" aria-label="Settings">
-            <ul className="sticky top-6 space-y-0.5">
-              {visibleTabs.map((tab) => {
-                const tabActive = activeTab === tab.id;
-                return (
-                  <li key={tab.id}>
-                    <button
-                      type="button"
-                      aria-current={tabActive && tab.id !== 'advanced' ? 'page' : undefined}
-                      onClick={() => setActiveTab(tab.id)}
-                      className={`${sidebarItem} ${
-                        tabActive && tab.id !== 'advanced' ? sidebarActive : sidebarInactive
-                      } ${tabActive && tab.id === 'advanced' ? 'text-gray-900' : ''}`}
-                    >
-                      {tab.label}
-                    </button>
-                    {tab.id === 'advanced' && tabActive && (
-                      <ul className="mb-1 ml-3 mt-0.5 space-y-0.5 border-l border-gray-200 pl-2">
-                        {ADVANCED_SUBTABS.map((subtab) => {
-                          const subActive = activeSubtab === subtab.id;
-                          return (
-                            <li key={subtab.id}>
-                              <button
-                                type="button"
-                                aria-current={subActive ? 'page' : undefined}
-                                onClick={() => setActiveSubtab(subtab.id)}
-                                className={`${sidebarItem} ${subActive ? sidebarActive : sidebarInactive}`}
-                              >
-                                {subtab.label}
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          </nav>
+          {/* From `lg`: a sticky sidebar; the Advanced subtabs branch off Advanced. */}
+          <div className="hidden lg:block">
+            <div className="sticky top-6">
+              <BranchedMenu
+                aria-label="Settings"
+                items={sidebarItems}
+                value={activeTab === 'advanced' ? activeSubtab : activeTab}
+                defaultOpen={activeTab === 'advanced' ? advancedIndex : -1}
+                onSelect={selectSidebarItem}
+                onToggle={(index, open) => {
+                  if (index === advancedIndex && open && activeTab !== 'advanced') {
+                    setActiveTab('advanced');
+                  }
+                }}
+                color="rgb(var(--gray-900))"
+                accentColor="rgb(var(--gray-900))"
+                mutedColor="rgb(var(--gray-600))"
+                lineColor="rgb(var(--gray-300))"
+                width={192}
+                rowHeight={32}
+                fontSize={14}
+                drawDuration={360}
+                foldDuration={280}
+                className="w-full"
+              />
+            </div>
+          </div>
 
           {/* Forms stay at a readable width; Costs keeps the full width for its tables. */}
-          <div className={`min-w-0 ${activeTab === 'costs' ? '' : 'max-w-5xl'}`}>
+          <div ref={contentRef} className={`min-w-0 ${activeTab === 'costs' ? '' : 'max-w-5xl'}`}>
             {activeTab === 'default' && <DefaultTab />}
             {activeTab === 'advanced' && <AdvancedTab />}
             {activeTab === 'users' && isAdmin && <UserManagementTab />}

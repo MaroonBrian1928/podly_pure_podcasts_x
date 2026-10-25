@@ -34,7 +34,9 @@ export default function Section({
       {description ? <p className="mt-0.5 text-sm text-gray-600">{description}</p> : null}
     </div>
   );
-  const body = <div className="min-w-0 space-y-5">{children}</div>;
+  // `self-start` keeps the body from stretching to the row height; a stretched
+  // grid item gives Field's `h-full` a definite height to fill.
+  const body = <div className="min-w-0 space-y-5 self-start">{children}</div>;
 
   if (collapsible) {
     return (
