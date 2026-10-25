@@ -1,3 +1,10 @@
+# [3.1.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v3.0.0...v3.1.0) (2026-10-25)
+
+
+### Features
+
+* UI refresh and processing stats from exact ad cuts ([#67](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/issues/67)) ([2a58ad9](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/2a58ad97acbcba743f59a47b0984b56c70b4e446))
+
 # [3.0.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v2.1.2...v3.0.0) (2026-10-20)
 
 
