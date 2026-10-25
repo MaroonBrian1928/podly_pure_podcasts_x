@@ -237,6 +237,8 @@ struct StatsRenderArgs {
     min_confidence: f64,
     #[arg(long = "min-ad-segment-separation-seconds")]
     min_ad_segment_separation_seconds: f64,
+    #[arg(long = "min-ad-segment-length-seconds")]
+    min_ad_segment_length_seconds: f64,
     #[arg(long = "enable-boundary-refinement", action = ArgAction::Set)]
     enable_boundary_refinement: bool,
     #[arg(long = "stats-debug", action = ArgAction::Set)]
@@ -709,6 +711,9 @@ struct StatsPostRow {
     chapter_data: Option<String>,
     bleep_windows: Option<String>,
     refined_ad_boundaries: Option<String>,
+    removed_ad_windows: Option<String>,
+    original_duration_seconds: Option<f64>,
+    cut_stats_source: Option<String>,
 }
 
 struct StatsFeedRow {
@@ -3218,6 +3223,87 @@ fn run_transcript_ad_merge(args: TranscriptAdMergeArgs) -> Result<Value> {
     Ok(json!({ "ad_segments": ad_segments }))
 }
 
+const STATS_EDGE_FRAGMENT_WINDOW_SECONDS: f64 = 30.0;
+const STATS_SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS: f64 = 20.0;
+const STATS_MIN_NEIGHBOR_AD_DURATION_SECONDS: f64 = 15.0;
+
+/// Mirrors `AudioProcessor.merge_ad_segments`; returns windows in milliseconds.
+fn merge_cutter_ad_segments(
+    duration_ms: i64,
+    ad_segments: &[(f64, f64)],
+    min_length: f64,
+    min_separation: f64,
+) -> Vec<(i64, i64)> {
+    if ad_segments.is_empty() {
+        return Vec::new();
+    }
+    let audio_duration = duration_ms as f64 / 1000.0;
+    let mut segs: Vec<(f64, f64)> = ad_segments.to_vec();
+    segs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let last_segment = match segs.last() {
+        Some(last) if (audio_duration - last.1) < min_separation => Some(*last),
+        _ => None,
+    };
+
+    if segs.len() >= 2 {
+        let leading_duration = segs[0].1 - segs[0].0;
+        let leading_gap = segs[1].0 - segs[0].1;
+        let following_duration = segs[1].1 - segs[1].0;
+        if segs[0].0 <= STATS_EDGE_FRAGMENT_WINDOW_SECONDS
+            && leading_duration < min_length
+            && following_duration >= STATS_MIN_NEIGHBOR_AD_DURATION_SECONDS
+            && leading_gap <= STATS_SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS
+        {
+            segs[1] = (segs[0].0, segs[1].1);
+            segs.remove(0);
+        }
+        if segs.len() >= 2 {
+            let n = segs.len();
+            let trailing_duration = segs[n - 1].1 - segs[n - 1].0;
+            let trailing_gap = segs[n - 1].0 - segs[n - 2].1;
+            let previous_duration = segs[n - 2].1 - segs[n - 2].0;
+            if audio_duration - segs[n - 1].1 <= STATS_EDGE_FRAGMENT_WINDOW_SECONDS
+                && trailing_duration < min_length
+                && previous_duration >= STATS_MIN_NEIGHBOR_AD_DURATION_SECONDS
+                && trailing_gap <= STATS_SHORT_EDGE_FRAGMENT_MERGE_GAP_SECONDS
+            {
+                segs[n - 2] = (segs[n - 2].0, segs[n - 1].1);
+                segs.pop();
+            }
+        }
+    }
+
+    let mut i = 0;
+    while i + 1 < segs.len() {
+        if segs[i].1 + min_separation >= segs[i + 1].0 {
+            segs[i] = (segs[i].0, segs[i + 1].1);
+            segs.remove(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+
+    segs.retain(|s| (s.1 - s.0) >= min_length);
+
+    if let Some(last) = last_segment {
+        if !segs.iter().any(|s| s.0 <= last.0 && s.1 >= last.1) {
+            segs.push(last);
+        }
+    }
+
+    if let Some(last) = segs.last().copied() {
+        if (audio_duration - last.1) < min_separation {
+            let n = segs.len();
+            segs[n - 1] = (last.0, audio_duration);
+        }
+    }
+
+    segs.into_iter()
+        .map(|(s, e)| ((s * 1000.0) as i64, (e * 1000.0) as i64))
+        .collect()
+}
+
 fn render_stats(args: StatsRenderArgs) -> Result<Value> {
     let conn = open_readonly_sqlite(&args.db)?;
     let post = query_stats_post(&conn, &args.post_guid)?
@@ -3274,26 +3360,71 @@ fn render_stats(args: StatsRenderArgs) -> Result<Value> {
         })
         .collect();
 
-    let ad_blocks = build_stats_ad_blocks(
-        &post,
-        &transcript_segments,
-        &audio_segments,
-        &identifications,
-        args.min_confidence,
-        args.min_ad_segment_separation_seconds,
-        args.enable_boundary_refinement,
-    );
-    let ad_time_seconds: f64 = ad_blocks
-        .iter()
-        .filter(|(start, end)| end > start)
-        .map(|(start, end)| end - start)
-        .sum();
-    let original_duration_seconds = resolve_original_duration_seconds(
-        post.duration,
-        &transcript_segments,
-        &bleep_windows,
-        ad_time_seconds,
-    );
+    let stored_cut = parse_stored_cut(&post);
+    let cut_is_stored = stored_cut.is_some();
+    let (ad_blocks, ad_time_seconds, original_duration_seconds, edited_duration_seconds) =
+        if let Some((windows, original)) = stored_cut {
+            let removed: f64 = windows
+                .iter()
+                .filter(|(start, end)| end > start)
+                .map(|(start, end)| end - start)
+                .sum();
+            (windows, removed, original, (original - removed).max(0.0))
+        } else {
+            let mut ad_blocks = build_stats_ad_blocks(
+                &post,
+                &transcript_segments,
+                &audio_segments,
+                &identifications,
+                args.min_confidence,
+                args.min_ad_segment_separation_seconds,
+                args.enable_boundary_refinement,
+            );
+            let mut ad_time_seconds: f64 = ad_blocks
+                .iter()
+                .filter(|(start, end)| end > start)
+                .map(|(start, end)| end - start)
+                .sum();
+            let mut original_duration_seconds = resolve_original_duration_seconds(
+                post.duration,
+                &transcript_segments,
+                &bleep_windows,
+                ad_time_seconds,
+            );
+            if !ad_blocks.is_empty() {
+                let merged_ms = merge_cutter_ad_segments(
+                    (original_duration_seconds * 1000.0).round_ties_even() as i64,
+                    &ad_blocks,
+                    args.min_ad_segment_length_seconds,
+                    args.min_ad_segment_separation_seconds,
+                );
+                ad_blocks = merged_ms
+                    .into_iter()
+                    .map(|(s, e)| (s as f64 / 1000.0, e as f64 / 1000.0))
+                    .collect();
+                ad_time_seconds = ad_blocks
+                    .iter()
+                    .filter(|(start, end)| end > start)
+                    .map(|(start, end)| end - start)
+                    .sum();
+                original_duration_seconds = resolve_original_duration_seconds(
+                    post.duration,
+                    &transcript_segments,
+                    &bleep_windows,
+                    ad_time_seconds,
+                );
+            }
+            let edited = (original_duration_seconds - ad_time_seconds).max(0.0);
+            (
+                ad_blocks,
+                ad_time_seconds,
+                original_duration_seconds,
+                edited,
+            )
+        };
+    let cut_stats_source = (cut_is_stored
+        || post.cut_stats_source.as_deref() == Some("unverified"))
+    .then(|| post.cut_stats_source.clone());
     let ad_percentage = if original_duration_seconds > 0.0 {
         ad_time_seconds / original_duration_seconds * 100.0
     } else {
@@ -3309,7 +3440,6 @@ fn render_stats(args: StatsRenderArgs) -> Result<Value> {
     } else {
         0.0
     };
-    let edited_duration_seconds = (original_duration_seconds - ad_time_seconds).max(0.0);
 
     let chapters = build_stats_chapters(&post, feed.as_ref(), ad_detection_strategy)?;
     let related_logs = build_related_logs_for_stats(&args.log_path, &post, &recent_jobs);
@@ -3336,6 +3466,7 @@ fn render_stats(args: StatsRenderArgs) -> Result<Value> {
             "estimated_ad_time_seconds": round_to(ad_time_seconds, 1),
             "original_duration_seconds": round_to(original_duration_seconds, 1),
             "edited_duration_seconds": round_to(edited_duration_seconds, 1),
+            "cut_stats_source": cut_stats_source,
             "ad_blocks": ad_blocks.iter().map(|(start, end)| json!({
                 "start_time": round_to(*start, 1),
                 "end_time": round_to(*end, 1),
@@ -3782,7 +3913,8 @@ fn query_stats_post(conn: &Connection, guid: &str) -> Result<Option<StatsPostRow
     let mut stmt = conn.prepare(
         "SELECT id, feed_id, guid, title, download_url, unprocessed_audio_path, processed_audio_path,
                 release_date, duration, whitelisted, download_count, chapter_data,
-                bleep_windows, refined_ad_boundaries
+                bleep_windows, refined_ad_boundaries,
+                removed_ad_windows, original_duration_seconds, cut_stats_source
          FROM post WHERE guid = ?1 LIMIT 1",
     )?;
     let mut rows = stmt.query([guid])?;
@@ -3804,6 +3936,9 @@ fn query_stats_post(conn: &Connection, guid: &str) -> Result<Option<StatsPostRow
             chapter_data: row.get(11)?,
             bleep_windows: row.get(12)?,
             refined_ad_boundaries: row.get(13)?,
+            removed_ad_windows: row.get(14)?,
+            original_duration_seconds: get_duration_f64(row, 15)?,
+            cut_stats_source: row.get(16)?,
         }))
     } else {
         Ok(None)
@@ -4103,6 +4238,25 @@ fn parse_time_windows_json(raw: Option<&str>, start_key: &str, end_key: &str) ->
             (end > start).then_some((start, end))
         })
         .collect()
+}
+
+/// Windows the cutter recorded, with the source length it measured. SQL NULL
+/// and JSON `null` (SQLAlchemy's encoding of None) both mean "not recorded".
+fn parse_stored_cut(post: &StatsPostRow) -> Option<(Vec<(f64, f64)>, f64)> {
+    let original = post.original_duration_seconds?;
+    let Ok(Value::Array(items)) =
+        serde_json::from_str::<Value>(post.removed_ad_windows.as_deref()?)
+    else {
+        return None;
+    };
+    let windows = items
+        .iter()
+        .filter_map(|item| {
+            let pair = item.as_array()?;
+            Some((value_to_f64(pair.first()?)?, value_to_f64(pair.get(1)?)?))
+        })
+        .collect();
+    Some((windows, original))
 }
 
 fn is_mixed_segment(seg_start: f64, seg_end: f64, refined_windows: &[(f64, f64)]) -> bool {
@@ -4625,9 +4779,11 @@ fn resolve_original_duration_seconds(
     bleep_windows: &[(f64, f64)],
     ad_time_seconds: f64,
 ) -> f64 {
+    // Bleep windows are in original-audio time, so they only stand in for the
+    // cut length when the post has no measured duration.
     let mut cut_duration = post_duration.unwrap_or(0.0);
-    if let Some(max_bleep_end) = bleep_windows.iter().map(|(_, end)| *end).reduce(f64::max) {
-        if max_bleep_end > cut_duration {
+    if cut_duration <= 0.0 {
+        if let Some(max_bleep_end) = bleep_windows.iter().map(|(_, end)| *end).reduce(f64::max) {
             cut_duration = max_bleep_end;
         }
     }
@@ -4636,7 +4792,7 @@ fn resolve_original_duration_seconds(
         .map(|segment| segment.end_time)
         .reduce(f64::max)
         .unwrap_or(0.0);
-    if post_duration.is_some() {
+    if post_duration.is_some_and(|duration| duration > 0.0) {
         // The transcript is of the unprocessed audio, so its end is a lower bound
         // when current ad settings yield fewer windows than were cut.
         (cut_duration + ad_time_seconds).max(transcript_duration)
@@ -8116,7 +8272,8 @@ mod tests {
                 id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL, guid TEXT NOT NULL,
                 title TEXT NOT NULL, download_url TEXT NOT NULL, unprocessed_audio_path TEXT,
                 processed_audio_path TEXT, release_date TEXT, duration REAL, whitelisted INTEGER NOT NULL,
-                download_count INTEGER, chapter_data TEXT, bleep_windows TEXT, refined_ad_boundaries TEXT
+                download_count INTEGER, chapter_data TEXT, bleep_windows TEXT, refined_ad_boundaries TEXT,
+                removed_ad_windows TEXT, original_duration_seconds REAL, cut_stats_source TEXT
             );
             CREATE TABLE model_call (
                 id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, first_segment_sequence_num INTEGER NOT NULL,
@@ -8150,7 +8307,8 @@ mod tests {
                 '/tmp/in.mp3', '/tmp/out.mp3', '2026-05-08 12:00:00.000000',
                 90.0, 1, 2, NULL,
                 '[{\"start_time\":5.0,\"end_time\":6.0}]',
-                '[{\"orig_start\":10.0,\"orig_end\":20.0,\"refined_start\":9.5,\"refined_end\":20.5}]'
+                '[{\"orig_start\":10.0,\"orig_end\":20.0,\"refined_start\":9.5,\"refined_end\":20.5}]',
+                NULL, NULL, NULL
             )",
             [],
         )
@@ -8193,6 +8351,7 @@ mod tests {
             post_guid: "slash/guid".to_string(),
             min_confidence: 0.8,
             min_ad_segment_separation_seconds: 60.0,
+            min_ad_segment_length_seconds: 0.0,
             enable_boundary_refinement: true,
             stats_debug: false,
             log_path,
@@ -9899,6 +10058,52 @@ mod tests {
     }
 
     #[test]
+    fn cutter_merge_extends_tail_to_end_of_file() {
+        let merged = merge_cutter_ad_segments(
+            11_176_100,
+            &[(100.0, 200.0), (11_020.5, 11_120.5)],
+            10.0,
+            60.0,
+        );
+        assert_eq!(merged, vec![(100_000, 200_000), (11_020_500, 11_176_100)]);
+    }
+
+    #[test]
+    fn cutter_merge_does_not_duplicate_merged_tail() {
+        let merged =
+            merge_cutter_ad_segments(1_000_000, &[(900.0, 930.0), (950.0, 980.0)], 10.0, 60.0);
+        assert_eq!(merged, vec![(900_000, 1_000_000)]);
+    }
+
+    #[test]
+    fn cutter_merge_joins_close_ads() {
+        let merged =
+            merge_cutter_ad_segments(1_000_000, &[(170.0, 230.0), (100.0, 160.0)], 10.0, 60.0);
+        assert_eq!(merged, vec![(100_000, 230_000)]);
+    }
+
+    #[test]
+    fn cutter_merge_filters_short_ads() {
+        let merged =
+            merge_cutter_ad_segments(1_000_000, &[(100.0, 103.0), (500.0, 560.0)], 10.0, 60.0);
+        assert_eq!(merged, vec![(500_000, 560_000)]);
+    }
+
+    #[test]
+    fn cutter_merge_restores_short_near_end_segment() {
+        // The 5s final ad is filtered as short, then restored because it sits
+        // within the separation of the end, and extended to the end.
+        let merged =
+            merge_cutter_ad_segments(1_000_000, &[(100.0, 200.0), (950.0, 955.0)], 10.0, 60.0);
+        assert_eq!(merged, vec![(100_000, 200_000), (950_000, 1_000_000)]);
+    }
+
+    #[test]
+    fn cutter_merge_empty_input_is_empty() {
+        assert!(merge_cutter_ad_segments(1_000_000, &[], 10.0, 60.0).is_empty());
+    }
+
+    #[test]
     fn stats_original_duration_is_at_least_transcript_end() {
         let segment = |id: i64, start_time: f64, end_time: f64| StatsTranscriptSegmentRow {
             id,
@@ -9924,6 +10129,18 @@ mod tests {
         assert_eq!(
             resolve_original_duration_seconds(Some(100.0), &partial, &[], 10.0),
             110.0
+        );
+        // Bleeps are in original-audio time: a late bleep past the cut length
+        // must not stand in for the measured duration.
+        let episode = [segment(0, 0.0, 7300.0)];
+        assert_eq!(
+            resolve_original_duration_seconds(Some(6271.5), &episode, &[(7100.0, 7101.8)], 1028.5),
+            7300.0
+        );
+        // Without a measured duration, the last bleep bounds the cut length.
+        assert_eq!(
+            resolve_original_duration_seconds(None, &partial, &[(50.0, 60.0)], 10.0),
+            60.0
         );
     }
 

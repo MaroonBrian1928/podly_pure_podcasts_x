@@ -1,30 +1,58 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
-import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { AudioPlayerProvider } from './contexts/AudioPlayerContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useQuery } from '@tanstack/react-query';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import HomePage from './pages/HomePage';
-import JobsPage from './pages/JobsPage';
-import ConfigPage from './pages/ConfigPage';
 import LoginPage from './pages/LoginPage';
-import LandingPage from './pages/LandingPage';
-import BillingPage from './pages/BillingPage';
 import AudioPlayer from './components/AudioPlayer';
 import { billingApi } from './services/api';
 import { DiagnosticsProvider, useDiagnostics } from './contexts/DiagnosticsContext';
-import DiagnosticsModal from './components/DiagnosticsModal';
 import ThemeToggle from './components/ThemeToggle';
 import PageTransitionFrame from './components/PageTransitionFrame';
-import { ThemeProvider, useTheme } from './contexts/ThemeContext';
-import './App.css';
+import NavHighlight from './components/NavHighlight';
+import { ThemeProvider } from './contexts/ThemeContext';
+import { CloseIcon, MenuIcon } from './components/icons';
+
+// Shared between lazy() and the idle prefetch so each chunk is requested once.
+const loadJobsPage = () => import('./pages/JobsPage');
+const loadConfigPage = () => import('./pages/ConfigPage');
+const loadBillingPage = () => import('./pages/BillingPage');
+const loadLandingPage = () => import('./pages/LandingPage');
+const loadDiagnosticsModal = () => import('./components/DiagnosticsModal');
+
+const JobsPage = lazy(loadJobsPage);
+const ConfigPage = lazy(loadConfigPage);
+const BillingPage = lazy(loadBillingPage);
+const LandingPage = lazy(loadLandingPage);
+const DiagnosticsModal = lazy(loadDiagnosticsModal);
+
+const navItemBase = 'rounded-md px-3 py-1.5 text-sm font-medium';
+const navItemInactive = 'text-gray-700 hover:text-gray-900 hover:bg-gray-50';
+const navItemActive = 'bg-gray-100 text-gray-900';
+
+function navItemClass({ isActive }: { isActive: boolean }) {
+  return `${navItemBase} ${isActive ? navItemActive : navItemInactive}`;
+}
+
+// Desktop items draw no fill of their own; NavHighlight slides one behind the current item.
+const deskItemBase = `relative ${navItemBase}`;
+const deskItemActive = 'text-gray-900';
+
+function deskItemClass({ isActive }: { isActive: boolean }) {
+  return `${deskItemBase} ${isActive ? deskItemActive : navItemInactive}`;
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
+      // Data is always stale and refetches on mount/focus/reconnect; inactive
+      // results are kept for five minutes so returning to a view shows the last
+      // copy at once while that refetch runs.
       staleTime: 0,
-      gcTime: 0,
+      gcTime: 5 * 60_000,
       refetchOnMount: 'always',
       refetchOnWindowFocus: 'always',
       refetchOnReconnect: 'always',
@@ -47,9 +75,32 @@ function AppShell() {
     showReportIssueButton,
   } = useAuth();
   const { open: openDiagnostics } = useDiagnostics();
-  const { isDark } = useTheme();
+  useEffect(() => {
+    const prefetch = () => {
+      void loadJobsPage();
+      void loadConfigPage();
+      void loadBillingPage();
+      void loadDiagnosticsModal();
+    };
+    // Prefetch keeps the first navigation from waiting on a chunk fetch. It
+    // waits out the first page's render: parsing these chunks mid-render
+    // measurably stalls slow phones.
+    let idleId: number | undefined;
+    const timeoutId = window.setTimeout(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(prefetch);
+      } else {
+        prefetch();
+      }
+    }, 5000);
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (idleId !== undefined) window.cancelIdleCallback(idleId);
+    };
+  }, []);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
+  const desktopNavRef = useRef<HTMLElement>(null);
   const location = useLocation();
   const previousPathnameRef = useRef<string | null>(null);
   const { data: billingSummary } = useQuery({
@@ -99,7 +150,7 @@ function AppShell() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         {landingPageEnabled ? (
-          <Route path="*" element={<LandingPage />} />
+          <Route path="*" element={<Suspense fallback={null}><LandingPage /></Suspense>} />
         ) : (
           <>
             <Route path="/" element={<Navigate to="/login" replace />} />
@@ -136,57 +187,60 @@ function AppShell() {
 
   return (
     <div className="h-dvh bg-gray-50 flex flex-col overflow-hidden">
-      <header className="bg-white shadow-sm border-b flex-shrink-0">
+      <header className="bg-surface border-b flex-shrink-0">
         <div className="px-2 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-12">
             <div className="flex items-center">
               <Link to="/" state={homeNavigationState} className="flex items-center">
-                <img 
-                  src="/images/logos/logo.webp" 
-                  alt="Podly" 
+                <img
+                  src="/images/logos/logo.webp"
+                  alt="Podly"
                   className="h-6 w-auto"
                 />
-                <h1 className="ml-2 text-lg font-semibold text-gray-900">
+                <span className="ml-2 text-lg font-semibold text-gray-900">
                   Podly
-                </h1>
+                </span>
               </Link>
             </div>
 
             {/* Desktop Navigation */}
-            <nav className="hidden md:flex items-center space-x-4">
-              <Link to="/" state={homeNavigationState} className="text-sm font-medium text-gray-700 hover:text-gray-900">
+            <nav ref={desktopNavRef} className="relative hidden md:flex items-center space-x-2">
+              <NavHighlight navRef={desktopNavRef} activeKey={location.pathname} />
+              <NavLink
+                to="/"
+                state={homeNavigationState}
+                className={`${deskItemBase} ${isHomeRoute(location.pathname) ? deskItemActive : navItemInactive}`}
+                aria-current={isHomeRoute(location.pathname) ? 'page' : undefined}
+              >
                 Home
-              </Link>
+              </NavLink>
               {showBillingLink && (
-                <Link to="/billing" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <NavLink to="/billing" className={deskItemClass}>
                   Billing
-                </Link>
+                </NavLink>
               )}
               {showJobsLink && (
-                <Link to="/jobs" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                <NavLink to="/jobs" className={deskItemClass}>
                   Jobs
-                </Link>
+                </NavLink>
               )}
               {showConfigLink && (
-                <Link
-                  to="/config"
-                  className="text-sm font-medium text-gray-700 hover:text-gray-900"
-                >
-                  Config
-                </Link>
+                <NavLink to="/config" className={deskItemClass}>
+                  Settings
+                </NavLink>
               )}
               {showReportIssueButton && (
                 <button
                   type="button"
                   onClick={() => openDiagnostics()}
-                  className="text-sm font-medium text-gray-700 hover:text-gray-900"
+                  className={`${deskItemBase} ${navItemInactive}`}
                 >
                   Report issue
                 </button>
               )}
-              <ThemeToggle />
+              <ThemeToggle className="ml-2" />
               {requireAuth && user && (
-                <div className="flex items-center gap-3 text-sm text-gray-600 flex-shrink-0">
+                <div className="flex items-center gap-3 ml-2 text-sm text-gray-600 flex-shrink-0">
                   {billingSummary && !isAdmin && (
                     <>
                       <div
@@ -195,19 +249,13 @@ function AppShell() {
                       >
                         Feeds {billingSummary.feeds_in_use}/{billingSummary.feed_allowance}
                       </div>
-                      <Link
-                        to="/billing"
-                        className="px-2 py-1 rounded-md border border-blue-200 text-blue-700 bg-white hover:bg-blue-50 text-xs whitespace-nowrap transition-colors"
-                      >
+                      <Link to="/billing" className="btn btn-secondary whitespace-nowrap">
                         Change plan
                       </Link>
                     </>
                   )}
                   <span className="hidden sm:inline whitespace-nowrap">{user.username}</span>
-                  <button
-                    onClick={logout}
-                    className="px-3 py-1 border border-gray-200 rounded-md hover:bg-gray-100 transition-colors whitespace-nowrap"
-                  >
+                  <button onClick={logout} className="btn btn-secondary whitespace-nowrap">
                     Logout
                   </button>
                 </div>
@@ -224,10 +272,7 @@ function AppShell() {
                   >
                     Feeds {billingSummary.feeds_in_use}/{billingSummary.feed_allowance}
                   </div>
-                  <Link
-                    to="/billing"
-                    className="px-2 py-1 rounded-md border border-blue-200 text-blue-700 bg-white text-xs whitespace-nowrap"
-                  >
+                  <Link to="/billing" className="btn btn-secondary btn-sm whitespace-nowrap">
                     Change plan
                   </Link>
                 </>
@@ -235,57 +280,41 @@ function AppShell() {
 
               <ThemeToggle />
 
-              {/* Hamburger Button */}
               <div className="relative" ref={mobileMenuRef}>
                 <button
+                  type="button"
                   onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                  className="p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
-                  aria-label="Toggle menu"
+                  className="touch-target p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                  aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+                  aria-expanded={mobileMenuOpen}
                 >
-                  {mobileMenuOpen ? (
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  ) : (
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                    </svg>
-                  )}
+                  {mobileMenuOpen ? <CloseIcon className="h-6 w-6" /> : <MenuIcon className="h-6 w-6" />}
                 </button>
 
-                {/* Mobile Menu Dropdown */}
                 {mobileMenuOpen && (
-                  <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-2 z-50">
-                    <Link
+                  <div className="animate-pop-in origin-top-right absolute right-0 top-full mt-2 w-56 bg-surface rounded-lg shadow-lg border border-gray-200 p-2 z-50">
+                    <NavLink
                       to="/"
                       state={homeNavigationState}
-                      className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                      className={`block ${navItemBase} ${isHomeRoute(location.pathname) ? navItemActive : navItemInactive}`}
+                      aria-current={isHomeRoute(location.pathname) ? 'page' : undefined}
                     >
                       Home
-                    </Link>
+                    </NavLink>
                     {showBillingLink && (
-                      <Link
-                        to="/billing"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      >
+                      <NavLink to="/billing" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
                         Billing
-                      </Link>
+                      </NavLink>
                     )}
                     {showJobsLink && (
-                      <Link
-                        to="/jobs"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      >
+                      <NavLink to="/jobs" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
                         Jobs
-                      </Link>
+                      </NavLink>
                     )}
                     {showConfigLink && (
-                      <Link
-                        to="/config"
-                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      >
-                        Config
-                      </Link>
+                      <NavLink to="/config" className={({ isActive }) => `block ${navItemClass({ isActive })}`}>
+                        Settings
+                      </NavLink>
                     )}
                     {showReportIssueButton && (
                       <button
@@ -294,7 +323,7 @@ function AppShell() {
                           openDiagnostics();
                           setMobileMenuOpen(false);
                         }}
-                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        className={`block w-full text-left ${navItemBase} ${navItemInactive}`}
                       >
                         Report issue
                       </button>
@@ -302,7 +331,7 @@ function AppShell() {
                     {requireAuth && user && (
                       <>
                         <div className="border-t border-gray-100 my-2" />
-                        <div className="px-4 py-2 text-sm text-gray-500">
+                        <div className="px-3 py-1.5 text-sm text-gray-600">
                           {user.username}
                         </div>
                         <button
@@ -310,7 +339,7 @@ function AppShell() {
                             logout();
                             setMobileMenuOpen(false);
                           }}
-                          className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                          className="btn btn-secondary btn-sm w-full mt-1"
                         >
                           Logout
                         </button>
@@ -333,7 +362,9 @@ function AppShell() {
               path="/billing"
               element={
                 <PageTransitionFrame key="billing" transitionKey="billing">
-                  <BillingPage />
+                  <Suspense fallback={null}>
+                    <BillingPage />
+                  </Suspense>
                 </PageTransitionFrame>
               }
             />
@@ -343,7 +374,9 @@ function AppShell() {
               path="/jobs"
               element={
                 <PageTransitionFrame key="jobs" transitionKey="jobs">
-                  <JobsPage />
+                  <Suspense fallback={null}>
+                    <JobsPage />
+                  </Suspense>
                 </PageTransitionFrame>
               }
             />
@@ -353,7 +386,9 @@ function AppShell() {
               path="/config"
               element={
                 <PageTransitionFrame key="config" transitionKey="config">
-                  <ConfigPage />
+                  <Suspense fallback={null}>
+                    <ConfigPage />
+                  </Suspense>
                 </PageTransitionFrame>
               }
             />
@@ -363,22 +398,18 @@ function AppShell() {
       </main>
 
       <AudioPlayer />
-      <DiagnosticsModal />
+      <Suspense fallback={null}>
+        <DiagnosticsModal />
+      </Suspense>
       <Toaster
         position="top-center"
         toastOptions={{
           duration: 3000,
-          style: isDark
-            ? {
-                background: '#0f172a',
-                color: '#e2e8f0',
-                border: '1px solid #334155',
-              }
-            : {
-                background: '#ffffff',
-                color: '#111827',
-                border: '1px solid #e5e7eb',
-              },
+          style: {
+            background: 'rgb(var(--surface))',
+            color: 'rgb(var(--gray-900))',
+            border: '1px solid rgb(var(--gray-200))',
+          },
         }}
       />
     </div>

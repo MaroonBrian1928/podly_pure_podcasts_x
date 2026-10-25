@@ -66,6 +66,8 @@
   },
   "generic_callers": [
     "src/app/model_call_token_backfill.py::backfill_model_call_token_usage::update:ModelCall#0",
+    "src/app/cut_stats.py::backfill_cut_windows::update:Post#0",
+    "src/app/cut_stats.py::mark_unverified::update:Post#0",
     "src/app/job_manager.py::_load_and_validate_post::update:Post#0",
     "src/app/jobs_manager.py::_ensure_jobs_for_all_posts::update:Post#0",
     "src/podcast_processor/audio_processor.py::process_audio::update:Post#0",

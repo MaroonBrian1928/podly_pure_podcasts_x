@@ -231,7 +231,8 @@ def test_process_audio(
             assert refreshed.processed_audio_path == output_path
             # The default test config extends a final ad segment to the end when
             # it is within the minimum separation threshold of the episode end.
-            assert removed_segments == [(5000, 30000)]
+            assert removed_segments.removed_segments_ms == [(5000, 30000)]
+            assert removed_segments.source_duration_ms == 30000
             mock_clip.assert_called_once()
             assert "use_vbr" not in mock_clip.call_args.kwargs
 
@@ -720,3 +721,62 @@ def test_get_ad_segments_ignores_malformed_refinement_data(app: Flask) -> None:
         )
 
         assert processor.get_ad_segments(post) == [(15.1, 65.4)]
+
+
+def test_merge_ad_segments_does_not_duplicate_merged_tail(
+    app: Flask, test_config: Config, test_logger: logging.Logger
+) -> None:
+    with app.app_context():
+        processor = AudioProcessor(
+            config=test_config, logger=test_logger, db_session=db.session
+        )
+        merged = processor.merge_ad_segments(
+            duration_ms=1_000_000,
+            ad_segments=[(900.0, 930.0), (950.0, 980.0)],
+            min_ad_segment_length_seconds=10.0,
+            min_ad_segment_separation_seconds=60.0,
+        )
+    assert merged == [(900_000, 1_000_000)]
+
+
+def test_process_audio_records_fade_inset_windows_in_early_update(
+    app: Flask, test_config: Config, test_logger: logging.Logger
+) -> None:
+    with app.app_context():
+        test_config.output.fade_ms = 3000
+        processor = AudioProcessor(
+            config=test_config, logger=test_logger, db_session=db.session
+        )
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss2.xml")
+        db.session.add(feed)
+        db.session.commit()
+        post = Post(
+            feed_id=feed.id,
+            title="Fade Post",
+            guid="fade-guid",
+            download_url="http://example.com/a.mp3",
+            unprocessed_audio_path="path/to/audio.mp3",
+        )
+        db.session.add(post)
+        db.session.commit()
+
+        with (
+            patch.object(processor, "get_ad_segments", return_value=[(10.0, 40.0)]),
+            patch(
+                "podcast_processor.audio_processor.get_audio_duration_ms",
+                side_effect=[300000, 270000],
+            ),
+            patch("podcast_processor.audio_processor.clip_segments_with_fade"),
+            patch("podcast_processor.audio_processor.writer_client") as mock_writer,
+        ):
+            mock_writer.update.return_value = MagicMock(success=True)
+            result = processor.process_audio(post, "out.mp3")
+
+        assert result.removed_segments_ms == [(10000, 40000)]
+        assert result.effective_removed_windows_ms == [(13000, 37000)]
+        payload = mock_writer.update.call_args.args[2]
+        assert payload["removed_ad_windows"] == [[13.0, 37.0]]
+        assert payload["original_duration_seconds"] == 300.0
+        assert payload["cut_stats_source"] == "recorded"
+        assert payload["processed_audio_path"] == "out.mp3"
+        assert payload["duration"] == 270.0

@@ -159,6 +159,9 @@ def clear_post_processing_data_action(params: dict[str, Any]) -> dict[str, Any]:
     post.duration = None
     post.chapter_data = None
     post.bleep_windows = None
+    post.removed_ad_windows = None
+    post.original_duration_seconds = None
+    post.cut_stats_source = None
     post.transcript_word_timestamps = None
     post.refined_ad_boundaries = None
     post.refined_ad_boundaries_updated_at = None
@@ -240,6 +243,9 @@ def clear_post_processing_data_keep_transcript_action(
     post.duration = None
     post.chapter_data = None
     post.bleep_windows = None
+    post.removed_ad_windows = None
+    post.original_duration_seconds = None
+    post.cut_stats_source = None
     post.refined_ad_boundaries = None
     post.refined_ad_boundaries_updated_at = None
 
@@ -364,6 +370,9 @@ def prepare_post_for_auto_retry_action(params: dict[str, Any]) -> dict[str, Any]
     post.duration = None
     post.chapter_data = None
     post.bleep_windows = None
+    post.removed_ad_windows = None
+    post.original_duration_seconds = None
+    post.cut_stats_source = None
     post.refined_ad_boundaries = None
     post.refined_ad_boundaries_updated_at = None
 

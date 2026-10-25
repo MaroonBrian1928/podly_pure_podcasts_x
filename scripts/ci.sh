@@ -78,9 +78,9 @@ if [ -f rust/Cargo.toml ]; then
     echo '============================================================='
     (
         cd rust || exit 1
-        cargo fmt --check
-        cargo clippy -- -D warnings
-        cargo test
+        mise exec -- cargo fmt --check
+        mise exec -- cargo clippy -- -D warnings
+        mise exec -- cargo test
     )
 fi
 

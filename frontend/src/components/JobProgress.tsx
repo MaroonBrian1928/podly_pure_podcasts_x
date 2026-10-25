@@ -5,13 +5,13 @@
 
 import type { ProcessingProgressModel, ProcessingStageState } from '../utils/processingProgress';
 import { formatDuration } from '../utils/datetime';
+import { CheckIcon } from './icons';
 
 type BarSize = 'compact' | 'full';
 
 interface JobProgressBarProps {
   value: number;
   colorClass?: string;
-  animated?: boolean;
   size?: BarSize;
   className?: string;
 }
@@ -28,43 +28,19 @@ const BAR_RADIUS: Record<BarSize, string> = {
 
 export function JobProgressBar({
   value,
-  colorClass = 'bg-indigo-600',
-  animated = false,
+  colorClass = 'bg-blue-600',
   size = 'full',
   className = '',
 }: JobProgressBarProps) {
   const clamped = Math.max(0, Math.min(100, Math.round(value)));
   const height = BAR_HEIGHT[size];
   const radius = BAR_RADIUS[size];
-  // The shimmer overlay below spans the full bar width and is revealed only
-  // over the filled region via clip-path. That keeps the shimmer's
-  // translateX(-100% → 100%) animation running across a *stable* width so
-  // stage transitions (which jump the fill width) don't stutter the
-  // animation. The clip-path itself transitions smoothly to match the
-  // fill's width change.
   return (
     <div className={`relative w-full bg-gray-200 ${radius} ${height} overflow-hidden ${className}`}>
       <div
-        className={`absolute inset-y-0 left-0 ${colorClass} ${radius} transition-all duration-300`}
+        className={`absolute inset-y-0 left-0 ${colorClass} ${radius} transition-[width,background-color] duration-300 ease-out`}
         style={{ width: `${clamped}%` }}
       />
-      {animated && clamped > 0 ? (
-        <div
-          className="pointer-events-none absolute inset-0 overflow-hidden"
-          style={{
-            clipPath: `inset(0 ${100 - clamped}% 0 0)`,
-            transition: 'clip-path 300ms',
-          }}
-        >
-          <div
-            className="absolute inset-y-0 left-0 w-full animate-progress-shimmer"
-            style={{
-              background:
-                'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0) 30%, rgba(255,255,255,0.45) 50%, rgba(255,255,255,0) 70%, transparent 100%)',
-            }}
-          />
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -83,7 +59,7 @@ export function JobStageRail({ stages, stageDurationsMs, className = '' }: JobSt
   // chapter pipelines 5.
   const cols = stages.length === 6 ? 'grid-cols-6' : 'grid-cols-5';
   return (
-    <div className={`grid ${cols} gap-1 text-[10px] text-gray-600 ${className}`}>
+    <div className={`grid ${cols} gap-1 text-[11px] text-gray-600 ${className}`}>
       {stages.map((stage) => {
         const ms = stageDurationsMs?.[stage.index];
         const hasDuration =
@@ -97,17 +73,17 @@ export function JobStageRail({ stages, stageDurationsMs, className = '' }: JobSt
             title={stage.label}
             className={`flex flex-col items-center leading-tight ${
               stage.state === 'active'
-                ? 'text-blue-600 font-medium'
+                ? 'text-blue-700 font-medium'
                 : stage.state === 'completed'
-                  ? 'text-green-600'
+                  ? 'text-green-700'
                   : stage.state === 'failed'
-                    ? 'text-red-600 font-medium'
-                    : 'text-gray-400'
+                    ? 'text-red-700 font-medium'
+                    : 'text-gray-500'
             }`}
           >
             <span className="flex h-3 items-center justify-center">
               {stage.state === 'completed' ? (
-                <span>✓</span>
+                <CheckIcon className="h-3 w-3" />
               ) : stage.state === 'active' ? (
                 <span className="relative inline-flex h-2 w-2">
                   <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
@@ -116,12 +92,12 @@ export function JobStageRail({ stages, stageDurationsMs, className = '' }: JobSt
               ) : stage.state === 'failed' ? (
                 <span>!</span>
               ) : (
-                <span>○</span>
+                <span className="inline-block h-2 w-2 rounded-full border border-current" />
               )}
             </span>
             <span>{stage.shortLabel}</span>
             {hasDuration ? (
-              <span className="font-mono tabular-nums text-[9px] text-gray-400">
+              <span className="font-mono tabular-nums text-[11px] text-gray-500">
                 {formatDuration(ms)}
               </span>
             ) : null}
@@ -158,14 +134,12 @@ export function JobProgressIndicator({
     ? 'bg-red-600'
     : isTerminalSuccess
       ? 'bg-green-600'
-      : 'bg-indigo-600';
-  const animated = !isFailure && !isTerminalSuccess;
+      : 'bg-blue-600';
   return (
     <div className={`space-y-1 ${className}`}>
       <JobProgressBar
         value={model.progress}
         colorClass={colorClass}
-        animated={animated}
         size={size}
       />
       <JobStageRail stages={model.stages} stageDurationsMs={stageDurationsMs} />
@@ -196,10 +170,10 @@ export interface ServiceTierSummary {
 export function ServiceTierChip({ tier }: { tier: ServiceTierSummary }) {
   const color =
     tier.label === 'flex'
-      ? 'bg-purple-100 text-purple-800'
+      ? 'bg-sky-100 text-sky-800'
       : tier.label === 'priority'
         ? 'bg-blue-100 text-blue-800'
-        : 'bg-gray-100 text-gray-700';
+        : 'bg-gray-100 text-gray-800';
   const title = tier.mixed
     ? `LLM calls so far used mixed tiers; latest=${tier.latest}`
     : `LLM calls used the "${tier.label}" service tier`;
@@ -207,13 +181,13 @@ export function ServiceTierChip({ tier }: { tier: ServiceTierSummary }) {
     <span className="inline-flex items-center gap-1">
       <span
         title={title}
-        className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded ${color}`}
+        className={`inline-flex items-center px-1.5 py-0.5 text-[11px] font-medium rounded ${color}`}
       >
         {tier.label}
         {tier.mixed ? '*' : ''}
       </span>
       {tier.in_flight ? (
-        <span className="text-[10px] text-gray-500 italic">
+        <span className="text-[11px] text-gray-500 italic">
           {formatTierInFlight(tier.in_flight)}
         </span>
       ) : null}
@@ -252,7 +226,7 @@ export function JobProgressCaption({
       </span>
       {tier && !hideChip ? <ServiceTierChip tier={tier} /> : null}
       {tier?.in_flight && hideChip ? (
-        <span className="text-[10px] text-gray-500 italic">
+        <span className="text-[11px] text-gray-500 italic">
           {formatTierInFlight(tier.in_flight)}
         </span>
       ) : null}

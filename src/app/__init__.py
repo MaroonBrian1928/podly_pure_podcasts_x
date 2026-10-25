@@ -245,6 +245,10 @@ def _create_configured_app(
 
     app.config["developer_mode"] = config.developer_mode
 
+    from app.cut_stats import register_cli
+
+    register_cli(app)
+
     with app.app_context():
         if run_startup:
             if fail_on_startup_error:
@@ -661,6 +665,7 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
     from app.background import (
         add_background_job,
         schedule_cleanup_job,
+        schedule_cut_window_backfill_job,
         schedule_memory_trim_job,
     )
     from app.jobs_manager import get_jobs_manager
@@ -682,4 +687,5 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
     )
     schedule_cleanup_job(getattr(config, "post_cleanup_retention_days", None))
     schedule_memory_trim_job()
+    schedule_cut_window_backfill_job()
     _start_request_burst_trim(app)

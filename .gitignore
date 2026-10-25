@@ -93,3 +93,9 @@ rust/perf.data.old
 # Claude local files
 .claude/
 CLAUDE.md
+
+# taste-skill review screenshots
+.taste-skill/
+
+# Impeccable design-hook local cache
+.impeccable/hook.cache.json

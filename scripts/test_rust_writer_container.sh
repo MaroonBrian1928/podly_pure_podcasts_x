@@ -195,7 +195,7 @@ await_ready "$upgrade_name"
 assert_retired_python_writer "$upgrade_name"
 upgraded_revision="$(docker exec "$upgrade_name" sqlite3 /app/src/instance/sqlite3.db \
     'SELECT version_num FROM alembic_version;')"
-test "$upgraded_revision" = 080b5181e23a
+test "$upgraded_revision" = 589f07c55324
 notification_table_count="$(docker exec "$upgrade_name" sqlite3 /app/src/instance/sqlite3.db \
     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='notification_settings';")"
 test "$notification_table_count" = 1

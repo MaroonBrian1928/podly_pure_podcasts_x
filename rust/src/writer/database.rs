@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 
-pub const EXPECTED_SCHEMA_REVISION: &str = "080b5181e23a";
+pub const EXPECTED_SCHEMA_REVISION: &str = "589f07c55324";
 
 pub fn open_existing(path: &Path) -> Result<Connection> {
     let metadata = path

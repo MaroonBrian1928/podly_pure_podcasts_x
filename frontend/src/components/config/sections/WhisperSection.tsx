@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { toast } from 'react-hot-toast';
 import { configApi } from '../../../services/api';
 import { useConfigContext } from '../ConfigContext';
-import { Section, Field, SaveButton, TestButton } from '../shared';
+import { Section, Field, ToggleField, SaveButton, TestButton } from '../shared';
 import type { WhisperConfig } from '../../../types';
 
 export default function WhisperSection() {
@@ -46,14 +46,11 @@ export default function WhisperSection() {
     return '';
   }, [whisperApiKeyPreview, pending?.whisper?.whisper_type, envOverrides]);
 
-  const inputClass = (readOnly: boolean) =>
-    readOnly ? 'input bg-gray-100 cursor-not-allowed' : 'input';
-
   if (!pending) return null;
 
   const handleTestWhisper = () => {
     toast.promise(configApi.testWhisper({ whisper: pending.whisper as WhisperConfig }), {
-      loading: 'Testing Whisper...',
+      loading: 'Testing Whisper…',
       success: (res: { ok: boolean; message?: string }) => res?.message || 'Whisper OK',
       error: (err: unknown) => {
         const e = err as {
@@ -71,183 +68,144 @@ export default function WhisperSection() {
   };
 
   const whisperType = pending?.whisper?.whisper_type === 'groq' ? 'groq' : 'remote';
-  const remoteWhisper =
-    pending?.whisper?.whisper_type === 'remote'
-      ? (pending.whisper as Extract<WhisperConfig, { whisper_type: 'remote' }>)
-      : null;
+  const isRemote = pending?.whisper?.whisper_type === 'remote';
+  const isGroq = pending?.whisper?.whisper_type === 'groq';
+  const remoteWhisper = isRemote
+    ? (pending.whisper as Extract<WhisperConfig, { whisper_type: 'remote' }>)
+    : null;
   const diarizeEnabled = remoteWhisper?.diarize ?? false;
 
   return (
     <div className="space-y-6">
-      <Section title="Whisper">
-        <Field label="Type" envMeta={getEnvHint('whisper.whisper_type')}>
+      <Section title="Transcription service">
+        <Field label="Provider" envMeta={getEnvHint('whisper.whisper_type')}>
           <select
-            className={inputClass(whisperTypeReadOnly)}
+            className="input"
             value={whisperType}
             onChange={(e) => handleWhisperTypeChange(e.target.value as 'remote' | 'groq')}
             disabled={whisperTypeReadOnly}
           >
-            <option value="remote">remote</option>
-            <option value="groq">groq</option>
+            <option value="remote">Remote (OpenAI-compatible)</option>
+            <option value="groq">Groq</option>
           </select>
         </Field>
 
-        {/* Remote Whisper Options */}
-        {pending?.whisper?.whisper_type === 'remote' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Field
-              label="API Key"
-              envMeta={getEnvHint('whisper.api_key', { env_var: 'WHISPER_REMOTE_API_KEY' })}
-            >
-              <input
-                className={inputClass(whisperApiKeyReadOnly)}
-                type="text"
-                placeholder={whisperApiKeyPlaceholder}
-                value={getWhisperApiKey(pending?.whisper)}
-                onChange={(e) => setField(['whisper', 'api_key'], e.target.value)}
-                disabled={whisperApiKeyReadOnly}
-              />
-            </Field>
-            <Field
-              label="Remote Model"
-              envMeta={getEnvHint('whisper.model', { env_var: 'WHISPER_REMOTE_MODEL' })}
-            >
-              <input
-                className={inputClass(whisperModelReadOnly)}
-                type="text"
-                value={(pending?.whisper as { model?: string })?.model || 'whisper-1'}
-                onChange={(e) => setField(['whisper', 'model'], e.target.value)}
-                disabled={whisperModelReadOnly}
-              />
-            </Field>
-            <Field label="Base URL" envMeta={getEnvHint('whisper.base_url')}>
-              <input
-                className={inputClass(whisperBaseUrlReadOnly)}
-                type="text"
-                placeholder="https://api.openai.com/v1"
-                value={(pending?.whisper as { base_url?: string })?.base_url || ''}
-                onChange={(e) => setField(['whisper', 'base_url'], e.target.value)}
-                disabled={whisperBaseUrlReadOnly}
-              />
-            </Field>
-            <Field label="Language">
-              <input
-                className="input"
-                type="text"
-                value={(pending?.whisper as { language?: string })?.language || 'en'}
-                onChange={(e) => setField(['whisper', 'language'], e.target.value)}
-              />
-            </Field>
-            <Field label="Timeout (sec)" envMeta={getEnvHint('whisper.timeout_sec')}>
-              <input
-                className={inputClass(whisperTimeoutReadOnly)}
-                type="number"
-                value={(pending?.whisper as { timeout_sec?: number })?.timeout_sec ?? 600}
-                onChange={(e) => setField(['whisper', 'timeout_sec'], Number(e.target.value))}
-                disabled={whisperTimeoutReadOnly}
-              />
-            </Field>
-            <Field label="Chunk Size (MB)" envMeta={getEnvHint('whisper.chunksize_mb')}>
-              <input
-                className={inputClass(whisperChunksizeReadOnly)}
-                type="number"
-                value={(pending?.whisper as { chunksize_mb?: number })?.chunksize_mb ?? 24}
-                onChange={(e) => setField(['whisper', 'chunksize_mb'], Number(e.target.value))}
-                disabled={whisperChunksizeReadOnly}
-              />
-            </Field>
-            <Field label="Diarize" envMeta={getEnvHint('whisper.diarize')}>
-              <label className="flex items-center gap-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={diarizeEnabled}
-                  onChange={(e) => {
-                    const nextChecked = e.target.checked;
-                    setField(['whisper', 'diarize'], nextChecked);
-                    if (!nextChecked) {
-                      setField(['whisper', 'speaker_embeddings'], false);
-                    }
-                  }}
-                  disabled={whisperDiarizeReadOnly}
-                />
-                <span>Include speaker diarization in the remote request.</span>
-              </label>
-            </Field>
-            <Field
-              label="Speaker Embeddings"
-              envMeta={getEnvHint('whisper.speaker_embeddings')}
-            >
-              <label className="flex items-center gap-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={remoteWhisper?.speaker_embeddings ?? false}
-                  onChange={(e) =>
-                    setField(['whisper', 'speaker_embeddings'], e.target.checked)
-                  }
-                  disabled={
-                    whisperSpeakerEmbeddingsReadOnly || !diarizeEnabled
-                  }
-                />
-                <span>Return speaker embeddings with diarization output.</span>
-              </label>
-            </Field>
-          </div>
+        <Field label="API key" envMeta={getEnvHint('whisper.api_key')}>
+          <input
+            className="input"
+            type="text"
+            placeholder={whisperApiKeyPlaceholder}
+            value={getWhisperApiKey(pending?.whisper)}
+            onChange={(e) => setField(['whisper', 'api_key'], e.target.value)}
+            disabled={whisperApiKeyReadOnly}
+          />
+        </Field>
+
+        <Field label="Model" envMeta={getEnvHint('whisper.model')}>
+          <input
+            className="input"
+            type="text"
+            value={
+              (pending?.whisper as { model?: string })?.model ||
+              (isGroq ? 'whisper-large-v3-turbo' : 'whisper-1')
+            }
+            onChange={(e) => setField(['whisper', 'model'], e.target.value)}
+            disabled={whisperModelReadOnly}
+          />
+        </Field>
+
+        {isRemote && (
+          <Field label="Base URL" envMeta={getEnvHint('whisper.base_url')}>
+            <input
+              className="input"
+              type="text"
+              placeholder="https://api.openai.com/v1"
+              value={(pending?.whisper as { base_url?: string })?.base_url || ''}
+              onChange={(e) => setField(['whisper', 'base_url'], e.target.value)}
+              disabled={whisperBaseUrlReadOnly}
+            />
+          </Field>
         )}
 
-        {/* Groq Whisper Options */}
-        {pending?.whisper?.whisper_type === 'groq' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Field
-              label="API Key"
-              envMeta={getEnvHint('whisper.api_key', { env_var: 'GROQ_API_KEY' })}
-            >
-              <input
-                className={inputClass(whisperApiKeyReadOnly)}
-                type="text"
-                placeholder={whisperApiKeyPlaceholder}
-                value={getWhisperApiKey(pending?.whisper)}
-                onChange={(e) => setField(['whisper', 'api_key'], e.target.value)}
-                disabled={whisperApiKeyReadOnly}
-              />
-            </Field>
-            <Field
-              label="Model"
-              envMeta={getEnvHint('whisper.model', { env_var: 'GROQ_WHISPER_MODEL' })}
-            >
-              <input
-                className={inputClass(whisperModelReadOnly)}
-                type="text"
-                value={(pending?.whisper as { model?: string })?.model || 'whisper-large-v3-turbo'}
-                onChange={(e) => setField(['whisper', 'model'], e.target.value)}
-                disabled={whisperModelReadOnly}
-              />
-            </Field>
-            <Field label="Language">
+        <Field label="Language">
+          <input
+            className="input"
+            type="text"
+            value={(pending?.whisper as { language?: string })?.language || 'en'}
+            onChange={(e) => setField(['whisper', 'language'], e.target.value)}
+          />
+        </Field>
+
+        <TestButton onClick={handleTestWhisper} label="Test connection" />
+      </Section>
+
+      <Section title="Limits" collapsible>
+        <div className="grid gap-5 sm:grid-cols-2">
+          {isRemote && (
+            <>
+              <Field label="Timeout (seconds)" envMeta={getEnvHint('whisper.timeout_sec')}>
+                <input
+                  className="input"
+                  type="number"
+                  value={(pending?.whisper as { timeout_sec?: number })?.timeout_sec ?? 600}
+                  onChange={(e) => setField(['whisper', 'timeout_sec'], Number(e.target.value))}
+                  disabled={whisperTimeoutReadOnly}
+                />
+              </Field>
+              <Field label="Chunk size (MB)" envMeta={getEnvHint('whisper.chunksize_mb')}>
+                <input
+                  className="input"
+                  type="number"
+                  value={(pending?.whisper as { chunksize_mb?: number })?.chunksize_mb ?? 24}
+                  onChange={(e) => setField(['whisper', 'chunksize_mb'], Number(e.target.value))}
+                  disabled={whisperChunksizeReadOnly}
+                />
+              </Field>
+            </>
+          )}
+          {isGroq && (
+            <Field label="Max retries" envMeta={getEnvHint('whisper.max_retries')}>
               <input
                 className="input"
-                type="text"
-                value={(pending?.whisper as { language?: string })?.language || 'en'}
-                onChange={(e) => setField(['whisper', 'language'], e.target.value)}
-              />
-            </Field>
-            <Field label="Max Retries" envMeta={getEnvHint('whisper.max_retries')}>
-              <input
-                className={inputClass(whisperMaxRetriesReadOnly)}
                 type="number"
                 value={(pending?.whisper as { max_retries?: number })?.max_retries ?? 3}
                 onChange={(e) => setField(['whisper', 'max_retries'], Number(e.target.value))}
                 disabled={whisperMaxRetriesReadOnly}
               />
             </Field>
-          </div>
-        )}
-
-        <TestButton onClick={handleTestWhisper} label="Test Whisper" />
+          )}
+        </div>
       </Section>
 
-      <SaveButton onSave={handleSave} isPending={isSaving} />
+      {isRemote && (
+        <Section title="Speaker detection">
+          <div className="space-y-4">
+            <ToggleField
+              label="Detect speakers (diarization)"
+              hint="Asks the remote service to label who is speaking in the transcript."
+              envMeta={getEnvHint('whisper.diarize')}
+              checked={diarizeEnabled}
+              onChange={(checked) => {
+                setField(['whisper', 'diarize'], checked);
+                if (!checked) {
+                  setField(['whisper', 'speaker_embeddings'], false);
+                }
+              }}
+              disabled={whisperDiarizeReadOnly}
+            />
+            <ToggleField
+              label="Return speaker embeddings"
+              hint="Needs speaker detection. Includes voice embeddings alongside the diarization output."
+              envMeta={getEnvHint('whisper.speaker_embeddings')}
+              checked={remoteWhisper?.speaker_embeddings ?? false}
+              onChange={(checked) => setField(['whisper', 'speaker_embeddings'], checked)}
+              disabled={whisperSpeakerEmbeddingsReadOnly || !diarizeEnabled}
+            />
+          </div>
+        </Section>
+      )}
 
-      <style>{`.input{width:100%;padding:0.5rem;border:1px solid #e5e7eb;border-radius:0.375rem;font-size:0.875rem}`}</style>
+      <SaveButton onSave={handleSave} isPending={isSaving} />
     </div>
   );
 }
