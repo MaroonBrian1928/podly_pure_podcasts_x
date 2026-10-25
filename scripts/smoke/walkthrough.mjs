@@ -19,6 +19,24 @@ const shot = async (page, label) => {
   await page.screenshot({ path: `${OUT}/${file}`, type: 'jpeg', quality: 70, scale: 'css' });
   note(`shot ${file}`);
 };
+// Settings show API keys, key previews and server addresses. This runs before any
+// page script and blurs every Settings field from the first painted frame, so
+// screenshots and recordings never capture them.
+const MASK_SETTINGS = () => {
+  const apply = () => document.documentElement.toggleAttribute('data-smoke-mask', location.pathname.startsWith('/config'));
+  for (const fn of ['pushState', 'replaceState']) {
+    const original = history[fn];
+    history[fn] = function (...args) { const result = original.apply(this, args); apply(); return result; };
+  }
+  window.addEventListener('popstate', apply);
+  const install = () => {
+    const style = document.createElement('style');
+    style.textContent = 'html[data-smoke-mask] main input, html[data-smoke-mask] main textarea, html[data-smoke-mask] main select { filter: blur(7px) !important; }';
+    document.documentElement.appendChild(style);
+    apply();
+  };
+  if (document.documentElement) install(); else document.addEventListener('DOMContentLoaded', install);
+};
 const watch = (page, tag) => {
   page.on('pageerror', (e) => note(`${tag} PAGEERROR ${e.message}`));
   page.on('console', (m) => { if (m.type() === 'error') note(`${tag} console.error ${m.text().slice(0, 200)}`); });
@@ -31,6 +49,7 @@ const desktop = await browser.newContext({
   colorScheme: 'dark',
   recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 800 } },
 });
+await desktop.addInitScript(MASK_SETTINGS);
 const page = await desktop.newPage();
 watch(page, 'desktop');
 
@@ -58,7 +77,7 @@ try {
   await shot(page, 'settings-basics');
   for (const [q, label] of [['tab=advanced&section=llm', 'settings-llm'], ['tab=advanced&section=whisper', 'settings-transcription'], ['tab=users', 'settings-users'], ['tab=costs', 'settings-costs']]) {
     await page.goto(`${BASE}/config?${q}`);
-    await page.waitForTimeout(1800);
+      await page.waitForTimeout(1800);
     await shot(page, label);
   }
 
@@ -151,6 +170,7 @@ await desktop.close();
 
 // Phone layout with the same session.
 const phone = await browser.newContext({ ...devices['iPhone 13'], colorScheme: 'light' });
+await phone.addInitScript(MASK_SETTINGS);
 await phone.addCookies(cookies);
 const p2 = await phone.newPage();
 watch(p2, 'phone');
