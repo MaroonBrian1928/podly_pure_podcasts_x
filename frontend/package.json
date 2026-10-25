@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "smoke": "node smoke/walkthrough.mjs",
-    "smoke:enable": "node smoke/enable-and-process.mjs"
+    "smoke:enable": "node smoke/enable-and-process.mjs",
+    "smoke:mock": "node smoke/mock-providers.mjs"
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",

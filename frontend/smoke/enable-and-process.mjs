@@ -21,8 +21,8 @@ try {
   await page.locator('button').filter({ hasText: /episodes/ }).first().click();
   await page.waitForTimeout(3500);
 
-  // Developer-mode test feeds start with every episode enabled; switch it off
-  // first so the run always goes through the confirm-and-process path.
+  // Some feeds start with every episode enabled; switch it off first so the run
+  // always goes through the confirm-and-process path.
   const toggle = page.getByRole('switch').nth(1);
   await toggle.waitFor({ timeout: 20000 });
   await toggle.scrollIntoViewIfNeeded();

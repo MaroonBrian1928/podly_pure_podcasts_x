@@ -68,9 +68,9 @@ try {
   await run.shot(page, 'feed-added');
   run.note('feed added');
 
-  // Open the feed. A real feed usually enables and queues its newest episode on
-  // its own; developer-mode test feeds enable it without queueing, so press
-  // Process when it is offered; enable it by hand when neither happened.
+  // Open the feed. A new feed usually enables and queues its newest episode on
+  // its own. Press Process when the episode is enabled but not queued, and
+  // enable it by hand when neither happened.
   await page.locator('button').filter({ hasText: /episodes/ }).first().click();
   await page.waitForTimeout(3500);
   await run.shot(page, 'feed-detail');
