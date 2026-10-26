@@ -108,6 +108,43 @@ jobs:
           grep 'Joined ad segments into' src/instance/logs/app.log
           test "$(grep -cF "$expected" src/instance/logs/app.log)" -eq 2
 
+      # A fixed set of files for smoke-report.yml, which posts them on the PR.
+      # That workflow treats everything here as untrusted.
+      - name: Prepare PR report
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p smoke-report
+          echo "$PR_NUMBER" > smoke-report/pr-number
+          pick() { f=$(compgen -G "smoke-output/$1" | head -1); if [ -n "$f" ]; then cp "$f" "smoke-report/$2"; fi; }
+          pick 'video/*.webm' walkthrough.webm
+          pick 'video-manual/*.webm' enable-and-process.webm
+          pick '*-episode-processed.jpg' feed.jpg
+          pick '*-stats-overview.jpg' stats-overview.jpg
+          pick '*-stats-model.jpg' stats-model-calls.jpg
+          pick '*-settings-llm.jpg' settings.jpg
+          pick 'manual-*-enable-confirm.jpg' enable-confirm.jpg
+          pick '*-phone-feed.jpg' phone.jpg
+          pick '[0-9][0-9]-failure.jpg' walkthrough-failure.jpg
+          pick '*-phone-failure.jpg' phone-failure.jpg
+          pick 'manual-*-failure.jpg' enable-failure.jpg
+          grep -h 'Joined ad segments into' src/instance/logs/app.log > smoke-report/cuts.txt || true
+          if [ -f smoke-report/walkthrough.webm ]; then
+            ffmpeg -v error -i smoke-report/walkthrough.webm \
+              -vf "setpts=PTS/4,fps=8,scale=640:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
+              smoke-report/walkthrough.gif || true
+          fi
+          ls -la smoke-report
+
+      - name: Upload PR report
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: smoke-report/
+          retention-days: 3
+
       - name: Upload screenshots, video and logs
         if: always()
         uses: actions/upload-artifact@v4
