@@ -29,6 +29,8 @@ jobs:
       WHISPER_REMOTE_API_KEY: smoke-mock
       WHISPER_REMOTE_BASE_URL: http://127.0.0.1:5098/v1
       WHISPER_REMOTE_MODEL: whisper-1
+      INA_ENABLED: "true"
+      INA_BASE_URL: http://127.0.0.1:5098
       REQUIRE_AUTH: "true"
       PODLY_ADMIN_USERNAME: admin
       # Throwaway instance reachable only from the runner.
@@ -114,6 +116,14 @@ jobs:
           expected='Joined ad segments into: [(88.0, 132.0), (242.0, 275.0)]'
           grep 'Joined ad segments into' src/instance/logs/app.log
           test "$(grep -cF "$expected" src/instance/logs/app.log)" -eq 2
+
+      - name: Check INA and bleeping
+        run: |
+          # INA segments both episodes; enable-and-process turns bleeping on
+          # before the second, whose transcript has one swear word.
+          test "$(grep -c 'INA analysis complete' src/instance/logs/app.log)" -eq 2
+          sqlite3 src/instance/sqlite3.db "select title, bleep_windows from post where bleep_windows is not null and bleep_windows != 'null'"
+          test "$(sqlite3 src/instance/sqlite3.db "select count(*) from post where bleep_windows like '%start_time%'")" -eq 1
 
       # A fixed set of files for smoke-report.yml, which posts them on the PR.
       # That workflow treats everything here as untrusted.

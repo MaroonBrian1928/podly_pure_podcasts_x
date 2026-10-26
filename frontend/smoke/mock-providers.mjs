@@ -7,6 +7,7 @@
 //   GET  /v1/models                  remote Whisper connection probe
 //   POST /v1/audio/transcriptions    the canned transcript below (verbose_json)
 //   POST /v1/chat/completions        ad classification and boundary refinement
+//   POST /segment                    INA speech/music segmentation
 //
 // Usage: node smoke/mock-providers.mjs [port]
 import fs from 'fs';
@@ -41,7 +42,7 @@ const SCRIPT = [
   ['Lines that fall close together are merged into one continuous ad break.', false],
   ['The edges of each break can then be nudged to the nearest natural pause.', false],
   ['With the breaks settled, the audio tool removes those stretches of time.', false],
-  ['A short fade at each join keeps the edit from sounding like a hard jump.', false],
+  ['A short fade at each join keeps the edit from sounding like a damn hard jump.', false],
   ['The finished file replaces the original in the feed your player reads.', false],
   ['Every step is recorded, which is what the statistics window shows you.', false],
   ['You can see each model call, every transcript line and every decision.', false],
@@ -114,7 +115,20 @@ const ARTWORK = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600">
 </svg>
 `;
 
-function transcription() {
+// Words are spread evenly across their line. Podly asks for them (with
+// timestamp_granularities "word") when a feed has profanity bleeping on.
+function words(segment) {
+  const list = segment.text.split(' ');
+  const step = (segment.end - segment.start) / list.length;
+  return list.map((word, i) => ({
+    word,
+    start: Number((segment.start + i * step).toFixed(2)),
+    end: Number((segment.start + (i + 1) * step - 0.05).toFixed(2)),
+    score: 0.9,
+  }));
+}
+
+function transcription(withWords) {
   return {
     task: 'transcribe',
     language: 'english',
@@ -131,8 +145,31 @@ function transcription() {
       avg_logprob: -0.2,
       compression_ratio: 1.3,
       no_speech_prob: 0.01,
+      ...(withWords ? { words: words(s) } : {}),
     })),
   };
+}
+
+// inaSpeechSegmenter labels: speech, with a short music sting at the start and
+// end of each sponsor break.
+function inaSegments() {
+  const breaks = [];
+  for (const s of TRANSCRIPT) {
+    const last = breaks[breaks.length - 1];
+    if (s.ad && last && last.end === s.start) last.end = s.end;
+    else if (s.ad) breaks.push({ start: s.start, end: s.end });
+  }
+  const segments = [];
+  let at = 0;
+  for (const b of breaks) {
+    segments.push({ label: 'male', start: at, end: b.start - 1.5 });
+    segments.push({ label: 'music', start: b.start - 1.5, end: b.start + 1.5 });
+    segments.push({ label: 'male', start: b.start + 1.5, end: b.end - 1.5 });
+    segments.push({ label: 'music', start: b.end - 1.5, end: b.end + 1.5 });
+    at = b.end + 1.5;
+  }
+  segments.push({ label: 'male', start: at, end: AUDIO_SECONDS });
+  return segments;
 }
 
 // Ad classification prompts list transcript lines as "[<start seconds>] <text>".
@@ -212,7 +249,9 @@ const server = http.createServer(async (req, res) => {
     } else if (route === 'GET /models') {
       sendJson(res, 200, { object: 'list', data: [{ id: 'whisper-1', object: 'model', owned_by: 'smoke' }] });
     } else if (route === 'POST /audio/transcriptions') {
-      sendJson(res, 200, transcription());
+      sendJson(res, 200, transcription(/name="timestamp_granularities\[\]"\r\n\r\nword/.test(body.toString('latin1'))));
+    } else if (route === 'POST /segment') {
+      sendJson(res, 200, inaSegments());
     } else if (route === 'POST /chat/completions') {
       sendJson(res, 200, chatCompletion(JSON.parse(body.toString('utf8') || '{}')));
     } else {

@@ -21,6 +21,20 @@ try {
   await page.locator('button').filter({ hasText: /episodes/ }).first().click();
   await page.waitForTimeout(3500);
 
+  // Turn on profanity bleeping for the feed, so this episode is transcribed with
+  // word timestamps and the mock transcript's swear word is bleeped.
+  await page.getByRole('button', { name: 'Feed settings' }).first().click();
+  const confirmWhisperx = page.getByRole('checkbox', { name: /WhisperX-compatible/ });
+  await confirmWhisperx.waitFor({ timeout: 10000 });
+  await confirmWhisperx.check();
+  await page.locator('label:has-text("WhisperX-compatible") + div select').selectOption('on');
+  await page.waitForTimeout(600);
+  await run.shot(page, 'bleeping-on');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await confirmWhisperx.waitFor({ state: 'detached', timeout: 15000 });
+  run.note('turned on profanity bleeping for the feed');
+  await page.waitForTimeout(1500);
+
   // Some feeds start with every episode enabled; switch it off first so the run
   // always goes through the confirm-and-process path.
   const toggle = page.getByRole('switch').nth(1);

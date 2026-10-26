@@ -3,7 +3,7 @@
 Two Playwright scripts in `frontend/smoke/` drive a real Podly instance in a browser and record what they see. Use them to check a change end to end before opening a pull request, and to capture screenshots and video for it.
 
 - `walkthrough.mjs` signs in (a wrong password first), tours Settings, adds a feed, processes its newest episode, inspects every Stats tab, opens Jobs, and checks the phone layout.
-- `enable-and-process.mjs` enables the feed's second episode by hand, confirms processing, waits for it, and opens its stats. Run it after `walkthrough.mjs`.
+- `enable-and-process.mjs` turns on profanity bleeping in the feed's settings, enables the second episode by hand, confirms processing, waits for it, and opens its stats. Run it after `walkthrough.mjs`.
 
 Each run writes numbered screenshots, a video and a log to the output directory. A run fails (exit code 1) on a failed step, a page error or a 5xx response. 4xx responses are logged but don't fail the run, because some are expected: the session check before sign-in, the wrong password, and the Settings connection probes when a real provider rejects them.
 
@@ -11,16 +11,16 @@ The scripts add a feed and process episodes, so run them against a fresh, dispos
 
 ## Two modes
 
-- **Mock providers (default).** `frontend/smoke/mock-providers.mjs` stands in for the podcast host, the transcription API and the LLM. It serves a three-episode feed of six-minute episodes, a fixed transcript with two sponsor reads, and LLM answers that mark exactly those reads. Podly runs its whole pipeline against it (download, transcription, ad classification, boundary refinement, cutting), so every Stats tab fills in, with no keys, no cost and no network access. Each episode processes in a few seconds.
+- **Mock providers (default).** `frontend/smoke/mock-providers.mjs` stands in for the podcast host, the transcription API, INA and the LLM. It serves a three-episode feed of six-minute episodes, a fixed transcript with two sponsor reads and one swear word (with per-word timestamps when Podly asks for them), INA segments with a music sting at each end of both breaks, and LLM answers that mark exactly the sponsor reads. Podly runs its whole pipeline against it (download, transcription, INA, ad classification, boundary refinement, cutting, bleeping), so every Stats tab fills in, with no keys, no cost and no network access. Each episode processes in a few seconds.
 - **Real providers.** A real feed with your transcription and LLM settings. Use it when a change depends on how real models behave, such as prompts, token parameters or parsing. One run costs a few cents.
 
-In mock mode, the expected result for every episode is two ad breaks, 1:28–2:12 and 4:02–4:35, removing 1m 17s. Anything else means the pipeline changed how it treats the same transcript and classifications.
+In mock mode, the expected result for every episode is two ad breaks, 1:28–2:12 and 4:02–4:35, and nine INA audio segments. The second episode, processed with bleeping on, also gets one bleep at 3:15–3:16. Anything else means the pipeline changed how it treats the same inputs.
 
 ## In CI
 
 Adding the `smoke-test` label to a pull request runs `.github/workflows/smoke-test.yml`, which runs the mock-provider mode on a GitHub runner. To test new commits, remove the label and add it again. It can also be started from the Actions tab.
 
-For speed, it runs Podly directly on the runner (the Rust writer and tools built with a cargo cache, the Python dependencies, and the built frontend copied into `src/app/static`) instead of building the Docker image. It fails if either script fails or the cuts differ from the expected two ad breaks. Screenshots, video and logs are uploaded as the `smoke-output` artifact whether it passes or fails.
+For speed, it runs Podly directly on the runner (the Rust writer and tools built with a cargo cache, the Python dependencies, and the built frontend copied into `src/app/static`) instead of building the Docker image. It fails if either script fails, the cuts differ from the expected two ad breaks, INA didn't run for both episodes, or the second episode wasn't bleeped once. Screenshots, video and logs are uploaded as the `smoke-output` artifact whether it passes or fails.
 
 `.github/workflows/smoke-report.yml` then keeps one comment on the pull request up to date: pass or fail, the cuts, a 4× GIF of the walkthrough, six screenshots (or the failure screenshots) and links to both videos. The smoke run can't comment itself, because pull request code runs with a read-only token, so the report workflow runs from the default branch, reads only that run's `smoke-report` artifact, and checks the pull request's head is the commit that was tested. The media is hosted on a `smoke-media` prerelease, not in git, and a pull request's files are deleted when it closes.
 
@@ -48,6 +48,8 @@ umask 077
   echo "WHISPER_REMOTE_API_KEY=smoke-mock"
   echo "WHISPER_REMOTE_BASE_URL=http://host.docker.internal:5098/v1"
   echo "WHISPER_REMOTE_MODEL=whisper-1"
+  echo "INA_ENABLED=true"
+  echo "INA_BASE_URL=http://host.docker.internal:5098"
   echo "REQUIRE_AUTH=true"
   echo "PODLY_ADMIN_USERNAME=admin"
   echo "PODLY_ADMIN_PASSWORD=$(openssl rand -hex 16)"
@@ -61,7 +63,7 @@ umask 077
 ```bash
 umask 077
 {
-  grep -E '^(LLM_API_KEY|LLM_MODEL|OPENAI_BASE_URL|WHISPER_TYPE|WHISPER_REMOTE_API_KEY|WHISPER_REMOTE_BASE_URL|WHISPER_REMOTE_MODEL|GROQ_API_KEY|GROQ_WHISPER_MODEL|GROQ_MAX_RETRIES)=' .env.local
+  grep -E '^(LLM_API_KEY|LLM_MODEL|OPENAI_BASE_URL|WHISPER_TYPE|WHISPER_REMOTE_API_KEY|WHISPER_REMOTE_BASE_URL|WHISPER_REMOTE_MODEL|GROQ_API_KEY|GROQ_WHISPER_MODEL|GROQ_MAX_RETRIES|INA_ENABLED|INA_BASE_URL)=' .env.local
   echo "REQUIRE_AUTH=true"
   echo "PODLY_ADMIN_USERNAME=admin"
   echo "PODLY_ADMIN_PASSWORD=$(openssl rand -hex 16)"
