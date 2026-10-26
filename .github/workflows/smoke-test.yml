@@ -142,6 +142,8 @@ jobs:
           pick '*-stats-model.jpg' stats-model-calls.jpg
           pick '*-settings-llm.jpg' settings.jpg
           pick 'manual-*-enable-confirm.jpg' enable-confirm.jpg
+          pick 'manual-*-stats-bleeps.jpg' bleeps.jpg
+          pick 'manual-*-stats-audio-segments.jpg' audio-segments.jpg
           pick '*-phone-feed.jpg' phone.jpg
           pick '[0-9][0-9]-failure.jpg' walkthrough-failure.jpg
           pick '*-phone-failure.jpg' phone-failure.jpg

@@ -65,6 +65,32 @@ try {
   await page.getByRole('tab', { name: /Model calls/ }).waitFor({ timeout: 20000 });
   await page.waitForTimeout(2500);
   await run.shot(page, 'stats');
+
+  // The mock transcript has one swear word, bleeped because of the feed setting.
+  const bleepsHeading = page.getByRole('heading', { name: 'Bleeps added' });
+  await bleepsHeading.waitFor({ timeout: 10000 });
+  const bleepsCardEl = bleepsHeading.locator('xpath=..');
+  await bleepsCardEl.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+  await page.waitForTimeout(1200);
+  const bleepsCard = await bleepsCardEl.innerText();
+  const bleeped = Number(bleepsCard.match(/(\d+)\s*Bleeped sections/)?.[1]);
+  await run.shot(page, 'stats-bleeps');
+  if (bleeped !== 1) throw new Error(`expected 1 bleeped section, the stats show ${bleeped}`);
+  run.note('stats show 1 bleeped section');
+
+  // The mock INA service returns 9 segments: speech with a music sting at each
+  // end of both ad breaks.
+  await page.getByRole('tab', { name: /Audio segments/ }).click();
+  const audioRows = page.locator('h3:has-text("Audio segments") + div tbody tr');
+  await audioRows.first().waitFor({ timeout: 10000 });
+  await page.waitForTimeout(1000);
+  await run.shot(page, 'stats-audio-segments');
+  const total = await audioRows.count();
+  const music = await audioRows.filter({ hasText: 'music' }).count();
+  if (total !== 9 || music !== 4) {
+    throw new Error(`expected 9 INA audio segments with 4 music, the stats show ${total} with ${music} music`);
+  }
+  run.note('stats show 9 INA audio segments, 4 music');
 } catch (err) {
   run.fail(err.message);
   await run.shot(page, 'failure').catch(() => {});
