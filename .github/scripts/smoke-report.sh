@@ -6,13 +6,12 @@
 # untrusted: only known file names of the expected type and size are used,
 # and only numbers are taken from text files.
 #
-# With BOT_TOKEN (a user's token) the videos and screenshots are attached
-# inline with `gh pr comment --attach`; GitHub refuses attachments from
-# GITHUB_TOKEN. Without it, a GIF and the screenshots are uploaded to the
-# smoke-media release with GITHUB_TOKEN and the videos are linked.
+# Media is hosted on the smoke-media release: a GIF and screenshots show
+# inline and the videos are linked. GitHub refuses inline video uploads
+# (gh pr comment --attach) from GITHUB_TOKEN.
 #
 # Env: GH_TOKEN, GH_REPO, REPORT_DIR, RUN_ID, RUN_URL, HEAD_SHA, CONCLUSION,
-#      STARTED_AT, UPDATED_AT, BOT_TOKEN (optional)
+#      STARTED_AT, UPDATED_AT
 set -euo pipefail
 
 MARKER='<!-- podly-smoke-test -->'
@@ -81,7 +80,6 @@ caption() {
   esac
 }
 
-# shot_cell NAME -> table cell markdown; video_block NAME -> markdown
 write_body() {
   {
     echo "$MARKER"
@@ -120,17 +118,6 @@ write_body() {
     echo "<sub>Mock providers; full screenshots, videos and logs are in the run's \`smoke-output\` artifact.</sub>"
   } > "$media/body.md"
 }
-
-if [ -n "${BOT_TOKEN:-}" ]; then
-  shot_cell() { echo "![$(caption "$1")](./$1)"; }
-  video_block() { echo "![$1](./$1)"; }
-  write_body
-  attach=()
-  for f in "${videos[@]}" "${shots[@]}"; do attach+=(--attach "$media/$f"); done
-  GH_TOKEN="$BOT_TOKEN" gh pr comment "$pr" --edit-last --create-if-none \
-    --body-file "$media/body.md" "${attach[@]}"
-  exit 0
-fi
 
 gh release view "$RELEASE_TAG" > /dev/null 2>&1 ||
   gh release create "$RELEASE_TAG" --prerelease --title "Smoke test media" \
