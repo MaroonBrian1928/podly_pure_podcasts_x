@@ -54,7 +54,8 @@ gif=
 accept walkthrough.gif image/gif && gif=walkthrough.gif
 
 fmt() { printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); }
-cuts=$(grep -oE '\(([0-9]{1,6})\.[0-9]+, ([0-9]{1,6})\.[0-9]+\)' "$REPORT_DIR/cuts.txt" 2>/dev/null | head -4 |
+# Both processed episodes are cut the same way, so repeated ranges are listed once.
+cuts=$(grep -oE '\(([0-9]{1,6})\.[0-9]+, ([0-9]{1,6})\.[0-9]+\)' "$REPORT_DIR/cuts.txt" 2>/dev/null | awk '!seen[$0]++' | head -6 |
   sed -E 's/\(([0-9]+)\.[0-9]+, ([0-9]+)\.[0-9]+\)/\1 \2/' |
   while read -r a b; do printf '%s–%s, ' "$(fmt "$a")" "$(fmt "$b")"; done || true)
 cuts=${cuts%, }
@@ -80,7 +81,7 @@ caption() {
   esac
 }
 
-# shot_url NAME -> markdown image target; video_block NAME -> markdown
+# shot_cell NAME -> table cell markdown; video_block NAME -> markdown
 write_body() {
   {
     echo "$MARKER"
@@ -102,7 +103,7 @@ write_body() {
       echo "|---|---|---|"
       for s in "${shots[@]}"; do
         row_titles+="| $(caption "$s") "
-        row_images+="| ![$(caption "$s")]($(shot_url "$s")) "
+        row_images+="| $(shot_cell "$s") "
         i=$((i + 1))
         if [ $((i % 3)) -eq 0 ]; then
           echo "$row_titles|"
@@ -121,7 +122,7 @@ write_body() {
 }
 
 if [ -n "${BOT_TOKEN:-}" ]; then
-  shot_url() { echo "./$1"; }
+  shot_cell() { echo "![$(caption "$1")](./$1)"; }
   video_block() { echo "![$1](./$1)"; }
   write_body
   attach=()
@@ -147,7 +148,8 @@ done
 [ ${#upload[@]} -eq 0 ] || gh release upload "$RELEASE_TAG" "${upload[@]}" --clobber
 
 asset_url() { echo "https://github.com/$GH_REPO/releases/download/$RELEASE_TAG/$prefix$1"; }
-shot_url() { asset_url "$1"; }
+# A fixed height keeps the portrait phone screenshot from stretching its row.
+shot_cell() { echo "<img src=\"$(asset_url "$1")\" alt=\"$(caption "$1")\" height=\"170\">"; }
 video_block() {
   if [ "$1" = walkthrough.webm ] && [ -n "$gif" ]; then
     echo "![Walkthrough at 4× speed]($(asset_url "$gif"))"
