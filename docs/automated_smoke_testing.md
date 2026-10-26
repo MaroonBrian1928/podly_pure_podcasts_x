@@ -16,6 +16,12 @@ The scripts add a feed and process episodes, so run them against a fresh, dispos
 
 In mock mode, the expected result for every episode is two ad breaks, 1:28–2:12 and 4:02–4:35, removing 1m 17s. Anything else means the pipeline changed how it treats the same transcript and classifications.
 
+## In CI
+
+Adding the `smoke-test` label to a pull request runs `.github/workflows/smoke-test.yml`, which runs the mock-provider mode on a GitHub runner. To test new commits, remove the label and add it again. It can also be started from the Actions tab.
+
+For speed, it runs Podly directly on the runner (lite Python dependencies, the built frontend copied into `src/app/static`) instead of building the Docker image. It fails if either script fails or the cuts differ from the expected two ad breaks. Screenshots, video and logs are uploaded as the `smoke-output` artifact whether it passes or fails.
+
 ## 1. Build an image
 
 From the repository root, build the branch you want to test. The lite build skips local Whisper, which neither mode needs:
