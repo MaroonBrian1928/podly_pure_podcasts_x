@@ -100,22 +100,33 @@ write_body() {
     done
     if [ ${#shots[@]} -gt 0 ]; then
       local i=0 row_titles="" row_images=""
-      echo "| | | |"
-      echo "|---|---|---|"
+      echo "| | |"
+      echo "|---|---|"
       for s in "${shots[@]}"; do
         row_titles+="| $(caption "$s") "
-        row_images+="| $(shot_cell "$s") "
+        row_images+="| $(shot_img "$s" thumb) "
         i=$((i + 1))
-        if [ $((i % 3)) -eq 0 ]; then
+        if [ $((i % 2)) -eq 0 ]; then
           echo "$row_titles|"
           echo "$row_images|"
           row_titles="" row_images=""
         fi
       done
       if [ -n "$row_titles" ]; then
-        echo "$row_titles|"
-        echo "$row_images|"
+        echo "$row_titles| |"
+        echo "$row_images| |"
       fi
+      echo
+      # Release files download when clicked, so full-size copies are inline.
+      echo "<details><summary>Full-size screenshots</summary>"
+      echo
+      for s in "${shots[@]}"; do
+        echo "**$(caption "$s")**"
+        echo
+        shot_img "$s" full
+        echo
+      done
+      echo "</details>"
       echo
     fi
     echo "<sub>Mock providers. The images and videos here are deleted when this PR is merged or closed; the run's \`smoke-output\` artifact keeps every screenshot, video and log for 7 days.</sub>"
@@ -138,8 +149,18 @@ done
 [ ${#upload[@]} -eq 0 ] || gh release upload "$RELEASE_TAG" "${upload[@]}" --clobber
 
 asset_url() { echo "https://github.com/$GH_REPO/releases/download/$RELEASE_TAG/$prefix$1"; }
-# A fixed height keeps the portrait phone screenshot from stretching its row.
-shot_cell() { echo "<img src=\"$(asset_url "$1")\" alt=\"$(caption "$1")\" height=\"170\">"; }
+# shot_img NAME thumb|full. Portrait phone screenshots are sized by height so
+# they don't stretch their row.
+shot_img() {
+  local size
+  case "$1:$2" in
+    phone*:thumb) size='height="300"' ;;
+    phone*:full) size='width="390"' ;;
+    *:thumb) size='width="380"' ;;
+    *) size='width="100%"' ;;
+  esac
+  echo "<img src=\"$(asset_url "$1")\" alt=\"$(caption "$1")\" $size>"
+}
 video_block() {
   if [ "$1" = walkthrough.webm ] && [ -n "$gif" ]; then
     echo "![Walkthrough at 4× speed]($(asset_url "$gif"))"
