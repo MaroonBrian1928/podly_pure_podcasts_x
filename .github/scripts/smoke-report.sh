@@ -46,7 +46,8 @@ for v in walkthrough.webm enable-and-process.webm; do
 done
 shots=()
 for s in walkthrough-failure.jpg enable-failure.jpg phone-failure.jpg \
-  feed.jpg stats-overview.jpg stats-model-calls.jpg settings.jpg enable-confirm.jpg phone.jpg; do
+  feed.jpg stats-overview.jpg stats-model-calls.jpg settings.jpg enable-confirm.jpg phone.jpg \
+  bleeps.jpg audio-segments.jpg; do
   accept "$s" image/jpeg && shots+=("$s")
 done
 gif=
@@ -77,6 +78,8 @@ caption() {
     settings.jpg) echo "Settings" ;;
     enable-confirm.jpg) echo "Enable episode" ;;
     phone.jpg) echo "Phone" ;;
+    bleeps.jpg) echo "Bleeps" ;;
+    audio-segments.jpg) echo "INA audio segments" ;;
   esac
 }
 
@@ -115,7 +118,7 @@ write_body() {
       fi
       echo
     fi
-    echo "<sub>Mock providers; full screenshots, videos and logs are in the run's \`smoke-output\` artifact.</sub>"
+    echo "<sub>Mock providers. The images and videos here are deleted when this PR is merged or closed; the run's \`smoke-output\` artifact keeps every screenshot, video and log for 7 days.</sub>"
   } > "$media/body.md"
 }
 
