@@ -22,6 +22,8 @@ Adding the `smoke-test` label to a pull request runs `.github/workflows/smoke-te
 
 For speed, it runs Podly directly on the runner (lite Python dependencies, the built frontend copied into `src/app/static`) instead of building the Docker image. It fails if either script fails or the cuts differ from the expected two ad breaks. Screenshots, video and logs are uploaded as the `smoke-output` artifact whether it passes or fails.
 
+`.github/workflows/smoke-report.yml` then keeps one comment on the pull request up to date: pass or fail, the cuts, a 4× GIF of the walkthrough, six screenshots (or the failure screenshots) and links to both videos. The smoke run can't comment itself, because pull request code runs with a read-only token, so the report workflow runs from the default branch, reads only that run's `smoke-report` artifact, and checks the pull request's head is the commit that was tested. The media is hosted on a `smoke-media` prerelease, not in git, and a pull request's files are deleted when it closes.
+
 ## 1. Build an image
 
 From the repository root, build the branch you want to test. The lite build skips local Whisper, which neither mode needs:
