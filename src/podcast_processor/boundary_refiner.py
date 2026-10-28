@@ -300,6 +300,9 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 status="success_heuristic",
                 response=raw_response,
                 error_message=parse_error or "parse_failed",
+                usage=usage,
+                prompt=prompt,
+                service_tier=effective_service_tier,
             )
         except Exception as e:  # noqa: BLE001
             self._update_model_call(

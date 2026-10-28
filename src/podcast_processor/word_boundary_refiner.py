@@ -204,6 +204,8 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                     status="success_heuristic",
                     response=raw_response,
                     error_message=f"parse_failed:{parse_failure_reason}",
+                    usage=usage,
+                    service_tier=effective_service_tier,
                 )
                 return self._fallback(ad_start, ad_end)
 
@@ -244,6 +246,8 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                         status="success_heuristic",
                         response=raw_response,
                         error_message=f"parse_failed:{parse_failure_reason}",
+                        usage=usage,
+                        service_tier=effective_service_tier,
                     )
                     return self._fallback(ad_start, ad_end)
 
@@ -309,6 +313,8 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                     status="success_heuristic",
                     response=raw_response,
                     error_message="invalid_refined_window",
+                    usage=usage,
+                    service_tier=effective_service_tier,
                 )
                 return self._fallback(ad_start, ad_end)
 

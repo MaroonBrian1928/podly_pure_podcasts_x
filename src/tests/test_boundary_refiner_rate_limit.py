@@ -122,3 +122,27 @@ class TestWordRefinerSharesLimiter:
 
         assert isinstance(classifier.boundary_refiner, WordBoundaryRefiner)
         assert classifier.boundary_refiner.token_limiter is classifier.rate_limiter
+
+
+def test_unparseable_response_still_reports_usage_for_pricing():
+    """A paid completion whose JSON can't be parsed must still be priced."""
+    usage = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+    response = _fake_response()
+    response.choices[0].message.content = "not json"
+    refiner = BoundaryRefiner(create_test_config())
+    refiner._update_model_call = Mock()  # type: ignore[method-assign]
+
+    with (
+        patch("podcast_processor.boundary_refiner.writer_client") as mock_writer,
+        patch("litellm.completion", return_value=response),
+        patch(
+            "podcast_processor.boundary_refiner.extract_litellm_usage",
+            return_value=usage,
+        ),
+    ):
+        mock_writer.action.return_value = Mock(success=False)
+        refiner.refine(5.0, 15.0, 0.9, _segments())
+
+    last = refiner._update_model_call.call_args_list[-1].kwargs
+    assert last["status"] == "success_heuristic"
+    assert last["usage"] == usage
