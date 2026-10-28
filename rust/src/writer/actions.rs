@@ -278,6 +278,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generic_update_compresses_large_word_timestamps() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE post(id INTEGER PRIMARY KEY, transcript_word_timestamps JSON)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO post(id) VALUES (1)", [])
+            .unwrap();
+        let words: Vec<Value> = (0..400)
+            .map(|index| json!({"word": "hello", "start": index as f64, "end": index as f64 + 0.5}))
+            .collect();
+        let timestamps = json!([{"sequence_num": 0, "words": words}]);
+
+        let transaction = connection.unchecked_transaction().unwrap();
+        ActionRegistry::default()
+            .execute(
+                &transaction,
+                &Operation::Update {
+                    model: "Post".to_owned(),
+                    id: json!(1),
+                    data: serde_json::Map::from_iter([(
+                        "transcript_word_timestamps".to_owned(),
+                        timestamps.clone(),
+                    )]),
+                },
+            )
+            .unwrap();
+
+        let stored: Vec<u8> = transaction
+            .query_row("SELECT transcript_word_timestamps FROM post", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(&stored[..2], &[0x1f, 0x8b]);
+        let decoded = transaction
+            .query_row("SELECT transcript_word_timestamps FROM post", [], |row| {
+                crate::word_blob::decode(row.get_ref(0)?)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), timestamps);
+
+        // A cleared value keeps the JSON text `null`, not a compressed blob.
+        ActionRegistry::default()
+            .execute(
+                &transaction,
+                &Operation::Update {
+                    model: "Post".to_owned(),
+                    id: json!(1),
+                    data: serde_json::Map::from_iter([(
+                        "transcript_word_timestamps".to_owned(),
+                        Value::Null,
+                    )]),
+                },
+            )
+            .unwrap();
+        let cleared: String = transaction
+            .query_row("SELECT transcript_word_timestamps FROM post", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cleared, "null");
+    }
+
+    #[test]
     fn transaction_update_result_matches_python_write_result_shape() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
@@ -392,6 +460,8 @@ enum ColumnKind {
     Numeric,
     Boolean,
     Json,
+    // JSON stored through `word_blob` (gzip BLOB when large).
+    CompressedJson,
 }
 
 fn execute_model_update(
@@ -477,7 +547,7 @@ fn model_spec(model: &str) -> Option<ModelSpec> {
         ("removed_ad_windows", ColumnKind::Json),
         ("original_duration_seconds", ColumnKind::Numeric),
         ("cut_stats_source", ColumnKind::Text),
-        ("transcript_word_timestamps", ColumnKind::Json),
+        ("transcript_word_timestamps", ColumnKind::CompressedJson),
         ("refined_ad_boundaries", ColumnKind::Json),
         ("refined_ad_boundaries_updated_at", ColumnKind::Text),
     ];
@@ -517,7 +587,7 @@ fn model_spec(model: &str) -> Option<ModelSpec> {
 }
 
 fn sql_value(value: &Value, kind: ColumnKind) -> Result<SqlValue, RpcError> {
-    if value.is_null() && !matches!(kind, ColumnKind::Json) {
+    if value.is_null() && !matches!(kind, ColumnKind::Json | ColumnKind::CompressedJson) {
         return Ok(SqlValue::Null);
     }
     match kind {
@@ -540,6 +610,9 @@ fn sql_value(value: &Value, kind: ColumnKind) -> Result<SqlValue, RpcError> {
             .ok_or_else(|| error("invalid_field", "boolean field has invalid value")),
         ColumnKind::Json => serde_json::to_string(value)
             .map(SqlValue::Text)
+            .map_err(|_| error("invalid_field", "JSON field has invalid value")),
+        ColumnKind::CompressedJson => serde_json::to_string(value)
+            .map(|json| crate::word_blob::encode(&json))
             .map_err(|_| error("invalid_field", "JSON field has invalid value")),
     }
 }

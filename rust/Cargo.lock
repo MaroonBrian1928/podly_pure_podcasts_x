@@ -754,6 +754,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "clap",
+ "flate2",
  "id3",
  "libc",
  "regex",

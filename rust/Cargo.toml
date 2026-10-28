@@ -23,3 +23,4 @@ thiserror = "2.0"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["limit"] }
 uuid = { version = "1.11", features = ["v4", "v5"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

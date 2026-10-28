@@ -1,7 +1,11 @@
+import gzip
+import json
 import os
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
+from sqlalchemy import JSON, TypeDecorator
 from sqlalchemy.orm import Mapped, relationship, validates
 
 from app.auth.passwords import hash_password, verify_password
@@ -21,6 +25,51 @@ def generate_job_id() -> str:
 
 def _utc_now_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+_GZIP_MAGIC = b"\x1f\x8b"
+# Short values are not worth a compression header.
+_COMPRESS_MIN_BYTES = 1024
+_COMPRESS_LEVEL = 6
+
+
+class CompressedJSON(TypeDecorator):  # type: ignore[type-arg]
+    """JSON that is stored as a gzip BLOB once it is large.
+
+    Reads accept gzip BLOBs, plain JSON text written before compression existed,
+    and the JSON text ``null`` that marks a cleared value. The Rust writer uses
+    the same format (``rust/src/word_blob.rs``). The column stays declared JSON,
+    so no schema change is involved.
+    """
+
+    impl = JSON
+    cache_ok = True
+    # Like JSON: an explicit None is stored as the JSON text `null`, while an
+    # attribute that was never set is left out of the INSERT (SQL NULL).
+    should_evaluate_none = True
+
+    def bind_processor(self, dialect: Any) -> Any:
+        def process(value: Any) -> str | bytes:
+            text = json.dumps(value)
+            if len(text) < _COMPRESS_MIN_BYTES:
+                return text
+            return gzip.compress(text.encode(), _COMPRESS_LEVEL, mtime=0)
+
+        return process
+
+    def result_processor(self, dialect: Any, coltype: Any) -> Any:
+        def process(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, memoryview):
+                value = bytes(value)
+            if isinstance(value, bytes):
+                value = (
+                    gzip.decompress(value) if value.startswith(_GZIP_MAGIC) else value
+                ).decode()
+            return json.loads(value)
+
+        return process
 
 
 # https://github.com/python/mypy/issues/17918
@@ -123,7 +172,7 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     cut_stats_source = db.Column(db.Text, nullable=True)
     # Optional per-segment word timestamps from WhisperX-compatible transcription.
     # Stored as reusable transcript metadata for exact intra-segment refinement.
-    transcript_word_timestamps = db.Column(db.JSON, nullable=True)
+    transcript_word_timestamps = db.Column(CompressedJSON, nullable=True)
 
     # Latest (most recent) refined ad cut windows for this post.
     # This is written by the ad classifier boundary refinement step and read by the

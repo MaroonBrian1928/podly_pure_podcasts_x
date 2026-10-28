@@ -2281,7 +2281,9 @@ fn query_wb_word_timestamps_by_seq(
     let mut stmt =
         conn.prepare("SELECT transcript_word_timestamps FROM post WHERE id = ?1 LIMIT 1")?;
     let raw: Option<String> = stmt
-        .query_row([post_id], |row| row.get::<_, Option<String>>(0))
+        .query_row([post_id], |row| {
+            podly_tools::word_blob::decode(row.get_ref(0)?)
+        })
         .unwrap_or(None);
     let Some(raw) = raw else {
         return Ok(HashMap::new());
@@ -2335,7 +2337,9 @@ fn query_wb_word_timestamps_for_seqs(
     let mut stmt =
         conn.prepare("SELECT transcript_word_timestamps FROM post WHERE id = ?1 LIMIT 1")?;
     let raw: Option<String> = stmt
-        .query_row([post_id], |row| row.get::<_, Option<String>>(0))
+        .query_row([post_id], |row| {
+            podly_tools::word_blob::decode(row.get_ref(0)?)
+        })
         .unwrap_or(None);
     let Some(raw) = raw else {
         return Ok(HashMap::new());
@@ -5783,7 +5787,7 @@ fn export_word_timestamps(args: TranscriptExportArgs) -> Result<TranscriptExport
         .query_row(
             "SELECT transcript_word_timestamps FROM post WHERE id = ?1",
             [args.post_id],
-            |row| row.get(0),
+            |row| podly_tools::word_blob::decode(row.get_ref(0)?),
         )
         .with_context(|| "failed to query transcript_word_timestamps")?;
 

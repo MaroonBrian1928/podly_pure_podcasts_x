@@ -420,11 +420,12 @@ fn finish_transcription_replace_inner(
     Ok(())
 }
 
-fn serialize_word_timestamps(value: Option<Value>) -> Result<String, RpcError> {
+fn serialize_word_timestamps(value: Option<Value>) -> Result<rusqlite::types::Value, RpcError> {
     value
         .map(|value| serde_json::to_string(&value))
         .transpose()
         .map(|value| value.unwrap_or_else(|| "null".to_owned()))
+        .map(|json| crate::word_blob::encode(&json))
         .map_err(|_| error("invalid_params", "invalid timestamp JSON"))
 }
 
@@ -1021,6 +1022,41 @@ mod tests {
             .unwrap();
         assert_eq!(finished, "null");
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn large_word_timestamps_are_stored_compressed_and_decode_back() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        schema(&connection);
+        let transaction = connection.transaction().unwrap();
+        let words: Vec<Value> = (0..400)
+            .map(|index| json!({"word": "hello", "start": index as f64, "end": index as f64 + 0.5, "score": null}))
+            .collect();
+        let timestamps = json!([{"sequence_num": 0, "words": words}]);
+        let params = Map::from_iter([
+            ("post_id".to_owned(), json!(1)),
+            ("transcript_word_timestamps".to_owned(), timestamps.clone()),
+        ]);
+
+        finish_transcription_replace(&transaction, &params).unwrap();
+
+        let stored: Vec<u8> = transaction
+            .query_row(
+                "SELECT transcript_word_timestamps FROM post WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(&stored[..2], &[0x1f, 0x8b]);
+        let decoded = transaction
+            .query_row(
+                "SELECT transcript_word_timestamps FROM post WHERE id=1",
+                [],
+                |row| crate::word_blob::decode(row.get_ref(0)?),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), timestamps);
     }
 
     #[test]

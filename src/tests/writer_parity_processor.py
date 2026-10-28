@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sqlite3
@@ -804,6 +805,18 @@ def _read_model_call(db_path: Any, model_call_id: int) -> dict[str, Any]:
         return dict(row)
 
 
+def stored_words_text(value: Any) -> Any:
+    """Decode a stored word-timestamps value (gzip BLOB or JSON text) to JSON text.
+
+    The two writers gzip with different encoders, so their bytes differ while
+    the decoded JSON is identical.
+    """
+    if isinstance(value, (bytes, memoryview)):
+        raw = bytes(value)
+        return (gzip.decompress(raw) if raw.startswith(b"\x1f\x8b") else raw).decode()
+    return value
+
+
 def _semantic_projection(
     projection: dict[str, list[tuple[Any, ...]]],
     columns: dict[str, list[str]],
@@ -823,6 +836,8 @@ def _semantic_projection(
             ):
                 record["timestamp"] = "<nondeterministic:timestamp>"
             for field in ("transcript_word_timestamps",):
+                if field in record:
+                    record[field] = stored_words_text(record[field])
                 if field in record and isinstance(record[field], str):
                     try:
                         record[field] = json.dumps(
@@ -1042,7 +1057,9 @@ def assert_writer_processor_parity(  # noqa: PLR0912 - action-specific parity br
                     "SELECT transcript_word_timestamps FROM post WHERE id=?",
                     (pair.manifest.post_ids[0],),
                 ).fetchone()[0]
-            assert json.loads(stored) == _large_word_timestamp_payload()
+            assert json.loads(stored_words_text(stored)) == (
+                _large_word_timestamp_payload()
+            )
         remaining_temp_files = {
             str(path) for path in Path(tempfile.gettempdir()).glob("*.normalized.json")
         }

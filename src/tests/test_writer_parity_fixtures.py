@@ -11,6 +11,7 @@ from tests.writer_parity_fixtures import (
     WriterParityPair,
     export_writer_parity_instance,
 )
+from tests.writer_parity_processor import stored_words_text
 
 
 def _query_value(path: Path, sql: str, params: tuple[object, ...] = ()) -> object:
@@ -83,6 +84,7 @@ def test_writer_parity_fixture_contains_required_cases(
             "SELECT transcript_word_timestamps FROM post WHERE id=?",
             (manifest.post_ids[0],),
         ).fetchone()[0]
+        payload = stored_words_text(payload)
         assert len(payload.encode()) >= LARGE_JSON_MIN_BYTES
         assert isinstance(json.loads(payload), list)
         assert (
