@@ -1,3 +1,4 @@
+import gzip
 import importlib.util
 import json
 import sqlite3
@@ -16,7 +17,11 @@ WORDS = [{"sequence_num": 0, "words": [{"word": "hi", "start": 1.0, "end": 1.5}]
 
 
 def _instance(
-    tmp_path: Path, posts: dict[int, Any], runs: dict[int, list[int]]
+    tmp_path: Path,
+    posts: dict[int, Any],
+    runs: dict[int, list[int]],
+    *,
+    compress: bool = False,
 ) -> Path:
     (tmp_path / "data" / "transcript_artifacts").mkdir(parents=True)
     db = sqlite3.connect(tmp_path / "sqlite3.db")
@@ -26,6 +31,8 @@ def _instance(
     )
     for post_id, column in posts.items():
         value = None if column is None else json.dumps(column)
+        if compress and value is not None:
+            value = gzip.compress(value.encode())
         db.execute("INSERT INTO post VALUES (?, ?)", (post_id, value))
     for post_id, ids in runs.items():
         for model_call_id in ids:
@@ -108,3 +115,13 @@ def test_delete_flag_removes_instead_of_moving(tmp_path: Path) -> None:
 
     assert not (root / "data" / "transcript_artifacts_pruned").exists()
     assert not (root / "data" / "transcript_artifacts" / "post_1").exists()
+
+
+def test_gzip_compressed_columns_are_read(tmp_path: Path) -> None:
+    root = _instance(tmp_path, {1: WORDS}, {1: [10]}, compress=True)
+    path = _artifact(root, 1, 10, WORDS)
+
+    counts = prune.run(root, apply=True, delete=False)
+
+    assert counts["identical"] == 1
+    assert not path.exists()

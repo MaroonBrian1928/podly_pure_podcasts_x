@@ -21,6 +21,7 @@ next to the original folder; add --delete to remove them instead.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import shutil
 import sqlite3
@@ -33,6 +34,14 @@ ROOT = Path(__file__).resolve().parents[1]
 # The writer rounds times to the millisecond, so allow that much difference.
 TOLERANCE = 0.0006
 WHISPER_PROMPT = "Whisper transcription job"
+
+
+def stored_words(raw: Any) -> Any:
+    """Decode post.transcript_word_timestamps: gzip BLOB, JSON text, or empty."""
+    if isinstance(raw, bytes):
+        raw = gzip.decompress(raw) if raw.startswith(b"\x1f\x8b") else raw
+        raw = raw.decode()
+    return None if raw in (None, "null") else json.loads(raw)
 
 
 def words_match(artifact: Any, column: Any) -> bool:
@@ -87,8 +96,7 @@ def run(instance_dir: Path, *, apply: bool, delete: bool) -> Counter[str]:
             counts["keep: post missing"] += 1
             kept.append(f"{path} (post missing)")
             continue
-        raw = row[0]
-        column = None if raw in (None, "null") else json.loads(raw)
+        column = stored_words(row[0])
         latest = db.execute(
             "SELECT MAX(id) FROM model_call WHERE post_id = ? AND prompt = ?",
             (post_id, WHISPER_PROMPT),
