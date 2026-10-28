@@ -19,6 +19,7 @@ PASS across a real episode is the bar before flipping
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import re
 import sqlite3
@@ -74,10 +75,10 @@ def load_segments_with_words(
     row = cur.fetchone()
     words_by_seq: dict[int, list[Any]] = {}
     if row and row[0]:
-        try:
-            payload = _json.loads(row[0])
-        except Exception:  # noqa: BLE001
-            payload = None
+        raw = row[0]
+        if isinstance(raw, bytes):
+            raw = gzip.decompress(raw) if raw.startswith(b"\x1f\x8b") else raw
+        payload = _json.loads(raw)
         if isinstance(payload, list):
             for entry in payload:
                 if not isinstance(entry, dict):

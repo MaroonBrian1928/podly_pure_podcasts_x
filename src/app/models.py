@@ -33,6 +33,13 @@ _COMPRESS_MIN_BYTES = 1024
 _COMPRESS_LEVEL = 6
 
 
+def compress_json_text(text: str) -> str | bytes:
+    """Encode JSON text for storage: a gzip BLOB once it is large, else the text."""
+    if len(text) < _COMPRESS_MIN_BYTES:
+        return text
+    return gzip.compress(text.encode(), _COMPRESS_LEVEL, mtime=0)
+
+
 class CompressedJSON(TypeDecorator):  # type: ignore[type-arg]
     """JSON that is stored as a gzip BLOB once it is large.
 
@@ -50,10 +57,7 @@ class CompressedJSON(TypeDecorator):  # type: ignore[type-arg]
 
     def bind_processor(self, dialect: Any) -> Any:
         def process(value: Any) -> str | bytes:
-            text = json.dumps(value)
-            if len(text) < _COMPRESS_MIN_BYTES:
-                return text
-            return gzip.compress(text.encode(), _COMPRESS_LEVEL, mtime=0)
+            return compress_json_text(json.dumps(value))
 
         return process
 

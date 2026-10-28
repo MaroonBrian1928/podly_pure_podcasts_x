@@ -146,6 +146,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "transcription_json",
     },
     {
+        "case_id": "processor_compress_post_word_timestamps",
+        "operation": "action",
+        "action": "compress_post_word_timestamps",
+        "owner": "compress_post_word_timestamps",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "semantics": "exact",
+    },
+    {
         "case_id": "processor_finish_transcription_replace_from_large_artifact",
         "operation": "action",
         "action": "finish_transcription_replace_from_artifact",
@@ -433,6 +442,9 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
             "model_call_id": 601,
             "segment_count": 17,
             "transcript_word_timestamps": _word_timestamp_payload(),
+        },
+        "processor_compress_post_word_timestamps": lambda: {
+            "post_id": manifest.post_ids[0],
         },
         "processor_finish_transcription_replace_from_large_artifact": lambda: {
             "post_id": manifest.post_ids[0],

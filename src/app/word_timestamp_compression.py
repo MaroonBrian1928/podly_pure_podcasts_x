@@ -21,23 +21,10 @@ PAUSE_BETWEEN_ROWS_SECONDS = 0.05
 logger = logging.getLogger("global_logger")
 
 
-def _stored_as_blob(post_id: int) -> bool:
-    from app.extensions import db
-
-    return (
-        db.session.execute(
-            text("SELECT typeof(transcript_word_timestamps) FROM post WHERE id = :id"),
-            {"id": post_id},
-        ).scalar()
-        == "blob"
-    )
-
-
 def compress_word_timestamps(
     *, apply: bool, limit: int | None = None, pause: float = PAUSE_BETWEEN_ROWS_SECONDS
 ) -> dict[str, Any]:
     from app.extensions import db
-    from app.models import Post
     from app.writer.client import writer_client
 
     ids = [
@@ -64,22 +51,20 @@ def compress_word_timestamps(
         return result
 
     for post_id in ids:
-        post = db.session.get(Post, post_id)
-        words = post.transcript_word_timestamps if post is not None else None
-        db.session.expire_all()
-        if words is None:
+        try:
+            write = writer_client.action(
+                "compress_post_word_timestamps", {"post_id": post_id}, wait=True
+            )
+        except Exception:
+            logger.exception("Word timestamp compression failed for post %s", post_id)
+            result["failed"] += 1
             continue
-        write = writer_client.update(
-            "Post", post_id, {"transcript_word_timestamps": words}, wait=True
-        )
         if not write or not write.success:
             result["failed"] += 1
-        elif _stored_as_blob(post_id):
+        elif (write.data or {}).get("compressed"):
             result["compressed"] += 1
         else:
-            # A writer that skips no-op updates (the Python fallback) leaves it.
             result["unchanged"] += 1
-        del words
         if pause:
             time.sleep(pause)
     if result["compressed"]:

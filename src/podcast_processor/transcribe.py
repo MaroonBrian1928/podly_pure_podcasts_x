@@ -1,3 +1,4 @@
+import bisect
 import logging
 import math
 import shutil
@@ -578,18 +579,22 @@ class GroqWhisperTranscriber(Transcriber):
         if not top_level_words or any(grouped):
             return grouped
 
-        index = 0
+        if not segments:
+            return grouped
+
+        # A word belongs to the last segment that started at or before it, so
+        # overlapping segments, gaps and words past the final segment all land
+        # somewhere; words without a start follow the previous word.
+        order = sorted(range(len(segments)), key=lambda i: segments[i]["start"])
+        starts = [segments[i]["start"] for i in order]
+        target = 0
         for raw_word in top_level_words:
             word = parse(raw_word)
             if word is None:
                 continue
-            while (
-                word.start is not None
-                and index < len(segments) - 1
-                and word.start >= segments[index]["end"]
-            ):
-                index += 1
-            grouped[index].append(word)
+            if word.start is not None:
+                target = order[max(bisect.bisect_right(starts, word.start) - 1, 0)]
+            grouped[target].append(word)
         return grouped
 
     def get_segments_for_chunk(

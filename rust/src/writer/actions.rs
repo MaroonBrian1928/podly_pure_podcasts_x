@@ -107,6 +107,7 @@ impl ActionRegistry {
                         | "insert_transcript_segments"
                         | "finish_transcription_replace"
                         | "finish_transcription_replace_from_artifact"
+                        | "compress_post_word_timestamps"
                         | "mark_model_call_failed"
                         | "insert_identifications"
                         | "replace_identifications"

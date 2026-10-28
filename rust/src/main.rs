@@ -3753,7 +3753,7 @@ fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<Hash
         })?;
     for r in default_rows {
         let (pid, model_name, prompt) = r?;
-        if is_whisper_call(&model_name, prompt.as_deref()) {
+        if is_whisper_call(&model_name, prompt.as_deref()) || is_ina_call(&model_name) {
             continue;
         }
         if let Some(bucket) = per_post.get_mut(&pid) {
@@ -10089,14 +10089,15 @@ mod tests {
                 (1, 1, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
                 (2, 1, 2, 3, 'gpt-5-mini', 'p', '2026-05-08 11:05:00', 'success', 1, NULL, NULL),
                 (3, 2, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
-                (4, 2, 0, -1, 'whisper-1', 'Whisper transcription job', '2026-05-08 11:06:00', 'success', 0, NULL, NULL);",
+                (4, 2, 0, -1, 'whisper-1', 'Whisper transcription job', '2026-05-08 11:06:00', 'success', 0, NULL, NULL),
+                (5, 2, 0, -1, 'ina:speech_music_noise', 'INA', '2026-05-08 11:07:00', 'success', 0, NULL, NULL);",
         )
         .unwrap();
 
         let summary = load_service_tier_summary(&conn, &[1, 2]).unwrap();
 
         assert_eq!(summary[&1]["mixed"], true);
-        // Whisper rows are not LLM calls and never count as a default tier.
+        // Whisper and INA rows are not LLM calls and never count as a default tier.
         assert_eq!(summary[&2]["mixed"], false);
     }
 

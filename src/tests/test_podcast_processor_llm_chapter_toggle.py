@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 from app.models import Post, ProcessingJob
 from app.runtime_config import config as runtime_config
 from podcast_processor.audio_processor import AudioProcessResult
@@ -706,6 +708,59 @@ def test_processing_steps_routes_chapter_insert_strategy() -> None:
     )
     processor._perform_chapter_based_processing.assert_not_called()
     processor._perform_llm_based_processing.assert_not_called()
+
+
+@pytest.mark.parametrize("record_word_timestamps", [True, False])
+def test_chapter_insert_fallback_transcription_follows_word_timestamp_setting(
+    record_word_timestamps: bool,
+) -> None:
+    config = create_standard_test_config()
+    config.processing.record_word_timestamps = record_word_timestamps
+
+    transcription_manager = MagicMock()
+    transcription_manager.transcribe_for_processing.return_value = (
+        [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=10.0, text="Intro")],
+        None,
+    )
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.transcription_manager = transcription_manager
+    processor.status_manager = MagicMock()
+    processor._finalize_processing = MagicMock()
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    with (
+        patch(
+            "podcast_processor.podcast_processor.resolve_llm_path_chapters",
+            side_effect=[
+                ([], "none"),
+                ([Chapter("g", "Intro", 0, 10_000)], "transcript"),
+            ],
+        ),
+        patch(
+            "podcast_processor.podcast_processor."
+            "generate_topic_chapters_from_transcript_with_llm",
+            return_value=[Chapter("t", "Intro", 0, 10_000)],
+        ),
+        patch("podcast_processor.podcast_processor.shutil.copyfile"),
+        patch("podcast_processor.podcast_processor.write_adjusted_chapters"),
+    ):
+        processor._perform_chapter_insertion_only_processing(
+            post, job, "/tmp/output.mp3"
+        )
+
+    kwargs = transcription_manager.transcribe_for_processing.call_args.kwargs
+    assert kwargs["include_word_timestamps"] is record_word_timestamps
 
 
 def test_chapter_insert_strategy_writes_chapters_without_ad_removal() -> None:

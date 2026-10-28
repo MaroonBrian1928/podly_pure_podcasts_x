@@ -104,7 +104,7 @@ def _summarize_service_tiers_for_posts(
 
 
 def _posts_with_finished_default_tier_calls(post_ids: list[int]) -> set[int]:
-    from app.llm_pricing import is_whisper_call
+    from app.llm_pricing import is_ina_call, is_whisper_call
 
     rows = (
         ModelCall.query.with_entities(
@@ -121,6 +121,7 @@ def _posts_with_finished_default_tier_calls(post_ids: list[int]) -> set[int]:
         post_id
         for post_id, model_name, prompt in rows
         if not is_whisper_call(model_name or "", prompt)
+        and not is_ina_call(model_name or "")
     }
 
 

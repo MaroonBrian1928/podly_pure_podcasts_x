@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.orm.attributes import flag_modified
 
 from app.extensions import db
 from app.models import Feed, Post
@@ -36,28 +35,34 @@ def _typeof(post_id: int) -> str:
     ).scalar_one()
 
 
-def test_only_large_text_rows_are_rewritten_through_the_writer(
-    app, monkeypatch
-) -> None:
+def _run_action(monkeypatch, fail_for: set[int] | None = None) -> list[int]:
+    """Route the job's writer calls to the real Python writer action."""
+    from app.writer.actions import compress_post_word_timestamps_action
     from app.writer.client import writer_client
 
+    calls: list[int] = []
+
+    def fake_action(name: str, params: dict[str, Any], wait: bool = True):
+        assert name == "compress_post_word_timestamps"
+        post_id = params["post_id"]
+        calls.append(post_id)
+        if fail_for and post_id in fail_for:
+            raise RuntimeError("request too large")
+        data = compress_post_word_timestamps_action(params)
+        db.session.commit()
+        return SimpleNamespace(success=True, data=data)
+
+    monkeypatch.setattr(writer_client, "action", fake_action)
+    return calls
+
+
+def test_only_large_text_rows_are_compressed(app, monkeypatch) -> None:
     with app.app_context():
         large = _post("large", json.dumps(LARGE))
         small = _post("small", json.dumps([{"sequence_num": 0, "words": []}]))
         cleared = _post("cleared", "null")
         never_set = _post("never", None)
-        written: list[tuple[int, Any]] = []
-
-        def fake_update(model: str, post_id: int, data: dict[str, Any], wait: bool):
-            written.append((post_id, data["transcript_word_timestamps"]))
-            post = db.session.get(Post, post_id)
-            assert post is not None
-            post.transcript_word_timestamps = data["transcript_word_timestamps"]
-            flag_modified(post, "transcript_word_timestamps")
-            db.session.commit()
-            return SimpleNamespace(success=True)
-
-        monkeypatch.setattr(writer_client, "update", fake_update)
+        calls = _run_action(monkeypatch)
 
         dry = compress_word_timestamps(apply=False)
         assert dry == {
@@ -67,13 +72,15 @@ def test_only_large_text_rows_are_rewritten_through_the_writer(
             "unchanged": 0,
             "failed": 0,
         }
-        assert written == []
+        assert calls == []
 
         result = compress_word_timestamps(apply=True, pause=0)
 
         assert result["compressed"] == 1 and result["failed"] == 0
-        assert written == [(large, LARGE)]
+        assert calls == [large]
         assert _typeof(large) == "blob"
+        stored = db.session.get(Post, large)
+        assert stored is not None and stored.transcript_word_timestamps == LARGE
         assert [_typeof(i) for i in (small, cleared)] == ["text", "text"]
         assert _typeof(never_set) == "null"
 
@@ -81,18 +88,58 @@ def test_only_large_text_rows_are_rewritten_through_the_writer(
         assert again["candidates"] == 0
 
 
-def test_failed_writes_are_counted_and_the_row_is_left_alone(app, monkeypatch) -> None:
-    from app.writer.client import writer_client
+def test_compression_keeps_words_written_after_the_job_listed_the_post(
+    app, monkeypatch
+) -> None:
+    from app.writer.actions import compress_post_word_timestamps_action
+
+    newer = [
+        {"sequence_num": 0, "words": [{"word": "new", "start": 1, "end": 2}] * 300}
+    ]
+    with app.app_context():
+        post_id = _post("race", json.dumps(LARGE))
+        post = db.session.get(Post, post_id)
+        post.transcript_word_timestamps = newer
+        db.session.commit()
+
+        compress_post_word_timestamps_action({"post_id": post_id})
+        db.session.commit()
+
+        db.session.expire_all()
+        stored = db.session.get(Post, post_id)
+        assert stored is not None and stored.transcript_word_timestamps == newer
+
+
+def test_action_skips_posts_that_are_missing_small_cleared_or_compressed(app) -> None:
+    from app.writer.actions import compress_post_word_timestamps_action
 
     with app.app_context():
-        post_id = _post("large", json.dumps(LARGE))
-        monkeypatch.setattr(
-            writer_client,
-            "update",
-            lambda *args, **kwargs: SimpleNamespace(success=False),
-        )
+        ids = [
+            _post("small", json.dumps([{"sequence_num": 0, "words": []}])),
+            _post("cleared", "null"),
+            _post("never", None),
+        ]
+        large = _post("large", json.dumps(LARGE))
+        assert compress_post_word_timestamps_action({"post_id": large})["compressed"]
+        ids.append(large)
+        ids.append(999_999)
+
+        results = [
+            compress_post_word_timestamps_action({"post_id": i})["compressed"]
+            for i in ids
+        ]
+
+        assert results == [False] * 5
+
+
+def test_one_failing_row_does_not_stop_the_rest(app, monkeypatch) -> None:
+    with app.app_context():
+        first = _post("first", json.dumps(LARGE))
+        second = _post("second", json.dumps(LARGE))
+        _run_action(monkeypatch, fail_for={first})
 
         result = compress_word_timestamps(apply=True, pause=0)
 
-        assert result["failed"] == 1 and result["compressed"] == 0
-        assert _typeof(post_id) == "text"
+        assert result["failed"] == 1 and result["compressed"] == 1
+        assert _typeof(first) == "text"
+        assert _typeof(second) == "blob"

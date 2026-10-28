@@ -1654,6 +1654,7 @@ class PodcastProcessor:
                 include_word_timestamps=(
                     (enable_profanity_bleeping and not has_saved_bleep_windows)
                     or word_refinement_active
+                    or self._record_word_timestamps_enabled()
                 ),
                 progress_callback=fallback_progress,
             )
