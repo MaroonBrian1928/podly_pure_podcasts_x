@@ -67,7 +67,7 @@ def test_refine_tags_parse_failures_with_finish_reason(
             return_value=("prompt", 42),
         ),
         patch(
-            "podcast_processor.word_boundary_refiner.litellm.completion",
+            "litellm.completion",
             return_value=response,
         ),
         caplog.at_level("DEBUG"),

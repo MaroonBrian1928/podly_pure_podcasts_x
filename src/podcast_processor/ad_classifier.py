@@ -4,7 +4,6 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-import litellm
 from jinja2 import Template
 from litellm.exceptions import InternalServerError
 from litellm.types.utils import Choices
@@ -21,6 +20,10 @@ from podcast_processor.llm_concurrency_limiter import (
     LLMConcurrencyLimiter,
     get_concurrency_limiter,
 )
+from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
+)
 from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
@@ -33,7 +36,10 @@ from podcast_processor.token_rate_limiter import (
 from podcast_processor.transcribe import Segment
 from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 from shared.config import Config, TestWhisperConfig
-from shared.llm_utils import model_uses_max_completion_tokens
+from shared.llm_utils import (
+    model_uses_max_completion_tokens,
+    normalize_completion_args_for_model,
+)
 
 
 class ClassifyParams:
@@ -678,6 +684,8 @@ class AdClassifier:
 
         completion_args["response_format"] = {"type": "json_object"}
 
+        normalize_completion_args_for_model(completion_args)
+        apply_service_tier(completion_args, self.config)
         return completion_args
 
     def _generate_user_prompt(
@@ -743,7 +751,14 @@ class AdClassifier:
         return model_call.status not in ("success", "failed_permanent")
 
     def _perform_llm_call(self, *, model_call: ModelCall, system_prompt: str) -> None:
-        """Perform the LLM call for classification."""
+        """Perform the LLM call for classification.
+
+        Re-raises on failure. `_call_model` already handles transient errors
+        with its own retry loop; anything that escapes it (non-retryable
+        exception, retries exhausted) is a genuine failure that must fail the
+        whole job. Swallowing it here would produce a zero-ad run marked
+        successful, leaving ads in the output.
+        """
         self.logger.info(
             f"Calling LLM for ModelCall {model_call.id} (post {model_call.post_id}, segments {model_call.first_segment_sequence_num}-{model_call.last_segment_sequence_num})."
         )
@@ -752,11 +767,12 @@ class AdClassifier:
                 self._handle_test_mode_call(model_call)
             else:
                 self._call_model(model_call_obj=model_call, system_prompt=system_prompt)
-        except Exception as e:
+        except Exception:
             self.logger.error(
-                f"LLM interaction via _call_model for ModelCall {model_call.id} resulted in an exception: {e}",
+                f"LLM call failed for ModelCall {model_call.id}; failing classification.",
                 exc_info=True,
             )
+            raise
 
     def _handle_test_mode_call(self, model_call: ModelCall) -> None:
         """Handle LLM call in test mode."""
@@ -1055,12 +1071,7 @@ class AdClassifier:
                 if completion_args is None:
                     return None  # Token limit exceeded
 
-                # Use concurrency limiter if available
-                if self.concurrency_limiter:
-                    with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
-                        response = litellm.completion(**completion_args)
-                else:
-                    response = litellm.completion(**completion_args)
+                response = self._complete(completion_args)
 
                 response_first_choice = response.choices[0]
                 assert isinstance(response_first_choice, Choices)
@@ -1096,6 +1107,11 @@ class AdClassifier:
             except Exception as e:
                 last_error = e
                 if self._is_retryable_error(e):
+                    # Preserve the classifier's gradual retry backoff after an
+                    # exhausted Flex-to-standard cycle. Do not sleep after the
+                    # final configured attempt.
+                    if attempt == retry_count - 1:
+                        break
                     self._handle_retryable_error(
                         model_call_obj=model_call_obj,
                         error=e,
@@ -1132,6 +1148,17 @@ class AdClassifier:
             f"Maximum retries ({retry_count}) exceeded for ModelCall {model_call_obj.id}."
         )
 
+    def _complete(self, completion_args: dict[str, Any]) -> Any:
+        """Run the completion, inside the concurrency limiter when configured."""
+        if not self.concurrency_limiter:
+            return call_litellm_with_tier_retry(
+                completion_args, config=self.config, logger=self.logger
+            )
+        with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
+            return call_litellm_with_tier_retry(
+                completion_args, config=self.config, logger=self.logger
+            )
+
     def _usable_response_content(
         self, *, finish_reason: Any, content: str | None
     ) -> str:
@@ -1166,20 +1193,28 @@ class AdClassifier:
         attempt: int,
         current_attempt_num: int,
     ) -> None:
-        """Handle a retryable error during LLM call."""
+        """Handle a retryable error during LLM call.
+
+        Flips the row to `status="retrying"` with an attempt-annotated error
+        message so the debug UI shows "retrying (2/5): rate limit" instead of
+        sitting silently at `pending` for the duration of the backoff sleep.
+        """
         self.logger.error(
             f"LLM retryable error for ModelCall {model_call_obj.id} (attempt {current_attempt_num}): {error}"
         )
+        retry_count = getattr(self.config, "llm_max_retry_attempts", 3)
+        error_message = f"Retrying ({current_attempt_num}/{retry_count}): {error}"
         res = writer_client.update(
             "ModelCall",
             model_call_obj.id,
-            {"error_message": str(error)},
+            {"status": "retrying", "error_message": error_message},
             wait=True,
         )
         if not res or not res.success:
             raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
         # Update local object to reflect database state
-        model_call_obj.error_message = str(error)
+        model_call_obj.status = "retrying"
+        model_call_obj.error_message = error_message
 
         # Use longer backoff for rate limiting errors. Invalid output quotes model text,
         # which may contain these terms, so it never counts as rate limiting.
@@ -1188,8 +1223,8 @@ class AdClassifier:
             term in error_str
             for term in ["rate_limit_error", "ratelimiterror", "429", "rate limit"]
         ):
-            # For rate limiting, use longer backoff: 60, 120, 240 seconds
-            wait_time = 60 * (2**attempt)
+            # For rate limiting, use a gradual backoff starting at 30 seconds.
+            wait_time = 30 * (2**attempt)
             self.logger.info(
                 f"Rate limit detected. Waiting {wait_time}s before retry for ModelCall {model_call_obj.id}."
             )

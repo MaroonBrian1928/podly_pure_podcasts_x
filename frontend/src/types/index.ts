@@ -122,6 +122,7 @@ export interface LLMConfig {
   enable_boundary_refinement: boolean;
   enable_word_level_boundary_refinder?: boolean;
   enable_llm_chapter_fallback_tagging?: boolean;
+  llm_service_tier?: 'default' | 'flex' | 'priority' | 'auto';
 }
 
 export type WhisperConfig =

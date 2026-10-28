@@ -105,6 +105,16 @@ class Config(BaseModel):
         default=DEFAULTS.ENABLE_WORD_LEVEL_BOUNDARY_REFINDER,
         description="Enable word-level (heuristic-timed) ad boundary refinement",
     )
+    llm_service_tier: str = Field(
+        default=DEFAULTS.LLM_SERVICE_TIER,
+        description=(
+            "litellm service_tier passed to providers that support it "
+            "(OpenAI, Gemini). Values: 'default' (unset), 'flex' (cheaper, "
+            "slower, may 429/503 -- the wrapper retries with backoff and "
+            "falls back to standard on exhaustion), 'priority' (faster, "
+            "pricier), 'auto'. Ignored for providers without service tiers."
+        ),
+    )
     enable_llm_chapter_fallback_tagging: bool = Field(
         default=DEFAULTS.ENABLE_LLM_CHAPTER_FALLBACK_TAGGING,
         description=(

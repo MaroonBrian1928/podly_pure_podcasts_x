@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import litellm
 from jinja2 import Template
 
 from podcast_processor.llm_model_call_utils import (
+    apply_service_tier,
+    call_litellm_with_tier_retry,
     extract_litellm_content,
     extract_litellm_finish_reason,
     extract_litellm_usage,
@@ -21,6 +22,7 @@ from podcast_processor.llm_model_call_utils import (
     try_update_model_call,
 )
 from shared.config import Config
+from shared.llm_utils import normalize_completion_args_for_model
 
 # Keep the same internal bounds as the existing BoundaryRefiner.
 MAX_START_EXTENSION_SECONDS = 30.0
@@ -100,14 +102,19 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         raw_response: str | None = None
 
         try:
-            response = litellm.completion(
-                model=self.config.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=4096,
-                timeout=self.config.openai_timeout,
-                api_key=self.config.llm_api_key,
-                base_url=self.config.openai_base_url,
+            completion_args: dict[str, Any] = {
+                "model": self.config.llm_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 4096,
+                "timeout": self.config.openai_timeout,
+                "api_key": self.config.llm_api_key,
+                "base_url": self.config.openai_base_url,
+            }
+            normalize_completion_args_for_model(completion_args)
+            apply_service_tier(completion_args, self.config)
+            response = call_litellm_with_tier_retry(
+                completion_args, config=self.config, logger=self.logger
             )
 
             content = extract_litellm_content(response)

@@ -175,7 +175,7 @@ def test_refine_generated_chapter_titles_with_llm_updates_titles() -> None:
     )
 
     with patch(
-        "podcast_processor.chapter_fallback.litellm.completion",
+        "litellm.completion",
         return_value=response,
     ) as completion_mock:
         refined = refine_generated_chapter_titles_with_llm(
@@ -225,7 +225,7 @@ def test_generate_topic_chapters_from_transcript_with_llm_uses_llm_boundaries() 
     )
 
     with patch(
-        "podcast_processor.chapter_fallback.litellm.completion",
+        "litellm.completion",
         return_value=response,
     ) as completion_mock:
         chapters = generate_topic_chapters_from_transcript_with_llm(
@@ -303,7 +303,7 @@ def test_generate_topic_chapters_from_transcript_with_llm_retries_remaining_bloc
         return second_response
 
     with patch(
-        "podcast_processor.chapter_fallback.litellm.completion",
+        "litellm.completion",
         side_effect=_completion_side_effect,
     ) as completion_mock:
         chapters = generate_topic_chapters_from_transcript_with_llm(
