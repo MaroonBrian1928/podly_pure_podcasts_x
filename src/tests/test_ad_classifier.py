@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -118,6 +119,54 @@ def test_call_model(test_config: Config, app: Flask) -> None:
             assert refreshed is not None
             assert refreshed.status == "success"
             assert refreshed.response == VALID_RESPONSE
+
+
+def test_call_model_persists_token_usage(test_config: Config, app: Flask) -> None:
+    """A successful LLM call should persist prompt/completion/total tokens on
+    the ModelCall row so the debug modal can display them alongside service tier.
+    """
+    with app.app_context():
+        classifier = AdClassifier(config=test_config, db_session=db.session)
+
+        dummy_model_call = ModelCall(
+            post_id=0,
+            model_name=test_config.llm_model,
+            prompt="test prompt",
+            first_segment_sequence_num=0,
+            last_segment_sequence_num=0,
+            status="pending",
+        )
+        db.session.add(dummy_model_call)
+        db.session.commit()
+
+        mock_message = MagicMock()
+        mock_message.content = VALID_RESPONSE
+        mock_choice = MagicMock(spec=Choices)
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        # LiteLLM exposes cached prompt hits under
+        # usage.prompt_tokens_details.cached_tokens.
+        mock_response.usage = SimpleNamespace(
+            prompt_tokens=120,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=30),
+            completion_tokens=45,
+            total_tokens=165,
+        )
+
+        with patch("litellm.completion", return_value=mock_response):
+            classifier._call_model(
+                model_call_obj=dummy_model_call,
+                system_prompt="sys",
+            )
+
+        refreshed = db.session.get(ModelCall, dummy_model_call.id)
+        assert refreshed is not None
+        assert refreshed.status == "success"
+        assert refreshed.prompt_tokens == 120
+        assert refreshed.cached_prompt_tokens == 30
+        assert refreshed.completion_tokens == 45
+        assert refreshed.total_tokens == 165
 
 
 def test_call_model_retry_on_internal_error(test_config: Config, app: Flask) -> None:

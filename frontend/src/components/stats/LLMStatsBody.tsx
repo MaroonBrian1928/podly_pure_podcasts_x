@@ -428,6 +428,8 @@ export default function LLMStatsBody({ episodeGuid, onClose }: LLMStatsBodyProps
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Model</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Segment range</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Status</th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Tier</th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Tokens</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Timestamp</th>
                                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-600">Retries</th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-600">Actions</th>
@@ -451,6 +453,17 @@ export default function LLMStatsBody({ episodeGuid, onClose }: LLMStatsBodyProps
                                         {call.status}
                                       </span>
                                     </td>
+                                    <td className="px-4 py-3 text-sm text-gray-600">{call.service_tier ?? '—'}</td>
+                                    <td
+                                      className="px-4 py-3 text-right text-sm tabular-nums text-gray-600"
+                                      title={
+                                        call.prompt_tokens != null
+                                          ? `${call.prompt_tokens.toLocaleString()} prompt (${(call.cached_prompt_tokens ?? 0).toLocaleString()} cached), ${(call.completion_tokens ?? 0).toLocaleString()} completion`
+                                          : undefined
+                                      }
+                                    >
+                                      {call.total_tokens != null ? call.total_tokens.toLocaleString() : '—'}
+                                    </td>
                                     <td className="px-4 py-3 text-sm text-gray-600">{formatTimestamp(call.timestamp)}</td>
                                     <td className="px-4 py-3 text-right text-sm tabular-nums text-gray-600">{call.retry_attempts}</td>
                                     <td className="px-4 py-3">
@@ -464,7 +477,7 @@ export default function LLMStatsBody({ episodeGuid, onClose }: LLMStatsBodyProps
                                   </tr>
                                   {expandedModelCalls.has(call.id) && (
                                     <tr className="bg-gray-50">
-                                      <td colSpan={7} className="px-4 py-4">
+                                      <td colSpan={9} className="px-4 py-4">
                                         <div className="space-y-4">
                                           {call.prompt && (
                                             <div>

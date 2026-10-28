@@ -18,6 +18,7 @@ from podcast_processor.llm_model_call_utils import (
     extract_litellm_content,
     extract_litellm_finish_reason,
     extract_litellm_usage,
+    record_service_tier_on_model_call,
     render_prompt_and_upsert_model_call,
     try_update_model_call,
 )
@@ -100,6 +101,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         )
 
         raw_response: str | None = None
+        usage: dict[str, int | None] | None = None
 
         try:
             completion_args: dict[str, Any] = {
@@ -113,8 +115,17 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             }
             normalize_completion_args_for_model(completion_args)
             apply_service_tier(completion_args, self.config)
+            record_service_tier_on_model_call(
+                model_call_id,
+                completion_args,
+                logger=self.logger,
+                log_prefix="Word boundary refine",
+            )
             response = call_litellm_with_tier_retry(
-                completion_args, config=self.config, logger=self.logger
+                completion_args,
+                config=self.config,
+                logger=self.logger,
+                model_call_id=model_call_id,
             )
 
             content = extract_litellm_content(response)
@@ -128,6 +139,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 extra={
                     "content_preview": (content or "")[:200],
                     "prompt_tokens": usage.get("prompt_tokens"),
+                    "cached_prompt_tokens": usage.get("cached_prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
                     "total_tokens": usage.get("total_tokens"),
                 },
@@ -138,6 +150,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status="received_response",
                 response=raw_response,
                 error_message=None,
+                usage=usage,
             )
 
             parsed = self._parse_json(content)
@@ -159,6 +172,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                     status="success_heuristic",
                     response=raw_response,
                     error_message=f"parse_failed:{parse_failure_reason}",
+                    usage=usage,
                 )
                 return self._fallback(ad_start, ad_end)
 
@@ -197,6 +211,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                     status="success_heuristic",
                     response=raw_response,
                     error_message="invalid_refined_window",
+                    usage=usage,
                 )
                 return self._fallback(ad_start, ad_end)
 
@@ -205,6 +220,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status=self._result_status(start_changed, end_changed, partial_errors),
                 response=raw_response,
                 error_message=(",".join(partial_errors) if partial_errors else None),
+                usage=usage,
             )
 
             result = WordBoundaryRefinement(
@@ -219,6 +235,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status="success",
                 response=raw_response,
                 error_message=None,
+                usage=usage,
             )
             return result
 
@@ -228,6 +245,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 status="failed_permanent",
                 response=raw_response,
                 error_message=str(exc),
+                usage=usage,
             )
             self.logger.warning("Word boundary refine failed: %s", exc)
             return self._fallback(ad_start, ad_end)
@@ -950,6 +968,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         status: str,
         response: str | None,
         error_message: str | None,
+        usage: dict[str, int | None] | None = None,
     ) -> None:
         try_update_model_call(
             model_call_id,
@@ -958,4 +977,5 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             error_message=error_message,
             logger=self.logger,
             log_prefix="Word boundary refine",
+            usage=usage,
         )

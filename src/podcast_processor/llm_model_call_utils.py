@@ -54,6 +54,41 @@ def _resolved_tier(config: Any) -> str:
     return tier
 
 
+def record_service_tier_on_model_call(
+    model_call_id: int | None,
+    completion_args: dict[str, Any],
+    *,
+    logger: logging.Logger,
+    log_prefix: str = "ModelCall",
+) -> None:
+    """Persist `service_tier` from completion_args onto the ModelCall row.
+
+    Best-effort: silently skips when there's no model_call_id (best-effort
+    upsert never returned one) or the writer call fails -- the LLM call itself
+    is the load-bearing operation, this is just so the debug UI can show
+    which tier was used. Writes NULL when the call ran at the default tier
+    (`service_tier` absent from args).
+    """
+    if model_call_id is None:
+        return
+    tier = completion_args.get("service_tier")
+    try:
+        writer_client.update(
+            "ModelCall",
+            int(model_call_id),
+            {"service_tier": tier},
+            wait=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "%s: failed to record service_tier=%r on ModelCall %s: %s",
+            log_prefix,
+            tier,
+            model_call_id,
+            exc,
+        )
+
+
 def apply_service_tier(
     completion_args: dict[str, Any],
     config: Any,
@@ -75,6 +110,30 @@ def apply_service_tier(
         return completion_args
     completion_args["service_tier"] = tier
     return completion_args
+
+
+def _record_effective_service_tier(
+    response: Any,
+    completion_args: dict[str, Any],
+    *,
+    model_call_id: int | None,
+    logger: logging.Logger,
+) -> Any:
+    """Keep request state and ModelCall pricing aligned with the served tier."""
+    response_tier = getattr(response, "service_tier", None)
+    if response_tier is None and isinstance(response, dict):
+        response_tier = response.get("service_tier")
+    normalized_tier = str(response_tier or "").strip().lower()
+    if normalized_tier in {"flex", "priority"}:
+        completion_args["service_tier"] = normalized_tier
+    elif normalized_tier in {"default", "auto"}:
+        completion_args.pop("service_tier", None)
+    record_service_tier_on_model_call(
+        model_call_id,
+        completion_args,
+        logger=logger,
+    )
+    return response
 
 
 def _is_tier_retryable(exc: Exception) -> bool:
@@ -100,6 +159,7 @@ def call_litellm_with_tier_retry(
     max_retries: int | None = None,
     base_delay: float | None = None,
     sleep: Any = time.sleep,
+    model_call_id: int | None = None,
 ) -> Any:
     """Run `litellm.completion(**args)` with Flex-aware retry + fallback.
 
@@ -113,7 +173,13 @@ def call_litellm_with_tier_retry(
 
     flex_active = completion_args.get("service_tier") == "flex"
     if not flex_active:
-        return litellm.completion(**completion_args)
+        response = litellm.completion(**completion_args)
+        return _record_effective_service_tier(
+            response,
+            completion_args,
+            model_call_id=model_call_id,
+            logger=logger,
+        )
 
     retries = (
         max_retries
@@ -129,7 +195,13 @@ def call_litellm_with_tier_retry(
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            return litellm.completion(**completion_args)
+            response = litellm.completion(**completion_args)
+            return _record_effective_service_tier(
+                response,
+                completion_args,
+                model_call_id=model_call_id,
+                logger=logger,
+            )
         except Exception as exc:
             last_err = exc
             if not _is_tier_retryable(exc):
@@ -143,7 +215,13 @@ def call_litellm_with_tier_retry(
                     exc,
                 )
                 completion_args.pop("service_tier", None)
-                return litellm.completion(**completion_args)
+                response = litellm.completion(**completion_args)
+                return _record_effective_service_tier(
+                    response,
+                    completion_args,
+                    model_call_id=model_call_id,
+                    logger=logger,
+                )
             wait = delay * (2**attempt)
             logger.info(
                 "Flex tier busy (%s); retrying in %.1fs (attempt %d/%d)",
@@ -237,21 +315,33 @@ def try_update_model_call(
     error_message: str | None,
     logger: logging.Logger,
     log_prefix: str,
+    usage: dict[str, int | None] | None = None,
 ) -> None:
     """Best-effort ModelCall updater; no-op if call creation failed."""
     if model_call_id is None:
         return
 
+    data: dict[str, Any] = {
+        "status": status,
+        "response": response,
+        "error_message": error_message,
+        "retry_attempts": 1,
+    }
+    if usage:
+        for field in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+        ):
+            if usage.get(field) is not None:
+                data[field] = usage[field]
+
     try:
         writer_client.update(
             "ModelCall",
             int(model_call_id),
-            {
-                "status": status,
-                "response": response,
-                "error_message": error_message,
-                "retry_attempts": 1,
-            },
+            data,
             wait=True,
         )
     except Exception as exc:  # best-effort  # noqa: BLE001
@@ -314,8 +404,26 @@ def extract_litellm_usage(response: Any) -> dict[str, int | None]:
             value = usage.get(name)
         return _maybe_int(value)
 
+    def _prompt_tokens_detail_field(name: str) -> int | None:
+        if usage is None:
+            return None
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is None and isinstance(usage, dict):
+            details = usage.get("prompt_tokens_details")
+        if details is None:
+            return None
+        value = getattr(details, name, None)
+        if value is None and isinstance(details, dict):
+            value = details.get(name)
+        return _maybe_int(value)
+
+    cached_prompt_tokens = _prompt_tokens_detail_field("cached_tokens")
+    if cached_prompt_tokens is None:
+        cached_prompt_tokens = _usage_field("cache_read_input_tokens")
+
     return {
         "prompt_tokens": _usage_field("prompt_tokens"),
+        "cached_prompt_tokens": cached_prompt_tokens,
         "completion_tokens": _usage_field("completion_tokens"),
         "total_tokens": _usage_field("total_tokens"),
     }

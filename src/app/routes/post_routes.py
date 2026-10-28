@@ -259,6 +259,7 @@ def get_post_json(p_guid: str) -> flask.Response:
                     else model_call.response
                 ),
                 "error": model_call.error_message,
+                "service_tier": model_call.service_tier,
             }
         )
 
@@ -460,6 +461,11 @@ def api_post_stats(p_guid: str) -> flask.Response:
                 "error_message": call.error_message,
                 "prompt": call.prompt,
                 "response": call.response,
+                "service_tier": call.service_tier,
+                "prompt_tokens": call.prompt_tokens,
+                "cached_prompt_tokens": call.cached_prompt_tokens,
+                "completion_tokens": call.completion_tokens,
+                "total_tokens": call.total_tokens,
             }
         )
 

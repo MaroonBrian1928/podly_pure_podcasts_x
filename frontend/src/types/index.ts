@@ -66,6 +66,11 @@ export interface Job {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  // Service tier summary across this post's ModelCall rows. Present only
+  // when at least one call was made at a non-default tier. `latest` is the
+  // most recent call's tier; `mixed` is true when calls used multiple tiers
+  // (e.g. Flex retried then fell back to standard).
+  service_tier?: { label: string; latest: string; mixed: boolean };
 }
 
 export interface JobManagerRun {

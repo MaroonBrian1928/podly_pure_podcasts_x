@@ -10,6 +10,7 @@ from podcast_processor.llm_model_call_utils import (
     extract_litellm_finish_reason,
     extract_litellm_usage,
     model_supports_service_tier,
+    try_update_model_call,
 )
 from shared.llm_utils import normalize_completion_args_for_model
 
@@ -32,6 +33,7 @@ def test_extract_litellm_usage_handles_object_and_numeric_strings() -> None:
     response = SimpleNamespace(
         usage=SimpleNamespace(
             prompt_tokens="101",
+            prompt_tokens_details=SimpleNamespace(cached_tokens="33"),
             completion_tokens=22,
             total_tokens=123,
         )
@@ -39,6 +41,7 @@ def test_extract_litellm_usage_handles_object_and_numeric_strings() -> None:
 
     assert extract_litellm_usage(response) == {
         "prompt_tokens": 101,
+        "cached_prompt_tokens": 33,
         "completion_tokens": 22,
         "total_tokens": 123,
     }
@@ -46,14 +49,122 @@ def test_extract_litellm_usage_handles_object_and_numeric_strings() -> None:
 
 def test_extract_litellm_usage_handles_dict_response() -> None:
     response = {
-        "usage": {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14}
+        "usage": {
+            "prompt_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens": 9,
+            "total_tokens": 14,
+        }
     }
 
     assert extract_litellm_usage(response) == {
         "prompt_tokens": 5,
+        "cached_prompt_tokens": 2,
         "completion_tokens": 9,
         "total_tokens": 14,
     }
+
+
+def test_extract_litellm_usage_handles_cache_read_input_tokens_fallback() -> None:
+    response = {
+        "usage": {
+            "prompt_tokens": 5,
+            "cache_read_input_tokens": 2,
+            "completion_tokens": 9,
+            "total_tokens": 14,
+        }
+    }
+
+    assert extract_litellm_usage(response)["cached_prompt_tokens"] == 2
+
+
+def test_extract_litellm_usage_leaves_cached_prompt_tokens_null_when_missing() -> None:
+    response = {
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 9,
+            "total_tokens": 14,
+        }
+    }
+
+    assert extract_litellm_usage(response) == {
+        "prompt_tokens": 5,
+        "cached_prompt_tokens": None,
+        "completion_tokens": 9,
+        "total_tokens": 14,
+    }
+
+
+def test_try_update_model_call_forwards_token_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When usage is supplied, the writer payload must include token counts so
+    the debug modal can render tokens alongside service tier. Missing fields
+    must be omitted (not stored as None) so older responses don't overwrite
+    existing values.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["model"] = model
+        captured["pk"] = pk
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+
+    try_update_model_call(
+        42,
+        status="success",
+        response="hi",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={
+            "prompt_tokens": 10,
+            "cached_prompt_tokens": 4,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        },
+    )
+
+    assert captured["model"] == "ModelCall"
+    assert captured["pk"] == 42
+    assert captured["data"]["prompt_tokens"] == 10
+    assert captured["data"]["cached_prompt_tokens"] == 4
+    assert captured["data"]["completion_tokens"] == 5
+    assert captured["data"]["total_tokens"] == 15
+
+    # Now without usage: token keys must not appear at all.
+    captured.clear()
+    try_update_model_call(
+        42,
+        status="success",
+        response="hi",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+    )
+    assert "prompt_tokens" not in captured["data"]
+    assert "cached_prompt_tokens" not in captured["data"]
+    assert "total_tokens" not in captured["data"]
+
+    # Missing cached token data must not be coerced to zero or forwarded.
+    captured.clear()
+    try_update_model_call(
+        42,
+        status="success",
+        response="hi",
+        error_message=None,
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+    assert "cached_prompt_tokens" not in captured["data"]
 
 
 # --------------------------------------------------------------------------

@@ -233,6 +233,19 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     # NULL = LLM/legacy row; set = Whisper row. Doubles as the discriminator
     # for the two partial unique indexes below.
     language = db.Column(db.Text, nullable=True)
+    # litellm `service_tier` value sent on the last attempt of this call (e.g.
+    # "flex", "priority"). NULL when the call was made at the provider's
+    # default tier or against a provider that doesn't accept service_tier
+    # (Anthropic, Groq, etc.). Surfaced in the debug UI so it's obvious which
+    # tier produced a given ModelCall row.
+    service_tier = db.Column(db.Text, nullable=True)
+    # Token usage reported by the provider for the successful (or last) attempt
+    # of this call. Null when the provider didn't return usage, when the call
+    # never produced a response, or for legacy rows created before tracking.
+    prompt_tokens = db.Column(db.Integer, nullable=True)
+    cached_prompt_tokens = db.Column(db.Integer, nullable=True)
+    completion_tokens = db.Column(db.Integer, nullable=True)
+    total_tokens = db.Column(db.Integer, nullable=True)
 
     identifications = db.relationship(
         "Identification", backref="model_call", lazy="dynamic"
