@@ -173,6 +173,7 @@ export interface AppConfigUI {
   user_limit_total: number | null;
   autoprocess_on_download: boolean;
   cost_rate_per_hour: number;
+  whisper_cost_rate_per_hour: number;
 }
 
 export interface CombinedConfig {
@@ -277,6 +278,8 @@ export interface CostFeed {
   subscriber_count: number;
   episodes_this_month: number;
   monthly_cost: number;
+  llm_cost: number;
+  whisper_cost: number;
 }
 
 export interface CostSummary {
@@ -284,6 +287,12 @@ export interface CostSummary {
   month: number;
   total_cost: number;
   cost_rate_per_hour: number;
+  whisper_cost_rate_per_hour: number;
+  total_llm_cost: number;
+  llm_service_tier: string;
+  llm_cost_by_tier: Record<string, number>;
+  total_whisper_cost: number;
+  total_audio_hours: number;
   users: CostUser[];
   feeds: CostFeed[];
 }
@@ -295,6 +304,12 @@ export interface CallLogEntry {
   status: string;
   timestamp: string | null;
   retry_attempts: number;
+  service_tier?: string | null;
+  prompt_tokens?: number | null;
+  cached_prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  estimated_cost?: number;
 }
 
 export interface CallLog {
@@ -303,4 +318,39 @@ export interface CallLog {
   page: number;
   per_page: number;
   pages: number;
+}
+
+export interface TokenBackfillModelSummary {
+  would_update: number;
+  updated: number;
+  tokenizer_errors: number;
+}
+
+export interface EstimatedCostBackfillResult {
+  applied: boolean;
+  scanned: number;
+  eligible: number;
+  skipped_non_billable: number;
+  skipped_no_tokens: number;
+  updated: number;
+  failed_updates: number;
+}
+
+export interface TokenBackfillResult {
+  apply: boolean;
+  scanned: number;
+  eligible: number;
+  would_update: number;
+  updated: number;
+  skipped_existing: number;
+  skipped_non_llm: number;
+  skipped_missing_text: number;
+  skipped_tokenizer_error: number;
+  failed_updates: number;
+  models: Record<string, TokenBackfillModelSummary>;
+  errors: Array<{
+    model_call_id: number;
+    model_name: string;
+    error: string;
+  }>;
 }

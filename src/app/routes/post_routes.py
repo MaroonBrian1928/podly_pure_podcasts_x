@@ -96,10 +96,11 @@ def _llm_costs_by_call_id(post_id: int) -> dict[int, float]:
 
 
 def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> None:
-    """Populate ``processing_stats.estimated_cost`` and per-call LLM costs.
+    """Populate ``processing_stats.estimated_cost`` and per-call costs.
 
-    Uses the ``estimated_cost_usd`` persisted on each billable LLM ModelCall
-    row; Whisper rows are not priced per token and report 0.
+    Billable LLM rows use the persisted ``estimated_cost_usd``. Whisper rows
+    share ``whisper_cost_rate_per_hour * hours`` evenly across the post's
+    successful Whisper calls.
     """
     if not _current_user_is_admin():
         return
@@ -107,25 +108,51 @@ def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> No
     if not isinstance(processing_stats, dict):
         return
 
+    from app.config_store import read_combined
     from app.llm_pricing import is_whisper_call
+
+    whisper_rate = float(
+        read_combined()
+        .get("app", {})
+        .get("whisper_cost_rate_per_hour", DEFAULTS.APP_WHISPER_COST_RATE_PER_HOUR)
+        or 0.0
+    )
+    transcript_end = (
+        db.session.query(db.func.max(TranscriptSegment.end_time))
+        .filter(TranscriptSegment.post_id == post.id)
+        .scalar()
+    )
+    # post.duration is the cut length; the transcript covers the full audio.
+    duration_hours = (
+        max(float(post.duration or 0.0), float(transcript_end or 0.0)) / 3600.0
+    )
+
+    calls = [c for c in stats_data.get("model_calls") or [] if isinstance(c, dict)]
+    whisper_success_count = sum(
+        1
+        for c in calls
+        if (c.get("status") or "").startswith("success")
+        and is_whisper_call(c.get("model_name") or "", c.get("prompt"))
+    )
+    whisper_total = whisper_rate * duration_hours if whisper_success_count else 0.0
+    whisper_per_call = (
+        whisper_total / whisper_success_count if whisper_success_count else 0.0
+    )
 
     llm_costs = _llm_costs_by_call_id(int(post.id))
 
-    total = 0.0
-    for call in stats_data.get("model_calls") or []:
-        if not isinstance(call, dict):
-            continue
-        model_name = call.get("model_name") or ""
-        if not (call.get("status") or "").startswith("success") or is_whisper_call(
-            model_name, call.get("prompt")
-        ):
+    llm_total = 0.0
+    for call in calls:
+        if not (call.get("status") or "").startswith("success"):
             call["estimated_cost_usd"] = 0.0
-            continue
-        cost = float(llm_costs.get(int(call.get("id", 0)), 0.0))
-        call["estimated_cost_usd"] = round(cost, 6)
-        total += cost
+        elif is_whisper_call(call.get("model_name") or "", call.get("prompt")):
+            call["estimated_cost_usd"] = round(whisper_per_call, 6)
+        else:
+            cost = float(llm_costs.get(int(call.get("id", 0)), 0.0))
+            call["estimated_cost_usd"] = round(cost, 6)
+            llm_total += cost
 
-    processing_stats["estimated_cost"] = round(total, 4)
+    processing_stats["estimated_cost"] = round(llm_total + whisper_total, 4)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

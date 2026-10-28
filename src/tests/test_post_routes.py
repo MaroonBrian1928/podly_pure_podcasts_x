@@ -820,7 +820,11 @@ def test_post_stats_includes_estimated_cost_for_admin(app):
         db.session.commit()
         guid = post.guid
 
-    response = app.test_client().get(f"/api/posts/{guid}/stats")
+    with mock.patch(
+        "app.config_store.read_combined",
+        return_value={"app": {"whisper_cost_rate_per_hour": 0.04}},
+    ):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -876,8 +880,8 @@ def test_post_stats_omits_estimated_cost_for_non_admin(app):
     assert "estimated_cost" not in payload["processing_stats"]
 
 
-def test_post_stats_estimated_cost_excludes_whisper(app):
-    """Whisper rows are not priced per token and report zero cost."""
+def test_post_stats_estimated_cost_includes_whisper_rate(app):
+    """Admin per-episode total = LLM cost + Whisper rate * full audio hours."""
     app.testing = True
     app.register_blueprint(post_bp)
 
@@ -896,10 +900,15 @@ def test_post_stats_estimated_cost_excludes_whisper(app):
             download_url="https://example.com/audio.mp3",
             title="Stats Cost Episode",
             whitelisted=True,
-            duration=3600.0,
+            duration=3000.0,  # processed length after ad cuts
         )
         db.session.add(post)
         db.session.flush()
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id, sequence_num=0, start_time=0, end_time=3600, text="x"
+            )
+        )
         db.session.add_all(
             [
                 ModelCall(
@@ -924,16 +933,20 @@ def test_post_stats_estimated_cost_excludes_whisper(app):
         db.session.commit()
         guid = post.guid
 
-    response = app.test_client().get(f"/api/posts/{guid}/stats")
+    with mock.patch(
+        "app.config_store.read_combined",
+        return_value={"app": {"whisper_cost_rate_per_hour": 0.04}},
+    ):
+        response = app.test_client().get(f"/api/posts/{guid}/stats")
 
     assert response.status_code == 200
     payload = response.get_json()
     assert payload is not None
-    assert payload["processing_stats"]["estimated_cost"] == 0.3375
+    assert payload["processing_stats"]["estimated_cost"] == 0.3775
 
     calls_by_model = {c["model_name"]: c for c in payload["model_calls"]}
     assert calls_by_model["gpt-4o-mini"]["estimated_cost_usd"] == 0.3375
-    assert calls_by_model["whisper-large-v3-turbo"]["estimated_cost_usd"] == 0.0
+    assert calls_by_model["whisper-large-v3-turbo"]["estimated_cost_usd"] == 0.04
 
 
 def test_post_stats_include_chapters_for_chapter_insert_strategy(app):
