@@ -98,6 +98,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
         model_call_id: int | None = None
         raw_response: str | None = None
         usage: dict[str, int | None] | None = None
+        effective_service_tier: str | None = None
 
         # Record the intent to call the LLM when we have enough context to do so
         if (
@@ -150,6 +151,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 logger=self.logger,
                 model_call_id=model_call_id,
             )
+            effective_service_tier = completion_args.get("service_tier")
             usage = extract_litellm_usage(response)
 
             choice = response.choices[0] if response.choices else None
@@ -197,6 +199,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 response=raw_response,
                 error_message=None,
                 usage=usage,
+                service_tier=effective_service_tier,
             )
             # Parse JSON (strip markdown fences). Log parse diagnostics so failures are actionable.
             cleaned = re.sub(r"```json|```", "", content.strip())
@@ -234,6 +237,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                     response=raw_response,
                     error_message=None,
                     usage=usage,
+                    service_tier=effective_service_tier,
                 )
                 self.logger.info(
                     "LLM refinement applied",
@@ -273,6 +277,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 response=raw_response,
                 error_message=parse_error or "parse_failed",
                 usage=usage,
+                service_tier=effective_service_tier,
             )
         except Exception as e:  # noqa: BLE001
             self._update_model_call(
@@ -281,6 +286,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 response=raw_response,
                 error_message=str(e),
                 usage=usage,
+                service_tier=effective_service_tier,
             )
             self.logger.warning(f"LLM refinement failed: {e}, using heuristic")
 
@@ -295,6 +301,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
         response: str | None,
         error_message: str | None,
         usage: dict[str, int | None] | None = None,
+        service_tier: str | None = None,
     ) -> None:
         try_update_model_call(
             model_call_id,
@@ -304,6 +311,9 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
             logger=self.logger,
             log_prefix="Boundary refine",
             usage=usage,
+            model_name=getattr(self.config, "llm_model", None),
+            service_tier=service_tier,
+            prompt="boundary_refine",
         )
 
     def _get_context(

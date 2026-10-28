@@ -284,6 +284,7 @@ export const feedsApi = {
     };
     ad_detection_strategy: 'llm' | 'chapter' | 'chapter_insert';
     processing_stats: {
+      estimated_cost?: number;
       total_segments: number;
       total_model_calls: number;
       total_identifications: number;
@@ -316,6 +317,7 @@ export const feedsApi = {
       cached_prompt_tokens: number | null;
       completion_tokens: number | null;
       total_tokens: number | null;
+      estimated_cost_usd?: number;
     }>;
     transcript_segments: Array<{
       id: number;
@@ -450,6 +452,7 @@ export const feedsApi = {
       has_processed_audio: boolean;
     };
     processing_stats: {
+      estimated_cost?: number;
       total_segments: number;
       total_model_calls: number;
       total_identifications: number;
@@ -482,6 +485,7 @@ export const feedsApi = {
       cached_prompt_tokens: number | null;
       completion_tokens: number | null;
       total_tokens: number | null;
+      estimated_cost_usd?: number;
     }>;
     transcript_segments: Array<{
       id: number;

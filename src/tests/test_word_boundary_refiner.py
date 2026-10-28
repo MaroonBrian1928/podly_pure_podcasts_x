@@ -214,7 +214,7 @@ def test_refine_end_uses_segment_seq_without_phrase() -> None:
     assert refined_end == 205.0
 
 
-def test_refine_persists_token_usage_on_success() -> None:
+def test_refine_persists_cost_on_success() -> None:
     refiner = WordBoundaryRefiner(config=create_standard_test_config())
     response = _build_response(
         content='{"refined_start": 10.0, "refined_end": 12.0}', finish_reason="stop"
@@ -234,6 +234,10 @@ def test_refine_persists_token_usage_on_success() -> None:
             return_value=("prompt", 42),
         ),
         patch("litellm.completion", return_value=response),
+        patch(
+            "podcast_processor.llm_model_call_utils.compute_estimated_cost_usd",
+            return_value=0.5,
+        ),
         patch("podcast_processor.llm_model_call_utils.writer_client") as writer,
     ):
         refiner.refine(
@@ -249,3 +253,4 @@ def test_refine_persists_token_usage_on_success() -> None:
     final = writer.update.call_args_list[-1].args[2]
     assert final["status"] == "success"
     assert final["total_tokens"] == 18
+    assert final["estimated_cost_usd"] == 0.5

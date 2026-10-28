@@ -102,6 +102,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
 
         raw_response: str | None = None
         usage: dict[str, int | None] | None = None
+        effective_service_tier: str | None = None
 
         try:
             completion_args: dict[str, Any] = {
@@ -127,6 +128,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 logger=self.logger,
                 model_call_id=model_call_id,
             )
+            effective_service_tier = completion_args.get("service_tier")
 
             content = extract_litellm_content(response)
             finish_reason = extract_litellm_finish_reason(response)
@@ -151,6 +153,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=None,
                 usage=usage,
+                service_tier=effective_service_tier,
             )
 
             parsed = self._parse_json(content)
@@ -173,6 +176,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                     response=raw_response,
                     error_message=f"parse_failed:{parse_failure_reason}",
                     usage=usage,
+                    service_tier=effective_service_tier,
                 )
                 return self._fallback(ad_start, ad_end)
 
@@ -212,6 +216,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                     response=raw_response,
                     error_message="invalid_refined_window",
                     usage=usage,
+                    service_tier=effective_service_tier,
                 )
                 return self._fallback(ad_start, ad_end)
 
@@ -221,6 +226,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=(",".join(partial_errors) if partial_errors else None),
                 usage=usage,
+                service_tier=effective_service_tier,
             )
 
             result = WordBoundaryRefinement(
@@ -236,6 +242,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=None,
                 usage=usage,
+                service_tier=effective_service_tier,
             )
             return result
 
@@ -246,6 +253,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
                 response=raw_response,
                 error_message=str(exc),
                 usage=usage,
+                service_tier=effective_service_tier,
             )
             self.logger.warning("Word boundary refine failed: %s", exc)
             return self._fallback(ad_start, ad_end)
@@ -969,6 +977,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
         response: str | None,
         error_message: str | None,
         usage: dict[str, int | None] | None = None,
+        service_tier: str | None = None,
     ) -> None:
         try_update_model_call(
             model_call_id,
@@ -978,4 +987,7 @@ Return only one JSON object (no markdown/code fences, no analysis text) with:
             logger=self.logger,
             log_prefix="Word boundary refine",
             usage=usage,
+            model_name=getattr(self.config, "llm_model", None),
+            service_tier=service_tier,
+            prompt="word_boundary_refine",
         )

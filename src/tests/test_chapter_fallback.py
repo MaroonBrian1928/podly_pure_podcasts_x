@@ -452,7 +452,7 @@ def test_topic_chapter_count_cap_for_duration_matches_configured_policy() -> Non
     )
 
 
-def test_chapter_title_refine_records_effective_tier_and_usage() -> None:
+def test_chapter_title_refine_records_effective_tier_and_cost_inputs() -> None:
     chapters = [Chapter("gen0", "Hello everybody", 0, 300_000)]
     transcript_segments = [
         SimpleNamespace(start_time=0.0, end_time=20.0, text="Hello everybody")
@@ -494,4 +494,5 @@ def test_chapter_title_refine_records_effective_tier_and_usage() -> None:
 
     assert retry_mock.call_args.kwargs["model_call_id"] == 9
     update_kwargs = update_mock.call_args.kwargs
+    assert update_kwargs["model_name"] == "test-model"
     assert update_kwargs["usage"]["prompt_tokens"] == 10

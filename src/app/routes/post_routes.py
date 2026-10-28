@@ -58,6 +58,76 @@ logger = logging.getLogger("global_logger")
 post_bp = Blueprint("post", __name__)
 
 
+def _current_user_is_admin() -> bool:
+    current_user = getattr(g, "current_user", None)
+    if current_user is None:
+        return False
+
+    role = getattr(current_user, "role", None)
+    if role == "admin":
+        return True
+
+    user_id = getattr(current_user, "id", None)
+    if user_id is None:
+        return False
+
+    from app.models import User
+
+    user = db.session.get(User, int(user_id))
+    return bool(user and user.role == "admin")
+
+
+def _llm_costs_by_call_id(post_id: int) -> dict[int, float]:
+    """Map of ``ModelCall.id`` → persisted ``estimated_cost_usd`` for a post.
+
+    Whisper rows are priced by audio duration (computed elsewhere) and keep a
+    NULL column. Pure SQL, so it never imports litellm.
+    """
+    rows = (
+        db.session.query(ModelCall.id, ModelCall.estimated_cost_usd)
+        .filter(
+            ModelCall.post_id == post_id,
+            ModelCall.status.like("success%"),
+            ModelCall.estimated_cost_usd.isnot(None),
+        )
+        .all()
+    )
+    return {int(call_id): float(cost) for call_id, cost in rows}
+
+
+def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> None:
+    """Populate ``processing_stats.estimated_cost`` and per-call LLM costs.
+
+    Uses the ``estimated_cost_usd`` persisted on each billable LLM ModelCall
+    row; Whisper rows are not priced per token and report 0.
+    """
+    if not _current_user_is_admin():
+        return
+    processing_stats = stats_data.get("processing_stats")
+    if not isinstance(processing_stats, dict):
+        return
+
+    from app.llm_pricing import is_whisper_call
+
+    llm_costs = _llm_costs_by_call_id(int(post.id))
+
+    total = 0.0
+    for call in stats_data.get("model_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        model_name = call.get("model_name") or ""
+        if not (call.get("status") or "").startswith("success") or is_whisper_call(
+            model_name, call.get("prompt")
+        ):
+            call["estimated_cost_usd"] = 0.0
+            continue
+        cost = float(llm_costs.get(int(call.get("id", 0)), 0.0))
+        call["estimated_cost_usd"] = round(cost, 6)
+        total += cost
+
+    processing_stats["estimated_cost"] = round(total, 4)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -631,6 +701,7 @@ def api_post_stats(p_guid: str) -> flask.Response:
             },
         }
 
+    _maybe_add_admin_cost_estimate(stats_data, post)
     return flask.jsonify(stats_data)
 
 

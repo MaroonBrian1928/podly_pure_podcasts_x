@@ -1033,7 +1033,7 @@ class AdClassifier:
         attempt_service_tier: str | None,
     ) -> dict[str, Any]:
         """Assemble the writer payload for a successful ModelCall update,
-        including token usage when the provider reports usage.
+        including token usage and estimated cost when the provider reports usage.
         """
         usage = extract_litellm_usage(response)
         payload: dict[str, Any] = {
@@ -1061,6 +1061,22 @@ class AdClassifier:
                 usage.get("total_tokens"),
                 attempt_service_tier or "default",
             )
+
+        # Persist USD cost computed against LiteLLM's price table while we
+        # still have litellm loaded in this short-lived worker. The web
+        # process reads the column directly and never imports litellm.
+        from podcast_processor.llm_model_call_utils import compute_estimated_cost_usd
+
+        cost = compute_estimated_cost_usd(
+            model_name=getattr(self.config, "llm_model", "") or "",
+            service_tier=attempt_service_tier,
+            prompt=None,
+            usage=usage,
+            logger=self.logger,
+            log_prefix=f"ModelCall {model_call_id}",
+        )
+        if cost is not None:
+            payload["estimated_cost_usd"] = cost
         return payload
 
     def _call_model(

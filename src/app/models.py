@@ -246,6 +246,11 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     cached_prompt_tokens = db.Column(db.Integer, nullable=True)
     completion_tokens = db.Column(db.Integer, nullable=True)
     total_tokens = db.Column(db.Integer, nullable=True)
+    # USD cost from token usage * LiteLLM rates, computed by the processing
+    # worker when the row is finalized so web routes can read it without
+    # importing litellm. NULL for legacy rows; see the admin
+    # `/api/admin/costs/backfill-estimated-cost` endpoint.
+    estimated_cost_usd = db.Column(db.Float, nullable=True)
 
     identifications = db.relationship(
         "Identification", backref="model_call", lazy="dynamic"
