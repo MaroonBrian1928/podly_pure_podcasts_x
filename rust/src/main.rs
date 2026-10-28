@@ -3730,6 +3730,33 @@ fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<Hash
         entry.tiers.insert(tier);
     }
 
+    // Standard-tier calls store a NULL tier, so a finished NULL-tier LLM call
+    // counts as "default" toward `mixed` (Flex call, then standard fallback).
+    let default_sql = format!(
+        "SELECT DISTINCT post_id, model_name, prompt
+         FROM model_call
+         WHERE service_tier IS NULL AND status LIKE 'success%' AND post_id IN ({})",
+        placeholders.join(",")
+    );
+    let mut default_stmt = conn.prepare(&default_sql)?;
+    let default_rows =
+        default_stmt.query_map(rusqlite::params_from_iter(post_ids.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+    for r in default_rows {
+        let (pid, model_name, prompt) = r?;
+        if is_whisper_call(&model_name, prompt.as_deref()) {
+            continue;
+        }
+        if let Some(bucket) = per_post.get_mut(&pid) {
+            bucket.tiers.insert("default".to_string());
+        }
+    }
+
     let max_retries = load_llm_max_retry_attempts(conn);
 
     Ok(per_post
@@ -10007,6 +10034,66 @@ mod tests {
         assert_eq!(payload["total_whisper_cost"], 0.0);
         assert_eq!(payload["total_ina_cost"], 0.0);
         assert_eq!(payload["total_llm_cost"], 0.2625);
+    }
+
+    #[test]
+    fn costs_render_admin_prefers_stored_cost_and_counts_success_heuristic() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        // The stored cost wins over re-pricing from tokens and current rates.
+        conn.execute(
+            "UPDATE model_call SET estimated_cost_usd = 0.5 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        // A refiner call that fell back to the heuristic still cost money.
+        conn.execute(
+            "INSERT INTO model_call VALUES
+                (4, 1, 2, 3, 'gpt-4o-mini', 'refine', 'resp', '2026-05-15 12:00:04', 'success_heuristic', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0.1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs(CostsRenderAdminArgs {
+            db: db_path,
+            year: 2026,
+            month: 5,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total_llm_cost"], 0.6);
+    }
+
+    #[test]
+    fn service_tier_summary_counts_finished_default_calls_as_mixed() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_call (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL,
+                first_segment_sequence_num INTEGER NOT NULL,
+                last_segment_sequence_num INTEGER NOT NULL,
+                model_name TEXT NOT NULL, prompt TEXT NOT NULL,
+                timestamp TEXT NOT NULL, status TEXT NOT NULL,
+                retry_attempts INTEGER, next_retry_at TEXT, service_tier TEXT
+            );
+            INSERT INTO model_call VALUES
+                (1, 1, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
+                (2, 1, 2, 3, 'gpt-5-mini', 'p', '2026-05-08 11:05:00', 'success', 1, NULL, NULL),
+                (3, 2, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
+                (4, 2, 0, -1, 'whisper-1', 'Whisper transcription job', '2026-05-08 11:06:00', 'success', 0, NULL, NULL);",
+        )
+        .unwrap();
+
+        let summary = load_service_tier_summary(&conn, &[1, 2]).unwrap();
+
+        assert_eq!(summary[&1]["mixed"], true);
+        // Whisper rows are not LLM calls and never count as a default tier.
+        assert_eq!(summary[&2]["mixed"], false);
     }
 
     #[test]
