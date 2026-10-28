@@ -131,6 +131,39 @@ def scheduled_cut_window_backfill() -> None:
         _memory_trim_logger.exception("cut window backfill: failed")
 
 
+WORD_TIMESTAMP_COMPRESSION_JOB_ID = "compress_word_timestamps"
+WORD_TIMESTAMP_COMPRESSION_DELAY_SECONDS = 180
+
+
+def scheduled_word_timestamp_compression() -> None:
+    """One-off job: gzip word timestamps saved as plain JSON by earlier releases."""
+    from app.word_timestamp_compression import compress_word_timestamps
+
+    if scheduler.app is None:
+        _memory_trim_logger.warning("word timestamp compression skipped: no app")
+        return
+    try:
+        with scheduler.app.app_context():
+            result = compress_word_timestamps(apply=True)
+        _memory_trim_logger.info("word timestamp compression: %s", result)
+    except Exception:
+        _memory_trim_logger.exception("word timestamp compression: failed")
+
+
+def schedule_word_timestamp_compression_job() -> None:
+    """Run the word timestamp compression once, after the cut-window backfill."""
+    scheduler.add_job(
+        id=WORD_TIMESTAMP_COMPRESSION_JOB_ID,
+        func=scheduled_word_timestamp_compression,
+        trigger="date",
+        run_date=datetime.now(UTC).replace(tzinfo=None)
+        + timedelta(seconds=WORD_TIMESTAMP_COMPRESSION_DELAY_SECONDS),
+        replace_existing=True,
+        misfire_grace_time=None,
+        max_instances=1,
+    )
+
+
 def schedule_cut_window_backfill_job() -> None:
     """Run the cut-window backfill once shortly after startup."""
     scheduler.add_job(

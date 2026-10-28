@@ -95,6 +95,7 @@
     "src/podcast_processor/ad_classifier.py::_refine_boundaries::update:Post#0",
     "src/podcast_processor/transcription_manager.py::_persist_transcript_word_timestamps::update:Post#0",
     "src/app/routes/cost_routes.py::api_admin_backfill_estimated_cost::update:ModelCall#0",
+    "src/app/word_timestamp_compression.py::compress_word_timestamps::update:Post#0",
     "src/app/routes/post_routes.py::api_toggle_whitelist::update:Post#0",
     "src/app/routes/main_routes.py::set_whitelist::update:Post#0",
     "src/app/routes/feed_routes.py::update_feed_settings_endpoint::update:Feed#0"
