@@ -210,7 +210,7 @@ fn isolated_rust_transport_covers_admission_deadlines_and_reconnect() {
     let (status, body) = readiness(server.port);
     assert_eq!(status, 200);
     assert_eq!(body["backend"], "rust");
-    assert_eq!(body["schema_revision"], "589f07c55324");
+    assert_eq!(body["schema_revision"], "e034b58ee2bd");
     assert_eq!(body["ready"], true);
 
     // Two I/O workers, the main thread and the single SQLite owner. The

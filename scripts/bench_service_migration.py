@@ -70,7 +70,7 @@ P0_PROFILE: dict[str, int | float] = {
     "mixed_writes": 100,
 }
 # Must match rust/src/writer/database.rs::EXPECTED_SCHEMA_REVISION.
-EXPECTED_SCHEMA_REVISION = "589f07c55324"
+EXPECTED_SCHEMA_REVISION = "e034b58ee2bd"
 RESOURCE_SAMPLING_POLICY = "periodic-phase-end-helper-window-warmed-idle-v4"
 WRITER_CPU_WINDOW_POLICY = "helper-threadpool-cgroup-cpu-v1"
 PROFILE_KEYS = tuple(DEFAULT_PROFILE)
