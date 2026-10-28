@@ -60,6 +60,14 @@ def _compute_cost_per_subscriber(
     return total_episode_cost / subscriber_count
 
 
+def _persisted_or_computed_cost(call: ModelCall) -> float:
+    """Cost stored when the call was finalized; legacy rows without one are
+    priced from their token usage."""
+    if call.estimated_cost_usd is not None:
+        return float(call.estimated_cost_usd)
+    return _model_call_cost(call)
+
+
 def _is_ina_call(call: ModelCall) -> bool:
     return _is_ina_call_by_name(call.model_name)
 
@@ -116,7 +124,7 @@ def _model_calls_by_post_id(post_ids: list[int]) -> dict[int, list[ModelCall]]:
     model_calls = (
         ModelCall.query.filter(
             ModelCall.post_id.in_(post_ids),
-            ModelCall.status == "success",
+            ModelCall.status.like("success%"),
         )
         .order_by(ModelCall.id.asc())
         .all()
@@ -304,7 +312,7 @@ def api_admin_costs() -> flask.Response:
         total_audio_hours += duration_hours
         post_model_calls = model_calls_by_post_id.get(post.id, [])
         llm_cost = sum(
-            _model_call_cost(call)
+            _persisted_or_computed_cost(call)
             for call in post_model_calls
             if _is_billable_llm_call(call)
         )

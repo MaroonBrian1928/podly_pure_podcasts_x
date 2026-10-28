@@ -115,7 +115,7 @@ def _llm_costs_by_call_id(post_id: int) -> dict[int, float]:
         db.session.query(ModelCall.id, ModelCall.estimated_cost_usd)
         .filter(
             ModelCall.post_id == post_id,
-            ModelCall.status == "success",
+            ModelCall.status.like("success%"),
             ModelCall.estimated_cost_usd.isnot(None),
         )
         .all()
@@ -165,14 +165,14 @@ def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> No
         1
         for c in calls
         if isinstance(c, dict)
-        and c.get("status") == "success"
+        and (c.get("status") or "").startswith("success")
         and is_whisper_call(c.get("model_name") or "", c.get("prompt"))
     )
     ina_success_count = sum(
         1
         for c in calls
         if isinstance(c, dict)
-        and c.get("status") == "success"
+        and (c.get("status") or "").startswith("success")
         and is_ina_call(c.get("model_name") or "")
     )
 
@@ -189,7 +189,7 @@ def _maybe_add_admin_cost_estimate(stats_data: dict[str, Any], post: Post) -> No
     for call in calls:
         if not isinstance(call, dict):
             continue
-        if call.get("status") != "success":
+        if not (call.get("status") or "").startswith("success"):
             call["estimated_cost_usd"] = 0.0
             continue
         model_name = call.get("model_name") or ""

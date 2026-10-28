@@ -6019,6 +6019,7 @@ struct CostsModelCallRow {
     cached_prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
+    estimated_cost_usd: Option<f64>,
 }
 
 fn rate_key(model_name: &str, service_tier: Option<&str>) -> String {
@@ -6045,7 +6046,7 @@ fn is_whisper_call(model_name: &str, prompt: Option<&str>) -> bool {
 }
 
 fn is_billable_llm_call(status: &str, model_name: &str, prompt: Option<&str>) -> bool {
-    if status != "success" {
+    if !status.starts_with("success") {
         return false;
     }
     if is_ina_call(model_name) {
@@ -6057,7 +6058,12 @@ fn is_billable_llm_call(status: &str, model_name: &str, prompt: Option<&str>) ->
     true
 }
 
+// Prefer the cost stored when the processing worker finalized the call; legacy
+// rows without one are priced from their token usage and the resolved rates.
 fn model_call_cost(call: &CostsModelCallRow, rates: &HashMap<String, ModelRate>) -> f64 {
+    if let Some(stored) = call.estimated_cost_usd {
+        return stored;
+    }
     let prompt_tokens = call.prompt_tokens.unwrap_or(0).max(0) as f64;
     let cached_prompt_tokens = call.cached_prompt_tokens.unwrap_or(0).max(0) as f64;
     let completion_tokens = call.completion_tokens.unwrap_or(0).max(0) as f64;
@@ -6238,9 +6244,9 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         let sql = format!(
             "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
                     service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
-                    completion_tokens, total_tokens \
+                    completion_tokens, total_tokens, estimated_cost_usd \
              FROM model_call \
-             WHERE status = 'success' AND post_id IN ({placeholders}) \
+             WHERE status LIKE 'success%' AND post_id IN ({placeholders}) \
              ORDER BY id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -6260,6 +6266,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
                 cached_prompt_tokens: row.get(9)?,
                 completion_tokens: row.get(10)?,
                 total_tokens: row.get(11)?,
+                estimated_cost_usd: row.get(12)?,
             })
         })?;
         for call_result in rows {
@@ -6428,7 +6435,7 @@ fn render_admin_costs_calls(args: CostsRenderCallsArgs) -> Result<Value> {
     let mut stmt = conn.prepare(
         "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
                 service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
-                completion_tokens, total_tokens \
+                completion_tokens, total_tokens, estimated_cost_usd \
          FROM model_call \
          ORDER BY timestamp DESC \
          LIMIT ?1 OFFSET ?2",
@@ -6447,6 +6454,7 @@ fn render_admin_costs_calls(args: CostsRenderCallsArgs) -> Result<Value> {
             cached_prompt_tokens: row.get(9)?,
             completion_tokens: row.get(10)?,
             total_tokens: row.get(11)?,
+            estimated_cost_usd: row.get(12)?,
         })
     })?;
     let calls: Vec<CostsModelCallRow> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -9883,7 +9891,7 @@ mod tests {
                 timestamp TEXT, status TEXT NOT NULL, error_message TEXT,
                 retry_attempts INTEGER, next_retry_at TEXT, service_tier TEXT,
                 prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
-                completion_tokens INTEGER, total_tokens INTEGER
+                completion_tokens INTEGER, total_tokens INTEGER, estimated_cost_usd REAL
              );",
         )
         .unwrap();
@@ -9905,9 +9913,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO model_call VALUES
-                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1250000),
-                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL),
-                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)",
+                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1250000, NULL),
+                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             [],
         )
         .unwrap();

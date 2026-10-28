@@ -610,3 +610,76 @@ def test_admin_costs_measure_original_length_from_transcript(
     payload = response.get_json()
     assert payload["total_audio_hours"] == 1.0
     assert payload["total_whisper_cost"] == 0.04
+
+
+def _seed_post(guid: str, duration: int = 3600) -> Post:
+    feed = Feed(title=f"Feed {guid}", rss_url=f"https://example.com/{guid}.xml")
+    db.session.add(feed)
+    db.session.flush()
+    post = Post(
+        feed_id=feed.id,
+        guid=guid,
+        download_url=f"https://example.com/{guid}.mp3",
+        title=guid,
+        duration=duration,
+    )
+    db.session.add(post)
+    db.session.flush()
+    return post
+
+
+def _add_llm_call(post_id: int, **overrides: Any) -> ModelCall:
+    fields: dict[str, Any] = {
+        "post_id": post_id,
+        "first_segment_sequence_num": 0,
+        "last_segment_sequence_num": 1,
+        "model_name": "gpt-4o-mini",
+        "prompt": "classify",
+        "status": "success",
+    }
+    fields.update(overrides)
+    call = ModelCall(**fields)
+    db.session.add(call)
+    return call
+
+
+def _prepare_dashboard(app: Any, monkeypatch: Any) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(
+        cost_routes,
+        "read_combined",
+        lambda: {"app": {"whisper_cost_rate_per_hour": 0.0}},
+    )
+    monkeypatch.setattr(cost_routes, "try_render_admin_costs", lambda **_: None)
+
+
+def test_admin_costs_prefers_persisted_cost_and_counts_success_heuristic(
+    app: Any, monkeypatch: Any
+) -> None:
+    _prepare_dashboard(app, monkeypatch)
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 9.0)
+
+    with app.app_context():
+        post = _seed_post("persisted-guid")
+        db.session.add(
+            ProcessingJob(
+                post_guid=post.guid,
+                status="completed",
+                completed_at=datetime(2026, 5, 15, 12, 0, 0),
+            )
+        )
+        _add_llm_call(post.id, estimated_cost_usd=0.2)
+        _add_llm_call(
+            post.id,
+            status="success_heuristic",
+            first_segment_sequence_num=2,
+            estimated_cost_usd=0.05,
+        )
+        # Legacy row without a stored cost falls back to pricing from tokens.
+        _add_llm_call(post.id, first_segment_sequence_num=4)
+        db.session.commit()
+
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.get_json()["total_llm_cost"] == 9.25
