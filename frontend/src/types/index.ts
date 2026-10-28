@@ -379,7 +379,9 @@ export interface EstimatedCostBackfillResult {
   scanned: number;
   eligible: number;
   skipped_non_billable: number;
+  skipped_no_tokens: number;
   updated: number;
+  failed_updates: number;
 }
 
 export interface TokenBackfillResult {
