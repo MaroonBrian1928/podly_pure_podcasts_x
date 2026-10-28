@@ -216,7 +216,7 @@ export default function FeedSettingsModal({
     <ModalShell
       isOpen={isOpen}
       onClose={onClose}
-      panelClassName="w-full max-w-md bg-surface rounded-lg border border-gray-200 shadow-lg overflow-hidden"
+      panelClassName="flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col bg-surface rounded-lg border border-gray-200 shadow-lg overflow-hidden"
     >
         <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-gray-200">
           <div>
@@ -235,7 +235,7 @@ export default function FeedSettingsModal({
           </button>
         </div>
 
-        <div className="px-5 py-4 space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Ad Detection Strategy
