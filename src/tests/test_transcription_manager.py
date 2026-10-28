@@ -762,3 +762,69 @@ def test_failing_to_remove_the_artifact_does_not_fail_the_job(
     )
 
     assert (artifact_dir / "word_timestamps.json").is_file()
+
+
+@pytest.mark.parametrize("words_optional", [True, False])
+def test_existing_transcript_without_words_is_retranscribed_only_when_words_are_needed(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+    mocker: Any,
+    words_optional: bool,
+) -> None:
+    from podcast_processor.transcribe import GroqWhisperTranscriber
+    from shared.config import GroqWhisperConfig
+
+    mocker.patch("podcast_processor.transcribe.Groq", return_value=MagicMock())
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-optional.xml")
+        post = Post(
+            feed=feed,
+            guid=f"guid-optional-{words_optional}",
+            download_url="http://example.com/audio-optional.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=0.0,
+                end_time=1.0,
+                text="Hello world",
+            )
+        )
+        transcriber = GroqWhisperTranscriber(
+            test_logger,
+            GroqWhisperConfig(api_key="test", model="whisper-large-v3-turbo"),
+        )
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                model_name=transcriber.model_name,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=0,
+                prompt="Whisper transcription job",
+                status="success",
+            )
+        )
+        db.session.commit()
+        transcribe = mocker.patch.object(transcriber, "transcribe", return_value=[])
+        persist = mocker.patch.object(
+            TranscriptionManager, "_persist_transcript_word_timestamps"
+        )
+        manager = TranscriptionManager(
+            test_logger, test_config, db_session=db.session, transcriber=transcriber
+        )
+
+        db_segments, rich_segments = manager.transcribe_for_processing(
+            post, include_word_timestamps=True, words_optional=words_optional
+        )
+
+        assert len(db_segments) == 1
+        assert transcribe.called is (not words_optional)
+        assert persist.called is (not words_optional)
+        if words_optional:
+            assert rich_segments is None

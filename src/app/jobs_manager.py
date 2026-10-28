@@ -8,8 +8,8 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, cast
 
-from sqlalchemy import case
-from sqlalchemy.orm import joinedload, load_only
+from sqlalchemy import case, func, not_, or_
+from sqlalchemy.orm import aliased, joinedload, load_only
 
 from app.db_guard import db_guard, reset_session
 from app.extensions import db as _db
@@ -104,25 +104,40 @@ def _summarize_service_tiers_for_posts(
 
 
 def _posts_with_finished_default_tier_calls(post_ids: list[int]) -> set[int]:
-    from app.llm_pricing import is_ina_call, is_whisper_call
-
-    rows = (
-        ModelCall.query.with_entities(
-            ModelCall.post_id, ModelCall.model_name, ModelCall.prompt
+    # Whisper and INA calls store no tier but are not LLM calls. Filtered in SQL
+    # so the (large) prompt text is never loaded; mirrors
+    # `llm_pricing.is_whisper_call` / `is_ina_call`.
+    not_llm_call = or_(
+        func.lower(ModelCall.model_name).like("%whisper%"),
+        func.coalesce(ModelCall.prompt, "") == "Whisper transcription job",
+        func.lower(ModelCall.model_name).like("local\\_%", escape="\\"),
+        ModelCall.model_name.like("ina:%"),
+    )
+    # Only a model that also ran at Flex on the same post counts: a model that
+    # never supports Flex (e.g. a separate chapter model) is not a fallback.
+    flex_call = aliased(ModelCall)
+    ran_at_flex = (
+        _db.session.query(flex_call.id)
+        .filter(
+            flex_call.post_id == ModelCall.post_id,
+            flex_call.model_name == ModelCall.model_name,
+            flex_call.service_tier == "flex",
         )
+        .exists()
+    )
+    rows = (
+        ModelCall.query.with_entities(ModelCall.post_id)
         .filter(
             ModelCall.post_id.in_(post_ids),
             ModelCall.service_tier.is_(None),
             ModelCall.status.like("success%"),
+            not_(not_llm_call),
+            ran_at_flex,
         )
+        .distinct()
         .all()
     )
-    return {
-        post_id
-        for post_id, model_name, prompt in rows
-        if not is_whisper_call(model_name or "", prompt)
-        and not is_ina_call(model_name or "")
-    }
+    return {post_id for (post_id,) in rows}
 
 
 def _summarize_service_tier_for_post(post_id: int) -> dict[str, Any] | None:

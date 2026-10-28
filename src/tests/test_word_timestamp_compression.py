@@ -88,23 +88,35 @@ def test_only_large_text_rows_are_compressed(app, monkeypatch) -> None:
         assert again["candidates"] == 0
 
 
-def test_compression_keeps_words_written_after_the_job_listed_the_post(
-    app, monkeypatch
-) -> None:
+def test_job_compresses_the_value_stored_when_the_writer_runs(app, monkeypatch) -> None:
+    """Words saved between the job listing a post and the writer acting survive."""
     from app.writer.actions import compress_post_word_timestamps_action
+    from app.writer.client import writer_client
 
     newer = [
         {"sequence_num": 0, "words": [{"word": "new", "start": 1, "end": 2}] * 300}
     ]
     with app.app_context():
         post_id = _post("race", json.dumps(LARGE))
-        post = db.session.get(Post, post_id)
-        post.transcript_word_timestamps = newer
-        db.session.commit()
 
-        compress_post_word_timestamps_action({"post_id": post_id})
-        db.session.commit()
+        def action_after_newer_write(
+            name: str, params: dict[str, Any], wait: bool = True
+        ):
+            # A transcription lands (still legacy text) after the listing query.
+            db.session.execute(
+                text("UPDATE post SET transcript_word_timestamps=:v WHERE id=:id"),
+                {"v": json.dumps(newer), "id": params["post_id"]},
+            )
+            data = compress_post_word_timestamps_action(params)
+            db.session.commit()
+            return SimpleNamespace(success=True, data=data)
 
+        monkeypatch.setattr(writer_client, "action", action_after_newer_write)
+
+        result = compress_word_timestamps(apply=True, pause=0)
+
+        assert result["compressed"] == 1
+        assert _typeof(post_id) == "blob"
         db.session.expire_all()
         stored = db.session.get(Post, post_id)
         assert stored is not None and stored.transcript_word_timestamps == newer

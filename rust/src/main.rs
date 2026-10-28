@@ -3735,28 +3735,31 @@ fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<Hash
     }
 
     // Standard-tier calls store a NULL tier, so a finished NULL-tier LLM call
-    // counts as "default" toward `mixed` (Flex call, then standard fallback).
+    // counts as "default" toward `mixed` (Flex call, then standard fallback) when the
+    // same model also ran at Flex on that post.
+    // Whisper and INA calls store no tier but are not LLM calls; filtered in SQL
+    // so the prompt text is never read. Mirrors `is_whisper_call` / `is_ina_call`.
     let default_sql = format!(
-        "SELECT DISTINCT post_id, model_name, prompt
+        "SELECT DISTINCT post_id
          FROM model_call
-         WHERE service_tier IS NULL AND status LIKE 'success%' AND post_id IN ({})",
+         WHERE service_tier IS NULL AND status LIKE 'success%' AND post_id IN ({})
+           AND EXISTS (SELECT 1 FROM model_call flex
+                       WHERE flex.post_id = model_call.post_id
+                         AND flex.model_name = model_call.model_name
+                         AND flex.service_tier = 'flex')
+           AND NOT (lower(model_name) LIKE '%whisper%'
+                    OR COALESCE(prompt, '') = 'Whisper transcription job'
+                    OR lower(model_name) LIKE 'local\\_%' ESCAPE '\\'
+                    OR lower(model_name) LIKE 'ina:%')",
         placeholders.join(",")
     );
     let mut default_stmt = conn.prepare(&default_sql)?;
-    let default_rows =
-        default_stmt.query_map(rusqlite::params_from_iter(post_ids.iter()), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
+    let default_rows = default_stmt
+        .query_map(rusqlite::params_from_iter(post_ids.iter()), |row| {
+            row.get::<_, i64>(0)
         })?;
     for r in default_rows {
-        let (pid, model_name, prompt) = r?;
-        if is_whisper_call(&model_name, prompt.as_deref()) || is_ina_call(&model_name) {
-            continue;
-        }
-        if let Some(bucket) = per_post.get_mut(&pid) {
+        if let Some(bucket) = per_post.get_mut(&r?) {
             bucket.tiers.insert("default".to_string());
         }
     }
@@ -10090,14 +10093,16 @@ mod tests {
                 (2, 1, 2, 3, 'gpt-5-mini', 'p', '2026-05-08 11:05:00', 'success', 1, NULL, NULL),
                 (3, 2, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
                 (4, 2, 0, -1, 'whisper-1', 'Whisper transcription job', '2026-05-08 11:06:00', 'success', 0, NULL, NULL),
-                (5, 2, 0, -1, 'ina:speech_music_noise', 'INA', '2026-05-08 11:07:00', 'success', 0, NULL, NULL);",
+                (5, 2, 0, -1, 'ina:speech_music_noise', 'INA', '2026-05-08 11:07:00', 'success', 0, NULL, NULL),
+                (6, 2, 0, 1, 'chapter-model', 'chapters', '2026-05-08 11:08:00', 'success', 1, NULL, NULL);",
         )
         .unwrap();
 
         let summary = load_service_tier_summary(&conn, &[1, 2]).unwrap();
 
         assert_eq!(summary[&1]["mixed"], true);
-        // Whisper and INA rows are not LLM calls and never count as a default tier.
+        // Whisper and INA rows are not LLM calls, and a model that never ran at Flex
+        // is not a fallback; neither counts as a default tier.
         assert_eq!(summary[&2]["mixed"], false);
     }
 

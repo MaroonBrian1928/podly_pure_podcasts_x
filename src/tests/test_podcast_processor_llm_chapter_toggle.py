@@ -562,6 +562,7 @@ def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> 
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=False,
+        words_optional=True,
         progress_callback=ANY,
     )
     assert processor._prepare_profanity_bleeped_audio.call_args.kwargs[
@@ -616,6 +617,7 @@ def test_llm_processing_requests_word_timestamps_for_word_level_refiner() -> Non
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=True,
+        words_optional=False,
         progress_callback=ANY,
     )
 
@@ -673,6 +675,7 @@ def test_llm_processing_reuses_saved_word_timestamps_for_word_level_refiner() ->
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=False,
+        words_optional=True,
         progress_callback=ANY,
     )
 
@@ -1147,6 +1150,8 @@ def test_llm_processing_requests_word_timestamps_when_setting_is_on() -> None:
     transcribe = _run_llm_processing_for_word_timestamps(record_word_timestamps=True)
 
     assert transcribe.call_args.kwargs["include_word_timestamps"] is True
+    # Nothing needs the words, so an existing transcript is not re-transcribed.
+    assert transcribe.call_args.kwargs["words_optional"] is True
 
 
 def test_llm_processing_skips_word_timestamps_when_setting_is_off() -> None:

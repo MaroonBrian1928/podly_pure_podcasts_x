@@ -30,7 +30,7 @@ def _fake_response():
     resp = Mock()
     choice = Mock()
     choice.message.content = (
-        '{"refined_start": 5.0, "refined_end": 15.0, '
+        '{"refined_start": 6.0, "refined_end": 14.0, '
         '"start_adjustment_reason": "ok", "end_adjustment_reason": "ok"}'
     )
     choice.text = ""
@@ -78,8 +78,8 @@ class TestBoundaryRefinerTokenLimiter:
         assert isinstance(messages, list)
         assert messages[0]["role"] == "user"
         # The refinement itself still completes through the paced call.
-        assert result.refined_start == 5.0
-        assert result.refined_end == 15.0
+        assert result.refined_start == 6.0
+        assert result.refined_end == 14.0
 
     def test_refine_without_limiter_still_calls_llm(self):
         """No limiter -> straight-through call, as before."""
@@ -93,7 +93,7 @@ class TestBoundaryRefinerTokenLimiter:
             result = refiner.refine(5.0, 15.0, 0.9, _segments())
 
         mock_call.assert_called_once()
-        assert result.refined_start == 5.0
+        assert result.refined_start == 6.0
 
 
 class TestClassifierSharesLimiterWithRefiner:
@@ -143,6 +143,43 @@ def test_unparseable_response_still_reports_usage_for_pricing():
         mock_writer.action.return_value = Mock(success=False)
         refiner.refine(5.0, 15.0, 0.9, _segments())
 
+    last = refiner._update_model_call.call_args_list[-1].kwargs
+    assert last["status"] == "success_heuristic"
+    assert last["usage"] == usage
+
+
+def test_repeat_ad_refiner_paces_each_attempt_and_prices_unparseable_replies():
+    from types import SimpleNamespace
+
+    from podcast_processor.repeat_ad_refiner import RepeatAdRefiner
+
+    limiter = Mock(spec=TokenRateLimiter)
+    refiner = RepeatAdRefiner(create_test_config(), token_limiter=limiter)
+    refiner._update_model_call = Mock()  # type: ignore[method-assign]
+    response = _fake_response()
+    response.choices[0].message.content = "not json"
+    usage = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+
+    with (
+        patch(
+            "podcast_processor.repeat_ad_refiner.writer_client.action",
+            return_value=SimpleNamespace(success=True, data={"model_call_id": 7}),
+        ),
+        patch("litellm.completion", return_value=response),
+        patch(
+            "podcast_processor.repeat_ad_refiner.extract_litellm_usage",
+            return_value=usage,
+        ),
+    ):
+        refiner.confirm(
+            reference_text="ad",
+            candidate_segments=[{"start_time": 1.0, "text": "buy now"}],
+            candidate_first_seq=100,
+            confidence_hint=0.8,
+            post_id=5,
+        )
+
+    limiter.wait_if_needed.assert_called_once()
     last = refiner._update_model_call.call_args_list[-1].kwargs
     assert last["status"] == "success_heuristic"
     assert last["usage"] == usage

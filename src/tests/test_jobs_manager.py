@@ -537,6 +537,8 @@ def test_service_tier_summary_reports_flex_fallback_as_mixed(app) -> None:
         (flex_only_post.id, 0, "flex", "gpt-5-mini", "classify"),
         # Whisper rows store no tier and are not LLM calls.
         (flex_only_post.id, 1, None, "whisper-1", "Whisper transcription job"),
+        # A model that never ran at Flex is not a fallback.
+        (flex_only_post.id, 3, None, "chapter-model", "chapters"),
         # INA rows store no tier either.
         (flex_only_post.id, 2, None, "ina:speech_music_noise", "INA"),
     ]

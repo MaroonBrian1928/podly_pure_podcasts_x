@@ -631,10 +631,9 @@ fn insert_post(
         fields.retain(|(existing, _)| *existing != field);
         let value = if field == "release_date" {
             datetime_scalar(value)?
-        } else if matches!(
-            field.as_str(),
-            "bleep_windows" | "transcript_word_timestamps" | "refined_ad_boundaries"
-        ) {
+        } else if field == "transcript_word_timestamps" {
+            word_timestamps_scalar(value)?
+        } else if matches!(field.as_str(), "bleep_windows" | "refined_ad_boundaries") {
             json_scalar(value)?
         } else {
             sql_scalar(value)?
@@ -972,6 +971,16 @@ fn json_scalar(value: &Value) -> Result<SqlValue, RpcError> {
     }
 }
 
+/// Same storage as `CompressedJSON` in Python: gzip BLOB once large.
+fn word_timestamps_scalar(value: &Value) -> Result<SqlValue, RpcError> {
+    if value.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    serde_json::to_string(value)
+        .map(|json| crate::word_blob::encode(&json))
+        .map_err(|_| error("invalid_params", "invalid JSON value"))
+}
+
 fn sql_scalar(value: &Value) -> Result<SqlValue, RpcError> {
     match value {
         Value::Null => Ok(SqlValue::Null),
@@ -1063,6 +1072,22 @@ fn database_error(_error: rusqlite::Error) -> RpcError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn post_word_timestamps_are_stored_like_the_python_orm() {
+        use rusqlite::types::Value as SqlValue;
+        let small = word_timestamps_scalar(&json!([{"sequence_num": 0, "words": []}])).unwrap();
+        assert!(matches!(small, SqlValue::Text(_)));
+        let words: Vec<Value> = (0..200)
+            .map(|index| json!({"word": "hello", "start": index as f64, "end": index as f64 + 0.5}))
+            .collect();
+        let large = word_timestamps_scalar(&json!([{"sequence_num": 0, "words": words}])).unwrap();
+        assert!(matches!(&large, SqlValue::Blob(bytes) if bytes.starts_with(&[0x1f, 0x8b])));
+        assert!(matches!(
+            word_timestamps_scalar(&Value::Null).unwrap(),
+            SqlValue::Null
+        ));
+    }
+
     use rusqlite::Connection;
 
     use super::*;

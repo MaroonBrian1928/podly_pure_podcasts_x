@@ -329,6 +329,7 @@ class TranscriptionManager:
         post: Post,
         *,
         include_word_timestamps: bool = False,
+        words_optional: bool = False,
         progress_callback: ChunkProgressCallback | None = None,
     ) -> tuple[list[TranscriptSegment], list[Segment] | None]:
         """
@@ -336,6 +337,11 @@ class TranscriptionManager:
 
         Args:
             post: The Post object containing the podcast audio to transcribe
+            include_word_timestamps: record word timestamps on a fresh
+                transcription.
+            words_optional: words are only being recorded, nothing needs them,
+                so an existing transcript without saved words is reused as is
+                instead of paying for a second transcription.
 
         Returns:
             The persisted transcript segments and, when requested, the richer
@@ -354,7 +360,12 @@ class TranscriptionManager:
                     getattr(post, "transcript_word_timestamps", None),
                 )
                 if rich_segments is None:
-                    if self._transcriber_supports_word_timestamps():
+                    if words_optional:
+                        self.logger.info(
+                            "Existing transcript found for post %s without word timestamps; not re-transcribing just to record them.",
+                            post.id,
+                        )
+                    elif self._transcriber_supports_word_timestamps():
                         self.logger.info(
                             "Existing transcript found for post %s but no saved word timestamps were available; requesting them from %s.",
                             post.id,

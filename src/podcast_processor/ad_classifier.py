@@ -171,7 +171,9 @@ class AdClassifier:
         # ads against the rest of the transcript and confirming with the LLM.
         self.repeat_ad_refiner: RepeatAdRefiner | None = None
         if repeat_ad_detection_enabled():
-            self.repeat_ad_refiner = RepeatAdRefiner(config, self.logger)
+            self.repeat_ad_refiner = RepeatAdRefiner(
+                config, self.logger, token_limiter=self.rate_limiter
+            )
             self.logger.info("Repeat-ad detection enabled")
 
     def classify(

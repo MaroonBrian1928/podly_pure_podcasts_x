@@ -730,3 +730,47 @@ def test_backfill_estimated_cost_applies_and_reports_updates(
         (whisper_id, 0.0),
     }
     assert all(wait for _, _, wait in updates)
+
+
+def test_backfill_estimated_cost_reprices_stale_zero_costs(
+    app: Any, monkeypatch: Any
+) -> None:
+    """Zeros stored before tokens were backfilled are priced from the tokens."""
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 0.5)
+    updates: list[tuple[int, float]] = []
+
+    class _Result:
+        success = True
+
+    def fake_update(_model: str, row_id: int, data: dict[str, Any], wait: bool):
+        updates.append((row_id, data["estimated_cost_usd"]))
+        return _Result()
+
+    monkeypatch.setattr(cost_routes.writer_client, "update", fake_update)
+
+    with app.app_context():
+        post = _seed_post("stale-zero-guid")
+        stale = _add_llm_call(
+            post.id, prompt_tokens=10, completion_tokens=5, estimated_cost_usd=0.0
+        )
+        # Already priced and a genuine zero with no tokens are left alone.
+        _add_llm_call(
+            post.id,
+            first_segment_sequence_num=2,
+            prompt_tokens=10,
+            estimated_cost_usd=0.5,
+        )
+        _add_llm_call(post.id, first_segment_sequence_num=4, estimated_cost_usd=0.0)
+        db.session.commit()
+        stale_id = stale.id
+
+        response = app.test_client().post(
+            "/api/admin/costs/backfill-estimated-cost", json={"apply": True}
+        )
+
+    payload = response.get_json()
+    assert payload["eligible"] == 1
+    assert payload["updated"] == 1
+    assert updates == [(stale_id, 0.5)]

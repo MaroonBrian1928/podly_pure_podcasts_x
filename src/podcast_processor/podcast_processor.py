@@ -1263,6 +1263,7 @@ class PodcastProcessor:
         post: Post,
         *,
         include_word_timestamps: bool,
+        words_optional: bool = False,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[list[Any], list[Any] | None]:
         transcribe_for_processing = getattr(
@@ -1274,6 +1275,7 @@ class PodcastProcessor:
             result = transcribe_for_processing(
                 post,
                 include_word_timestamps=include_word_timestamps,
+                words_optional=words_optional,
                 progress_callback=progress_callback,
             )
             if isinstance(result, tuple) and len(result) == 2:
@@ -1325,6 +1327,13 @@ class PodcastProcessor:
             include_word_timestamps=(
                 (enable_profanity_bleeping and not has_saved_bleep_windows)
                 or (wants_word_timestamps and not has_saved_transcript_word_timestamps)
+            ),
+            words_optional=not (
+                (enable_profanity_bleeping and not has_saved_bleep_windows)
+                or (
+                    self._word_level_boundary_refiner_enabled()
+                    and not has_saved_transcript_word_timestamps
+                )
             ),
         )
         self._raise_if_cancelled(job, 2, cancel_callback)
@@ -1655,6 +1664,10 @@ class PodcastProcessor:
                     (enable_profanity_bleeping and not has_saved_bleep_windows)
                     or word_refinement_active
                     or self._record_word_timestamps_enabled()
+                ),
+                words_optional=not (
+                    (enable_profanity_bleeping and not has_saved_bleep_windows)
+                    or word_refinement_active
                 ),
                 progress_callback=fallback_progress,
             )

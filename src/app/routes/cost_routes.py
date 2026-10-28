@@ -6,11 +6,13 @@ attributed across subscribers.
 """
 
 import logging
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
 import flask
 from flask import Blueprint, jsonify, request
+from sqlalchemy import and_, or_
 
 from app.auth.guards import require_admin
 from app.config_store import read_combined
@@ -470,6 +472,17 @@ def api_admin_costs_calls() -> flask.Response:
     )
 
 
+def _backfill_cost_for_call(call: ModelCall) -> tuple[str, float | None]:
+    """Return how the backfill treats ``call`` and the cost to store, if any."""
+    if not _is_billable_llm_call(call):
+        return "skip_non_billable", 0.0
+    if not (call.prompt_tokens or call.cached_prompt_tokens or call.completion_tokens):
+        return "skip_no_tokens", None
+    cost = round(_model_call_cost(call), 8)
+    # Re-priced stale zeros that price to the same value are not work.
+    return ("unchanged" if call.estimated_cost_usd == cost else "eligible"), cost
+
+
 @costs_bp.route("/api/admin/costs/backfill-estimated-cost", methods=["POST"])
 def api_admin_backfill_estimated_cost() -> flask.Response:
     """Populate ``ModelCall.estimated_cost_usd`` for legacy rows.
@@ -500,32 +513,31 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
         if limit <= 0:
             return flask.make_response(jsonify({"error": "Invalid limit"}), 400)
 
+    # Earlier releases stored 0.0 for billable calls that had no tokens yet and
+    # kept it after the token backfill; those zeros are re-priced too.
+    has_tokens = or_(
+        ModelCall.prompt_tokens > 0,
+        ModelCall.cached_prompt_tokens > 0,
+        ModelCall.completion_tokens > 0,
+    )
     query = ModelCall.query.filter(
-        ModelCall.estimated_cost_usd.is_(None),
+        or_(
+            ModelCall.estimated_cost_usd.is_(None),
+            and_(ModelCall.estimated_cost_usd == 0, has_tokens),
+        ),
         ModelCall.status.like("success%"),
     ).order_by(ModelCall.id.asc())
     if limit:
         query = query.limit(limit)
     targets: list[ModelCall] = query.all()
 
-    eligible = 0
+    outcomes = Counter[str]()
     updated = 0
-    skipped_non_billable = 0
-    skipped_no_tokens = 0
     failed_updates = 0
     for call in targets:
-        if not _is_billable_llm_call(call):
-            skipped_non_billable += 1
-            cost = 0.0
-        elif not (
-            call.prompt_tokens or call.cached_prompt_tokens or call.completion_tokens
-        ):
-            skipped_no_tokens += 1
-            continue
-        else:
-            eligible += 1
-            cost = round(_model_call_cost(call), 8)
-        if not apply:
+        outcome, cost = _backfill_cost_for_call(call)
+        outcomes[outcome] += 1
+        if cost is None or call.estimated_cost_usd == cost or not apply:
             continue
         result = writer_client.update(
             "ModelCall",
@@ -541,9 +553,9 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
     return jsonify(
         {
             "scanned": len(targets),
-            "eligible": eligible,
-            "skipped_non_billable": skipped_non_billable,
-            "skipped_no_tokens": skipped_no_tokens,
+            "eligible": outcomes["eligible"],
+            "skipped_non_billable": outcomes["skip_non_billable"],
+            "skipped_no_tokens": outcomes["skip_no_tokens"],
             "updated": updated,
             "failed_updates": failed_updates,
             "applied": apply,
