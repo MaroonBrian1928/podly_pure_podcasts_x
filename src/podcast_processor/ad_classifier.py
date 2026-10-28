@@ -1195,8 +1195,7 @@ class AdClassifier:
         attempt_service_tier: str | None,
     ) -> dict[str, Any]:
         """Assemble the writer payload for a successful ModelCall update,
-        including per-provider token usage when reported. Kept separate from
-        ``_call_model`` so the latter stays under the branch-count budget.
+        including token usage and estimated cost when the provider reports usage.
         """
         usage = extract_litellm_usage(response)
         payload: dict[str, Any] = {
@@ -1242,7 +1241,68 @@ class AdClassifier:
             payload["estimated_cost_usd"] = cost
         return payload
 
-    def _call_model(  # noqa: PLR0912
+    def _mark_attempt_pending(
+        self,
+        model_call_obj: ModelCall,
+        retry_attempts_value: int,
+        service_tier: str | None,
+    ) -> None:
+        """Persist the attempt number, pending status and requested tier."""
+        if model_call_obj.id is None:
+            return
+        pending_res = writer_client.update(
+            "ModelCall",
+            model_call_obj.id,
+            {
+                "status": "pending",
+                "retry_attempts": retry_attempts_value,
+                "service_tier": service_tier,
+                # The backoff (if any) is over; this attempt is in flight, not
+                # waiting.
+                "next_retry_at": None,
+            },
+            wait=True,
+        )
+        if not pending_res or not pending_res.success:
+            raise RuntimeError(
+                getattr(pending_res, "error", "Failed to update ModelCall")
+            )
+        model_call_obj.service_tier = service_tier
+
+    def _complete(
+        self, completion_args: dict[str, Any], model_call_id: int | None
+    ) -> Any:
+        """Run the completion, inside the concurrency limiter when configured."""
+        if not self.concurrency_limiter:
+            return call_litellm_with_tier_retry(
+                completion_args,
+                config=self.config,
+                logger=self.logger,
+                model_call_id=model_call_id,
+            )
+        with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
+            return call_litellm_with_tier_retry(
+                completion_args,
+                config=self.config,
+                logger=self.logger,
+                model_call_id=model_call_id,
+            )
+
+    def _fail_permanently(self, model_call_obj: ModelCall, error: Exception) -> None:
+        fail_res = writer_client.update(
+            "ModelCall",
+            model_call_obj.id,
+            {"status": "failed_permanent", "error_message": str(error)},
+            wait=True,
+        )
+        if not fail_res or not fail_res.success:
+            raise RuntimeError(
+                getattr(fail_res, "error", "Failed to update ModelCall")
+            ) from error
+        model_call_obj.status = "failed_permanent"
+        model_call_obj.error_message = str(error)
+
+    def _call_model(
         self,
         model_call_obj: ModelCall,
         system_prompt: str,
@@ -1281,45 +1341,13 @@ class AdClassifier:
 
                 requested_service_tier = completion_args.get("service_tier")
 
-                # Persist retry attempt + pending status (+ tier) via writer
-                if model_call_obj.id is not None:
-                    pending_res = writer_client.update(
-                        "ModelCall",
-                        model_call_obj.id,
-                        {
-                            "status": "pending",
-                            "retry_attempts": retry_attempts_value,
-                            "service_tier": requested_service_tier,
-                            # The backoff (if any) is over; this attempt is in
-                            # flight, not waiting.
-                            "next_retry_at": None,
-                        },
-                        wait=True,
-                    )
-                    if not pending_res or not pending_res.success:
-                        raise RuntimeError(
-                            getattr(pending_res, "error", "Failed to update ModelCall")
-                        )
-                    model_call_obj.service_tier = requested_service_tier
+                self._mark_attempt_pending(
+                    model_call_obj, retry_attempts_value, requested_service_tier
+                )
 
                 from litellm.types.utils import Choices
 
-                # Use concurrency limiter if available
-                if self.concurrency_limiter:
-                    with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
-                        response = call_litellm_with_tier_retry(
-                            completion_args,
-                            config=self.config,
-                            logger=self.logger,
-                            model_call_id=model_call_obj.id,
-                        )
-                else:
-                    response = call_litellm_with_tier_retry(
-                        completion_args,
-                        config=self.config,
-                        logger=self.logger,
-                        model_call_id=model_call_obj.id,
-                    )
+                response = self._complete(completion_args, model_call_obj.id)
 
                 # The helper removes Flex after an exhausted-tier fallback and
                 # also honors OpenAI's response-reported tier.
@@ -1359,22 +1387,7 @@ class AdClassifier:
 
             except Exception as e:
                 if isinstance(e, LLMRequestTooLargeError):
-                    error_message = str(e)
-                    fail_res = writer_client.update(
-                        "ModelCall",
-                        model_call_obj.id,
-                        {
-                            "status": "failed_permanent",
-                            "error_message": error_message,
-                        },
-                        wait=True,
-                    )
-                    if not fail_res or not fail_res.success:
-                        raise RuntimeError(
-                            getattr(fail_res, "error", "Failed to update ModelCall")
-                        ) from e
-                    model_call_obj.status = "failed_permanent"
-                    model_call_obj.error_message = error_message
+                    self._fail_permanently(model_call_obj, e)
                     raise
                 last_error = e
                 if self._is_retryable_error(e):
@@ -1394,19 +1407,7 @@ class AdClassifier:
                         f"Non-retryable LLM error for ModelCall {model_call_obj.id} (attempt {current_attempt_num}): {e}",
                         exc_info=True,
                     )
-                    fail_res = writer_client.update(
-                        "ModelCall",
-                        model_call_obj.id,
-                        {"status": "failed_permanent", "error_message": str(e)},
-                        wait=True,
-                    )
-                    if not fail_res or not fail_res.success:
-                        raise RuntimeError(
-                            getattr(fail_res, "error", "Failed to update ModelCall")
-                        ) from e
-                    # Update local object to reflect database state
-                    model_call_obj.status = "failed_permanent"
-                    model_call_obj.error_message = str(e)
+                    self._fail_permanently(model_call_obj, e)
                     raise  # Re-raise non-retryable exceptions immediately
 
         # If we get here, all retries were exhausted
