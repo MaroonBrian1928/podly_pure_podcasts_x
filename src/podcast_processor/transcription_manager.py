@@ -239,6 +239,7 @@ class TranscriptionManager:
                 self.logger,
             )
 
+        artifact_path: Path | None = None
         finish_action = "finish_transcription_replace"
         finish_payload: dict[str, Any] = {
             "post_id": post.id,
@@ -268,6 +269,23 @@ class TranscriptionManager:
         if not finish_res or not finish_res.success:
             raise RuntimeError(
                 getattr(finish_res, "error", "Failed to finish transcription replace")
+            )
+        if artifact_path is not None:
+            self._remove_transcript_word_timestamps_artifact(artifact_path)
+
+    def _remove_transcript_word_timestamps_artifact(self, artifact_path: Path) -> None:
+        """Drop the hand-off file once the writer has committed its contents.
+
+        Runs only after a successful finish call; on failure the file stays so
+        the outcome can be inspected. A failed delete never fails the job.
+        """
+        try:
+            artifact_path.unlink(missing_ok=True)
+            for directory in (artifact_path.parent, artifact_path.parent.parent):
+                directory.rmdir()
+        except OSError as exc:
+            self.logger.debug(
+                "Could not fully remove transcript artifact %s: %s", artifact_path, exc
             )
 
     def _write_transcript_word_timestamps_artifact(

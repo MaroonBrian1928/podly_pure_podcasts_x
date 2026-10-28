@@ -660,3 +660,105 @@ def test_transcribe_wrapper_does_not_request_word_timestamps(
         manager.transcribe(Post(guid="g", title="t", download_url="u"))
 
     assert for_processing.call_args.kwargs["include_word_timestamps"] is False
+
+
+def _persist_with_artifact(
+    manager: TranscriptionManager,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    finish_succeeds: bool,
+) -> Any:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        transcription_manager_module, "get_base_podcast_data_dir", lambda: tmp_path
+    )
+
+    def fake_action(action: str, params: dict[str, Any], wait: bool = True) -> Any:
+        if action.startswith("finish_"):
+            return SimpleNamespace(success=finish_succeeds, error="boom", data={})
+        return SimpleNamespace(success=True, error=None, data={"inserted": 1})
+
+    monkeypatch.setattr(
+        transcription_manager_module.writer_client, "action", fake_action
+    )
+    manager._persist_transcription_chunks(
+        post=Post(id=5, guid="g", title="t", download_url="u"),
+        model_call_id=9,
+        segments=[Segment(start=0.0, end=1.0, text="hi")],
+        transcript_word_timestamps=[{"sequence_num": 0, "words": []}],
+    )
+    return tmp_path / "transcript_artifacts" / "post_5" / "model_call_9"
+
+
+def _make_manager(
+    test_config: Config, test_logger: logging.Logger, mock_db_session: MagicMock
+) -> TranscriptionManager:
+    return TranscriptionManager(
+        test_logger,
+        test_config,
+        model_call_query=MagicMock(),
+        segment_query=MagicMock(),
+        db_session=mock_db_session,
+        transcriber=MagicMock(spec=Transcriber),
+    )
+
+
+def test_word_timestamp_artifact_is_removed_after_the_writer_succeeds(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _make_manager(test_config, test_logger, mock_db_session)
+
+    artifact_dir = _persist_with_artifact(
+        manager, tmp_path, monkeypatch, finish_succeeds=True
+    )
+
+    assert not (artifact_dir / "word_timestamps.json").exists()
+    assert not artifact_dir.exists()
+    assert not (tmp_path / "transcript_artifacts" / "post_5").exists()
+
+
+def test_word_timestamp_artifact_is_kept_when_the_writer_fails(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _make_manager(test_config, test_logger, mock_db_session)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _persist_with_artifact(manager, tmp_path, monkeypatch, finish_succeeds=False)
+
+    artifact = (
+        tmp_path / "transcript_artifacts" / "post_5" / "model_call_9"
+    ) / "word_timestamps.json"
+    assert artifact.is_file()
+
+
+def test_failing_to_remove_the_artifact_does_not_fail_the_job(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    manager = _make_manager(test_config, test_logger, mock_db_session)
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    artifact_dir = _persist_with_artifact(
+        manager, tmp_path, monkeypatch, finish_succeeds=True
+    )
+
+    assert (artifact_dir / "word_timestamps.json").is_file()
