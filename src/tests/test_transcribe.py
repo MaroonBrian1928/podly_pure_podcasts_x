@@ -428,13 +428,15 @@ def test_non_finite_word_values_never_reach_the_artifact_payload() -> None:
     json.dumps(payload, allow_nan=False)
 
 
-def _make_groq_transcriber(mocker: Any, response_segments: list) -> Any:
+def _make_groq_transcriber(
+    mocker: Any, response_segments: list, response_words: list | None = None
+) -> Any:
     from podcast_processor.transcribe import GroqWhisperTranscriber
     from shared.config import GroqWhisperConfig
 
     mock_client = MagicMock()
     mock_client.audio.transcriptions.create.return_value = SimpleNamespace(
-        segments=response_segments
+        segments=response_segments, words=response_words
     )
     mocker.patch("podcast_processor.transcribe.Groq", return_value=mock_client)
     logger = logging.getLogger("global_logger")
@@ -470,36 +472,79 @@ def test_groq_get_segments_for_chunk_omits_word_granularities_by_default(
     assert "timestamp_granularities" not in kwargs
 
 
-def test_groq_word_timestamps_parsed_and_carried_through(mocker: Any) -> None:
+def test_groq_top_level_words_are_grouped_into_their_segments(mocker: Any) -> None:
+    """Groq returns words as one top-level list; segments carry none."""
     from podcast_processor.transcribe import GroqWhisperTranscriber
 
     transcriber, _ = _make_groq_transcriber(
         mocker,
         [
-            {
-                "start": 10.0,
-                "end": 12.0,
-                "text": "hello world",
-                "words": [
-                    {"word": "hello", "start": 10.1, "end": 10.5},
-                    {"word": "world", "start": 10.6, "end": 11.0},
-                ],
-            },
+            {"start": 10.0, "end": 12.0, "text": "hello world"},
             {"start": 12.0, "end": 13.0, "text": "no words here"},
+            {"start": 13.0, "end": 14.0, "text": "bye"},
+        ],
+        [
+            {"word": "hello", "start": 10.1, "end": 10.5},
+            {"word": "world", "start": 10.6, "end": 11.0},
+            {"word": "bye", "start": 13.1, "end": 13.4},
         ],
     )
 
     segments = transcriber.get_segments_for_chunk(
         "chunk.mp3", include_word_timestamps=True
     )
-    assert len(segments) == 2
-    assert segments[0].words is not None
-    assert [w.word for w in segments[0].words] == ["hello", "world"]
+
+    assert [[w.word for w in (s.words or [])] for s in segments] == [
+        ["hello", "world"],
+        [],
+        ["bye"],
+    ]
     assert segments[1].words is None
 
     converted = GroqWhisperTranscriber.convert_segments(segments)
-    assert converted[0].words is not None
-    assert [w.word for w in converted[0].words] == ["hello", "world"]
+    assert [w.word for w in (converted[0].words or [])] == ["hello", "world"]
+
+
+def test_groq_word_without_start_follows_the_previous_word(mocker: Any) -> None:
+    transcriber, _ = _make_groq_transcriber(
+        mocker,
+        [
+            {"start": 0.0, "end": 2.0, "text": "one two"},
+            {"start": 2.0, "end": 4.0, "text": "three"},
+        ],
+        [
+            {"word": "one", "start": 0.1, "end": 0.5},
+            {"word": "two", "start": None, "end": None},
+            {"word": "three", "start": 2.1, "end": 2.5},
+        ],
+    )
+
+    segments = transcriber.get_segments_for_chunk(
+        "chunk.mp3", include_word_timestamps=True
+    )
+
+    assert [w.word for w in (segments[0].words or [])] == ["one", "two"]
+    assert [w.word for w in (segments[1].words or [])] == ["three"]
+
+
+def test_groq_nested_segment_words_are_still_accepted(mocker: Any) -> None:
+    transcriber, _ = _make_groq_transcriber(
+        mocker,
+        [
+            {
+                "start": 10.0,
+                "end": 12.0,
+                "text": "hello",
+                "words": [{"word": "hello", "start": 10.1, "end": 10.5}],
+            }
+        ],
+    )
+
+    segments = transcriber.get_segments_for_chunk(
+        "chunk.mp3", include_word_timestamps=True
+    )
+
+    assert [w.word for w in (segments[0].words or [])] == ["hello"]
 
 
 def test_groq_add_offset_to_segments_shifts_word_timestamps() -> None:

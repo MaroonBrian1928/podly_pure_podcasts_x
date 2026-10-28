@@ -301,7 +301,7 @@ class TranscriptionManager:
     ) -> list[TranscriptSegment]:
         db_segments, _ = self.transcribe_for_processing(
             post,
-            include_word_timestamps=True,
+            include_word_timestamps=False,
             progress_callback=progress_callback,
         )
         return db_segments

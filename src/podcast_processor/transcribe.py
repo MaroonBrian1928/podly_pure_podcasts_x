@@ -559,6 +559,39 @@ class GroqWhisperTranscriber(Transcriber):
 
         return segments
 
+    @staticmethod
+    def _assign_top_level_words(
+        segments: list[Any], top_level_words: list[Any] | None
+    ) -> list[list[WordTimestamp]]:
+        """Group Groq's word entries by segment.
+
+        Groq returns words as one top-level list next to ``segments`` (segments
+        carry no words of their own), so each word goes to the segment that
+        contains its start time. A segment's own ``words`` are used when a
+        compatible server nests them instead.
+        """
+        parse = OpenAIWhisperTranscriber._parse_word
+        grouped: list[list[WordTimestamp]] = [
+            [w for w in (parse(word) for word in seg.get("words") or []) if w]
+            for seg in segments
+        ]
+        if not top_level_words or any(grouped):
+            return grouped
+
+        index = 0
+        for raw_word in top_level_words:
+            word = parse(raw_word)
+            if word is None:
+                continue
+            while (
+                word.start is not None
+                and index < len(segments) - 1
+                and word.start >= segments[index]["end"]
+            ):
+                index += 1
+            grouped[index].append(word)
+        return grouped
+
     def get_segments_for_chunk(
         self, chunk_path: str, *, include_word_timestamps: bool = False
     ) -> list[GroqTranscriptionSegment]:
@@ -611,26 +644,19 @@ class GroqWhisperTranscriber(Transcriber):
                 )
                 return []
 
-            groq_segments = []
-            for seg in transcription_segments:
-                # Reuse the OpenAI transcriber's defensive word parser: the
-                # verbose_json word entries have the same shape.
-                parsed_words = [
-                    parsed_word
-                    for parsed_word in (
-                        OpenAIWhisperTranscriber._parse_word(word)
-                        for word in seg.get("words", []) or []
-                    )
-                    if parsed_word is not None
-                ]
-                groq_segments.append(
-                    GroqTranscriptionSegment(
-                        start=seg["start"],
-                        end=seg["end"],
-                        text=seg["text"],
-                        words=parsed_words or None,
-                    )
+            top_level_words = getattr(transcription, "words", None)
+            words_by_segment = self._assign_top_level_words(
+                transcription_segments, top_level_words
+            )
+            groq_segments = [
+                GroqTranscriptionSegment(
+                    start=seg["start"],
+                    end=seg["end"],
+                    text=seg["text"],
+                    words=words_by_segment[index] or None,
                 )
+                for index, seg in enumerate(transcription_segments)
+            ]
 
             self.logger.info(
                 "[GROQ_API_CALL] Got %d segments from chunk (attempt %d/%d)",

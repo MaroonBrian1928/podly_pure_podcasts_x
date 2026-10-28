@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Flask
@@ -633,3 +633,30 @@ def test_supports_word_timestamps_for_groq_transcriber(
             transcriber=groq_transcriber,
         )
         assert manager._transcriber_supports_word_timestamps() is True
+
+
+def test_transcribe_wrapper_does_not_request_word_timestamps(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    app: Flask,
+) -> None:
+    """Plain transcribe() must not turn on word timestamps (and the cached-read
+    backfill that goes with them); callers opt in explicitly."""
+    manager = TranscriptionManager(
+        test_logger,
+        test_config,
+        model_call_query=MagicMock(),
+        segment_query=MagicMock(),
+        db_session=mock_db_session,
+        transcriber=MagicMock(spec=Transcriber),
+    )
+    with (
+        app.app_context(),
+        patch.object(
+            manager, "transcribe_for_processing", return_value=([], None)
+        ) as for_processing,
+    ):
+        manager.transcribe(Post(guid="g", title="t", download_url="u"))
+
+    assert for_processing.call_args.kwargs["include_word_timestamps"] is False
