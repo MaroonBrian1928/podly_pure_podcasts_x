@@ -213,7 +213,10 @@ def _params_for_case(case_id: str) -> dict[str, Any]:
             "payload": {
                 "llm": {"llm_model": "synthetic-parity-model", "llm_api_key": ""},
                 "whisper": {"whisper_type": "test"},
-                "processing": {"num_segments_to_input_to_prompt": 73},
+                "processing": {
+                    "num_segments_to_input_to_prompt": 73,
+                    "record_word_timestamps": False,
+                },
                 "output": {
                     "fade_ms": 2222,
                     "min_confidence": 0.731234,
@@ -472,6 +475,7 @@ def assert_writer_system_parity(observation: dict[str, Any]) -> None:
         assert result["llm"]["llm_model"] == "synthetic-parity-model"
         assert result["whisper"]["whisper_type"] == "test"
         assert result["processing"]["num_segments_to_input_to_prompt"] == 73
+        assert result["processing"]["record_word_timestamps"] is False
         assert result["output"]["fade_ms"] == 2222
         assert result["app"]["enable_public_landing_page"] is True
         assert result["notifications"]["apprise_urls"] == ["synthetic://notify"]

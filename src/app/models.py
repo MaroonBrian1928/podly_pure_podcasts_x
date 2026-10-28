@@ -581,6 +581,11 @@ class ProcessingSettings(db.Model):  # type: ignore[name-defined, misc]
         nullable=False,
         default=DEFAULTS.PROCESSING_NUM_SEGMENTS_TO_INPUT_TO_PROMPT,
     )
+    record_word_timestamps = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.PROCESSING_RECORD_WORD_TIMESTAMPS,
+    )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

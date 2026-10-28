@@ -15,6 +15,10 @@ class ProcessingConfig(BaseModel):
         ge=0,
         description="Maximum number of previously identified segments carried into the next prompt.",
     )
+    record_word_timestamps: bool = Field(
+        default=DEFAULTS.PROCESSING_RECORD_WORD_TIMESTAMPS,
+        description="Request and store per-word timestamps when transcribing.",
+    )
 
     @model_validator(mode="after")
     def validate_overlap_limits(self) -> ProcessingConfig:

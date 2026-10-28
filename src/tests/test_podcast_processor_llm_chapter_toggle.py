@@ -512,6 +512,7 @@ def test_prepare_profanity_bleeped_audio_uses_configured_bleep_padding(
 
 def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> None:
     config = create_standard_test_config()
+    config.processing.record_word_timestamps = False
 
     processor = object.__new__(PodcastProcessor)
     processor.config = config
@@ -1041,3 +1042,68 @@ def test_llm_path_declares_chapter_generation_stage() -> None:
     assert step_sequence.index(5) > step_sequence.index(4)
     chapters_call = next(c for c in calls if c.args[2] == 5)
     assert chapters_call.args[3] == "Generating chapters"
+
+
+def _run_llm_processing_for_word_timestamps(
+    *, record_word_timestamps: bool, saved_words: list[dict] | None = None
+) -> MagicMock:
+    config = create_standard_test_config()
+    config.processing.record_word_timestamps = record_word_timestamps
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.status_manager = MagicMock()
+    processor.audio_processor = MagicMock()
+    processor.audio_processor.process_audio.return_value = AudioProcessResult(
+        [], 600_000
+    )
+    processor._classify_ad_segments = MagicMock()
+    processor._transcribe_for_processing = MagicMock(
+        return_value=(
+            [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0)],
+            None,
+        )
+    )
+    processor._prepare_profanity_bleeped_audio = MagicMock(
+        return_value=ProfanityBleepResult("/tmp/input.mp3", [])
+    )
+    processor._cleanup_temp_audio_path = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+        transcript_word_timestamps=saved_words,
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+    processor._perform_llm_based_processing(
+        post, job, "/tmp/output.mp3", enable_profanity_bleeping=False
+    )
+    return processor._transcribe_for_processing
+
+
+def test_llm_processing_requests_word_timestamps_when_setting_is_on() -> None:
+    transcribe = _run_llm_processing_for_word_timestamps(record_word_timestamps=True)
+
+    assert transcribe.call_args.kwargs["include_word_timestamps"] is True
+
+
+def test_llm_processing_skips_word_timestamps_when_setting_is_off() -> None:
+    transcribe = _run_llm_processing_for_word_timestamps(record_word_timestamps=False)
+
+    assert transcribe.call_args.kwargs["include_word_timestamps"] is False
+
+
+def test_llm_processing_does_not_rerequest_saved_word_timestamps() -> None:
+    transcribe = _run_llm_processing_for_word_timestamps(
+        record_word_timestamps=True,
+        saved_words=[{"sequence_num": 0, "words": [{"word": "hi", "start": 0.0}]}],
+    )
+
+    assert transcribe.call_args.kwargs["include_word_timestamps"] is False

@@ -186,6 +186,7 @@ export type WhisperConfig =
 
 export interface ProcessingConfigUI {
   num_segments_to_input_to_prompt: number;
+  record_word_timestamps: boolean;
 }
 
 export interface OutputConfigUI {

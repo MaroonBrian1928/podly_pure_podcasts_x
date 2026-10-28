@@ -836,6 +836,10 @@ class PodcastProcessor:
             return bool(feed_override)
         return bool(getattr(self.config, "chapter_full_block_text", False))
 
+    def _record_word_timestamps_enabled(self) -> bool:
+        processing = getattr(self.config, "processing", None)
+        return bool(getattr(processing, "record_word_timestamps", False))
+
     def _word_level_boundary_refiner_enabled(self) -> bool:
         return bool(
             getattr(self.config, "enable_boundary_refinement", False)
@@ -1294,10 +1298,13 @@ class PodcastProcessor:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
         """
-        needs_word_timestamps_for_refiner = self._word_level_boundary_refiner_enabled()
+        wants_word_timestamps = (
+            self._word_level_boundary_refiner_enabled()
+            or self._record_word_timestamps_enabled()
+        )
         has_saved_transcript_word_timestamps = (
             self._has_saved_transcript_word_timestamps(
-                post if needs_word_timestamps_for_refiner else None
+                post if wants_word_timestamps else None
             )
         )
         has_saved_bleep_windows, saved_bleep_windows_ms = (
@@ -1317,10 +1324,7 @@ class PodcastProcessor:
             progress_callback=transcribe_progress,
             include_word_timestamps=(
                 (enable_profanity_bleeping and not has_saved_bleep_windows)
-                or (
-                    needs_word_timestamps_for_refiner
-                    and not has_saved_transcript_word_timestamps
-                )
+                or (wants_word_timestamps and not has_saved_transcript_word_timestamps)
             ),
         )
         self._raise_if_cancelled(job, 2, cancel_callback)
