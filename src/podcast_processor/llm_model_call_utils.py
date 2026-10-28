@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -331,6 +332,7 @@ def call_litellm_with_tier_retry(
     base_delay: float | None = None,
     sleep: Any = time.sleep,
     model_call_id: int | None = None,
+    before_attempt: Callable[[], None] | None = None,
 ) -> Any:
     """Run `litellm.completion(**args)` with Flex-aware retry + fallback.
 
@@ -344,6 +346,10 @@ def call_litellm_with_tier_retry(
     ModelCall row (`status="retrying"` + `next_retry_at`) so the jobs UI can
     show the live backoff state; the row returns to `pending` as each retry
     attempt goes out. All such writes are best-effort.
+
+    ``before_attempt`` runs before every provider request, including Flex
+    retries, the standard-tier fallback and the TPM-adjusted retry, so a rate
+    limiter can pace each one.
     """
     import litellm  # local import to keep top-level imports cheap
 
@@ -351,10 +357,15 @@ def call_litellm_with_tier_retry(
 
     apply_litellm_suppress_debug_info()
 
+    def completion(**kwargs: Any) -> Any:
+        if before_attempt is not None:
+            before_attempt()
+        return litellm.completion(**kwargs)
+
     flex_active = completion_args.get("service_tier") == "flex"
     if not flex_active:
         response = _call_with_tpm_adjustment(
-            litellm.completion,
+            completion,
             completion_args,
             logger=logger,
         )
@@ -380,7 +391,7 @@ def call_litellm_with_tier_retry(
     for attempt in range(retries):
         try:
             response = _call_with_tpm_adjustment(
-                litellm.completion,
+                completion,
                 completion_args,
                 logger=logger,
             )
@@ -405,7 +416,7 @@ def call_litellm_with_tier_retry(
                 _mark_model_call_attempt_started(model_call_id, logger=logger)
                 completion_args.pop("service_tier", None)
                 response = _call_with_tpm_adjustment(
-                    litellm.completion,
+                    completion,
                     completion_args,
                     logger=logger,
                 )

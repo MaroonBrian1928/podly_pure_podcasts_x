@@ -6,6 +6,7 @@ Note: We intentionally share some call-setup patterns with WordBoundaryRefiner.
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,21 @@ class BoundaryRefiner:
         self.logger = logger or logging.getLogger(__name__)
         self.token_limiter = token_limiter
         self.template = self._load_template()
+
+    def _pace_request(
+        self, completion_args: dict[str, Any]
+    ) -> Callable[[], None] | None:
+        """Wait for the classifier's token budget before each provider request.
+
+        The refiner draws on the same per-minute token budget as the classifier
+        and runs right after it, so unpaced calls hit the provider's limit.
+        """
+        limiter = self.token_limiter
+        if limiter is None:
+            return None
+        return lambda: limiter.wait_if_needed(
+            completion_args["messages"], self.config.llm_model
+        )
 
     def _load_template(self) -> Template:
         path = (
@@ -150,22 +166,12 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 logger=self.logger,
                 log_prefix="Boundary refine",
             )
-            # Pace this call through the shared token bucket. The refiner's calls
-            # draw on the same provider per-minute token budget as the ad
-            # classifier's, but previously fired unpaced right after
-            # classification had just filled that window — the provider's TPM
-            # limit (input+output tokens combined) then 429'd these calls and
-            # they failed permanently. Waiting here trades a short delay for a
-            # call that actually goes through.
-            if self.token_limiter is not None:
-                self.token_limiter.wait_if_needed(
-                    completion_args["messages"], self.config.llm_model
-                )
             response = call_litellm_with_tier_retry(
                 completion_args,
                 config=self.config,
                 logger=self.logger,
                 model_call_id=model_call_id,
+                before_attempt=self._pace_request(completion_args),
             )
             effective_service_tier = completion_args.get("service_tier")
             usage = extract_litellm_usage(response)

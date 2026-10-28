@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from podcast_processor.ad_classifier import AdClassifier
 from podcast_processor.boundary_refiner import BoundaryRefiner
 from podcast_processor.token_rate_limiter import TokenRateLimiter
+from podcast_processor.word_boundary_refiner import WordBoundaryRefiner
 
 from .test_helpers import create_test_config
 
@@ -60,9 +61,7 @@ class TestBoundaryRefinerTokenLimiter:
         refiner = BoundaryRefiner(config, token_limiter=limiter)
         with (
             patch("podcast_processor.boundary_refiner.writer_client") as mock_writer,
-            patch(
-                "podcast_processor.boundary_refiner.call_litellm_with_tier_retry"
-            ) as mock_call,
+            patch("litellm.completion") as mock_call,
         ):
             mock_writer.action.return_value = Mock(success=False)
 
@@ -87,9 +86,7 @@ class TestBoundaryRefinerTokenLimiter:
         refiner = BoundaryRefiner(create_test_config())
         with (
             patch("podcast_processor.boundary_refiner.writer_client") as mock_writer,
-            patch(
-                "podcast_processor.boundary_refiner.call_litellm_with_tier_retry"
-            ) as mock_call,
+            patch("litellm.completion") as mock_call,
         ):
             mock_writer.action.return_value = Mock(success=False)
             mock_call.return_value = _fake_response()
@@ -111,4 +108,17 @@ class TestClassifierSharesLimiterWithRefiner:
 
         assert classifier.rate_limiter is not None
         assert isinstance(classifier.boundary_refiner, BoundaryRefiner)
+        assert classifier.boundary_refiner.token_limiter is classifier.rate_limiter
+
+
+class TestWordRefinerSharesLimiter:
+    def test_classifier_passes_its_limiter_to_word_refiner(self):
+        config = create_test_config(
+            enable_boundary_refinement=True,
+            enable_word_level_boundary_refinder=True,
+        )
+        with patch("podcast_processor.ad_classifier.db.session") as mock_session:
+            classifier = AdClassifier(config=config, db_session=mock_session)
+
+        assert isinstance(classifier.boundary_refiner, WordBoundaryRefiner)
         assert classifier.boundary_refiner.token_limiter is classifier.rate_limiter
