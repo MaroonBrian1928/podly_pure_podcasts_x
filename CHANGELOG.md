@@ -1,3 +1,10 @@
+## [3.1.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v3.1.0...v3.1.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **frontend:** keep feed settings Save reachable on short screens ([a09154f](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/a09154f2b82b8b9772459fc12be89365a6ec245a))
+
 # [3.1.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v3.0.0...v3.1.0) (2026-10-25)
 
 
