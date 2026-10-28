@@ -42,6 +42,9 @@ def _summarize_service_tiers_for_posts(
     """Bulk variant of `_summarize_service_tier_for_post` for the jobs-list
     endpoints. Returns {post_id: {label, latest, mixed, in_flight?}} only for
     posts that have at least one ModelCall row with a non-null service_tier.
+    Standard-tier calls store a NULL tier, so a finished NULL-tier LLM call
+    counts as "default" toward `mixed`; that is what makes a Flex call
+    followed by a standard fallback show as mixed.
 
     `in_flight` is included only when the most recent tiered ModelCall for the
     post is in a non-terminal state (pending or retrying). The frontend uses
@@ -92,9 +95,32 @@ def _summarize_service_tiers_for_posts(
             },
         )
         bucket["tiers"].add(tier)
+    for post_id in _posts_with_finished_default_tier_calls(list(per_post)):
+        per_post[post_id]["tiers"].add("default")
     return {
         pid: _build_tier_summary(bucket, max_retries)
         for pid, bucket in per_post.items()
+    }
+
+
+def _posts_with_finished_default_tier_calls(post_ids: list[int]) -> set[int]:
+    from app.llm_pricing import is_whisper_call
+
+    rows = (
+        ModelCall.query.with_entities(
+            ModelCall.post_id, ModelCall.model_name, ModelCall.prompt
+        )
+        .filter(
+            ModelCall.post_id.in_(post_ids),
+            ModelCall.service_tier.is_(None),
+            ModelCall.status.like("success%"),
+        )
+        .all()
+    )
+    return {
+        post_id
+        for post_id, model_name, prompt in rows
+        if not is_whisper_call(model_name or "", prompt)
     }
 
 

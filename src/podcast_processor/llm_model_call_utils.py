@@ -524,7 +524,7 @@ def try_update_model_call(
 ) -> None:
     """Best-effort ModelCall updater; no-op if call creation failed.
 
-    When ``status == "success"`` and token usage is supplied, this also
+    When the status starts with ``success`` and token usage is supplied, this also
     pre-computes ``estimated_cost_usd`` and passes it in the writer
     payload. litellm is already loaded in this process (it just ran the
     completion) so the price lookup is free here; the web process can
@@ -550,7 +550,7 @@ def try_update_model_call(
             if usage.get(field) is not None:
                 data[field] = usage[field]
 
-    if status == "success" and model_name and usage:
+    if status.startswith("success") and model_name and usage:
         cost = compute_estimated_cost_usd(
             model_name=model_name,
             service_tier=service_tier,

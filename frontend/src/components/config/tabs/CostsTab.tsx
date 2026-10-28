@@ -50,22 +50,16 @@ function MonthSelector({
   );
 }
 
+// Cached tokens are already part of prompt_tokens, so they are not added again.
 function costTokenTotal(call: CallLog['calls'][number]) {
-  const hasCostTokens =
-    call.prompt_tokens != null ||
-    call.cached_prompt_tokens != null ||
-    call.completion_tokens != null;
-  if (!hasCostTokens) return call.total_tokens ?? null;
-  return (
-    (call.prompt_tokens ?? 0) +
-    (call.cached_prompt_tokens ?? 0) +
-    (call.completion_tokens ?? 0)
-  );
+  if (call.total_tokens != null) return call.total_tokens;
+  if (call.prompt_tokens == null && call.completion_tokens == null) return null;
+  return (call.prompt_tokens ?? 0) + (call.completion_tokens ?? 0);
 }
 
 function EstimatedCostBackfillSummary({ result }: { result: EstimatedCostBackfillResult }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-sm">
       <div className="rounded bg-gray-50 p-2">
         <div className="text-xs text-gray-600">Scanned</div>
         <div className="font-mono tabular-nums text-gray-900">{result.scanned.toLocaleString()}</div>
@@ -77,6 +71,10 @@ function EstimatedCostBackfillSummary({ result }: { result: EstimatedCostBackfil
       <div className="rounded bg-gray-50 p-2">
         <div className="text-xs text-gray-600">Non-billable</div>
         <div className="font-mono tabular-nums text-gray-900">{result.skipped_non_billable.toLocaleString()}</div>
+      </div>
+      <div className="rounded bg-gray-50 p-2" title="Run the token backfill first to price these.">
+        <div className="text-xs text-gray-600">No token data</div>
+        <div className="font-mono tabular-nums text-gray-900">{result.skipped_no_tokens.toLocaleString()}</div>
       </div>
       <div className="rounded bg-gray-50 p-2">
         <div className="text-xs text-gray-600">Updated</div>
@@ -206,8 +204,10 @@ export default function CostsTab() {
       setCostBackfillResult(data);
       if (data.applied) {
         setCostBackfillNotice({
-          type: 'success',
-          message: `Backfill complete. Updated ${data.updated} model call(s).`,
+          type: data.failed_updates > 0 ? 'error' : 'success',
+          message: data.failed_updates > 0
+            ? `Backfill finished with ${data.updated} update(s) and ${data.failed_updates} failure(s).`
+            : `Backfill complete. Updated ${data.updated} model call(s).`,
         });
         toast.success(`Backfilled ${data.updated} model call(s)`);
         queryClient.invalidateQueries({ queryKey: ['admin-costs'] });
@@ -396,7 +396,6 @@ export default function CostsTab() {
         </>
       ) : null}
 
-      {/* API Call Log */}
       <Section title="API call log" stacked>
         {callsLoading ? (
           <div className="text-sm text-gray-600">Loading call log…</div>
@@ -448,7 +447,6 @@ export default function CostsTab() {
                 </tbody>
               </table>
             </div>
-            {/* Pagination */}
             {calls.pages > 1 && (
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs tabular-nums text-gray-600">

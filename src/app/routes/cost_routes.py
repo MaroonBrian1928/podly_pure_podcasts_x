@@ -60,6 +60,14 @@ def _compute_cost_per_subscriber(
     return total_episode_cost / subscriber_count
 
 
+def _persisted_or_computed_cost(call: ModelCall) -> float:
+    """Cost stored when the call was finalized; legacy rows without one are
+    priced from their token usage."""
+    if call.estimated_cost_usd is not None:
+        return float(call.estimated_cost_usd)
+    return _model_call_cost(call)
+
+
 def _is_ina_call(call: ModelCall) -> bool:
     return _is_ina_call_by_name(call.model_name)
 
@@ -116,7 +124,7 @@ def _model_calls_by_post_id(post_ids: list[int]) -> dict[int, list[ModelCall]]:
     model_calls = (
         ModelCall.query.filter(
             ModelCall.post_id.in_(post_ids),
-            ModelCall.status == "success",
+            ModelCall.status.like("success%"),
         )
         .order_by(ModelCall.id.asc())
         .all()
@@ -304,7 +312,7 @@ def api_admin_costs() -> flask.Response:
         total_audio_hours += duration_hours
         post_model_calls = model_calls_by_post_id.get(post.id, [])
         llm_cost = sum(
-            _model_call_cost(call)
+            _persisted_or_computed_cost(call)
             for call in post_model_calls
             if _is_billable_llm_call(call)
         )
@@ -466,10 +474,11 @@ def api_admin_costs_calls() -> flask.Response:
 def api_admin_backfill_estimated_cost() -> flask.Response:
     """Populate ``ModelCall.estimated_cost_usd`` for legacy rows.
 
-    New ModelCalls are populated by the writer at finalize time. Rows that
-    predate the column will have ``estimated_cost_usd IS NULL`` — running
-    this endpoint resolves prices in a disposable helper and writes the
-    computed value back via the writer.
+    New ModelCalls are priced when the processing worker finalizes them. Rows
+    that predate the column have ``estimated_cost_usd IS NULL``; this endpoint
+    prices them from their stored token usage via the pricing helper and
+    writes the value back via the writer. Rows without token usage stay NULL
+    so running the token backfill afterwards can still price them.
 
     POST body (all optional):
       apply: bool (default False — dry run when false)
@@ -493,7 +502,7 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
 
     query = ModelCall.query.filter(
         ModelCall.estimated_cost_usd.is_(None),
-        ModelCall.status == "success",
+        ModelCall.status.like("success%"),
     ).order_by(ModelCall.id.asc())
     if limit:
         query = query.limit(limit)
@@ -502,36 +511,41 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
     eligible = 0
     updated = 0
     skipped_non_billable = 0
+    skipped_no_tokens = 0
+    failed_updates = 0
     for call in targets:
         if not _is_billable_llm_call(call):
             skipped_non_billable += 1
-            if apply:
-                writer_client.update(
-                    "ModelCall",
-                    int(call.id),
-                    {"estimated_cost_usd": 0.0},
-                    wait=False,
-                )
+            cost = 0.0
+        elif not (
+            call.prompt_tokens or call.cached_prompt_tokens or call.completion_tokens
+        ):
+            skipped_no_tokens += 1
             continue
-        eligible += 1
+        else:
+            eligible += 1
+            cost = round(_model_call_cost(call), 8)
         if not apply:
             continue
-        cost = round(_model_call_cost(call), 8)
         result = writer_client.update(
             "ModelCall",
             int(call.id),
             {"estimated_cost_usd": cost},
-            wait=False,
+            wait=True,
         )
         if result and result.success:
             updated += 1
+        else:
+            failed_updates += 1
 
     return jsonify(
         {
             "scanned": len(targets),
             "eligible": eligible,
             "skipped_non_billable": skipped_non_billable,
+            "skipped_no_tokens": skipped_no_tokens,
             "updated": updated,
+            "failed_updates": failed_updates,
             "applied": apply,
         }
     )

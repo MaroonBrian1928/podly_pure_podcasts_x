@@ -156,7 +156,7 @@ def is_whisper_call(model_name: str, prompt: str | None) -> bool:
 
 
 def is_billable_llm_call(call: ModelCall) -> bool:
-    if call.status != "success":
+    if not (call.status or "").startswith("success"):
         return False
     if is_ina_call(call.model_name):
         return False

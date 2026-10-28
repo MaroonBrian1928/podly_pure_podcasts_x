@@ -647,3 +647,36 @@ def test_tier_retry_reraises_non_retryable(
 )
 def test_model_uses_max_completion_tokens(model: str | None, expected: bool) -> None:
     assert model_uses_max_completion_tokens(model) is expected
+
+
+def test_try_update_model_call_prices_success_heuristic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refiner call that fell back to the heuristic still consumed tokens."""
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+    monkeypatch.setattr("app.llm_pricing.compute_model_call_cost", lambda _call: 0.01)
+
+    try_update_model_call(
+        7,
+        status="success_heuristic",
+        response="not json",
+        error_message="parse_failed",
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        model_name="gpt-4o-mini",
+        service_tier=None,
+        prompt="boundary_refine",
+    )
+
+    assert captured["data"]["estimated_cost_usd"] == 0.01
