@@ -208,7 +208,7 @@ export default function WhisperSection() {
       <Section title="Word timestamps">
         <ToggleField
           label="Record word timestamps"
-          hint="Asks the transcription service for per-word timing and keeps it with the episode. Word-level boundary refinement and profanity bleeping need it and request it even when this is off. Adds roughly 1 MB of stored data per hour of audio."
+          hint="Asks the transcription service for per-word timing and keeps it with the episode. Word-level boundary refinement and profanity bleeping need it and request it even when this is off."
           checked={pending?.processing?.record_word_timestamps ?? true}
           onChange={(checked) =>
             setField(['processing', 'record_word_timestamps'], checked)
