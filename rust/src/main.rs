@@ -6093,14 +6093,19 @@ fn is_billable_llm_call(status: &str, model_name: &str, prompt: Option<&str>) ->
 }
 
 // Prefer the cost stored when the processing worker finalized the call; legacy
-// rows without one are priced from their token usage and the resolved rates.
+// rows without one (or with a stale zero despite tokens) are priced from their
+// token usage and the resolved rates.
 fn model_call_cost(call: &CostsModelCallRow, rates: &HashMap<String, ModelRate>) -> f64 {
-    if let Some(stored) = call.estimated_cost_usd {
-        return stored;
-    }
     let prompt_tokens = call.prompt_tokens.unwrap_or(0).max(0) as f64;
     let cached_prompt_tokens = call.cached_prompt_tokens.unwrap_or(0).max(0) as f64;
     let completion_tokens = call.completion_tokens.unwrap_or(0).max(0) as f64;
+    let has_tokens = prompt_tokens > 0.0 || cached_prompt_tokens > 0.0 || completion_tokens > 0.0;
+    // Earlier releases stored 0.0 for calls that only got tokens afterwards.
+    if let Some(stored) = call.estimated_cost_usd {
+        if stored != 0.0 || !has_tokens {
+            return stored;
+        }
+    }
     if prompt_tokens <= 0.0 && cached_prompt_tokens <= 0.0 && completion_tokens <= 0.0 {
         return 0.0;
     }
@@ -10074,6 +10079,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(payload["total_llm_cost"], 0.6);
+    }
+
+    #[test]
+    fn costs_render_admin_reprices_stored_zero_when_tokens_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        // A zero stored before tokens were recorded is priced from the tokens.
+        conn.execute(
+            "UPDATE model_call SET estimated_cost_usd = 0.0 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs(CostsRenderAdminArgs {
+            db: db_path,
+            year: 2026,
+            month: 5,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total_llm_cost"], 0.2625);
     }
 
     #[test]

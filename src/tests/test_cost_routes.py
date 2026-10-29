@@ -685,6 +685,66 @@ def test_admin_costs_prefers_persisted_cost_and_counts_success_heuristic(
     assert response.get_json()["total_llm_cost"] == 9.25
 
 
+def test_admin_costs_reprices_stored_zero_when_tokens_exist(
+    app: Any, monkeypatch: Any
+) -> None:
+    _prepare_dashboard(app, monkeypatch)
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 9.0)
+
+    with app.app_context():
+        post = _seed_post("stale-zero-dashboard-guid")
+        db.session.add(
+            ProcessingJob(
+                post_guid=post.guid,
+                status="completed",
+                completed_at=datetime(2026, 5, 15, 12, 0, 0),
+            )
+        )
+        _add_llm_call(post.id, prompt_tokens=10, estimated_cost_usd=0.0)
+        # A zero with no tokens is a genuine zero.
+        _add_llm_call(post.id, first_segment_sequence_num=2, estimated_cost_usd=0.0)
+        db.session.commit()
+
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.get_json()["total_llm_cost"] == 9.0
+
+
+def test_backfill_estimated_cost_limit_counts_rows_that_change(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 0.5)
+    updates: list[int] = []
+
+    class _Result:
+        success = True
+
+    def fake_update(_model: str, row_id: int, data: dict[str, Any], wait: bool):
+        updates.append(row_id)
+        return _Result()
+
+    monkeypatch.setattr(cost_routes.writer_client, "update", fake_update)
+
+    with app.app_context():
+        post = _seed_post("backfill-limit-guid")
+        # Earlier rows that can never be priced must not use up the limit.
+        _add_llm_call(post.id, first_segment_sequence_num=0)
+        _add_llm_call(post.id, first_segment_sequence_num=2)
+        later = _add_llm_call(post.id, first_segment_sequence_num=4, prompt_tokens=10)
+        db.session.commit()
+        later_id = later.id
+
+        response = app.test_client().post(
+            "/api/admin/costs/backfill-estimated-cost",
+            json={"apply": True, "limit": 1},
+        )
+
+    assert response.get_json()["updated"] == 1
+    assert updates == [later_id]
+
+
 def test_backfill_estimated_cost_applies_and_reports_updates(
     app: Any, monkeypatch: Any
 ) -> None:

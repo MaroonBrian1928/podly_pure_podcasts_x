@@ -63,10 +63,15 @@ def _compute_cost_per_subscriber(
 
 
 def _persisted_or_computed_cost(call: ModelCall) -> float:
-    """Cost stored when the call was finalized; legacy rows without one are
-    priced from their token usage."""
-    if call.estimated_cost_usd is not None:
-        return float(call.estimated_cost_usd)
+    """Cost stored when the call was finalized; legacy rows without one (or with
+    a stale zero despite token usage) are priced from their token usage."""
+    stored = call.estimated_cost_usd
+    has_tokens = (
+        call.prompt_tokens or call.cached_prompt_tokens or call.completion_tokens
+    )
+    # Earlier releases stored 0.0 for calls that only got tokens afterwards.
+    if stored is not None and not (stored == 0 and has_tokens):
+        return float(stored)
     return _model_call_cost(call)
 
 
@@ -527,21 +532,27 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
         ),
         ModelCall.status.like("success%"),
     ).order_by(ModelCall.id.asc())
-    if limit:
-        query = query.limit(limit)
-    targets: list[ModelCall] = query.all()
-
+    # The cap counts rows that would change, not rows looked at: tokenless or
+    # unchanged rows stay candidates, so a plain LIMIT would revisit them forever.
     outcomes = Counter[str]()
-    updated = 0
-    failed_updates = 0
-    for call in targets:
+    scanned = 0
+    pending: list[tuple[int, float]] = []
+    for call in query.yield_per(200):
+        scanned += 1
         outcome, cost = _backfill_cost_for_call(call)
         outcomes[outcome] += 1
-        if cost is None or call.estimated_cost_usd == cost or not apply:
+        if cost is None or call.estimated_cost_usd == cost:
             continue
+        pending.append((int(call.id), cost))
+        if limit and len(pending) >= limit:
+            break
+
+    updated = 0
+    failed_updates = 0
+    for call_id, cost in pending if apply else []:
         result = writer_client.update(
             "ModelCall",
-            int(call.id),
+            call_id,
             {"estimated_cost_usd": cost},
             wait=True,
         )
@@ -552,7 +563,7 @@ def api_admin_backfill_estimated_cost() -> flask.Response:
 
     return jsonify(
         {
-            "scanned": len(targets),
+            "scanned": scanned,
             "eligible": outcomes["eligible"],
             "skipped_non_billable": outcomes["skip_non_billable"],
             "skipped_no_tokens": outcomes["skip_no_tokens"],

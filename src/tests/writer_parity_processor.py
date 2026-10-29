@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.writer.protocol import WriteCommand, WriteCommandType
-from tests.writer_parity_fixtures import WriterParityPair
+from tests.writer_parity_fixtures import WriterParityPair, _large_word_timestamps
 
 ParamsFactory = Callable[[WriterParityPair], dict[str, Any]]
 _NORMALIZED_TEMP_FILES_BEFORE: dict[str, set[str]] = {}
@@ -544,6 +544,17 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
         raise AssertionError(f"No processor payload factory for {case_id}") from exc
 
 
+def _seed_raw_word_timestamps(pair: WriterParityPair) -> None:
+    """Store the first post's words as plain JSON text, as earlier releases did."""
+    raw = json.dumps(_large_word_timestamps(), separators=(",", ":"))
+    for backend in (pair.python, pair.rust):
+        with sqlite3.connect(backend.db_path) as connection:
+            connection.execute(
+                "UPDATE post SET transcript_word_timestamps=? WHERE id=?",
+                (raw, pair.manifest.post_ids[0]),
+            )
+
+
 def _seed_delete_target(pair: WriterParityPair) -> None:
     sql = """INSERT INTO model_call(
         id,post_id,first_segment_sequence_num,last_segment_sequence_num,
@@ -652,6 +663,8 @@ def build_writer_processor_case(
 ) -> tuple[dict[str, Any], WriteCommand, dict[str, dict[str, str]]]:
     if case_id == "processor_delete_model_calls_by_name":
         _seed_delete_target(pair)
+    if case_id == "processor_compress_post_word_timestamps":
+        _seed_raw_word_timestamps(pair)
     if case_id == "processor_upsert_model_call_retry_reuses_failed_row":
         _seed_retry_model_call(pair)
     params = _params_for_case(case_id, pair)
