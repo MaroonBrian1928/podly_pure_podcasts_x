@@ -168,6 +168,18 @@ async function expectWheelScrolls(page, scroller, target, label) {
   check(top > 0, `${label}: wheel scrolls it (scrollTop ${top})`);
 }
 
+// For a list inside a page that may scroll either itself or the page around it
+// depending on the width: the wheel must move one of the two.
+async function expectWheelScrollsOneOf(page, scrollers, target, label) {
+  const point = await target.boundingBox();
+  const viewport = page.viewportSize();
+  await page.mouse.move(point.x + point.width / 2, Math.min(point.y + point.height / 2, viewport.height - 20));
+  await page.mouse.wheel(0, 500);
+  await page.waitForTimeout(700);
+  const tops = await Promise.all(scrollers.map((scroller) => scroller.first().evaluate((node) => node.scrollTop)));
+  check(tops.some((top) => top > 0), `${label}: wheel scrolls the list or its page (scrollTop ${tops.join(', ')})`);
+}
+
 async function scenario(name, viewport, run) {
   console.log(`\n# ${name}`);
   const { context, page, pageErrors } = await openPage(viewport);
@@ -265,7 +277,12 @@ await scenario('feed panel (phone)', { width: 390, height: 700 }, async (page) =
   await page.goto(`${base}/`);
   await page.getByText('Mock Feed 12', { exact: true }).first().waitFor({ timeout: 15000 });
   await settle(page);
-  await expectWheelScrolls(page, page.locator('main'), page.getByText('Mock Feed 12', { exact: true }).first(), 'feed list page (phone)');
+  await expectWheelScrollsOneOf(
+    page,
+    [page.locator('.overflow-y-auto.h-full.pb-20'), page.locator('main')],
+    page.getByText('Mock Feed 12', { exact: true }).first(),
+    'feed list (phone)'
+  );
   await page.getByText('Mock Feed 12', { exact: true }).first().click();
   await page.getByText('Episode 5', { exact: true }).waitFor({ timeout: 15000 });
   await settle(page);
