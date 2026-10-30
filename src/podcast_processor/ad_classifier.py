@@ -1278,7 +1278,9 @@ class AdClassifier:
             )
         model_call_obj.service_tier = service_tier
 
-    def _pace_retries(self, completion_args: dict[str, Any]) -> Callable[[], None] | None:
+    def _pace_retries(
+        self, completion_args: dict[str, Any]
+    ) -> Callable[[], None] | None:
         """Pace every provider request after the first.
 
         ``_prepare_api_call`` already waited for the first request's tokens;
