@@ -58,7 +58,9 @@ Word timestamps are stored gzip-compressed, about 0.13 MB per hour of audio.
 Releases before 3.2 stored them as plain JSON (about 0.9 MB per episode), and
 left a copy of each file in `data/transcript_artifacts/`. After upgrading:
 
-- A background job compresses the old rows a few minutes after startup. SQLite
+- A background job compresses the old rows in batches a few minutes after
+  startup, then writes `word_timestamps_compressed` in the instance directory so
+  later startups skip the scan (delete the file to scan again). SQLite
   keeps the freed pages inside the file, so run `VACUUM` once afterwards to
   shrink it (stop Podly first, or expect writes to wait; it needs about the
   database's size in free disk): `sqlite3 src/instance/sqlite3.db VACUUM`.

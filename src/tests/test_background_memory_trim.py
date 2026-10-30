@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest import mock
 
 from app import background
@@ -121,9 +122,14 @@ def test_cut_window_backfill_job_runs_apply_and_swallows_errors() -> None:
         background.scheduled_cut_window_backfill()
 
 
-def _run_compression(result: dict[str, int] | Exception) -> mock.MagicMock:
+def _run_compression(
+    result: dict[str, int] | Exception, marker: Path
+) -> mock.MagicMock:
     with (
         mock.patch.object(background, "scheduler") as sched,
+        mock.patch.object(
+            background, "_word_timestamp_compression_marker", return_value=marker
+        ),
         mock.patch(
             "app.word_timestamp_compression.compress_word_timestamps",
             side_effect=[result] if isinstance(result, Exception) else None,
@@ -137,27 +143,72 @@ def _run_compression(result: dict[str, int] | Exception) -> mock.MagicMock:
     return sched
 
 
-def test_word_timestamp_compression_schedules_the_next_batch() -> None:
-    sched = _run_compression({"candidates": 200, "compressed": 190, "failed": 10})
+def test_word_timestamp_compression_schedules_the_next_batch(tmp_path: Path) -> None:
+    marker = tmp_path / "done"
+    sched = _run_compression(
+        {"candidates": 200, "compressed": 190, "failed": 10}, marker
+    )
+    assert not marker.exists()
 
     call = sched.add_job.call_args
     assert call.kwargs["id"] == "compress_word_timestamps"
     assert call.kwargs["trigger"] == "date"
 
 
-def test_word_timestamp_compression_stops_after_a_partial_batch() -> None:
-    sched = _run_compression({"candidates": 37, "compressed": 37, "failed": 0})
+def test_word_timestamp_compression_finishes_after_a_clean_partial_batch(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "done"
+    sched = _run_compression({"candidates": 37, "compressed": 37, "failed": 0}, marker)
+
+    sched.add_job.assert_not_called()
+    assert marker.exists()
+
+
+def test_word_timestamp_compression_leaves_no_marker_when_rows_failed(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "done"
+    sched = _run_compression({"candidates": 37, "compressed": 30, "failed": 7}, marker)
+
+    sched.add_job.assert_not_called()
+    assert not marker.exists()
+
+
+def test_word_timestamp_compression_skips_the_scan_once_the_marker_exists(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "done"
+    marker.touch()
+    with (
+        mock.patch.object(background, "scheduler"),
+        mock.patch.object(
+            background, "_word_timestamp_compression_marker", return_value=marker
+        ),
+        mock.patch(
+            "app.word_timestamp_compression.compress_word_timestamps"
+        ) as compress,
+    ):
+        background.scheduled_word_timestamp_compression()
+
+    compress.assert_not_called()
+
+
+def test_word_timestamp_compression_stops_when_a_full_batch_made_no_progress(
+    tmp_path: Path,
+) -> None:
+    sched = _run_compression(
+        {"candidates": 200, "compressed": 0, "failed": 200}, tmp_path / "done"
+    )
 
     sched.add_job.assert_not_called()
 
 
-def test_word_timestamp_compression_stops_when_a_full_batch_made_no_progress() -> None:
-    sched = _run_compression({"candidates": 200, "compressed": 0, "failed": 200})
-
-    sched.add_job.assert_not_called()
-
-
-def test_word_timestamp_compression_does_not_reschedule_after_an_error() -> None:
-    sched = _run_compression(RuntimeError("boom"))
+def test_word_timestamp_compression_does_not_reschedule_after_an_error(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "done"
+    sched = _run_compression(RuntimeError("boom"), marker)
+    assert not marker.exists()
 
     sched.add_job.assert_not_called()

@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from app.extensions import scheduler
 from app.jobs_manager import (
@@ -139,10 +140,24 @@ WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE = 200
 WORD_TIMESTAMP_COMPRESSION_BATCH_GAP_SECONDS = 30
 
 
+def _word_timestamp_compression_marker() -> Path:
+    """Exists once a run has found nothing left to compress.
+
+    The candidate query reads every row's word timestamps, so without the marker
+    each startup would scan the whole column again. Delete the file to rescan.
+    """
+    from shared.processing_paths import get_instance_dir
+
+    return get_instance_dir() / "word_timestamps_compressed"
+
+
 def scheduled_word_timestamp_compression() -> None:
     """One-off job: gzip word timestamps saved as plain JSON by earlier releases."""
     from app.word_timestamp_compression import compress_word_timestamps
 
+    marker = _word_timestamp_compression_marker()
+    if marker.exists():
+        return
     if scheduler.app is None:
         _memory_trim_logger.warning("word timestamp compression skipped: no app")
         return
@@ -154,6 +169,12 @@ def scheduled_word_timestamp_compression() -> None:
         _memory_trim_logger.info("word timestamp compression: %s", result)
     except Exception:
         _memory_trim_logger.exception("word timestamp compression: failed")
+        return
+    if (
+        result["candidates"] < WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE
+        and result["failed"] == 0
+    ):
+        marker.touch()
         return
     # A full batch that made progress means more rows may remain. A batch that
     # compressed nothing (only failing rows left) ends the job instead of looping.
