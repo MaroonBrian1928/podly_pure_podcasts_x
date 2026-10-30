@@ -148,6 +148,31 @@ def test_unparseable_response_still_reports_usage_for_pricing():
     assert last["usage"] == usage
 
 
+def test_json_missing_required_fields_is_priced_as_a_heuristic_fallback():
+    """Valid JSON without refined_end is still a paid reply, not a permanent failure."""
+    usage = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+    response = _fake_response()
+    response.choices[0].message.content = '{"refined_start": 5}'
+    refiner = BoundaryRefiner(create_test_config())
+    refiner._update_model_call = Mock()  # type: ignore[method-assign]
+
+    with (
+        patch("podcast_processor.boundary_refiner.writer_client") as mock_writer,
+        patch("litellm.completion", return_value=response),
+        patch(
+            "podcast_processor.boundary_refiner.extract_litellm_usage",
+            return_value=usage,
+        ),
+    ):
+        mock_writer.action.return_value = Mock(success=False)
+        refiner.refine(5.0, 15.0, 0.9, _segments())
+
+    last = refiner._update_model_call.call_args_list[-1].kwargs
+    assert last["status"] == "success_heuristic"
+    assert last["usage"] == usage
+    assert "refined_end" in last["error_message"]
+
+
 def test_repeat_ad_refiner_paces_each_attempt_and_prices_unparseable_replies():
     from types import SimpleNamespace
 

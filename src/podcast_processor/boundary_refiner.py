@@ -239,11 +239,10 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 ) as exc:  # capture the last parse error for logging
                     parse_error = str(exc)
 
+            proposal: BoundaryRefinement | None = None
             if parsed:
-                refined = self._validate(
-                    ad_start,
-                    ad_end,
-                    BoundaryRefinement(
+                try:
+                    proposal = BoundaryRefinement(
                         refined_start=float(parsed["refined_start"]),
                         refined_end=float(parsed["refined_end"]),
                         start_adjustment_reason=parsed.get(
@@ -252,8 +251,14 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                         end_adjustment_reason=parsed.get(
                             "end_adjustment_reason", parsed.get("end_reason", "")
                         ),
-                    ),
-                )
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    # Valid JSON without usable fields is still a paid reply:
+                    # take the heuristic path below so its usage is recorded.
+                    parse_error = f"invalid refinement fields: {exc!r}"
+
+            if proposal is not None:
+                refined = self._validate(ad_start, ad_end, proposal)
                 self._update_model_call(
                     model_call_id,
                     status="success",
