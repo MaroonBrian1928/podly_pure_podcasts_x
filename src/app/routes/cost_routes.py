@@ -453,13 +453,11 @@ def api_admin_costs_calls() -> flask.Response:
             "cached_prompt_tokens": c.cached_prompt_tokens,
             "completion_tokens": c.completion_tokens,
             "total_tokens": c.total_tokens,
-            # Read the persisted cost the writer stored at finalize time so
-            # the listing doesn't have to import litellm in the web process.
-            # Legacy rows whose column is NULL appear as 0.0 until the
-            # admin backfill endpoint runs.
+            # Same rule as the dashboard and the Rust sidecar: the stored cost,
+            # or one priced from tokens for legacy rows without a usable one.
             "estimated_cost": (
-                round(float(c.estimated_cost_usd), 8)
-                if c.estimated_cost_usd is not None
+                round(_persisted_or_computed_cost(c), 8)
+                if _is_billable_llm_call(c)
                 else 0.0
             ),
         }

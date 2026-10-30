@@ -834,3 +834,38 @@ def test_backfill_estimated_cost_reprices_stale_zero_costs(
     assert payload["eligible"] == 1
     assert payload["updated"] == 1
     assert updates == [(stale_id, 0.5)]
+
+
+def test_admin_costs_calls_python_fallback_prices_legacy_rows_like_the_sidecar(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "read_combined", lambda: {"app": {}})
+    monkeypatch.setattr(cost_routes, "try_render_admin_costs_calls", lambda **_: None)
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 9.0)
+
+    with app.app_context():
+        post = _seed_post("calls-fallback-guid")
+        stored = _add_llm_call(post.id, estimated_cost_usd=0.2)
+        legacy_null = _add_llm_call(
+            post.id, first_segment_sequence_num=2, prompt_tokens=10
+        )
+        stale_zero = _add_llm_call(
+            post.id,
+            first_segment_sequence_num=4,
+            prompt_tokens=10,
+            estimated_cost_usd=0.0,
+        )
+        genuine_zero = _add_llm_call(
+            post.id, first_segment_sequence_num=6, estimated_cost_usd=0.0
+        )
+        db.session.commit()
+        ids = (stored.id, legacy_null.id, stale_zero.id, genuine_zero.id)
+
+        response = app.test_client().get("/api/admin/costs/calls?page=1&per_page=50")
+
+    by_id = {
+        call["id"]: call["estimated_cost"] for call in response.get_json()["calls"]
+    }
+    assert [by_id[i] for i in ids] == [0.2, 9.0, 9.0, 0.0]
