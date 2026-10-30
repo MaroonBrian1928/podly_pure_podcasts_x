@@ -26,6 +26,7 @@ import json
 import shutil
 import sqlite3
 import sys
+import zlib
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,8 @@ def words_match(artifact: Any, column: Any) -> bool:
     if len(artifact) != len(column):
         return False
     for seg_a, seg_b in zip(artifact, column, strict=True):
+        if seg_a.get("sequence_num") != seg_b.get("sequence_num"):
+            return False
         words_a = seg_a.get("words") or []
         words_b = seg_b.get("words") or []
         if len(words_a) != len(words_b):
@@ -96,7 +99,12 @@ def run(instance_dir: Path, *, apply: bool, delete: bool) -> Counter[str]:
             counts["keep: post missing"] += 1
             kept.append(f"{path} (post missing)")
             continue
-        column = stored_words(row[0])
+        try:
+            column = stored_words(row[0])
+        except OSError, EOFError, zlib.error, ValueError:
+            counts["keep: column unreadable"] += 1
+            kept.append(f"{path} (column unreadable)")
+            continue
         latest = db.execute(
             "SELECT MAX(id) FROM model_call WHERE post_id = ? AND prompt = ?",
             (post_id, WHISPER_PROMPT),

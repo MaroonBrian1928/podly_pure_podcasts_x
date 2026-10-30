@@ -125,3 +125,29 @@ def test_gzip_compressed_columns_are_read(tmp_path: Path) -> None:
 
     assert counts["identical"] == 1
     assert not path.exists()
+
+
+def test_same_words_under_a_different_sequence_num_are_not_identical() -> None:
+    shifted = [{"sequence_num": 1, "words": WORDS[0]["words"]}]
+
+    assert not prune.words_match(shifted, WORDS)
+
+
+def test_a_corrupt_column_keeps_its_file_and_the_run_continues(tmp_path: Path) -> None:
+    root = _instance(tmp_path, {1: WORDS, 2: WORDS}, {1: [10], 2: [20]})
+    db = sqlite3.connect(root / "sqlite3.db")
+    truncated = gzip.compress(json.dumps(WORDS * 50).encode())[:-8]
+    db.execute(
+        "UPDATE post SET transcript_word_timestamps = ? WHERE id = 1", (truncated,)
+    )
+    db.commit()
+    db.close()
+    corrupt = _artifact(root, 1, 10, WORDS)
+    fine = _artifact(root, 2, 20, WORDS)
+
+    counts = prune.run(root, apply=True, delete=False)
+
+    assert counts["keep: column unreadable"] == 1
+    assert counts["identical"] == 1
+    assert corrupt.is_file()
+    assert not fine.exists()
