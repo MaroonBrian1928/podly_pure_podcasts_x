@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -1277,24 +1278,45 @@ class AdClassifier:
             )
         model_call_obj.service_tier = service_tier
 
+    def _pace_retries(self, completion_args: dict[str, Any]) -> Callable[[], None] | None:
+        """Pace every provider request after the first.
+
+        ``_prepare_api_call`` already waited for the first request's tokens;
+        Flex retries, the standard-tier fallback and the TPM-adjusted retry each
+        send the prompt again and need their own wait.
+        """
+        limiter = self.rate_limiter
+        if limiter is None:
+            return None
+        first_attempt = True
+
+        def before_attempt() -> None:
+            nonlocal first_attempt
+            if first_attempt:
+                first_attempt = False
+                return
+            limiter.wait_if_needed(completion_args["messages"], self.config.llm_model)
+
+        return before_attempt
+
     def _complete(
         self, completion_args: dict[str, Any], model_call_id: int | None
     ) -> Any:
         """Run the completion, inside the concurrency limiter when configured."""
+
+        def call() -> Any:
+            return call_litellm_with_tier_retry(
+                completion_args,
+                config=self.config,
+                logger=self.logger,
+                model_call_id=model_call_id,
+                before_attempt=self._pace_retries(completion_args),
+            )
+
         if not self.concurrency_limiter:
-            return call_litellm_with_tier_retry(
-                completion_args,
-                config=self.config,
-                logger=self.logger,
-                model_call_id=model_call_id,
-            )
+            return call()
         with ConcurrencyContext(self.concurrency_limiter, timeout=30.0):
-            return call_litellm_with_tier_retry(
-                completion_args,
-                config=self.config,
-                logger=self.logger,
-                model_call_id=model_call_id,
-            )
+            return call()
 
     def _fail_permanently(self, model_call_obj: ModelCall, error: Exception) -> None:
         fail_res = writer_client.update(
