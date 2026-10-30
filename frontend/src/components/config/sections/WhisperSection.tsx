@@ -205,6 +205,17 @@ export default function WhisperSection() {
         </Section>
       )}
 
+      <Section title="Word timestamps">
+        <ToggleField
+          label="Record word timestamps"
+          hint="Asks the transcription service for per-word timing and keeps it with the episode. Word-level boundary refinement and profanity bleeping need it and request it even when this is off."
+          checked={pending?.processing?.record_word_timestamps ?? true}
+          onChange={(checked) =>
+            setField(['processing', 'record_word_timestamps'], checked)
+          }
+        />
+      </Section>
+
       <SaveButton onSave={handleSave} isPending={isSaving} />
     </div>
   );

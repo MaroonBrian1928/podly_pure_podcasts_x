@@ -76,6 +76,7 @@ from tests.writer_parity_processor import (
     assert_writer_processor_parity,
     build_writer_processor_case,
     build_writer_processor_replacement_workflow,
+    stored_words_text,
 )
 from tests.writer_parity_system import (
     WRITER_DIFFERENTIAL_CASES as SYSTEM_WRITER_DIFFERENTIAL_CASES,
@@ -404,12 +405,12 @@ def _run_processor_replacement_workflow(
                         "FROM model_call WHERE id=601"
                     ).fetchone()
                 if len(python_outcomes) == 1:
-                    assert json.loads(transcript_json) is None
+                    assert json.loads(stored_words_text(transcript_json)) is None
                     assert segment_rows == []
                     assert identification_count == 0
                     assert model_call == ("pending", 0, -1, 0, None, None)
                 elif len(python_outcomes) == 2:
-                    assert json.loads(transcript_json) is None
+                    assert json.loads(stored_words_text(transcript_json)) is None
                     assert segment_rows == [
                         (
                             8,
@@ -429,7 +430,7 @@ def _run_processor_replacement_workflow(
                     assert model_call == ("pending", 0, -1, 0, None, None)
                 else:
                     assert len(python_outcomes) == 3
-                    assert json.loads(transcript_json) == (
+                    assert json.loads(stored_words_text(transcript_json)) == (
                         _processor_word_timestamp_payload()
                     )
     finally:
@@ -500,7 +501,7 @@ def _run_processor_replacement_workflow(
             stored_word_timestamps = connection.execute(
                 "SELECT transcript_word_timestamps FROM post WHERE id=?", (post_id,)
             ).fetchone()[0]
-            assert json.loads(stored_word_timestamps) == (
+            assert json.loads(stored_words_text(stored_word_timestamps)) == (
                 _processor_word_timestamp_payload()
             )
 

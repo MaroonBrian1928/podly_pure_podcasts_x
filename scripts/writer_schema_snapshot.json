@@ -1,5 +1,5 @@
 {
-  "revision": "589f07c55324",
+  "revision": "e034b58ee2bd",
   "tables": {
     "app_settings": {
       "id": {
@@ -1280,6 +1280,13 @@
       },
       "num_segments_to_input_to_prompt": {
         "type": "INTEGER",
+        "nullable": false,
+        "primary_key": false,
+        "python_default": true,
+        "server_default": false
+      },
+      "record_word_timestamps": {
+        "type": "BOOLEAN",
         "nullable": false,
         "primary_key": false,
         "python_default": true,

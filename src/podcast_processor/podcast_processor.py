@@ -836,6 +836,10 @@ class PodcastProcessor:
             return bool(feed_override)
         return bool(getattr(self.config, "chapter_full_block_text", False))
 
+    def _record_word_timestamps_enabled(self) -> bool:
+        processing = getattr(self.config, "processing", None)
+        return bool(getattr(processing, "record_word_timestamps", False))
+
     def _word_level_boundary_refiner_enabled(self) -> bool:
         return bool(
             getattr(self.config, "enable_boundary_refinement", False)
@@ -1259,6 +1263,7 @@ class PodcastProcessor:
         post: Post,
         *,
         include_word_timestamps: bool,
+        words_optional: bool = False,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[list[Any], list[Any] | None]:
         transcribe_for_processing = getattr(
@@ -1270,6 +1275,7 @@ class PodcastProcessor:
             result = transcribe_for_processing(
                 post,
                 include_word_timestamps=include_word_timestamps,
+                words_optional=words_optional,
                 progress_callback=progress_callback,
             )
             if isinstance(result, tuple) and len(result) == 2:
@@ -1294,10 +1300,13 @@ class PodcastProcessor:
         """
         Perform LLM-based ad detection: transcription, classification, and audio processing.
         """
-        needs_word_timestamps_for_refiner = self._word_level_boundary_refiner_enabled()
+        wants_word_timestamps = (
+            self._word_level_boundary_refiner_enabled()
+            or self._record_word_timestamps_enabled()
+        )
         has_saved_transcript_word_timestamps = (
             self._has_saved_transcript_word_timestamps(
-                post if needs_word_timestamps_for_refiner else None
+                post if wants_word_timestamps else None
             )
         )
         has_saved_bleep_windows, saved_bleep_windows_ms = (
@@ -1317,8 +1326,12 @@ class PodcastProcessor:
             progress_callback=transcribe_progress,
             include_word_timestamps=(
                 (enable_profanity_bleeping and not has_saved_bleep_windows)
+                or (wants_word_timestamps and not has_saved_transcript_word_timestamps)
+            ),
+            words_optional=not (
+                (enable_profanity_bleeping and not has_saved_bleep_windows)
                 or (
-                    needs_word_timestamps_for_refiner
+                    self._word_level_boundary_refiner_enabled()
                     and not has_saved_transcript_word_timestamps
                 )
             ),
@@ -1648,6 +1661,11 @@ class PodcastProcessor:
             ) = self._transcribe_for_processing(
                 post,
                 include_word_timestamps=(
+                    (enable_profanity_bleeping and not has_saved_bleep_windows)
+                    or word_refinement_active
+                    or self._record_word_timestamps_enabled()
+                ),
+                words_optional=not (
                     (enable_profanity_bleeping and not has_saved_bleep_windows)
                     or word_refinement_active
                 ),

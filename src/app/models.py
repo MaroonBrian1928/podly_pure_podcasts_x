@@ -1,7 +1,11 @@
+import gzip
+import json
 import os
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
+from sqlalchemy import JSON, TypeDecorator
 from sqlalchemy.orm import Mapped, relationship, validates
 
 from app.auth.passwords import hash_password, verify_password
@@ -21,6 +25,55 @@ def generate_job_id() -> str:
 
 def _utc_now_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+_GZIP_MAGIC = b"\x1f\x8b"
+# Short values are not worth a compression header.
+_COMPRESS_MIN_BYTES = 1024
+_COMPRESS_LEVEL = 6
+
+
+def compress_json_text(text: str) -> str | bytes:
+    """Encode JSON text for storage: a gzip BLOB once it is large, else the text."""
+    if len(text) < _COMPRESS_MIN_BYTES:
+        return text
+    return gzip.compress(text.encode(), _COMPRESS_LEVEL, mtime=0)
+
+
+class CompressedJSON(TypeDecorator):  # type: ignore[type-arg]
+    """JSON that is stored as a gzip BLOB once it is large.
+
+    Reads accept gzip BLOBs, plain JSON text written before compression existed,
+    and the JSON text ``null`` that marks a cleared value. The Rust writer uses
+    the same format (``rust/src/word_blob.rs``). The column stays declared JSON,
+    so no schema change is involved.
+    """
+
+    impl = JSON
+    cache_ok = True
+    # Like JSON: an explicit None is stored as the JSON text `null`, while an
+    # attribute that was never set is left out of the INSERT (SQL NULL).
+    should_evaluate_none = True
+
+    def bind_processor(self, dialect: Any) -> Any:
+        def process(value: Any) -> str | bytes:
+            return compress_json_text(json.dumps(value))
+
+        return process
+
+    def result_processor(self, dialect: Any, coltype: Any) -> Any:
+        def process(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, memoryview):
+                value = bytes(value)
+            if isinstance(value, bytes):
+                value = (
+                    gzip.decompress(value) if value.startswith(_GZIP_MAGIC) else value
+                ).decode()
+            return json.loads(value)
+
+        return process
 
 
 # https://github.com/python/mypy/issues/17918
@@ -123,7 +176,7 @@ class Post(db.Model):  # type: ignore[name-defined, misc]
     cut_stats_source = db.Column(db.Text, nullable=True)
     # Optional per-segment word timestamps from WhisperX-compatible transcription.
     # Stored as reusable transcript metadata for exact intra-segment refinement.
-    transcript_word_timestamps = db.Column(db.JSON, nullable=True)
+    transcript_word_timestamps = db.Column(CompressedJSON, nullable=True)
 
     # Latest (most recent) refined ad cut windows for this post.
     # This is written by the ad classifier boundary refinement step and read by the
@@ -289,11 +342,9 @@ class ModelCall(db.Model):  # type: ignore[name-defined, misc]
     cached_prompt_tokens = db.Column(db.Integer, nullable=True)
     completion_tokens = db.Column(db.Integer, nullable=True)
     total_tokens = db.Column(db.Integer, nullable=True)
-    # USD cost computed from token usage * LiteLLM rates at the moment the
-    # row is finalized (writer-side, where litellm is already loaded).
-    # Persisted so the web process can show per-post cost in the stats page
-    # without importing litellm — which pulls in ~160 MiB of openai
-    # submodules. NULL for legacy rows; backfilled via the admin
+    # USD cost from token usage * LiteLLM rates, computed by the processing
+    # worker when the row is finalized so web routes can read it without
+    # resolving rates. NULL for legacy rows; see the admin
     # `/api/admin/costs/backfill-estimated-cost` endpoint.
     estimated_cost_usd = db.Column(db.Float, nullable=True)
 
@@ -582,6 +633,11 @@ class ProcessingSettings(db.Model):  # type: ignore[name-defined, misc]
         db.Integer,
         nullable=False,
         default=DEFAULTS.PROCESSING_NUM_SEGMENTS_TO_INPUT_TO_PROMPT,
+    )
+    record_word_timestamps = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=DEFAULTS.PROCESSING_RECORD_WORD_TIMESTAMPS,
     )
 
     created_at = db.Column(db.DateTime, nullable=False, default=_utc_now_naive)

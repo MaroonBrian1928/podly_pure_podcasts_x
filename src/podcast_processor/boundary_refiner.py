@@ -6,6 +6,7 @@ Note: We intentionally share some call-setup patterns with WordBoundaryRefiner.
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from podcast_processor.llm_model_call_utils import (
     record_service_tier_on_model_call,
     try_update_model_call,
 )
+from podcast_processor.token_rate_limiter import TokenRateLimiter
 from shared.config import Config
 from shared.llm_utils import normalize_completion_args_for_model
 
@@ -37,10 +39,31 @@ class BoundaryRefinement:
 
 
 class BoundaryRefiner:
-    def __init__(self, config: Config, logger: logging.Logger | None = None):
+    def __init__(
+        self,
+        config: Config,
+        logger: logging.Logger | None = None,
+        token_limiter: TokenRateLimiter | None = None,
+    ):
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
+        self.token_limiter = token_limiter
         self.template = self._load_template()
+
+    def _pace_request(
+        self, completion_args: dict[str, Any]
+    ) -> Callable[[], None] | None:
+        """Wait for the classifier's token budget before each provider request.
+
+        The refiner draws on the same per-minute token budget as the classifier
+        and runs right after it, so unpaced calls hit the provider's limit.
+        """
+        limiter = self.token_limiter
+        if limiter is None:
+            return None
+        return lambda: limiter.wait_if_needed(
+            completion_args["messages"], self.config.llm_model
+        )
 
     def _load_template(self) -> Template:
         path = (
@@ -148,6 +171,7 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 config=self.config,
                 logger=self.logger,
                 model_call_id=model_call_id,
+                before_attempt=self._pace_request(completion_args),
             )
             effective_service_tier = completion_args.get("service_tier")
             usage = extract_litellm_usage(response)
@@ -215,11 +239,10 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 ) as exc:  # capture the last parse error for logging
                     parse_error = str(exc)
 
+            proposal: BoundaryRefinement | None = None
             if parsed:
-                refined = self._validate(
-                    ad_start,
-                    ad_end,
-                    BoundaryRefinement(
+                try:
+                    proposal = BoundaryRefinement(
                         refined_start=float(parsed["refined_start"]),
                         refined_end=float(parsed["refined_end"]),
                         start_adjustment_reason=parsed.get(
@@ -228,8 +251,14 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                         end_adjustment_reason=parsed.get(
                             "end_adjustment_reason", parsed.get("end_reason", "")
                         ),
-                    ),
-                )
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    # Valid JSON without usable fields is still a paid reply:
+                    # take the heuristic path below so its usage is recorded.
+                    parse_error = f"invalid refinement fields: {exc!r}"
+
+            if proposal is not None:
+                refined = self._validate(ad_start, ad_end, proposal)
                 self._update_model_call(
                     model_call_id,
                     status="success",
@@ -276,6 +305,9 @@ Return JSON: {"refined_start": {{ad_start}}, "refined_end": {{ad_end}}, "start_r
                 status="success_heuristic",
                 response=raw_response,
                 error_message=parse_error or "parse_failed",
+                usage=usage,
+                prompt=prompt,
+                service_tier=effective_service_tier,
             )
         except Exception as e:  # noqa: BLE001
             self._update_model_call(

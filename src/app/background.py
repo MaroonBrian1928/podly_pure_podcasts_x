@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from app.extensions import scheduler
 from app.jobs_manager import (
@@ -129,6 +130,77 @@ def scheduled_cut_window_backfill() -> None:
         _memory_trim_logger.info("cut window backfill: %s", result)
     except Exception:
         _memory_trim_logger.exception("cut window backfill: failed")
+
+
+WORD_TIMESTAMP_COMPRESSION_JOB_ID = "compress_word_timestamps"
+WORD_TIMESTAMP_COMPRESSION_DELAY_SECONDS = 180
+# Each run handles one batch, then schedules the next, so the scheduler's single
+# worker is free for feed refreshes and cleanup in between.
+WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE = 200
+WORD_TIMESTAMP_COMPRESSION_BATCH_GAP_SECONDS = 30
+
+
+def _word_timestamp_compression_marker() -> Path:
+    """Exists once a run has found nothing left to compress.
+
+    The candidate query reads every row's word timestamps, so without the marker
+    each startup would scan the whole column again. Delete the file to rescan.
+    """
+    from shared.processing_paths import get_instance_dir
+
+    return get_instance_dir() / "word_timestamps_compressed"
+
+
+def scheduled_word_timestamp_compression() -> None:
+    """One-off job: gzip word timestamps saved as plain JSON by earlier releases."""
+    from app.word_timestamp_compression import compress_word_timestamps
+
+    marker = _word_timestamp_compression_marker()
+    if marker.exists():
+        return
+    if scheduler.app is None:
+        _memory_trim_logger.warning("word timestamp compression skipped: no app")
+        return
+    try:
+        with scheduler.app.app_context():
+            result = compress_word_timestamps(
+                apply=True, limit=WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE
+            )
+        _memory_trim_logger.info("word timestamp compression: %s", result)
+    except Exception:
+        _memory_trim_logger.exception("word timestamp compression: failed")
+        return
+    if (
+        result["candidates"] < WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE
+        and result["failed"] == 0
+    ):
+        marker.touch()
+        return
+    # A full batch that made progress means more rows may remain. A batch that
+    # compressed nothing (only failing rows left) ends the job instead of looping.
+    if (
+        result["candidates"] >= WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE
+        and result["compressed"] > 0
+    ):
+        schedule_word_timestamp_compression_job(
+            delay_seconds=WORD_TIMESTAMP_COMPRESSION_BATCH_GAP_SECONDS
+        )
+
+
+def schedule_word_timestamp_compression_job(
+    delay_seconds: int = WORD_TIMESTAMP_COMPRESSION_DELAY_SECONDS,
+) -> None:
+    """Run one batch of word timestamp compression after the delay."""
+    scheduler.add_job(
+        id=WORD_TIMESTAMP_COMPRESSION_JOB_ID,
+        func=scheduled_word_timestamp_compression,
+        trigger="date",
+        run_date=datetime.now(UTC).replace(tzinfo=None)
+        + timedelta(seconds=delay_seconds),
+        replace_existing=True,
+        misfire_grace_time=None,
+        max_instances=1,
+    )
 
 
 def schedule_cut_window_backfill_job() -> None:

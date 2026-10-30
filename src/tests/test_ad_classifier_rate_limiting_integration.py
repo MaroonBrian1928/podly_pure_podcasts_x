@@ -161,6 +161,55 @@ class TestAdClassifierRateLimiting:
 
             assert result == "test response"
 
+    def test_retries_wait_for_the_token_budget_but_the_first_attempt_does_not(self):
+        """The first request was already paced by _prepare_api_call; each later
+        provider request (Flex retry, standard fallback, TPM retry) paces itself."""
+        config = create_test_config()
+
+        with patch("podcast_processor.ad_classifier.db.session") as mock_session:
+            classifier = AdClassifier(config=config, db_session=mock_session)
+            classifier.rate_limiter = Mock(spec=TokenRateLimiter)
+            args = {
+                "model": "per-call/model",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+
+            before_attempt = classifier._pace_retries(args)
+            assert before_attempt is not None
+
+            before_attempt()
+            classifier.rate_limiter.wait_if_needed.assert_not_called()
+
+            before_attempt()
+            before_attempt()
+            assert classifier.rate_limiter.wait_if_needed.call_count == 2
+            classifier.rate_limiter.wait_if_needed.assert_called_with(
+                args["messages"], "per-call/model"
+            )
+
+    def test_complete_passes_the_pacing_hook_to_the_tier_retry(self):
+        config = create_test_config()
+
+        with patch("podcast_processor.ad_classifier.db.session") as mock_session:
+            classifier = AdClassifier(config=config, db_session=mock_session)
+            args = {"messages": []}
+
+            with patch(
+                "podcast_processor.ad_classifier.call_litellm_with_tier_retry"
+            ) as tier_retry:
+                classifier._complete(args, model_call_id=7)
+
+            assert callable(tier_retry.call_args.kwargs["before_attempt"])
+
+    def test_no_pacing_hook_without_a_rate_limiter(self):
+        config = create_test_config()
+
+        with patch("podcast_processor.ad_classifier.db.session") as mock_session:
+            classifier = AdClassifier(config=config, db_session=mock_session)
+            classifier.rate_limiter = None
+
+            assert classifier._pace_retries({"messages": []}) is None
+
     @patch("time.sleep")
     def test_rate_limit_backoff_timing(self, mock_sleep):
         """Test that rate limit errors use longer backoff timing."""

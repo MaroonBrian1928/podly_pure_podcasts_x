@@ -36,7 +36,10 @@ const LLM: &[Field] = &[
     field("chapter_full_block_text", Kind::Boolean),
     field("llm_service_tier", Kind::Text),
 ];
-const PROCESSING: &[Field] = &[field("num_segments_to_input_to_prompt", Kind::Integer)];
+const PROCESSING: &[Field] = &[
+    field("num_segments_to_input_to_prompt", Kind::Integer),
+    field("record_word_timestamps", Kind::Boolean),
+];
 const OUTPUT: &[Field] = &[
     field("fade_ms", Kind::Integer),
     field("bleep_padding_start_ms", Kind::Integer),
@@ -466,8 +469,8 @@ mod tests {
                 groq_api_key TEXT,groq_model TEXT NOT NULL,groq_language TEXT NOT NULL,
                 groq_max_retries INTEGER NOT NULL);
              INSERT INTO whisper_settings VALUES(1,'groq','whisper-1',NULL,'https://api.openai.com/v1','en',600,24,0,0,NULL,'whisper-large-v3-turbo','en',0);
-             CREATE TABLE processing_settings(id INTEGER PRIMARY KEY,num_segments_to_input_to_prompt INTEGER NOT NULL);
-             INSERT INTO processing_settings VALUES(1,60);
+             CREATE TABLE processing_settings(id INTEGER PRIMARY KEY,num_segments_to_input_to_prompt INTEGER NOT NULL,record_word_timestamps BOOLEAN NOT NULL);
+             INSERT INTO processing_settings VALUES(1,60,1);
              CREATE TABLE output_settings(
                 id INTEGER PRIMARY KEY,fade_ms INTEGER NOT NULL,bleep_padding_start_ms INTEGER NOT NULL,
                 bleep_padding_end_ms INTEGER NOT NULL,min_ad_segement_separation_seconds INTEGER NOT NULL,

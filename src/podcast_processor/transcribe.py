@@ -1,3 +1,4 @@
+import bisect
 import logging
 import math
 import shutil
@@ -458,6 +459,7 @@ class GroqTranscriptionSegment(BaseModel):
     start: float
     end: float
     text: str
+    words: list[WordTimestamp] | None = None
 
 
 class GroqWhisperTranscriber(Transcriber):
@@ -480,7 +482,6 @@ class GroqWhisperTranscriber(Transcriber):
         include_word_timestamps: bool = False,
         progress_callback: ChunkProgressCallback | None = None,
     ) -> list[Segment]:
-        del include_word_timestamps
         self.logger.info(
             "[WHISPER_GROQ] Starting Groq whisper transcription for: %s",
             audio_file_path,
@@ -504,7 +505,9 @@ class GroqWhisperTranscriber(Transcriber):
                 total_chunks,
                 chunk_path,
             )
-            segments = self.get_segments_for_chunk(str(chunk_path))
+            segments = self.get_segments_for_chunk(
+                str(chunk_path), include_word_timestamps=include_word_timestamps
+            )
             self.logger.info(
                 "[WHISPER_GROQ] Chunk %d/%d complete: %d segments",
                 idx + 1,
@@ -534,6 +537,7 @@ class GroqWhisperTranscriber(Transcriber):
                 start=seg.start,
                 end=seg.end,
                 text=seg.text,
+                words=seg.words,
             )
             for seg in segments
         ]
@@ -546,10 +550,56 @@ class GroqWhisperTranscriber(Transcriber):
         for segment in segments:
             segment.start += offset_sec
             segment.end += offset_sec
+            # Word timestamps are chunk-relative in the API response, just
+            # like segment times — shift them by the same offset.
+            for word in segment.words or []:
+                if word.start is not None:
+                    word.start += offset_sec
+                if word.end is not None:
+                    word.end += offset_sec
 
         return segments
 
-    def get_segments_for_chunk(self, chunk_path: str) -> list[GroqTranscriptionSegment]:
+    @staticmethod
+    def _assign_top_level_words(
+        segments: list[Any], top_level_words: list[Any] | None
+    ) -> list[list[WordTimestamp]]:
+        """Group Groq's word entries by segment.
+
+        Groq returns words as one top-level list next to ``segments`` (segments
+        carry no words of their own), so each word goes to the segment that
+        contains its start time. A segment's own ``words`` are used when a
+        compatible server nests them instead.
+        """
+        parse = OpenAIWhisperTranscriber._parse_word
+        grouped: list[list[WordTimestamp]] = [
+            [w for w in (parse(word) for word in seg.get("words") or []) if w]
+            for seg in segments
+        ]
+        if not top_level_words or any(grouped):
+            return grouped
+
+        if not segments:
+            return grouped
+
+        # A word belongs to the last segment that started at or before it, so
+        # overlapping segments, gaps and words past the final segment all land
+        # somewhere; words without a start follow the previous word.
+        order = sorted(range(len(segments)), key=lambda i: segments[i]["start"])
+        starts = [segments[i]["start"] for i in order]
+        target = 0
+        for raw_word in top_level_words:
+            word = parse(raw_word)
+            if word is None:
+                continue
+            if word.start is not None:
+                target = order[max(bisect.bisect_right(starts, word.start) - 1, 0)]
+            grouped[target].append(word)
+        return grouped
+
+    def get_segments_for_chunk(
+        self, chunk_path: str, *, include_word_timestamps: bool = False
+    ) -> list[GroqTranscriptionSegment]:
         retries = self.config.max_retries if self.config.max_retries is not None else 0
         max_attempts = retries + 1
         for attempt in range(1, max_attempts + 1):
@@ -560,12 +610,15 @@ class GroqWhisperTranscriber(Transcriber):
                 max_attempts,
             )
             try:
-                transcription = self.client.audio.transcriptions.create(
-                    file=Path(chunk_path),
-                    model=self.config.model,
-                    response_format="verbose_json",  # Ensure segments are included
-                    language=self.config.language,
-                )
+                create_kwargs: dict[str, Any] = {
+                    "file": Path(chunk_path),
+                    "model": self.config.model,
+                    "response_format": "verbose_json",  # Ensure segments are included
+                    "language": self.config.language,
+                }
+                if include_word_timestamps:
+                    create_kwargs["timestamp_granularities"] = ["segment", "word"]
+                transcription = self.client.audio.transcriptions.create(**create_kwargs)
             except Exception as exc:
                 self.logger.warning(
                     "[GROQ_API_CALL] Attempt %d/%d failed for %s: %s",
@@ -596,11 +649,18 @@ class GroqWhisperTranscriber(Transcriber):
                 )
                 return []
 
+            top_level_words = getattr(transcription, "words", None)
+            words_by_segment = self._assign_top_level_words(
+                transcription_segments, top_level_words
+            )
             groq_segments = [
                 GroqTranscriptionSegment(
-                    start=seg["start"], end=seg["end"], text=seg["text"]
+                    start=seg["start"],
+                    end=seg["end"],
+                    text=seg["text"],
+                    words=words_by_segment[index] or None,
                 )
-                for seg in transcription_segments
+                for index, seg in enumerate(transcription_segments)
             ]
 
             self.logger.info(

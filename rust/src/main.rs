@@ -2281,7 +2281,9 @@ fn query_wb_word_timestamps_by_seq(
     let mut stmt =
         conn.prepare("SELECT transcript_word_timestamps FROM post WHERE id = ?1 LIMIT 1")?;
     let raw: Option<String> = stmt
-        .query_row([post_id], |row| row.get::<_, Option<String>>(0))
+        .query_row([post_id], |row| {
+            podly_tools::word_blob::decode(row.get_ref(0)?)
+        })
         .unwrap_or(None);
     let Some(raw) = raw else {
         return Ok(HashMap::new());
@@ -2335,7 +2337,9 @@ fn query_wb_word_timestamps_for_seqs(
     let mut stmt =
         conn.prepare("SELECT transcript_word_timestamps FROM post WHERE id = ?1 LIMIT 1")?;
     let raw: Option<String> = stmt
-        .query_row([post_id], |row| row.get::<_, Option<String>>(0))
+        .query_row([post_id], |row| {
+            podly_tools::word_blob::decode(row.get_ref(0)?)
+        })
         .unwrap_or(None);
     let Some(raw) = raw else {
         return Ok(HashMap::new());
@@ -3728,6 +3732,36 @@ fn load_service_tier_summary(conn: &Connection, post_ids: &[i64]) -> Result<Hash
             tiers: HashSet::new(),
         });
         entry.tiers.insert(tier);
+    }
+
+    // Standard-tier calls store a NULL tier, so a finished NULL-tier LLM call
+    // counts as "default" toward `mixed` (Flex call, then standard fallback) when the
+    // same model also ran at Flex on that post.
+    // Whisper and INA calls store no tier but are not LLM calls; filtered in SQL
+    // so the prompt text is never read. Mirrors `is_whisper_call` / `is_ina_call`.
+    let default_sql = format!(
+        "SELECT DISTINCT post_id
+         FROM model_call
+         WHERE service_tier IS NULL AND status LIKE 'success%' AND post_id IN ({})
+           AND EXISTS (SELECT 1 FROM model_call flex
+                       WHERE flex.post_id = model_call.post_id
+                         AND flex.model_name = model_call.model_name
+                         AND flex.service_tier = 'flex')
+           AND NOT (lower(model_name) LIKE '%whisper%'
+                    OR COALESCE(prompt, '') = 'Whisper transcription job'
+                    OR lower(model_name) LIKE 'local\\_%' ESCAPE '\\'
+                    OR lower(model_name) LIKE 'ina:%')",
+        placeholders.join(",")
+    );
+    let mut default_stmt = conn.prepare(&default_sql)?;
+    let default_rows = default_stmt
+        .query_map(rusqlite::params_from_iter(post_ids.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?;
+    for r in default_rows {
+        if let Some(bucket) = per_post.get_mut(&r?) {
+            bucket.tiers.insert("default".to_string());
+        }
     }
 
     let max_retries = load_llm_max_retry_attempts(conn);
@@ -5756,7 +5790,7 @@ fn export_word_timestamps(args: TranscriptExportArgs) -> Result<TranscriptExport
         .query_row(
             "SELECT transcript_word_timestamps FROM post WHERE id = ?1",
             [args.post_id],
-            |row| row.get(0),
+            |row| podly_tools::word_blob::decode(row.get_ref(0)?),
         )
         .with_context(|| "failed to query transcript_word_timestamps")?;
 
@@ -6019,6 +6053,7 @@ struct CostsModelCallRow {
     cached_prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
+    estimated_cost_usd: Option<f64>,
 }
 
 fn rate_key(model_name: &str, service_tier: Option<&str>) -> String {
@@ -6045,7 +6080,7 @@ fn is_whisper_call(model_name: &str, prompt: Option<&str>) -> bool {
 }
 
 fn is_billable_llm_call(status: &str, model_name: &str, prompt: Option<&str>) -> bool {
-    if status != "success" {
+    if !status.starts_with("success") {
         return false;
     }
     if is_ina_call(model_name) {
@@ -6057,10 +6092,20 @@ fn is_billable_llm_call(status: &str, model_name: &str, prompt: Option<&str>) ->
     true
 }
 
+// Prefer the cost stored when the processing worker finalized the call; legacy
+// rows without one (or with a stale zero despite tokens) are priced from their
+// token usage and the resolved rates.
 fn model_call_cost(call: &CostsModelCallRow, rates: &HashMap<String, ModelRate>) -> f64 {
     let prompt_tokens = call.prompt_tokens.unwrap_or(0).max(0) as f64;
     let cached_prompt_tokens = call.cached_prompt_tokens.unwrap_or(0).max(0) as f64;
     let completion_tokens = call.completion_tokens.unwrap_or(0).max(0) as f64;
+    let has_tokens = prompt_tokens > 0.0 || cached_prompt_tokens > 0.0 || completion_tokens > 0.0;
+    // Earlier releases stored 0.0 for calls that only got tokens afterwards.
+    if let Some(stored) = call.estimated_cost_usd {
+        if stored != 0.0 || !has_tokens {
+            return stored;
+        }
+    }
     if prompt_tokens <= 0.0 && cached_prompt_tokens <= 0.0 && completion_tokens <= 0.0 {
         return 0.0;
     }
@@ -6238,9 +6283,9 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
         let sql = format!(
             "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
                     service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
-                    completion_tokens, total_tokens \
+                    completion_tokens, total_tokens, estimated_cost_usd \
              FROM model_call \
-             WHERE status = 'success' AND post_id IN ({placeholders}) \
+             WHERE status LIKE 'success%' AND post_id IN ({placeholders}) \
              ORDER BY id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -6260,6 +6305,7 @@ fn render_admin_costs(args: CostsRenderAdminArgs) -> Result<Value> {
                 cached_prompt_tokens: row.get(9)?,
                 completion_tokens: row.get(10)?,
                 total_tokens: row.get(11)?,
+                estimated_cost_usd: row.get(12)?,
             })
         })?;
         for call_result in rows {
@@ -6428,7 +6474,7 @@ fn render_admin_costs_calls(args: CostsRenderCallsArgs) -> Result<Value> {
     let mut stmt = conn.prepare(
         "SELECT id, post_id, model_name, status, timestamp, retry_attempts, \
                 service_tier, prompt, prompt_tokens, cached_prompt_tokens, \
-                completion_tokens, total_tokens \
+                completion_tokens, total_tokens, estimated_cost_usd \
          FROM model_call \
          ORDER BY timestamp DESC \
          LIMIT ?1 OFFSET ?2",
@@ -6447,6 +6493,7 @@ fn render_admin_costs_calls(args: CostsRenderCallsArgs) -> Result<Value> {
             cached_prompt_tokens: row.get(9)?,
             completion_tokens: row.get(10)?,
             total_tokens: row.get(11)?,
+            estimated_cost_usd: row.get(12)?,
         })
     })?;
     let calls: Vec<CostsModelCallRow> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -9883,7 +9930,7 @@ mod tests {
                 timestamp TEXT, status TEXT NOT NULL, error_message TEXT,
                 retry_attempts INTEGER, next_retry_at TEXT, service_tier TEXT,
                 prompt_tokens INTEGER, cached_prompt_tokens INTEGER,
-                completion_tokens INTEGER, total_tokens INTEGER
+                completion_tokens INTEGER, total_tokens INTEGER, estimated_cost_usd REAL
              );",
         )
         .unwrap();
@@ -9905,9 +9952,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO model_call VALUES
-                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1250000),
-                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL),
-                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL)",
+                (1, 1, 0, 1, 'gpt-4o-mini', 'classify', 'resp', '2026-05-15 12:00:01', 'success', NULL, 0, NULL, NULL, 1000000, 500000, 250000, 1250000, NULL),
+                (2, 1, 0, -1, 'whisper-large-v3-turbo', 'Whisper transcription job', NULL, '2026-05-15 12:00:02', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+                (3, 1, 0, -1, 'ina:speech_music_noise', 'INA', NULL, '2026-05-15 12:00:03', 'success', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             [],
         )
         .unwrap();
@@ -9999,6 +10046,95 @@ mod tests {
         assert_eq!(payload["total_whisper_cost"], 0.0);
         assert_eq!(payload["total_ina_cost"], 0.0);
         assert_eq!(payload["total_llm_cost"], 0.2625);
+    }
+
+    #[test]
+    fn costs_render_admin_prefers_stored_cost_and_counts_success_heuristic() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        // The stored cost wins over re-pricing from tokens and current rates.
+        conn.execute(
+            "UPDATE model_call SET estimated_cost_usd = 0.5 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        // A refiner call that fell back to the heuristic still cost money.
+        conn.execute(
+            "INSERT INTO model_call VALUES
+                (4, 1, 2, 3, 'gpt-4o-mini', 'refine', 'resp', '2026-05-15 12:00:04', 'success_heuristic', NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0.1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs(CostsRenderAdminArgs {
+            db: db_path,
+            year: 2026,
+            month: 5,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total_llm_cost"], 0.6);
+    }
+
+    #[test]
+    fn costs_render_admin_reprices_stored_zero_when_tokens_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("podly.sqlite");
+        seed_costs_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        // A zero stored before tokens were recorded is priced from the tokens.
+        conn.execute(
+            "UPDATE model_call SET estimated_cost_usd = 0.0 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let rates_json = write_costs_rates_json(dir.path());
+
+        let payload = render_admin_costs(CostsRenderAdminArgs {
+            db: db_path,
+            year: 2026,
+            month: 5,
+            rates_json,
+        })
+        .unwrap();
+
+        assert_eq!(payload["total_llm_cost"], 0.2625);
+    }
+
+    #[test]
+    fn service_tier_summary_counts_finished_default_calls_as_mixed() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_call (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL,
+                first_segment_sequence_num INTEGER NOT NULL,
+                last_segment_sequence_num INTEGER NOT NULL,
+                model_name TEXT NOT NULL, prompt TEXT NOT NULL,
+                timestamp TEXT NOT NULL, status TEXT NOT NULL,
+                retry_attempts INTEGER, next_retry_at TEXT, service_tier TEXT
+            );
+            INSERT INTO model_call VALUES
+                (1, 1, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
+                (2, 1, 2, 3, 'gpt-5-mini', 'p', '2026-05-08 11:05:00', 'success', 1, NULL, NULL),
+                (3, 2, 0, 1, 'gpt-5-mini', 'p', '2026-05-08 11:00:00', 'success', 1, NULL, 'flex'),
+                (4, 2, 0, -1, 'whisper-1', 'Whisper transcription job', '2026-05-08 11:06:00', 'success', 0, NULL, NULL),
+                (5, 2, 0, -1, 'ina:speech_music_noise', 'INA', '2026-05-08 11:07:00', 'success', 0, NULL, NULL),
+                (6, 2, 0, 1, 'chapter-model', 'chapters', '2026-05-08 11:08:00', 'success', 1, NULL, NULL);",
+        )
+        .unwrap();
+
+        let summary = load_service_tier_summary(&conn, &[1, 2]).unwrap();
+
+        assert_eq!(summary[&1]["mixed"], true);
+        // Whisper and INA rows are not LLM calls, and a model that never ran at Flex
+        // is not a fallback; neither counts as a default tier.
+        assert_eq!(summary[&2]["mixed"], false);
     }
 
     #[test]

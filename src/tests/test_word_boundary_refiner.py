@@ -665,6 +665,8 @@ def test_refine_falls_back_when_rust_refine_from_llm_reports_parse_failed(
     update_calls = refiner._update_model_call.call_args_list
     assert update_calls[-1].kwargs["status"] == "success_heuristic"
     assert update_calls[-1].kwargs["error_message"] == "parse_failed:format"
+    # The paid completion is priced even though the answer was unusable.
+    assert "usage" in update_calls[-1].kwargs
 
 
 def test_refine_logs_warning_when_rust_reports_salvaged(

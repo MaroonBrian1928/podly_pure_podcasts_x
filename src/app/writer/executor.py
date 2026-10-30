@@ -194,6 +194,10 @@ class CommandExecutor:
             writer_actions.finish_transcription_replace_from_artifact_action,
         )
         self.register_action(
+            "compress_post_word_timestamps",
+            writer_actions.compress_post_word_timestamps_action,
+        )
+        self.register_action(
             "mark_model_call_failed", writer_actions.mark_model_call_failed_action
         )
         self.register_action(

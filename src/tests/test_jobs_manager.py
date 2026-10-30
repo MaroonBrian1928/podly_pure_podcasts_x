@@ -13,7 +13,7 @@ from sqlalchemy import event
 import app.jobs_manager as jobs_manager_module
 from app.extensions import db
 from app.jobs_manager import JobsManager
-from app.models import Feed, JobsManagerRun, Post, ProcessingJob
+from app.models import Feed, JobsManagerRun, ModelCall, Post, ProcessingJob
 
 
 def _create_feed() -> Feed:
@@ -513,3 +513,52 @@ def test_build_tier_summary_names_chapter_calls() -> None:
     # stage caption already says what's happening.
     assert jobs_manager_module._in_flight_call_label(0, 1890) is None
     assert jobs_manager_module._in_flight_call_label(-100, -100) == "chapter titles"
+
+
+def test_service_tier_summary_reports_flex_fallback_as_mixed(app) -> None:
+    feed = _create_feed()
+    mixed_post = _create_post(
+        feed_id=feed.id,
+        guid="tier-mixed",
+        download_url="https://example.com/mixed.mp3",
+        whitelisted=True,
+        processed_audio_path=None,
+    )
+    flex_only_post = _create_post(
+        feed_id=feed.id,
+        guid="tier-flex",
+        download_url="https://example.com/flex.mp3",
+        whitelisted=True,
+        processed_audio_path=None,
+    )
+    rows = [
+        (mixed_post.id, 0, "flex", "gpt-5-mini", "classify"),
+        (mixed_post.id, 1, None, "gpt-5-mini", "classify"),
+        (flex_only_post.id, 0, "flex", "gpt-5-mini", "classify"),
+        # Whisper rows store no tier and are not LLM calls.
+        (flex_only_post.id, 1, None, "whisper-1", "Whisper transcription job"),
+        # A model that never ran at Flex is not a fallback.
+        (flex_only_post.id, 3, None, "chapter-model", "chapters"),
+        # INA rows store no tier either.
+        (flex_only_post.id, 2, None, "ina:speech_music_noise", "INA"),
+    ]
+    for post_id, index, tier, model_name, prompt in rows:
+        db.session.add(
+            ModelCall(
+                post_id=post_id,
+                first_segment_sequence_num=index,
+                last_segment_sequence_num=index,
+                model_name=model_name,
+                prompt=prompt,
+                status="success",
+                service_tier=tier,
+            )
+        )
+    db.session.commit()
+
+    summary = jobs_manager_module._summarize_service_tiers_for_posts(
+        [mixed_post.id, flex_only_post.id]
+    )
+
+    assert summary[mixed_post.id]["mixed"] is True
+    assert summary[flex_only_post.id]["mixed"] is False

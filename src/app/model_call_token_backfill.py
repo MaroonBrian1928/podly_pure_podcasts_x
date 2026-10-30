@@ -59,7 +59,7 @@ class TokenBackfillResult:
 
 
 def _is_legacy_billable_llm_call(call: ModelCall) -> bool:
-    if call.status != "success":
+    if not (call.status or "").startswith("success"):
         return False
     if (call.model_name or "").startswith("ina:"):
         return False

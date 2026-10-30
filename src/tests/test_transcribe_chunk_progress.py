@@ -191,10 +191,12 @@ def test_transcribe_for_processing_forwards_progress_callback() -> None:
         post: object,
         *,
         include_word_timestamps: bool,
+        words_optional: bool,
         progress_callback: Any,
     ) -> tuple[Sequence[object], Sequence[object] | None]:
         received["post"] = post
         received["include_word_timestamps"] = include_word_timestamps
+        received["words_optional"] = words_optional
         received["progress_callback"] = progress_callback
         return ([], None)
 
@@ -212,5 +214,6 @@ def test_transcribe_for_processing_forwards_progress_callback() -> None:
     assert received == {
         "post": post,
         "include_word_timestamps": False,
+        "words_optional": False,
         "progress_callback": sentinel_callback,
     }

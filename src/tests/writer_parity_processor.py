@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sqlite3
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.writer.protocol import WriteCommand, WriteCommandType
-from tests.writer_parity_fixtures import WriterParityPair
+from tests.writer_parity_fixtures import WriterParityPair, _large_word_timestamps
 
 ParamsFactory = Callable[[WriterParityPair], dict[str, Any]]
 _NORMALIZED_TEMP_FILES_BEFORE: dict[str, set[str]] = {}
@@ -143,6 +144,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "owner_group": "processor",
         "source": "src/app/writer/actions/processor.py",
         "semantics": "transcription_json",
+    },
+    {
+        "case_id": "processor_compress_post_word_timestamps",
+        "operation": "action",
+        "action": "compress_post_word_timestamps",
+        "owner": "compress_post_word_timestamps",
+        "owner_group": "processor",
+        "source": "src/app/writer/actions/processor.py",
+        "semantics": "exact",
     },
     {
         "case_id": "processor_finish_transcription_replace_from_large_artifact",
@@ -433,6 +443,9 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
             "segment_count": 17,
             "transcript_word_timestamps": _word_timestamp_payload(),
         },
+        "processor_compress_post_word_timestamps": lambda: {
+            "post_id": manifest.post_ids[0],
+        },
         "processor_finish_transcription_replace_from_large_artifact": lambda: {
             "post_id": manifest.post_ids[0],
             "model_call_id": 601,
@@ -529,6 +542,17 @@ def _params_for_case(case_id: str, pair: WriterParityPair) -> dict[str, Any]:
         return factories[case_id]()
     except KeyError as exc:
         raise AssertionError(f"No processor payload factory for {case_id}") from exc
+
+
+def _seed_raw_word_timestamps(pair: WriterParityPair) -> None:
+    """Store the first post's words as plain JSON text, as earlier releases did."""
+    raw = json.dumps(_large_word_timestamps(), separators=(",", ":"))
+    for backend in (pair.python, pair.rust):
+        with sqlite3.connect(backend.db_path) as connection:
+            connection.execute(
+                "UPDATE post SET transcript_word_timestamps=? WHERE id=?",
+                (raw, pair.manifest.post_ids[0]),
+            )
 
 
 def _seed_delete_target(pair: WriterParityPair) -> None:
@@ -639,6 +663,8 @@ def build_writer_processor_case(
 ) -> tuple[dict[str, Any], WriteCommand, dict[str, dict[str, str]]]:
     if case_id == "processor_delete_model_calls_by_name":
         _seed_delete_target(pair)
+    if case_id == "processor_compress_post_word_timestamps":
+        _seed_raw_word_timestamps(pair)
     if case_id == "processor_upsert_model_call_retry_reuses_failed_row":
         _seed_retry_model_call(pair)
     params = _params_for_case(case_id, pair)
@@ -804,6 +830,18 @@ def _read_model_call(db_path: Any, model_call_id: int) -> dict[str, Any]:
         return dict(row)
 
 
+def stored_words_text(value: Any) -> Any:
+    """Decode a stored word-timestamps value (gzip BLOB or JSON text) to JSON text.
+
+    The two writers gzip with different encoders, so their bytes differ while
+    the decoded JSON is identical.
+    """
+    if isinstance(value, (bytes, memoryview)):
+        raw = bytes(value)
+        return (gzip.decompress(raw) if raw.startswith(b"\x1f\x8b") else raw).decode()
+    return value
+
+
 def _semantic_projection(
     projection: dict[str, list[tuple[Any, ...]]],
     columns: dict[str, list[str]],
@@ -823,6 +861,8 @@ def _semantic_projection(
             ):
                 record["timestamp"] = "<nondeterministic:timestamp>"
             for field in ("transcript_word_timestamps",):
+                if field in record:
+                    record[field] = stored_words_text(record[field])
                 if field in record and isinstance(record[field], str):
                     try:
                         record[field] = json.dumps(
@@ -1042,7 +1082,9 @@ def assert_writer_processor_parity(  # noqa: PLR0912 - action-specific parity br
                     "SELECT transcript_word_timestamps FROM post WHERE id=?",
                     (pair.manifest.post_ids[0],),
                 ).fetchone()[0]
-            assert json.loads(stored) == _large_word_timestamp_payload()
+            assert json.loads(stored_words_text(stored)) == (
+                _large_word_timestamp_payload()
+            )
         remaining_temp_files = {
             str(path) for path in Path(tempfile.gettempdir()).glob("*.normalized.json")
         }

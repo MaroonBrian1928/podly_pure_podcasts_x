@@ -135,6 +135,7 @@ def ensure_defaults() -> None:
         ProcessingSettings,
         {
             "num_segments_to_input_to_prompt": DEFAULTS.PROCESSING_NUM_SEGMENTS_TO_INPUT_TO_PROMPT,
+            "record_word_timestamps": DEFAULTS.PROCESSING_RECORD_WORD_TIMESTAMPS,
         },
     )
 
@@ -252,6 +253,7 @@ def read_combined() -> dict[str, Any]:
         "whisper": whisper_payload,
         "processing": {
             "num_segments_to_input_to_prompt": processing.num_segments_to_input_to_prompt,
+            "record_word_timestamps": processing.record_word_timestamps,
         },
         "output": {
             "fade_ms": output.fade_ms,
@@ -373,6 +375,7 @@ def _update_section_processing(data: dict[str, Any]) -> None:
     assert row is not None
     for key in [
         "num_segments_to_input_to_prompt",
+        "record_word_timestamps",
     ]:
         if key in data:
             setattr(row, key, data[key])

@@ -47,6 +47,10 @@ WHISPER_GROQ_MAX_RETRIES = 0
 # Processing defaults
 PROCESSING_NUM_SEGMENTS_TO_INPUT_TO_PROMPT = 60
 PROCESSING_MAX_OVERLAP_SEGMENTS = 30
+# Ask the transcription service for per-word timestamps and keep them on the
+# post. The word-level boundary refiner and profanity bleeping need them and
+# request them regardless of this setting.
+PROCESSING_RECORD_WORD_TIMESTAMPS = True
 
 # Output defaults
 OUTPUT_FADE_MS = 3000

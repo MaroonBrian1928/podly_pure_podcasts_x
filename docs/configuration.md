@@ -43,6 +43,33 @@ Refinement** in the LLM section of the Config page. Podly then asks the server
 for word-level timestamps, and falls back to segment-level cuts when the server
 doesn't return them.
 
+### Word timestamps
+
+Settings > Advanced > Transcription > "Record word timestamps" (on by default)
+asks the transcription service for per-word timing and keeps it with the
+episode. The word-level boundary refiner and profanity bleeping need it and
+request it regardless of this setting. Episodes that already have saved word
+timestamps are not asked again. When the setting is the only reason to record
+words, an episode that already has a transcript but no words is left as is rather
+than transcribed a second time; words are recorded the next time it is
+transcribed from scratch.
+
+Word timestamps are stored gzip-compressed, about 0.13 MB per hour of audio.
+Releases before 3.2 stored them as plain JSON (about 0.9 MB per episode), and
+left a copy of each file in `data/transcript_artifacts/`. After upgrading:
+
+- A background job compresses the old rows in batches a few minutes after
+  startup, then writes `word_timestamps_compressed` in the instance directory so
+  later startups skip the scan (delete the file to scan again). SQLite
+  keeps the freed pages inside the file, so run `VACUUM` once afterwards to
+  shrink it (stop Podly first, or expect writes to wait; it needs about the
+  database's size in free disk): `sqlite3 src/instance/sqlite3.db VACUUM`.
+- `uv run python scripts/prune_transcript_artifacts.py` lists the leftover
+  `transcript_artifacts/` files the database already holds. Add `--apply` to
+  move them aside, or `--apply --delete` to remove them.
+- Compressed rows can't be read by older releases, so back up the database
+  before upgrading if you may roll back.
+
 ### Speaker diarization
 
 With `WHISPER_TYPE=remote`, Podly can ask the server to label speakers and

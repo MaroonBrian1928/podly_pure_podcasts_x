@@ -53,3 +53,14 @@ jobs:
       - name: Type check and build
         if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
         run: npm run build
+
+      - name: Install Chromium
+        if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Browser regression checks
+        if: github.event_name == 'push' || steps.filter.outputs.frontend == 'true'
+        run: |
+          nohup npx vite preview --port 4173 > ../preview.log 2>&1 &
+          timeout 30 bash -c 'until curl -sf -o /dev/null http://127.0.0.1:4173/; do sleep 1; done'
+          npm run test:ui -- http://127.0.0.1:4173

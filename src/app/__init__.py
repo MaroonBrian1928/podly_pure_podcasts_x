@@ -667,6 +667,7 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
         schedule_cleanup_job,
         schedule_cut_window_backfill_job,
         schedule_memory_trim_job,
+        schedule_word_timestamp_compression_job,
     )
     from app.jobs_manager import get_jobs_manager
 
@@ -688,4 +689,5 @@ def _start_scheduler_and_jobs(app: Flask) -> None:
     schedule_cleanup_job(getattr(config, "post_cleanup_retention_days", None))
     schedule_memory_trim_job()
     schedule_cut_window_backfill_job()
+    schedule_word_timestamp_compression_job()
     _start_request_burst_trim(app)

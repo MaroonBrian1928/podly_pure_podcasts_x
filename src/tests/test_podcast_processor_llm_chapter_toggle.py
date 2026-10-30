@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 from app.models import Post, ProcessingJob
 from app.runtime_config import config as runtime_config
 from podcast_processor.audio_processor import AudioProcessResult
@@ -512,6 +514,7 @@ def test_prepare_profanity_bleeped_audio_uses_configured_bleep_padding(
 
 def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> None:
     config = create_standard_test_config()
+    config.processing.record_word_timestamps = False
 
     processor = object.__new__(PodcastProcessor)
     processor.config = config
@@ -559,6 +562,7 @@ def test_llm_processing_reuses_saved_bleep_windows_without_word_timestamps() -> 
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=False,
+        words_optional=True,
         progress_callback=ANY,
     )
     assert processor._prepare_profanity_bleeped_audio.call_args.kwargs[
@@ -613,6 +617,7 @@ def test_llm_processing_requests_word_timestamps_for_word_level_refiner() -> Non
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=True,
+        words_optional=False,
         progress_callback=ANY,
     )
 
@@ -670,6 +675,7 @@ def test_llm_processing_reuses_saved_word_timestamps_for_word_level_refiner() ->
     processor._transcribe_for_processing.assert_called_once_with(
         post,
         include_word_timestamps=False,
+        words_optional=True,
         progress_callback=ANY,
     )
 
@@ -705,6 +711,59 @@ def test_processing_steps_routes_chapter_insert_strategy() -> None:
     )
     processor._perform_chapter_based_processing.assert_not_called()
     processor._perform_llm_based_processing.assert_not_called()
+
+
+@pytest.mark.parametrize("record_word_timestamps", [True, False])
+def test_chapter_insert_fallback_transcription_follows_word_timestamp_setting(
+    record_word_timestamps: bool,
+) -> None:
+    config = create_standard_test_config()
+    config.processing.record_word_timestamps = record_word_timestamps
+
+    transcription_manager = MagicMock()
+    transcription_manager.transcribe_for_processing.return_value = (
+        [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=10.0, text="Intro")],
+        None,
+    )
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.transcription_manager = transcription_manager
+    processor.status_manager = MagicMock()
+    processor._finalize_processing = MagicMock()
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+
+    with (
+        patch(
+            "podcast_processor.podcast_processor.resolve_llm_path_chapters",
+            side_effect=[
+                ([], "none"),
+                ([Chapter("g", "Intro", 0, 10_000)], "transcript"),
+            ],
+        ),
+        patch(
+            "podcast_processor.podcast_processor."
+            "generate_topic_chapters_from_transcript_with_llm",
+            return_value=[Chapter("t", "Intro", 0, 10_000)],
+        ),
+        patch("podcast_processor.podcast_processor.shutil.copyfile"),
+        patch("podcast_processor.podcast_processor.write_adjusted_chapters"),
+    ):
+        processor._perform_chapter_insertion_only_processing(
+            post, job, "/tmp/output.mp3"
+        )
+
+    kwargs = transcription_manager.transcribe_for_processing.call_args.kwargs
+    assert kwargs["include_word_timestamps"] is record_word_timestamps
 
 
 def test_chapter_insert_strategy_writes_chapters_without_ad_removal() -> None:
@@ -1041,3 +1100,70 @@ def test_llm_path_declares_chapter_generation_stage() -> None:
     assert step_sequence.index(5) > step_sequence.index(4)
     chapters_call = next(c for c in calls if c.args[2] == 5)
     assert chapters_call.args[3] == "Generating chapters"
+
+
+def _run_llm_processing_for_word_timestamps(
+    *, record_word_timestamps: bool, saved_words: list[dict] | None = None
+) -> MagicMock:
+    config = create_standard_test_config()
+    config.processing.record_word_timestamps = record_word_timestamps
+
+    processor = object.__new__(PodcastProcessor)
+    processor.config = config
+    processor.logger = MagicMock()
+    processor.status_manager = MagicMock()
+    processor.audio_processor = MagicMock()
+    processor.audio_processor.process_audio.return_value = AudioProcessResult(
+        [], 600_000
+    )
+    processor._classify_ad_segments = MagicMock()
+    processor._transcribe_for_processing = MagicMock(
+        return_value=(
+            [SimpleNamespace(sequence_num=0, start_time=0.0, end_time=5.0)],
+            None,
+        )
+    )
+    processor._prepare_profanity_bleeped_audio = MagicMock(
+        return_value=ProfanityBleepResult("/tmp/input.mp3", [])
+    )
+    processor._cleanup_temp_audio_path = MagicMock()
+    processor._finalize_processing = MagicMock()
+
+    post = Post(
+        id=1,
+        feed_id=1,
+        guid="test-guid",
+        title="Test Episode",
+        download_url="https://example.com/test.mp3",
+        description="",
+        unprocessed_audio_path="/tmp/input.mp3",
+        transcript_word_timestamps=saved_words,
+    )
+    job = ProcessingJob(id="job-1", post_guid="test-guid", status="running")
+    processor._perform_llm_based_processing(
+        post, job, "/tmp/output.mp3", enable_profanity_bleeping=False
+    )
+    return processor._transcribe_for_processing
+
+
+def test_llm_processing_requests_word_timestamps_when_setting_is_on() -> None:
+    transcribe = _run_llm_processing_for_word_timestamps(record_word_timestamps=True)
+
+    assert transcribe.call_args.kwargs["include_word_timestamps"] is True
+    # Nothing needs the words, so an existing transcript is not re-transcribed.
+    assert transcribe.call_args.kwargs["words_optional"] is True
+
+
+def test_llm_processing_skips_word_timestamps_when_setting_is_off() -> None:
+    transcribe = _run_llm_processing_for_word_timestamps(record_word_timestamps=False)
+
+    assert transcribe.call_args.kwargs["include_word_timestamps"] is False
+
+
+def test_llm_processing_does_not_rerequest_saved_word_timestamps() -> None:
+    transcribe = _run_llm_processing_for_word_timestamps(
+        record_word_timestamps=True,
+        saved_words=[{"sequence_num": 0, "words": [{"word": "hi", "start": 0.0}]}],
+    )
+
+    assert transcribe.call_args.kwargs["include_word_timestamps"] is False

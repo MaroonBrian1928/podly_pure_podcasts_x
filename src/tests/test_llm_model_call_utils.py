@@ -647,3 +647,72 @@ def test_tier_retry_reraises_non_retryable(
 )
 def test_model_uses_max_completion_tokens(model: str | None, expected: bool) -> None:
     assert model_uses_max_completion_tokens(model) is expected
+
+
+def test_try_update_model_call_prices_success_heuristic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refiner call that fell back to the heuristic still consumed tokens."""
+    captured: dict[str, Any] = {}
+
+    def fake_update(
+        model: str, pk: Any, data: dict[str, Any], wait: bool = True
+    ) -> Any:
+        captured["data"] = data
+        return SimpleNamespace(success=True, error=None)
+
+    from podcast_processor import llm_model_call_utils
+
+    monkeypatch.setattr(llm_model_call_utils.writer_client, "update", fake_update)
+    monkeypatch.setattr("app.llm_pricing.compute_model_call_cost", lambda _call: 0.01)
+
+    try_update_model_call(
+        7,
+        status="success_heuristic",
+        response="not json",
+        error_message="parse_failed",
+        logger=logging.getLogger("test"),
+        log_prefix="t",
+        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        model_name="gpt-4o-mini",
+        service_tier=None,
+        prompt="boundary_refine",
+    )
+
+    assert captured["data"]["estimated_cost_usd"] == 0.01
+
+
+def test_tier_retry_paces_every_provider_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rate limiter hook must run before the first try, each Flex retry and
+    the standard-tier fallback, not just once per call."""
+    import litellm
+
+    events: list[str] = []
+
+    def failing_completion(**kwargs: Any) -> Any:
+        events.append(f"call:{kwargs.get('service_tier')}")
+        if kwargs.get("service_tier") == "flex":
+            raise RuntimeError("503 service unavailable")
+        return SimpleNamespace(choices=[])
+
+    monkeypatch.setattr(litellm, "completion", failing_completion)
+
+    call_litellm_with_tier_retry(
+        {"model": "gemini/gemini-3-flash-preview", "service_tier": "flex"},
+        config=SimpleNamespace(llm_service_tier="flex"),
+        logger=logging.getLogger("test"),
+        max_retries=2,
+        sleep=lambda _seconds: None,
+        before_attempt=lambda: events.append("pace"),
+    )
+
+    assert events == [
+        "pace",
+        "call:flex",
+        "pace",
+        "call:flex",
+        "pace",
+        "call:None",
+    ]

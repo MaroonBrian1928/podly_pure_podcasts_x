@@ -610,3 +610,262 @@ def test_admin_costs_measure_original_length_from_transcript(
     payload = response.get_json()
     assert payload["total_audio_hours"] == 1.0
     assert payload["total_whisper_cost"] == 0.04
+
+
+def _seed_post(guid: str, duration: int = 3600) -> Post:
+    feed = Feed(title=f"Feed {guid}", rss_url=f"https://example.com/{guid}.xml")
+    db.session.add(feed)
+    db.session.flush()
+    post = Post(
+        feed_id=feed.id,
+        guid=guid,
+        download_url=f"https://example.com/{guid}.mp3",
+        title=guid,
+        duration=duration,
+    )
+    db.session.add(post)
+    db.session.flush()
+    return post
+
+
+def _add_llm_call(post_id: int, **overrides: Any) -> ModelCall:
+    fields: dict[str, Any] = {
+        "post_id": post_id,
+        "first_segment_sequence_num": 0,
+        "last_segment_sequence_num": 1,
+        "model_name": "gpt-4o-mini",
+        "prompt": "classify",
+        "status": "success",
+    }
+    fields.update(overrides)
+    call = ModelCall(**fields)
+    db.session.add(call)
+    return call
+
+
+def _prepare_dashboard(app: Any, monkeypatch: Any) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(
+        cost_routes,
+        "read_combined",
+        lambda: {"app": {"whisper_cost_rate_per_hour": 0.0}},
+    )
+    monkeypatch.setattr(cost_routes, "try_render_admin_costs", lambda **_: None)
+
+
+def test_admin_costs_prefers_persisted_cost_and_counts_success_heuristic(
+    app: Any, monkeypatch: Any
+) -> None:
+    _prepare_dashboard(app, monkeypatch)
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 9.0)
+
+    with app.app_context():
+        post = _seed_post("persisted-guid")
+        db.session.add(
+            ProcessingJob(
+                post_guid=post.guid,
+                status="completed",
+                completed_at=datetime(2026, 5, 15, 12, 0, 0),
+            )
+        )
+        _add_llm_call(post.id, estimated_cost_usd=0.2)
+        _add_llm_call(
+            post.id,
+            status="success_heuristic",
+            first_segment_sequence_num=2,
+            estimated_cost_usd=0.05,
+        )
+        # Legacy row without a stored cost falls back to pricing from tokens.
+        _add_llm_call(post.id, first_segment_sequence_num=4)
+        db.session.commit()
+
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.get_json()["total_llm_cost"] == 9.25
+
+
+def test_admin_costs_reprices_stored_zero_when_tokens_exist(
+    app: Any, monkeypatch: Any
+) -> None:
+    _prepare_dashboard(app, monkeypatch)
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 9.0)
+
+    with app.app_context():
+        post = _seed_post("stale-zero-dashboard-guid")
+        db.session.add(
+            ProcessingJob(
+                post_guid=post.guid,
+                status="completed",
+                completed_at=datetime(2026, 5, 15, 12, 0, 0),
+            )
+        )
+        _add_llm_call(post.id, prompt_tokens=10, estimated_cost_usd=0.0)
+        # A zero with no tokens is a genuine zero.
+        _add_llm_call(post.id, first_segment_sequence_num=2, estimated_cost_usd=0.0)
+        db.session.commit()
+
+        response = app.test_client().get("/api/admin/costs?year=2026&month=5")
+
+    assert response.get_json()["total_llm_cost"] == 9.0
+
+
+def test_backfill_estimated_cost_limit_counts_rows_that_change(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 0.5)
+    updates: list[int] = []
+
+    class _Result:
+        success = True
+
+    def fake_update(_model: str, row_id: int, data: dict[str, Any], wait: bool):
+        updates.append(row_id)
+        return _Result()
+
+    monkeypatch.setattr(cost_routes.writer_client, "update", fake_update)
+
+    with app.app_context():
+        post = _seed_post("backfill-limit-guid")
+        # Earlier rows that can never be priced must not use up the limit.
+        _add_llm_call(post.id, first_segment_sequence_num=0)
+        _add_llm_call(post.id, first_segment_sequence_num=2)
+        later = _add_llm_call(post.id, first_segment_sequence_num=4, prompt_tokens=10)
+        db.session.commit()
+        later_id = later.id
+
+        response = app.test_client().post(
+            "/api/admin/costs/backfill-estimated-cost",
+            json={"apply": True, "limit": 1},
+        )
+
+    assert response.get_json()["updated"] == 1
+    assert updates == [later_id]
+
+
+def test_backfill_estimated_cost_applies_and_reports_updates(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 0.5)
+    updates: list[tuple[int, dict[str, Any], bool]] = []
+
+    class _Result:
+        success = True
+
+    def fake_update(_model: str, row_id: int, data: dict[str, Any], wait: bool):
+        updates.append((row_id, data, wait))
+        return _Result()
+
+    monkeypatch.setattr(cost_routes.writer_client, "update", fake_update)
+
+    with app.app_context():
+        post = _seed_post("backfill-cost-guid")
+        priced = _add_llm_call(post.id, prompt_tokens=10, completion_tokens=5)
+        _add_llm_call(post.id, first_segment_sequence_num=2)  # no tokens: stays NULL
+        whisper = _add_llm_call(
+            post.id,
+            first_segment_sequence_num=3,
+            model_name="whisper-1",
+            prompt="Whisper transcription job",
+        )
+        db.session.commit()
+        priced_id, whisper_id = priced.id, whisper.id
+
+        response = app.test_client().post(
+            "/api/admin/costs/backfill-estimated-cost", json={"apply": True}
+        )
+
+    payload = response.get_json()
+    assert payload["eligible"] == 1
+    assert payload["skipped_no_tokens"] == 1
+    assert payload["skipped_non_billable"] == 1
+    assert payload["updated"] == 2
+    assert payload["failed_updates"] == 0
+    assert {(row_id, data["estimated_cost_usd"]) for row_id, data, _ in updates} == {
+        (priced_id, 0.5),
+        (whisper_id, 0.0),
+    }
+    assert all(wait for _, _, wait in updates)
+
+
+def test_backfill_estimated_cost_reprices_stale_zero_costs(
+    app: Any, monkeypatch: Any
+) -> None:
+    """Zeros stored before tokens were backfilled are priced from the tokens."""
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 0.5)
+    updates: list[tuple[int, float]] = []
+
+    class _Result:
+        success = True
+
+    def fake_update(_model: str, row_id: int, data: dict[str, Any], wait: bool):
+        updates.append((row_id, data["estimated_cost_usd"]))
+        return _Result()
+
+    monkeypatch.setattr(cost_routes.writer_client, "update", fake_update)
+
+    with app.app_context():
+        post = _seed_post("stale-zero-guid")
+        stale = _add_llm_call(
+            post.id, prompt_tokens=10, completion_tokens=5, estimated_cost_usd=0.0
+        )
+        # Already priced and a genuine zero with no tokens are left alone.
+        _add_llm_call(
+            post.id,
+            first_segment_sequence_num=2,
+            prompt_tokens=10,
+            estimated_cost_usd=0.5,
+        )
+        _add_llm_call(post.id, first_segment_sequence_num=4, estimated_cost_usd=0.0)
+        db.session.commit()
+        stale_id = stale.id
+
+        response = app.test_client().post(
+            "/api/admin/costs/backfill-estimated-cost", json={"apply": True}
+        )
+
+    payload = response.get_json()
+    assert payload["eligible"] == 1
+    assert payload["updated"] == 1
+    assert updates == [(stale_id, 0.5)]
+
+
+def test_admin_costs_calls_python_fallback_prices_legacy_rows_like_the_sidecar(
+    app: Any, monkeypatch: Any
+) -> None:
+    app.register_blueprint(costs_bp)
+    monkeypatch.setattr(cost_routes, "require_admin", lambda _action: (None, None))
+    monkeypatch.setattr(cost_routes, "read_combined", lambda: {"app": {}})
+    monkeypatch.setattr(cost_routes, "try_render_admin_costs_calls", lambda **_: None)
+    monkeypatch.setattr(cost_routes, "_model_call_cost", lambda call: 9.0)
+
+    with app.app_context():
+        post = _seed_post("calls-fallback-guid")
+        stored = _add_llm_call(post.id, estimated_cost_usd=0.2)
+        legacy_null = _add_llm_call(
+            post.id, first_segment_sequence_num=2, prompt_tokens=10
+        )
+        stale_zero = _add_llm_call(
+            post.id,
+            first_segment_sequence_num=4,
+            prompt_tokens=10,
+            estimated_cost_usd=0.0,
+        )
+        genuine_zero = _add_llm_call(
+            post.id, first_segment_sequence_num=6, estimated_cost_usd=0.0
+        )
+        db.session.commit()
+        ids = (stored.id, legacy_null.id, stale_zero.id, genuine_zero.id)
+
+        response = app.test_client().get("/api/admin/costs/calls?page=1&per_page=50")
+
+    by_id = {
+        call["id"]: call["estimated_cost"] for call in response.get_json()["calls"]
+    }
+    assert [by_id[i] for i in ids] == [0.2, 9.0, 9.0, 0.0]

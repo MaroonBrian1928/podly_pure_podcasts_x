@@ -186,6 +186,7 @@ export type WhisperConfig =
 
 export interface ProcessingConfigUI {
   num_segments_to_input_to_prompt: number;
+  record_word_timestamps: boolean;
 }
 
 export interface OutputConfigUI {
@@ -379,7 +380,9 @@ export interface EstimatedCostBackfillResult {
   scanned: number;
   eligible: number;
   skipped_non_billable: number;
+  skipped_no_tokens: number;
   updated: number;
+  failed_updates: number;
 }
 
 export interface TokenBackfillResult {

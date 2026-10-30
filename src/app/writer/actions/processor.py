@@ -7,12 +7,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.memory_pressure import collect_incremental
-from app.models import AudioSegment, Identification, ModelCall, Post, TranscriptSegment
+from app.models import (
+    AudioSegment,
+    Identification,
+    ModelCall,
+    Post,
+    TranscriptSegment,
+    compress_json_text,
+)
 from app.writer.batching import (
     batch_count_for,
     get_writer_batch_size,
@@ -390,6 +398,34 @@ def insert_transcript_segments_action(params: dict[str, Any]) -> dict[str, Any]:
 
     db.session.flush()
     return {"post_id": post_id_i, "inserted": inserted}
+
+
+def compress_post_word_timestamps_action(params: dict[str, Any]) -> dict[str, Any]:
+    """Gzip a post's stored word timestamps in place.
+
+    Reads the stored text inside the writer transaction, so a transcription that
+    finished earlier is never overwritten with stale words.
+    """
+    post_id = params.get("post_id")
+    if post_id is None:
+        raise ValueError("post_id is required")
+    post_id_i = int(post_id)
+
+    stored = db.session.execute(
+        text("SELECT transcript_word_timestamps FROM post WHERE id = :id"),
+        {"id": post_id_i},
+    ).scalar()
+    compressed = (
+        isinstance(stored, str) and stored != "null" and compress_json_text(stored)
+    )
+    if not isinstance(compressed, bytes):
+        return {"post_id": post_id_i, "compressed": False}
+
+    db.session.execute(
+        text("UPDATE post SET transcript_word_timestamps = :v WHERE id = :id"),
+        {"v": compressed, "id": post_id_i},
+    )
+    return {"post_id": post_id_i, "compressed": True}
 
 
 def finish_transcription_replace_action(params: dict[str, Any]) -> dict[str, Any]:

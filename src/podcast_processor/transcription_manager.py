@@ -177,7 +177,9 @@ class TranscriptionManager:
             )
 
     def _transcriber_supports_word_timestamps(self) -> bool:
-        return isinstance(self.transcriber, OpenAIWhisperTranscriber)
+        return isinstance(
+            self.transcriber, (OpenAIWhisperTranscriber, GroqWhisperTranscriber)
+        )
 
     def _persist_transcription_chunks(
         self,
@@ -237,6 +239,7 @@ class TranscriptionManager:
                 self.logger,
             )
 
+        artifact_path: Path | None = None
         finish_action = "finish_transcription_replace"
         finish_payload: dict[str, Any] = {
             "post_id": post.id,
@@ -266,6 +269,23 @@ class TranscriptionManager:
         if not finish_res or not finish_res.success:
             raise RuntimeError(
                 getattr(finish_res, "error", "Failed to finish transcription replace")
+            )
+        if artifact_path is not None:
+            self._remove_transcript_word_timestamps_artifact(artifact_path)
+
+    def _remove_transcript_word_timestamps_artifact(self, artifact_path: Path) -> None:
+        """Drop the hand-off file once the writer has committed its contents.
+
+        Runs only after a successful finish call; on failure the file stays so
+        the outcome can be inspected. A failed delete never fails the job.
+        """
+        try:
+            artifact_path.unlink(missing_ok=True)
+            for directory in (artifact_path.parent, artifact_path.parent.parent):
+                directory.rmdir()
+        except OSError as exc:
+            self.logger.debug(
+                "Could not fully remove transcript artifact %s: %s", artifact_path, exc
             )
 
     def _write_transcript_word_timestamps_artifact(
@@ -309,6 +329,7 @@ class TranscriptionManager:
         post: Post,
         *,
         include_word_timestamps: bool = False,
+        words_optional: bool = False,
         progress_callback: ChunkProgressCallback | None = None,
     ) -> tuple[list[TranscriptSegment], list[Segment] | None]:
         """
@@ -316,6 +337,11 @@ class TranscriptionManager:
 
         Args:
             post: The Post object containing the podcast audio to transcribe
+            include_word_timestamps: record word timestamps on a fresh
+                transcription.
+            words_optional: words are only being recorded, nothing needs them,
+                so an existing transcript without saved words is reused as is
+                instead of paying for a second transcription.
 
         Returns:
             The persisted transcript segments and, when requested, the richer
@@ -334,7 +360,12 @@ class TranscriptionManager:
                     getattr(post, "transcript_word_timestamps", None),
                 )
                 if rich_segments is None:
-                    if self._transcriber_supports_word_timestamps():
+                    if words_optional:
+                        self.logger.info(
+                            "Existing transcript found for post %s without word timestamps; not re-transcribing just to record them.",
+                            post.id,
+                        )
+                    elif self._transcriber_supports_word_timestamps():
                         self.logger.info(
                             "Existing transcript found for post %s but no saved word timestamps were available; requesting them from %s.",
                             post.id,

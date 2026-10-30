@@ -18,6 +18,7 @@ pub(super) const PROCESSOR_ACTIONS: &[&str] = &[
     "insert_transcript_segments",
     "finish_transcription_replace",
     "finish_transcription_replace_from_artifact",
+    "compress_post_word_timestamps",
     "mark_model_call_failed",
     "insert_identifications",
     "replace_identifications",
@@ -47,6 +48,7 @@ pub fn execute(
         "finish_transcription_replace_from_artifact" => {
             finish_transcription_replace_from_artifact(transaction, params)
         }
+        "compress_post_word_timestamps" => compress_post_word_timestamps(transaction, params),
         "mark_model_call_failed" => mark_model_call_failed(transaction, params),
         "insert_identifications" => insert_identifications(transaction, params),
         "replace_identifications" => replace_identifications(transaction, params),
@@ -420,11 +422,47 @@ fn finish_transcription_replace_inner(
     Ok(())
 }
 
-fn serialize_word_timestamps(value: Option<Value>) -> Result<String, RpcError> {
+fn compress_post_word_timestamps(
+    transaction: &Transaction<'_>,
+    params: &Map<String, Value>,
+) -> RpcActionResult {
+    let value = params
+        .get("post_id")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| error("invalid_params", "post_id is required"))?;
+    let post_id = py_int(value)?;
+    let stored: Option<String> = transaction
+        .query_row(
+            "SELECT CASE typeof(transcript_word_timestamps)
+                    WHEN 'text' THEN transcript_word_timestamps END
+             FROM post WHERE id=?1",
+            [post_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?
+        .flatten();
+    let encoded = stored
+        .filter(|json| json != "null")
+        .map(|json| crate::word_blob::encode(&json));
+    let compressed = matches!(encoded, Some(SqlValue::Blob(_)));
+    if let Some(blob @ SqlValue::Blob(_)) = encoded {
+        transaction
+            .execute(
+                "UPDATE post SET transcript_word_timestamps=?1 WHERE id=?2",
+                rusqlite::params![blob, post_id],
+            )
+            .map_err(database_error)?;
+    }
+    Ok(json!({"post_id": post_id, "compressed": compressed}))
+}
+
+fn serialize_word_timestamps(value: Option<Value>) -> Result<rusqlite::types::Value, RpcError> {
     value
         .map(|value| serde_json::to_string(&value))
         .transpose()
         .map(|value| value.unwrap_or_else(|| "null".to_owned()))
+        .map(|json| crate::word_blob::encode(&json))
         .map_err(|_| error("invalid_params", "invalid timestamp JSON"))
 }
 
@@ -1021,6 +1059,92 @@ mod tests {
             .unwrap();
         assert_eq!(finished, "null");
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn large_word_timestamps_are_stored_compressed_and_decode_back() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        schema(&connection);
+        let transaction = connection.transaction().unwrap();
+        let words: Vec<Value> = (0..400)
+            .map(|index| json!({"word": "hello", "start": index as f64, "end": index as f64 + 0.5, "score": null}))
+            .collect();
+        let timestamps = json!([{"sequence_num": 0, "words": words}]);
+        let params = Map::from_iter([
+            ("post_id".to_owned(), json!(1)),
+            ("transcript_word_timestamps".to_owned(), timestamps.clone()),
+        ]);
+
+        finish_transcription_replace(&transaction, &params).unwrap();
+
+        let stored: Vec<u8> = transaction
+            .query_row(
+                "SELECT transcript_word_timestamps FROM post WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(&stored[..2], &[0x1f, 0x8b]);
+        let decoded = transaction
+            .query_row(
+                "SELECT transcript_word_timestamps FROM post WHERE id=1",
+                [],
+                |row| crate::word_blob::decode(row.get_ref(0)?),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), timestamps);
+    }
+
+    #[test]
+    fn compress_post_word_timestamps_only_rewrites_large_text() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        schema(&connection);
+        let transaction = connection.transaction().unwrap();
+        let large =
+            serde_json::to_string(&vec![json!({"word": "hello", "start": 1.0}); 200]).unwrap();
+        let params = Map::from_iter([("post_id".to_owned(), json!(1))]);
+        let typeof_stored = |transaction: &Transaction<'_>| -> String {
+            transaction
+                .query_row(
+                    "SELECT typeof(transcript_word_timestamps) FROM post WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        for (stored, expected) in [
+            (Some("null"), "text"),
+            (Some("[]"), "text"),
+            (None, "null"),
+            (Some(large.as_str()), "blob"),
+        ] {
+            transaction
+                .execute(
+                    "UPDATE post SET transcript_word_timestamps=?1 WHERE id=1",
+                    [stored],
+                )
+                .unwrap();
+            let result = compress_post_word_timestamps(&transaction, &params).unwrap();
+            assert_eq!(result["compressed"], json!(expected == "blob"));
+            assert_eq!(typeof_stored(&transaction), expected);
+        }
+
+        let decoded = transaction
+            .query_row(
+                "SELECT transcript_word_timestamps FROM post WHERE id=1",
+                [],
+                |row| crate::word_blob::decode(row.get_ref(0)?),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, large);
+        let again = compress_post_word_timestamps(&transaction, &params).unwrap();
+        assert_eq!(again["compressed"], json!(false));
+        let missing = Map::from_iter([("post_id".to_owned(), json!(999))]);
+        let result = compress_post_word_timestamps(&transaction, &missing).unwrap();
+        assert_eq!(result["compressed"], json!(false));
     }
 
     #[test]

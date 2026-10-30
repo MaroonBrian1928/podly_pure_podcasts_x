@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Flask
@@ -605,3 +605,226 @@ def test_transcribe_for_processing_falls_back_when_existing_transcript_has_no_sa
 
         assert len(db_segments) == 1
         assert rich_segments is None
+
+
+def test_supports_word_timestamps_for_groq_transcriber(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    app: Flask,
+    mocker: Any,
+) -> None:
+    """GroqWhisperTranscriber must be recognized as word-timestamp capable."""
+    from podcast_processor.transcribe import GroqWhisperTranscriber
+    from shared.config import GroqWhisperConfig
+
+    mocker.patch("podcast_processor.transcribe.Groq", return_value=MagicMock())
+    with app.app_context():
+        groq_transcriber = GroqWhisperTranscriber(
+            test_logger,
+            GroqWhisperConfig(api_key="test", model="whisper-large-v3-turbo"),
+        )
+        manager = TranscriptionManager(
+            test_logger,
+            test_config,
+            model_call_query=MagicMock(),
+            segment_query=MagicMock(),
+            db_session=mock_db_session,
+            transcriber=groq_transcriber,
+        )
+        assert manager._transcriber_supports_word_timestamps() is True
+
+
+def test_transcribe_wrapper_does_not_request_word_timestamps(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    app: Flask,
+) -> None:
+    """Plain transcribe() must not turn on word timestamps (and the cached-read
+    backfill that goes with them); callers opt in explicitly."""
+    manager = TranscriptionManager(
+        test_logger,
+        test_config,
+        model_call_query=MagicMock(),
+        segment_query=MagicMock(),
+        db_session=mock_db_session,
+        transcriber=MagicMock(spec=Transcriber),
+    )
+    with (
+        app.app_context(),
+        patch.object(
+            manager, "transcribe_for_processing", return_value=([], None)
+        ) as for_processing,
+    ):
+        manager.transcribe(Post(guid="g", title="t", download_url="u"))
+
+    assert for_processing.call_args.kwargs["include_word_timestamps"] is False
+
+
+def _persist_with_artifact(
+    manager: TranscriptionManager,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    finish_succeeds: bool,
+) -> Any:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        transcription_manager_module, "get_base_podcast_data_dir", lambda: tmp_path
+    )
+
+    def fake_action(action: str, params: dict[str, Any], wait: bool = True) -> Any:
+        if action.startswith("finish_"):
+            return SimpleNamespace(success=finish_succeeds, error="boom", data={})
+        return SimpleNamespace(success=True, error=None, data={"inserted": 1})
+
+    monkeypatch.setattr(
+        transcription_manager_module.writer_client, "action", fake_action
+    )
+    manager._persist_transcription_chunks(
+        post=Post(id=5, guid="g", title="t", download_url="u"),
+        model_call_id=9,
+        segments=[Segment(start=0.0, end=1.0, text="hi")],
+        transcript_word_timestamps=[{"sequence_num": 0, "words": []}],
+    )
+    return tmp_path / "transcript_artifacts" / "post_5" / "model_call_9"
+
+
+def _make_manager(
+    test_config: Config, test_logger: logging.Logger, mock_db_session: MagicMock
+) -> TranscriptionManager:
+    return TranscriptionManager(
+        test_logger,
+        test_config,
+        model_call_query=MagicMock(),
+        segment_query=MagicMock(),
+        db_session=mock_db_session,
+        transcriber=MagicMock(spec=Transcriber),
+    )
+
+
+def test_word_timestamp_artifact_is_removed_after_the_writer_succeeds(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _make_manager(test_config, test_logger, mock_db_session)
+
+    artifact_dir = _persist_with_artifact(
+        manager, tmp_path, monkeypatch, finish_succeeds=True
+    )
+
+    assert not (artifact_dir / "word_timestamps.json").exists()
+    assert not artifact_dir.exists()
+    assert not (tmp_path / "transcript_artifacts" / "post_5").exists()
+
+
+def test_word_timestamp_artifact_is_kept_when_the_writer_fails(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _make_manager(test_config, test_logger, mock_db_session)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _persist_with_artifact(manager, tmp_path, monkeypatch, finish_succeeds=False)
+
+    artifact = (
+        tmp_path / "transcript_artifacts" / "post_5" / "model_call_9"
+    ) / "word_timestamps.json"
+    assert artifact.is_file()
+
+
+def test_failing_to_remove_the_artifact_does_not_fail_the_job(
+    test_config: Config,
+    test_logger: logging.Logger,
+    mock_db_session: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    manager = _make_manager(test_config, test_logger, mock_db_session)
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    artifact_dir = _persist_with_artifact(
+        manager, tmp_path, monkeypatch, finish_succeeds=True
+    )
+
+    assert (artifact_dir / "word_timestamps.json").is_file()
+
+
+@pytest.mark.parametrize("words_optional", [True, False])
+def test_existing_transcript_without_words_is_retranscribed_only_when_words_are_needed(
+    test_config: Config,
+    test_logger: logging.Logger,
+    app: Flask,
+    mocker: Any,
+    words_optional: bool,
+) -> None:
+    from podcast_processor.transcribe import GroqWhisperTranscriber
+    from shared.config import GroqWhisperConfig
+
+    mocker.patch("podcast_processor.transcribe.Groq", return_value=MagicMock())
+    with app.app_context():
+        feed = Feed(title="Test Feed", rss_url="http://example.com/rss-optional.xml")
+        post = Post(
+            feed=feed,
+            guid=f"guid-optional-{words_optional}",
+            download_url="http://example.com/audio-optional.mp3",
+            title="Test Post",
+            unprocessed_audio_path="/path/to/audio.mp3",
+        )
+        db.session.add_all([feed, post])
+        db.session.commit()
+        db.session.add(
+            TranscriptSegment(
+                post_id=post.id,
+                sequence_num=0,
+                start_time=0.0,
+                end_time=1.0,
+                text="Hello world",
+            )
+        )
+        transcriber = GroqWhisperTranscriber(
+            test_logger,
+            GroqWhisperConfig(api_key="test", model="whisper-large-v3-turbo"),
+        )
+        db.session.add(
+            ModelCall(
+                post_id=post.id,
+                model_name=transcriber.model_name,
+                first_segment_sequence_num=0,
+                last_segment_sequence_num=0,
+                prompt="Whisper transcription job",
+                status="success",
+            )
+        )
+        db.session.commit()
+        transcribe = mocker.patch.object(transcriber, "transcribe", return_value=[])
+        persist = mocker.patch.object(
+            TranscriptionManager, "_persist_transcript_word_timestamps"
+        )
+        manager = TranscriptionManager(
+            test_logger, test_config, db_session=db.session, transcriber=transcriber
+        )
+
+        db_segments, rich_segments = manager.transcribe_for_processing(
+            post, include_word_timestamps=True, words_optional=words_optional
+        )
+
+        assert len(db_segments) == 1
+        assert transcribe.called is (not words_optional)
+        assert persist.called is (not words_optional)
+        if words_optional:
+            assert rich_segments is None
