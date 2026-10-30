@@ -169,7 +169,10 @@ class TestAdClassifierRateLimiting:
         with patch("podcast_processor.ad_classifier.db.session") as mock_session:
             classifier = AdClassifier(config=config, db_session=mock_session)
             classifier.rate_limiter = Mock(spec=TokenRateLimiter)
-            args = {"messages": [{"role": "user", "content": "hi"}]}
+            args = {
+                "model": "per-call/model",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
 
             before_attempt = classifier._pace_retries(args)
             assert before_attempt is not None
@@ -181,7 +184,7 @@ class TestAdClassifierRateLimiting:
             before_attempt()
             assert classifier.rate_limiter.wait_if_needed.call_count == 2
             classifier.rate_limiter.wait_if_needed.assert_called_with(
-                args["messages"], config.llm_model
+                args["messages"], "per-call/model"
             )
 
     def test_complete_passes_the_pacing_hook_to_the_tier_retry(self):

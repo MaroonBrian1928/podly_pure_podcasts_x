@@ -1297,7 +1297,9 @@ class AdClassifier:
             if first_attempt:
                 first_attempt = False
                 return
-            limiter.wait_if_needed(completion_args["messages"], self.config.llm_model)
+            limiter.wait_if_needed(
+                completion_args["messages"], completion_args["model"]
+            )
 
         return before_attempt
 
