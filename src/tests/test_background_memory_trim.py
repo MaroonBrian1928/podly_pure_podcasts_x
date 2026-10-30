@@ -119,3 +119,45 @@ def test_cut_window_backfill_job_runs_apply_and_swallows_errors() -> None:
 
         backfill.side_effect = RuntimeError("boom")
         background.scheduled_cut_window_backfill()
+
+
+def _run_compression(result: dict[str, int] | Exception) -> mock.MagicMock:
+    with (
+        mock.patch.object(background, "scheduler") as sched,
+        mock.patch(
+            "app.word_timestamp_compression.compress_word_timestamps",
+            side_effect=[result] if isinstance(result, Exception) else None,
+            return_value=None if isinstance(result, Exception) else result,
+        ) as compress,
+    ):
+        background.scheduled_word_timestamp_compression()
+    compress.assert_called_once_with(
+        apply=True, limit=background.WORD_TIMESTAMP_COMPRESSION_BATCH_SIZE
+    )
+    return sched
+
+
+def test_word_timestamp_compression_schedules_the_next_batch() -> None:
+    sched = _run_compression({"candidates": 200, "compressed": 190, "failed": 10})
+
+    call = sched.add_job.call_args
+    assert call.kwargs["id"] == "compress_word_timestamps"
+    assert call.kwargs["trigger"] == "date"
+
+
+def test_word_timestamp_compression_stops_after_a_partial_batch() -> None:
+    sched = _run_compression({"candidates": 37, "compressed": 37, "failed": 0})
+
+    sched.add_job.assert_not_called()
+
+
+def test_word_timestamp_compression_stops_when_a_full_batch_made_no_progress() -> None:
+    sched = _run_compression({"candidates": 200, "compressed": 0, "failed": 200})
+
+    sched.add_job.assert_not_called()
+
+
+def test_word_timestamp_compression_does_not_reschedule_after_an_error() -> None:
+    sched = _run_compression(RuntimeError("boom"))
+
+    sched.add_job.assert_not_called()
