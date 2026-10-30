@@ -209,7 +209,11 @@ export default function CostsTab() {
             ? `Backfill finished with ${data.updated} update(s) and ${data.failed_updates} failure(s).`
             : `Backfill complete. Updated ${data.updated} model call(s).`,
         });
-        toast.success(`Backfilled ${data.updated} model call(s)`);
+        if (data.failed_updates > 0) {
+          toast.error(`Backfilled ${data.updated} model call(s); ${data.failed_updates} failed`);
+        } else {
+          toast.success(`Backfilled ${data.updated} model call(s)`);
+        }
         queryClient.invalidateQueries({ queryKey: ['admin-costs'] });
         queryClient.invalidateQueries({ queryKey: ['admin-calls'] });
       } else {
