@@ -1,3 +1,39 @@
+# [3.2.0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v3.1.1...v3.2.0) (2026-10-30)
+
+
+### Bug Fixes
+
+* address review findings on word timestamp storage, tiers and Groq grouping ([6e2ed53](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/6e2ed53f6966e6cbbaa313baba9af112cde8ae52))
+* avoid re-transcribing for optional words, tighten tier and cost handling ([d28b7e4](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/d28b7e42d5a398621c456afe6ce5dcc10b9fdc36))
+* **classifier:** pace Flex retries, the standard fallback and TPM retries through the token budget ([4276dad](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/4276dad9e5b71732261b10563c10ebf4d8fe1567))
+* **classifier:** pace retries against the model the call actually uses ([611bb40](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/611bb408d2fb85ea3718f512ad05e889dd979066))
+* **costs:** make the estimated-cost backfill report real results ([ec2012c](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/ec2012ccf556a48cbe156640c0e7a9b7696147a1))
+* **costs:** price from the stored cost and count success_heuristic calls ([f8567d4](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/f8567d49a764c470f762bcad8c28b5501dde9dbe))
+* **costs:** price legacy rows in the Python calls list like the Rust sidecar ([bef99e5](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/bef99e53937bb554fad1a33e8cc6ebeb975855e5))
+* **costs:** price refiner calls that fall back to the heuristic ([c965f78](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c965f782176c52d8eadace7035b1e30b2811aae6))
+* **costs:** reprice stored zeros on the dashboard and apply backfill limits to changed rows ([bd35701](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/bd3570123d95925a921c424f0e26695771f99b9a))
+* **costs:** show an error toast when a backfill has failed updates ([e34cd76](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/e34cd7676fda375e36d35c7b0dc126997d54a47f))
+* **frontend:** scroll the feed page over the episode list and ignore ResizeObserver loop notices ([a7b0583](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/a7b05834c299a1221c419c16f1da5fa4d9e26fd6))
+* **jobs:** compress word timestamps in batches so the scheduler worker stays free ([b26e3e9](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/b26e3e960bfe4a0aa8f613fa6350f02298830503))
+* **jobs:** show a Flex-to-standard fallback as a mixed service tier ([8287281](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/82872816828ed1d28b07af13a2d2efdf9c2733f2))
+* **jobs:** skip the word timestamp compression scan once nothing is left to compress ([d252c38](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/d252c38b55786f982c55d4ffa36e0c346897efcb))
+* pace boundary-refiner LLM calls through the shared token bucket ([b800cc8](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/b800cc8d98dcad92575cd87610c4ab8769e3386f))
+* pace every provider attempt and the word-level refiner ([d4e8dd5](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/d4e8dd572ced7c71596c2bc7dee10ea322c55e92))
+* read Groq word timestamps from the top-level words list ([c356ae7](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/c356ae79001c61392625a9bfd6ffadbf23535081))
+* **refiner:** record usage when a reply is valid JSON without the required fields ([9634de0](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/9634de0485624d86d4f834ac6e5d22cb83623382))
+* **scripts:** compare segment numbers and survive an unreadable column in the artifact prune script ([cd3204c](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/cd3204cd91e5cc1be3f7429fe5994208ded018b0))
+* **scripts:** read gzip-compressed word timestamps in the artifact prune script ([192c19d](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/192c19d15f534a8ee8754c5a7aed592cdebe42ca))
+* **transcription:** remove the word-timestamp hand-off file once the writer has it ([36b8a7d](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/36b8a7d4d2e8e578265d75cba52eb644ac6daebd))
+
+
+### Features
+
+* request and persist word-level timestamps from Groq Whisper ([3cd29f8](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/3cd29f85e32d74f2360aabceafe45aa1aa70357a))
+* **settings:** migration and Rust writer schema pin for record_word_timestamps ([533e4c8](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/533e4c8fe3371e81df55878b948fa82e1ea48722))
+* **settings:** record word timestamps setting on the Transcription page ([f8cfb19](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/f8cfb192bec7c5533ae4bae772189f1e31a991ca))
+* **storage:** compress existing word timestamps in the background ([e159857](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/e159857e38621b7dc62797b69e311c9838445c33))
+* **storage:** store word timestamps gzip-compressed ([1b76741](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/commit/1b76741043fa28cb0afa2673faf3475a503dca12))
+
 ## [3.1.1](https://github.com/MaroonBrian1928/podly_pure_podcasts_x/compare/v3.1.0...v3.1.1) (2026-10-28)
 
 
