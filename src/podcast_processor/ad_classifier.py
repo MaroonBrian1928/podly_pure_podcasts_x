@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -53,6 +54,12 @@ from podcast_processor.repeat_ad_finder import (
     tokenize,
 )
 from podcast_processor.repeat_ad_refiner import RepeatAdRefiner
+from podcast_processor.sting_anchor import (
+    PEAK_FLOOR,
+    apply_sting_anchors,
+    detect_sting_peaks,
+    feed_sting_config,
+)
 from podcast_processor.token_rate_limiter import (
     TokenRateLimiter,
     configure_rate_limiter_for_model,
@@ -64,6 +71,7 @@ from shared.llm_utils import (
     model_uses_max_completion_tokens,
     normalize_completion_args_for_model,
 )
+from shared.rust_sidecar import env_flag_enabled
 
 
 class ClassifyParams:
@@ -1994,6 +2002,23 @@ class AdClassifier:
                     }
                 )
 
+        # Sting anchor (deterministic): when the feed has a configured
+        # sting template, cross-correlate it against the original audio
+        # and pull refined break starts/ends onto the measured sting
+        # offsets. Positive-only (no detection, no change); runs before
+        # the INA snap guard, whose silence logic stays the fallback
+        # for boundaries without a usable sting. Applied adjustments
+        # are stored on the boundaries ("sting_anchor" key) and logged,
+        # so any later boundary question can be attributed exactly.
+        # Kill switch: PODLY_STING_ANCHOR_ENABLED=0. Per-feed config:
+        # PODLY_STING_CONFIG (JSON, see sting_config.example.json).
+        if refined_boundaries and env_flag_enabled(
+            "PODLY_STING_ANCHOR_ENABLED", default=True
+        ):
+            refined_boundaries = self._apply_sting_anchor(
+                post, refined_boundaries, transcript_segments
+            )
+
         # Store latest refined boundaries on the post so audio processing can cut
         # using refined timestamps (including word-level refined start times).
         # Clear the value when we have no refined boundaries so stale data doesn't
@@ -2021,6 +2046,93 @@ class AdClassifier:
                 post.id,
                 exc,
             )
+
+    def _apply_sting_anchor(
+        self,
+        post: Post,
+        refined_boundaries: list[dict[str, Any]],
+        transcript_segments: list | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run the sting anchor over a post's refined boundaries.
+
+        Best-effort: any failure (no sting config for the feed, the
+        original audio is not on disk, ffmpeg/numpy unavailable, a
+        detection error) returns the boundaries unchanged -- the
+        anchor is an assist, never a gate on persistence.
+        """
+        try:
+            config = feed_sting_config(post.feed_id)
+            if config is None:
+                return refined_boundaries
+            post_row = self._safe_get_post_row(post) or post
+            audio_path = getattr(post_row, "unprocessed_audio_path", None)
+            if not audio_path or not os.path.exists(audio_path):
+                return refined_boundaries
+            peaks = detect_sting_peaks(
+                audio_path,
+                config.template_path,
+                floor=min(PEAK_FLOOR, config.threshold),
+            )
+            # Segment data for the START role's optional early-cut
+            # check (transcript labels + INA speech spans). Missing
+            # data only disables the early cut, never the anchor.
+            tsegs: list[tuple[float, float, str]] | None = None
+            if transcript_segments:
+                label_by_seg_id = {
+                    getattr(ident, "transcript_segment_id", None): ident.label
+                    for ident in self.db_session.query(Identification)
+                    .join(TranscriptSegment)
+                    .filter(TranscriptSegment.post_id == post.id)
+                    .all()
+                }
+                tsegs = [
+                    (
+                        float(getattr(s, "start_time", 0.0)),
+                        float(getattr(s, "end_time", 0.0)),
+                        str(label_by_seg_id.get(getattr(s, "id", None), "none")),
+                    )
+                    for s in transcript_segments
+                ]
+            ina_speech: list[tuple[float, float]] | None = None
+            try:
+                ina_rows = (
+                    self.db_session.query(AudioSegment)
+                    .filter(
+                        AudioSegment.post_id == post.id,
+                        AudioSegment.label == "speech",
+                    )
+                    .order_by(AudioSegment.start_time.asc())
+                    .all()
+                )
+                ina_speech = [
+                    (float(r.start_time), float(r.end_time)) for r in ina_rows
+                ]
+            except Exception:  # noqa: BLE001
+                ina_speech = None
+            adjusted, adjustments = apply_sting_anchors(
+                refined_boundaries, config, peaks, tsegs, ina_speech
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "Sting anchor failed for post %s (boundaries unchanged): %s",
+                post.id,
+                exc,
+            )
+            return refined_boundaries
+        for adj in adjustments:
+            self.logger.info(
+                "Sting anchor: post %s block %d %s %.2f -> %.2f "
+                "(score %.2f, onset %.2f%s)",
+                post.id,
+                adj.block_index,
+                adj.edge,
+                adj.original,
+                adj.adjusted,
+                adj.score,
+                adj.onset,
+                ", early-cut" if adj.early else "",
+            )
+        return adjusted
 
     @staticmethod
     def _segment_payload_for_boundary_refinement(
