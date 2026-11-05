@@ -7,7 +7,7 @@ name = "podly-pure-podcasts"
 version = "0.0.0"
 description = "Ad-block for podcasts. Create an ad-free RSS feed."
 readme = "README.md"
-requires-python = ">=3.14,<3.15"
+requires-python = ">=3.15,<3.16"
 dependencies = [
     "openai",
     "python-dotenv",

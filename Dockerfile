@@ -19,7 +19,7 @@ COPY rust/Cargo.toml rust/Cargo.lock* ./
 COPY rust/src/ ./src/
 RUN cargo build --release --locked --bins
 
-FROM python:3.14-slim AS backend
+FROM python:3.15-slim AS backend
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1
