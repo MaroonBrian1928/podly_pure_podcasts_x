@@ -126,6 +126,31 @@ def _resolve_user_id_from_feed_path(path: str) -> int | None:
     return None
 
 
+_API_POST_SUFFIXES = ("/download/original", "/download", "/audio")
+_LEGACY_POST_SUFFIXES = ("/original.mp3", "/chapters.json", ".mp3")
+
+
+def _resolve_post_guid(path: str) -> str | None:
+    """Extract the full post GUID from a token-protected episode path.
+
+    GUIDs are stored verbatim from upstream feeds and may contain ``/`` and
+    ``.``; the episode routes use the ``path`` converter, so take everything
+    between the route prefix and its known suffix rather than one segment.
+    """
+    for prefix, suffixes in (
+        ("/api/posts/", _API_POST_SUFFIXES),
+        ("/post/", _LEGACY_POST_SUFFIXES),
+    ):
+        if not path.startswith(prefix):
+            continue
+        remainder = path[len(prefix) :]
+        for suffix in suffixes:
+            if remainder.endswith(suffix) and len(remainder) > len(suffix):
+                return remainder[: -len(suffix)]
+        return None
+    return None
+
+
 def _resolve_feed_id(path: str) -> int | None:
     if path.startswith("/feed/"):
         remainder = path[len("/feed/") :]
@@ -134,30 +159,8 @@ def _resolve_feed_id(path: str) -> int | None:
         except ValueError:
             return None
 
-    if path.startswith("/api/posts/"):
-        parts = path.split("/")
-        if len(parts) < 4:
-            return None
-        guid = parts[3]
-        post = Post.query.filter_by(guid=guid).first()
-        return post.feed_id if post else None
-
-    if path.startswith("/post/"):
-        remainder = path[len("/post/") :]
-        # Guids can be URL-shaped (e.g. supercast feeds use the episode URL as
-        # the guid), and Flask hands us a decoded path, so the guid here may
-        # contain "/" and "." characters. Mirror the route patterns
-        # ("/post/<path:guid>.mp3" and "/post/<path:guid>/original.mp3") by
-        # stripping the known suffix rather than splitting on the first
-        # delimiter, which would mangle URL-shaped guids and reject the token.
-        if remainder.endswith("/original.mp3"):
-            guid = remainder[: -len("/original.mp3")]
-        elif remainder.endswith("/chapters.json"):
-            guid = remainder[: -len("/chapters.json")]
-        elif remainder.endswith(".mp3"):
-            guid = remainder[: -len(".mp3")]
-        else:
-            guid = remainder.split("/", 1)[0].split(".", 1)[0]
+    guid = _resolve_post_guid(path)
+    if guid is not None:
         post = Post.query.filter_by(guid=guid).first()
         return post.feed_id if post else None
 
