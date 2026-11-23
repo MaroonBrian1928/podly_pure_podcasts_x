@@ -7,6 +7,7 @@ from podcast_processor.audio import (
     DEFAULT_VBR_QUALITY,
     _clip_segments_simple,
     _trim_file_lossless,
+    chunk_extension_for_codec,
     clip_segments_exact,
     clip_segments_with_fade,
     get_audio_bitrate_bps,
@@ -18,6 +19,8 @@ from podcast_processor.audio import (
 
 TEST_FILE_DURATION = 66_048
 TEST_FILE_PATH = "src/tests/data/count_0_99.mp3"
+# AAC audio in an MP4 container, saved with a .mp3 name as some feeds serve it.
+AAC_TEST_FILE_PATH = "src/tests/data/count_0_99_aac.mp3"
 
 
 def test_default_encoding_args_use_fallback_or_source_bitrate() -> None:
@@ -415,3 +418,34 @@ def test_split_audio_uses_rust_when_enabled(monkeypatch) -> None:
     )
 
     assert split_audio(Path(TEST_FILE_PATH), Path("/tmp/chunks"), 38_000) == expected
+
+
+def test_split_audio_names_aac_chunks_for_their_container(monkeypatch) -> None:
+    monkeypatch.setattr(audio_module, "try_split_audio", lambda **kwargs: None)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        chunks = split_audio(Path(AAC_TEST_FILE_PATH), Path(temp_dir), 200_000)
+
+        assert len(chunks) > 1
+        assert [path.name for path, _ in chunks] == [
+            f"{i}.m4a" for i in range(len(chunks))
+        ]
+        total_ms = 0
+        for path, _ in chunks:
+            duration_ms = get_audio_duration_ms(str(path))
+            assert duration_ms is not None and duration_ms > 0
+            total_ms += duration_ms
+        source_ms = get_audio_duration_ms(AAC_TEST_FILE_PATH)
+        assert source_ms is not None
+        assert abs(total_ms - source_ms) <= 500
+
+
+def test_chunk_extension_for_codec() -> None:
+    assert chunk_extension_for_codec("mp3") == ".mp3"
+    assert chunk_extension_for_codec("aac") == ".m4a"
+    assert chunk_extension_for_codec("ALAC") == ".m4a"
+    assert chunk_extension_for_codec("flac") == ".flac"
+    assert chunk_extension_for_codec("opus") == ".ogg"
+    assert chunk_extension_for_codec("vorbis") == ".ogg"
+    assert chunk_extension_for_codec("pcm_s16le") == ".mp3"
+    assert chunk_extension_for_codec(None) == ".mp3"

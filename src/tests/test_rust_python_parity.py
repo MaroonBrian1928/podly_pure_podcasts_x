@@ -580,3 +580,27 @@ def test_rust_stats_prefer_stored_cut_windows_like_python(
     assert rs["estimated_ad_time_seconds"] == py["estimated_ad_time_seconds"]
     assert rs["ad_blocks"] == py["ad_blocks"]
     assert rs["edited_ad_markers"] == py["edited_ad_markers"]
+
+
+def test_rust_split_names_aac_chunks_like_python(
+    monkeypatch: pytest.MonkeyPatch, rust_bin: Path, tmp_path: Path
+) -> None:
+    from podcast_processor import audio
+    from shared import rust_sidecar
+
+    source = Path(__file__).parent / "data" / "count_0_99_aac.mp3"
+    monkeypatch.setenv("PODLY_RUST_TOOLS_BIN", str(rust_bin))
+    monkeypatch.setenv("PODLY_RUST_AUDIO_ENABLED", "true")
+
+    rust_chunks = rust_sidecar.try_split_audio(
+        input_path=source, output_dir=tmp_path / "rust", chunk_size_bytes=200_000
+    )
+    assert rust_chunks is not None, "Rust split fell back to Python"
+
+    monkeypatch.setattr(audio, "try_split_audio", lambda **kwargs: None)
+    py_chunks = audio.split_audio(source, tmp_path / "py", 200_000)
+
+    assert [(p.name, off) for p, off in rust_chunks] == [
+        (p.name, off) for p, off in py_chunks
+    ]
+    assert all(p.suffix == ".m4a" and p.stat().st_size > 0 for p, _ in rust_chunks)

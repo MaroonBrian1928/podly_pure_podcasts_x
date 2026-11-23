@@ -577,6 +577,38 @@ def _build_window_condition_expression(windows: list[tuple[int, int]]) -> str:
     return "+".join(expressions)
 
 
+# Stream-copied chunks must use a container that can hold the source codec,
+# and the Whisper APIs pick the decoder from the file extension. Anything not
+# listed keeps the historical ".mp3" name.
+_CHUNK_EXTENSION_BY_CODEC = {
+    "mp3": ".mp3",
+    "aac": ".m4a",
+    "alac": ".m4a",
+    "flac": ".flac",
+    "opus": ".ogg",
+    "vorbis": ".ogg",
+}
+
+
+def chunk_extension_for_codec(codec_name: str | None) -> str:
+    return _CHUNK_EXTENSION_BY_CODEC.get((codec_name or "").lower(), ".mp3")
+
+
+def _probe_audio_codec(file_path: Path) -> str | None:
+    try:
+        probe = ffmpeg.probe(str(file_path), select_streams="a:0")
+    except ffmpeg.Error as e:
+        logger.warning(
+            "[FFMPEG_PROBE] Could not read audio codec of %s: %s", file_path, e
+        )
+        return None
+    for stream in probe.get("streams", []):
+        codec = stream.get("codec_name")
+        if isinstance(codec, str):
+            return codec
+    return None
+
+
 def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:
     duration_ms = end_ms - start_ms
 
@@ -647,6 +679,7 @@ def split_audio(
         chunk_duration_ms,
     )
 
+    chunk_ext = chunk_extension_for_codec(_probe_audio_codec(audio_file_path))
     chunks: list[tuple[Path, int]] = []
 
     for i in range(num_chunks):
@@ -656,7 +689,7 @@ def split_audio(
 
         end_offset_ms = min(duration_ms, (i + 1) * chunk_duration_ms)
 
-        export_path = audio_chunk_path / f"{i}.mp3"
+        export_path = audio_chunk_path / f"{i}{chunk_ext}"
         logger.debug(
             "[FFMPEG_SPLIT] Creating chunk %d/%d: %s", i + 1, num_chunks, export_path
         )

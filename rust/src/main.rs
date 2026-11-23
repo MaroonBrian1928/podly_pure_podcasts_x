@@ -5167,6 +5167,45 @@ fn probe_audio_path(input: &Path) -> Result<ProbeResponse> {
     })
 }
 
+/// Codec of the first audio stream, or None when ffprobe cannot read it.
+fn probe_audio_codec(input: &Path) -> Option<String> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("a:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name")
+        .arg("-of")
+        .arg("json")
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout).ok()?;
+    payload
+        .get("streams")?
+        .as_array()?
+        .first()?
+        .get("codec_name")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Mirrors `chunk_extension_for_codec` in `src/podcast_processor/audio.py`.
+/// Stream-copied chunks need a container that holds the source codec, and the
+/// Whisper APIs pick the decoder from the extension.
+fn chunk_extension_for_codec(codec: Option<&str>) -> &'static str {
+    match codec.map(str::to_ascii_lowercase).as_deref() {
+        Some("aac" | "alac") => ".m4a",
+        Some("flac") => ".flac",
+        Some("opus" | "vorbis") => ".ogg",
+        _ => ".mp3",
+    }
+}
+
 fn cut_audio(args: AudioCutArgs) -> Result<OkResponse> {
     let duration_ms = probe_audio_path(&args.input)?.duration_ms;
     let windows = read_windows_ms(&args.windows_json)?;
@@ -5445,6 +5484,7 @@ fn split_audio(args: AudioSplitArgs) -> Result<SplitResponse> {
     let chunk_duration_ms = ((duration_ms as f64 * chunk_ratio).ceil() as u64).max(1);
     let num_chunks = ((duration_ms as f64 / chunk_duration_ms as f64).ceil() as u64).max(1);
 
+    let chunk_ext = chunk_extension_for_codec(probe_audio_codec(&args.input).as_deref());
     let mut chunks = Vec::new();
     for index in 0..num_chunks {
         let start_offset_ms = index * chunk_duration_ms;
@@ -5452,7 +5492,7 @@ fn split_audio(args: AudioSplitArgs) -> Result<SplitResponse> {
             break;
         }
         let end_offset_ms = duration_ms.min((index + 1) * chunk_duration_ms);
-        let output_path = args.out_dir.join(format!("{index}.mp3"));
+        let output_path = args.out_dir.join(format!("{index}{chunk_ext}"));
         trim_file(&args.input, &output_path, start_offset_ms, end_offset_ms)?;
         chunks.push(SplitChunk {
             path: output_path.to_string_lossy().into_owned(),
@@ -7605,6 +7645,18 @@ fn write_json<T: Serialize>(output: &mut impl Write, value: &T) -> Result<()> {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn chunk_extension_matches_stream_copy_container() {
+        assert_eq!(chunk_extension_for_codec(Some("mp3")), ".mp3");
+        assert_eq!(chunk_extension_for_codec(Some("aac")), ".m4a");
+        assert_eq!(chunk_extension_for_codec(Some("ALAC")), ".m4a");
+        assert_eq!(chunk_extension_for_codec(Some("flac")), ".flac");
+        assert_eq!(chunk_extension_for_codec(Some("opus")), ".ogg");
+        assert_eq!(chunk_extension_for_codec(Some("vorbis")), ".ogg");
+        assert_eq!(chunk_extension_for_codec(Some("pcm_s16le")), ".mp3");
+        assert_eq!(chunk_extension_for_codec(None), ".mp3");
+    }
 
     #[test]
     fn feed_output_preserves_raw_xml_and_legacy_json() {
