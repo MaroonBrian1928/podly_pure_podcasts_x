@@ -403,7 +403,8 @@ class OpenAIWhisperTranscriber(Transcriber):
                     segment_payloads = serialized.get("segments")
 
         if segment_payloads is None:
-            return []
+            # A chunk without segments would leave its audio unclassified.
+            raise ValueError("Remote transcription response has no 'segments'")
 
         if isinstance(segment_payloads, dict):
             nested_segments = segment_payloads.get("segments")
@@ -643,11 +644,10 @@ class GroqWhisperTranscriber(Transcriber):
             # Groq Transcription type stub, so read it defensively.
             transcription_segments = getattr(transcription, "segments", None)
             if transcription_segments is None:
-                self.logger.warning(
-                    "[GROQ_API_CALL] No segments found in transcription for %s",
-                    chunk_path,
+                # A chunk without segments would leave its audio unclassified.
+                raise ValueError(
+                    f"Groq transcription response for {chunk_path} has no segments"
                 )
-                return []
 
             top_level_words = getattr(transcription, "words", None)
             words_by_segment = self._assign_top_level_words(

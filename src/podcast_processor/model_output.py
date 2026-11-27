@@ -201,3 +201,17 @@ def clean_and_parse_model_output(model_output: str) -> AdSegmentPredictionList:
             )
             # Re-raise the original error with more context
             raise first_error from repair_error
+
+
+def has_trailing_prediction_object(model_output: str) -> bool:
+    """True when another ``ad_segments`` object follows the first JSON object.
+
+    ``clean_and_parse_model_output`` keeps only the first balanced object, so
+    predictions in a second object would be dropped without notice.
+    """
+    start_idx = model_output.find("{")
+    if start_idx < 0:
+        return False
+    root = _truncate_after_balanced_root(model_output[start_idx:])
+    rest = model_output[start_idx + len(root) :]
+    return "{" in rest and '"ad_segments"' in rest

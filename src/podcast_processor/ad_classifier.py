@@ -35,11 +35,13 @@ from podcast_processor.llm_model_call_utils import (
     LLMRequestTooLargeError,
     apply_service_tier,
     call_litellm_with_tier_retry,
+    extract_litellm_finish_reason,
     extract_litellm_usage,
 )
 from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
+    has_trailing_prediction_object,
 )
 from podcast_processor.prompt import (
     build_prompt_audio_markers,
@@ -84,6 +86,25 @@ class ClassifyParams:
 
 class ClassifyException(Exception):
     """Custom exception for classification errors."""
+
+
+class ClassificationIncompleteError(Exception):
+    """A transcript chunk has no usable classification.
+
+    The episode must not be cut or published from a partial classification,
+    so this fails the processing job.
+    """
+
+
+class InvalidClassificationOutputError(Exception):
+    """The model answered, but not with a complete, usable prediction list.
+
+    Retried like a transient provider error.
+    """
+
+
+class ClassificationRefusedError(Exception):
+    """The provider withheld the answer (content filter); not retried."""
 
 
 class AdClassifier:
@@ -280,7 +301,9 @@ class AdClassifier:
 
         except ClassifyException as e:
             self.logger.error(f"Classification failed for post {post.id}: {e}")
-            return
+            raise ClassificationIncompleteError(
+                f"Classification stopped before the end of the transcript: {e}"
+            ) from e
 
     def _step(
         self,
@@ -411,13 +434,22 @@ class AdClassifier:
         )
 
         if not model_call:
-            self.logger.error("ModelCall object is unexpectedly None. Skipping chunk.")
-            return []
+            raise ClassificationIncompleteError(
+                f"No ModelCall for post {post.id}, segments {first_seq_num}-{last_seq_num}."
+            )
 
-        if self._should_call_llm(model_call):
+        def validate(content: str | None, response: Any = None) -> None:
+            self._validate_classification_output(
+                content, response=response, chunk_segments=chunk_segments
+            )
+
+        if self._should_call_llm(model_call) or self._stored_response_is_stale(
+            model_call, user_prompt_str, validate
+        ):
             self._perform_llm_call(
                 model_call=model_call,
                 system_prompt=system_prompt,
+                validate=validate,
             )
         else:
             oversized_error = LLMRequestTooLargeError.from_message(
@@ -426,16 +458,117 @@ class AdClassifier:
             if oversized_error is not None:
                 raise oversized_error
 
-        if model_call.status == "success" and model_call.response:
-            return self._process_successful_response(
-                model_call=model_call,
-                current_chunk_db_segments=chunk_segments,
+        if model_call.status != "success" or not model_call.response:
+            raise ClassificationIncompleteError(
+                f"ModelCall {model_call.id} (post {post.id}, segments "
+                f"{first_seq_num}-{last_seq_num}) has no usable classification "
+                f"(status: {model_call.status})."
             )
+        return self._process_successful_response(
+            model_call=model_call,
+            current_chunk_db_segments=chunk_segments,
+        )
+
+    def _validate_classification_output(
+        self,
+        content: str | None,
+        *,
+        response: Any = None,
+        chunk_segments: list[TranscriptSegment],
+    ) -> None:
+        """Raise unless content is a complete prediction list for this chunk."""
+        finish_reason = (
+            extract_litellm_finish_reason(response) if response is not None else None
+        )
+        if finish_reason == "content_filter":
+            raise ClassificationRefusedError(
+                "Provider withheld the classification (finish_reason=content_filter)."
+            )
+        if finish_reason == "length":
+            raise InvalidClassificationOutputError(
+                "Classification was cut off at the output token limit "
+                "(finish_reason=length)."
+            )
+        if not content or not content.strip():
+            raise InvalidClassificationOutputError("Classification response was empty.")
+        if has_trailing_prediction_object(content):
+            raise InvalidClassificationOutputError(
+                "Classification response holds more than one prediction object."
+            )
+        try:
+            predictions = clean_and_parse_model_output(content)
+        except (ValidationError, AssertionError, ValueError) as exc:
+            raise InvalidClassificationOutputError(
+                f"Classification response is not a valid prediction list: {exc}"
+            ) from exc
+        for pred in predictions.ad_segments:
+            adjusted = self._adjust_confidence(
+                base_confidence=pred.confidence,
+                content_type=predictions.content_type,
+            )
+            if adjusted < self.config.output.min_confidence:
+                continue
+            if (
+                self._find_matching_segment(
+                    segment_offset=pred.segment_offset,
+                    current_chunk_db_segments=chunk_segments,
+                )
+                is None
+            ):
+                raise InvalidClassificationOutputError(
+                    f"Ad prediction at offset {pred.segment_offset:.2f} matches no "
+                    "transcript segment in this chunk."
+                )
+
+    def _stored_response_is_stale(
+        self,
+        model_call: ModelCall,
+        user_prompt_str: str,
+        validate: Callable[..., None],
+    ) -> bool:
+        """True when a stored success can't stand in for this chunk's answer.
+
+        A success row is reused only when it was produced for this exact
+        prompt and still validates; otherwise it is reset so the chunk is
+        classified again.
+        """
         if model_call.status != "success":
-            self.logger.info(
-                f"LLM call for ModelCall {model_call.id} was not successful (status: {model_call.status}). No identifications to process."
-            )
-        return []
+            return False
+        reason: str | None = None
+        if model_call.prompt != user_prompt_str:
+            reason = "its prompt differs from this chunk's prompt"
+        else:
+            try:
+                validate(model_call.response)
+            except InvalidClassificationOutputError as exc:
+                reason = str(exc)
+        if reason is None:
+            return False
+        self.logger.warning(
+            "Reclassifying ModelCall %s: stored response is not reusable (%s).",
+            model_call.id,
+            reason,
+        )
+        res = writer_client.update(
+            "ModelCall",
+            model_call.id,
+            {
+                "prompt": user_prompt_str,
+                "status": "pending",
+                "response": None,
+                "error_message": None,
+                "retry_attempts": 0,
+            },
+            wait=True,
+        )
+        if not res or not res.success:
+            raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
+        model_call.prompt = user_prompt_str
+        model_call.status = "pending"
+        model_call.response = None
+        model_call.error_message = None
+        model_call.retry_attempts = 0
+        return True
 
     def _build_chunk_payload(
         self,
@@ -929,7 +1062,13 @@ class AdClassifier:
         """Determine if an LLM call should be made."""
         return model_call.status not in ("success", "failed_permanent")
 
-    def _perform_llm_call(self, *, model_call: ModelCall, system_prompt: str) -> None:
+    def _perform_llm_call(
+        self,
+        *,
+        model_call: ModelCall,
+        system_prompt: str,
+        validate: Callable[..., None] | None = None,
+    ) -> None:
         """Perform the LLM call for classification.
 
         Re-raises on failure. `_call_model` already handles transient errors
@@ -945,7 +1084,11 @@ class AdClassifier:
             if isinstance(self.config.whisper, TestWhisperConfig):
                 self._handle_test_mode_call(model_call)
             else:
-                self._call_model(model_call_obj=model_call, system_prompt=system_prompt)
+                self._call_model(
+                    model_call_obj=model_call,
+                    system_prompt=system_prompt,
+                    validate=validate,
+                )
         except Exception as e:
             # `_call_model` already logged the exception with traceback before
             # re-raising, so don't dump it a second time -- just leave a short
@@ -1009,11 +1152,11 @@ class AdClassifier:
                 f"Error processing LLM response for ModelCall {model_call.id}: {e}",
                 exc_info=True,
             )
-            # Surface the parse failure to the orchestrator. Combined with a
-            # final ad-window count of 0 this drives the optional auto-retry
-            # path; on its own it's just diagnostic.
             self.had_parse_error = True
-        return []
+            raise ClassificationIncompleteError(
+                f"Classification response for ModelCall {model_call.id} could not "
+                f"be parsed: {e}"
+            ) from e
 
     def _create_identifications(
         self,
@@ -1192,6 +1335,12 @@ class AdClassifier:
         """
         from podcast_processor.llm_error_classifier import LLMErrorClassifier
 
+        if isinstance(error, InvalidClassificationOutputError):
+            return True
+        if isinstance(
+            error, (ClassificationRefusedError, ClassificationIncompleteError)
+        ):
+            return False
         return LLMErrorClassifier.is_retryable_error(error)
 
     def _build_success_payload(
@@ -1341,8 +1490,13 @@ class AdClassifier:
         model_call_obj: ModelCall,
         system_prompt: str,
         max_retries: int | None = None,
+        validate: Callable[..., None] | None = None,
     ) -> str | None:
-        """Call the LLM model with retry logic."""
+        """Call the LLM model with retry logic.
+
+        validate(content, response) runs before the answer is stored; an
+        InvalidClassificationOutputError is retried like a transient error.
+        """
         # Use configured retry count if not specified
         retry_count = (
             max_retries
@@ -1371,7 +1525,10 @@ class AdClassifier:
                 # service_tier for this attempt.
                 completion_args = self._prepare_api_call(model_call_obj, system_prompt)
                 if completion_args is None:
-                    return None  # Token limit exceeded
+                    raise ClassificationIncompleteError(
+                        model_call_obj.error_message
+                        or f"Prompt for ModelCall {model_call_obj.id} exceeds the token limit."
+                    )
 
                 requested_service_tier = completion_args.get("service_tier")
 
@@ -1390,7 +1547,12 @@ class AdClassifier:
                 response_first_choice = response.choices[0]
                 assert isinstance(response_first_choice, Choices)
                 content = response_first_choice.message.content
-                assert content is not None
+                if validate is not None:
+                    validate(content, response)
+                if content is None:
+                    raise InvalidClassificationOutputError(
+                        "Classification response had no content."
+                    )
                 raw_response_content = content
 
                 success_payload = self._build_success_payload(

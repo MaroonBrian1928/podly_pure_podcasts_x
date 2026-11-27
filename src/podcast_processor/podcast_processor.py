@@ -327,7 +327,9 @@ class PodcastProcessor:
             )
 
             try:
-                if os.path.exists(processed_audio_path):
+                if os.path.exists(
+                    processed_audio_path
+                ) and self._rediscovered_output_is_trusted(post, processed_audio_path):
                     self.logger.info(f"Audio already processed: {post}")
                     # Update the database with the processed audio path
                     self._remove_unprocessed_audio(post)
@@ -1424,11 +1426,9 @@ class PodcastProcessor:
             for start_ms, end_ms in effective_removed_ms
         ]
 
-        # Zero-ads guard: the LLM strategy occasionally yields zero ad
-        # windows because the model returned malformed JSON for a batch
-        # (parse error swallowed in ad_classifier) rather than because the
-        # episode is genuinely ad-free. Record the count + parse-error flag
-        # so the UI can badge the run, and optionally requeue once.
+        # Zero-ads guard: record the run's ad-window count so the UI can
+        # badge a zero-ad run for review. Unparseable classifications fail the
+        # job in ad_classifier before this point.
         ad_classifier = getattr(self, "ad_classifier", None)
         self._evaluate_zero_ads_guard(
             post,
@@ -1566,6 +1566,26 @@ class PodcastProcessor:
             )
             .one()
         )
+
+    def _rediscovered_output_is_trusted(self, post: Post, path: str) -> bool:
+        """Whether a processed file found on disk, but not recorded on the post,
+        may be published.
+
+        Rejected when the post has classification calls that did not succeed:
+        the file may come from a run whose ad detection was incomplete.
+        """
+        counts = self._get_llm_classification_model_call_counts(int(post.id))
+        if counts is not None and counts.total > counts.successful:
+            self.logger.warning(
+                "Ignoring processed audio found at %s for post %s: %s of %s "
+                "classification calls did not succeed.",
+                path,
+                post.id,
+                counts.total - counts.successful,
+                counts.total,
+            )
+            return False
+        return True
 
     def _get_latest_llm_classification_error(self, post_id: int) -> str | None:
         session = getattr(self, "db_session", None)
@@ -2133,6 +2153,11 @@ class PodcastProcessor:
         self.status_manager.update_job_status(
             job, "running", 3, "Identifying ads", 75.0
         )
+        if not transcript_segments:
+            raise ProcessorException(
+                "Transcription produced no segments, so no ads could be "
+                "identified; refusing to publish the episode unprocessed."
+            )
         user_prompt_template = self.get_user_prompt_template(
             DEFAULT_USER_PROMPT_TEMPLATE_PATH
         )
@@ -2423,6 +2448,11 @@ class PodcastProcessor:
         )
         if existing_processed_path:
             processed_path_str = str(existing_processed_path)
+            if (
+                post.processed_audio_path != processed_path_str
+                and not self._rediscovered_output_is_trusted(post, processed_path_str)
+            ):
+                return False
             if post.processed_audio_path != processed_path_str:
                 self.logger.info(
                     "Found existing processed audio for post '%s' at '%s'. "

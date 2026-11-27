@@ -457,7 +457,8 @@ def test_process_chunk(test_config: Config, app: Flask) -> None:
         model_call = ModelCall(
             post_id=1,
             model_name=test_config.llm_model,
-            prompt="test prompt",
+            # A stored success is reused only for the same prompt.
+            prompt=user_prompt,
             first_segment_sequence_num=0,
             last_segment_sequence_num=1,
             status="success",
