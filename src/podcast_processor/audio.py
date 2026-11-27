@@ -32,9 +32,9 @@ def get_audio_duration_ms(file_path: str) -> int | None:
         probe = ffmpeg.probe(file_path)
         format_info = probe["format"]
         duration_seconds = float(format_info["duration"])
-        duration_milliseconds = duration_seconds * 1000
         logger.debug("[FFMPEG_PROBE] Duration: %.2f seconds", duration_seconds)
-        return int(duration_milliseconds)
+        # Half up, like Rust's f64::round, so both probes give the same offsets.
+        return math.floor(duration_seconds * 1000 + 0.5)
     except ffmpeg.Error as e:
         logger.error(
             "[FFMPEG_PROBE] Error probing file %s: %s",
@@ -168,15 +168,15 @@ def _clip_segments_complex(
     for start_ms, end_ms in ad_segments_ms:
         trimmed_list.extend(
             [
-                ffmpeg.input(in_path).filter(
+                ffmpeg.input(in_path)["a:0"].filter(
                     "atrim", start=last_end / 1000.0, end=start_ms / 1000.0
                 ),
-                ffmpeg.input(in_path)
+                ffmpeg.input(in_path)["a:0"]
                 .filter(
                     "atrim", start=start_ms / 1000.0, end=(start_ms + fade_ms) / 1000.0
                 )
                 .filter("afade", t="out", ss=0, d=fade_ms / 1000.0),
-                ffmpeg.input(in_path)
+                ffmpeg.input(in_path)["a:0"]
                 .filter("atrim", start=(end_ms - fade_ms) / 1000.0, end=end_ms / 1000.0)
                 .filter("afade", t="in", ss=0, d=fade_ms / 1000.0),
             ]
@@ -186,7 +186,7 @@ def _clip_segments_complex(
 
     if last_end != audio_duration_ms:
         trimmed_list.append(
-            ffmpeg.input(in_path).filter(
+            ffmpeg.input(in_path)["a:0"].filter(
                 "atrim", start=last_end / 1000.0, end=audio_duration_ms / 1000.0
             )
         )
@@ -525,7 +525,7 @@ def _trim_file_lossless(
     duration_sec = duration_ms / 1000.0
 
     (
-        ffmpeg.input(str(in_path))
+        ffmpeg.input(str(in_path))["a:0"]
         .output(
             str(out_path),
             ss=start_sec,
@@ -577,34 +577,66 @@ def _build_window_condition_expression(windows: list[tuple[int, int]]) -> str:
     return "+".join(expressions)
 
 
-def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:
-    duration_ms = end_ms - start_ms
+# Stream-copied chunks must use a container that can hold the source codec,
+# and the Whisper APIs pick the decoder from the file extension. Anything not
+# listed keeps the historical ".mp3" name.
+_CHUNK_EXTENSION_BY_CODEC = {
+    "mp3": ".mp3",
+    "aac": ".m4a",
+    "alac": ".m4a",
+    "flac": ".flac",
+    "opus": ".ogg",
+    "vorbis": ".ogg",
+}
 
-    if duration_ms <= 0:
+
+def chunk_extension_for_codec(codec_name: str | None) -> str:
+    return _CHUNK_EXTENSION_BY_CODEC.get((codec_name or "").lower(), ".mp3")
+
+
+def _probe_audio_codec(file_path: Path) -> str | None:
+    try:
+        probe = ffmpeg.probe(str(file_path), select_streams="a:0")
+    except ffmpeg.Error as e:
+        logger.warning(
+            "[FFMPEG_PROBE] Could not read audio codec of %s: %s", file_path, e
+        )
+        return None
+    for stream in probe.get("streams", []):
+        codec = stream.get("codec_name")
+        if isinstance(codec, str):
+            return codec
+    return None
+
+
+def _trim_stream(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> Any:
+    """Build the stream-copy trim for one transcription chunk.
+
+    Mirrors the Rust sidecar's ``trim_file``: the first audio track, which is
+    the one ``_probe_audio_codec`` named the chunk for, and output-side seek,
+    which cuts at the requested timestamp even in files without a seek index.
+    """
+    start_sec = max(start_ms, 0) / 1000.0
+    duration_sec = (end_ms - start_ms) / 1000.0
+    return (
+        ffmpeg.input(str(in_path))["a:0"]
+        .output(str(out_path), ss=start_sec, t=duration_sec, acodec="copy", vn=None)
+        .overwrite_output()
+    )
+
+
+def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:
+    if end_ms - start_ms <= 0:
         return
 
-    start_sec = max(start_ms, 0) / 1000.0
-    duration_sec = duration_ms / 1000.0
-
     logger.debug(
-        "[FFMPEG_TRIM] Trimming %s -> %s (start=%.2fs, duration=%.2fs)",
+        "[FFMPEG_TRIM] Trimming %s -> %s (start_ms=%d, end_ms=%d)",
         in_path,
         out_path,
-        start_sec,
-        duration_sec,
+        start_ms,
+        end_ms,
     )
-    (
-        ffmpeg.input(str(in_path))
-        .output(
-            str(out_path),
-            ss=start_sec,
-            t=duration_sec,
-            acodec="copy",
-            vn=None,
-        )
-        .overwrite_output()
-        .run()
-    )
+    _trim_stream(in_path, out_path, start_ms, end_ms).run()
 
 
 def split_audio(
@@ -647,6 +679,7 @@ def split_audio(
         chunk_duration_ms,
     )
 
+    chunk_ext = chunk_extension_for_codec(_probe_audio_codec(audio_file_path))
     chunks: list[tuple[Path, int]] = []
 
     for i in range(num_chunks):
@@ -656,7 +689,7 @@ def split_audio(
 
         end_offset_ms = min(duration_ms, (i + 1) * chunk_duration_ms)
 
-        export_path = audio_chunk_path / f"{i}.mp3"
+        export_path = audio_chunk_path / f"{i}{chunk_ext}"
         logger.debug(
             "[FFMPEG_SPLIT] Creating chunk %d/%d: %s", i + 1, num_chunks, export_path
         )

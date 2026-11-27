@@ -85,7 +85,11 @@ def init_auth_middleware(app: Any) -> None:
             failure_rate_limiter.register_success(client_identifier)
             return None
 
-        if _is_token_protected_endpoint(request.path):
+        # Feed tokens are read-only credentials shared in feed and enclosure
+        # URLs; they must never authorize a write.
+        if request.method in ("GET", "HEAD") and _is_token_protected_endpoint(
+            request.path
+        ):
             limiter_key = _feed_token_limiter_key(client_identifier)
             # Valid credentials bypass the limiter: anyone who knows a token id can
             # put it into backoff, and that must not lock out its owner. Secrets are

@@ -91,6 +91,14 @@ def missing_processed_audio_response(post: Post, p_guid: str) -> flask.Response:
         logger.warning("Processed audio not found for post: %s", post.id)
         return flask.make_response(("Processed audio not found", 404))
 
+    if Post.query.filter_by(guid=p_guid).count() > 1:
+        # Jobs are keyed by GUID, so queueing here could start or report on
+        # another feed's episode with the same GUID.
+        logger.warning(
+            "Not auto-processing %s: the GUID is shared by several posts", p_guid
+        )
+        return flask.make_response(("Processed audio not found", 404))
+
     logger.info(
         "Auto-processing on audio request is enabled; queuing processing for %s",
         p_guid,

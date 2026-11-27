@@ -12,6 +12,7 @@ from flask.typing import ResponseReturnValue
 from sqlalchemy import func
 from sqlalchemy.orm import defer
 
+from app.auth.feed_tokens import find_post_for_request, resolve_legacy_original_guid
 from app.auth.guards import require_admin
 from app.auth.service import update_user_last_active
 from app.cut_stats import (
@@ -1732,7 +1733,7 @@ def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
 
     logger.info(f"API request for audio file with GUID: {p_guid}")
 
-    post = Post.query.filter_by(guid=p_guid).first()
+    post = find_post_for_request(p_guid)
     if post is None:
         logger.warning(f"Post with GUID: {p_guid} not found")
         return flask.make_response(
@@ -1770,7 +1771,7 @@ def api_get_post_audio(p_guid: str) -> ResponseReturnValue:
 @post_bp.route("/api/posts/<path:p_guid>/chapters", methods=["GET"])
 def api_get_post_chapters(p_guid: str) -> flask.Response:
     """Return chapter metadata embedded in the processed MP3, if present."""
-    post = Post.query.filter_by(guid=p_guid).first()
+    post = find_post_for_request(p_guid)
     if post is None:
         return flask.make_response(
             jsonify({"error": "Post not found", "error_code": "NOT_FOUND"}), 404
@@ -1806,7 +1807,7 @@ def api_download_post(p_guid: str) -> flask.Response:
         update_user_last_active(current_user.id)
 
     logger.info(f"Request to download post with GUID: {p_guid}")
-    post = Post.query.filter_by(guid=p_guid).first()
+    post = find_post_for_request(p_guid)
     if post is None:
         logger.warning(f"Post with GUID: {p_guid} not found")
         return flask.make_response(("Post not found", 404))
@@ -1840,7 +1841,7 @@ def api_download_post(p_guid: str) -> flask.Response:
 def api_download_original_post(p_guid: str) -> flask.Response:
     """API endpoint to download original (unprocessed) audio files."""
     logger.info(f"Request to download original post with GUID: {p_guid}")
-    post = Post.query.filter_by(guid=p_guid).first()
+    post = find_post_for_request(p_guid)
     if post is None:
         logger.warning(f"Post with GUID: {p_guid} not found")
         return flask.make_response(("Post not found", 404))
@@ -1875,7 +1876,7 @@ def api_download_original_post(p_guid: str) -> flask.Response:
 @post_bp.route("/post/<path:p_guid>/chapters.json", methods=["GET"])
 def podcast_chapters_json(p_guid: str) -> flask.Response:
     """Podcasting 2.0 JSON chapters for the feed's `<podcast:chapters>` tag."""
-    post = Post.query.filter_by(guid=p_guid).first()
+    post = find_post_for_request(p_guid)
     if post is None:
         return flask.make_response(
             jsonify({"error": "Post not found", "error_code": "NOT_FOUND"}), 404
@@ -1903,5 +1904,8 @@ def download_post_legacy(p_guid: str) -> ResponseReturnValue:
 
 
 @post_bp.route("/post/<path:p_guid>/original.mp3", methods=["GET"])
-def download_original_post_legacy(p_guid: str) -> flask.Response:
-    return api_download_original_post(p_guid)
+def download_original_post_legacy(p_guid: str) -> ResponseReturnValue:
+    guid, wants_original = resolve_legacy_original_guid(p_guid)
+    if not wants_original:
+        return api_get_post_audio(guid)
+    return api_download_original_post(guid)
