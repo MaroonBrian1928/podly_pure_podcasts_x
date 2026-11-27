@@ -33,6 +33,18 @@ _cache: dict[str, tuple[int | None, float]] = {}
 CACHE_TTL_SECONDS = 3600  # 1 hour
 
 
+def stripe_object_to_dict(obj: Any) -> Any:
+    """Return a plain dict for a Stripe SDK object.
+
+    Since stripe-python 15, ``StripeObject`` is not a ``dict`` and has no
+    ``.get()``; plain dicts and ``None`` pass through unchanged.
+    """
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return obj
+
+
 def get_subscription_amount(subscription_id: str) -> int | None:
     with _lock:
         cached = _cache.get(subscription_id)
@@ -72,7 +84,9 @@ def fetch_subscription_amount(subscription_id: str) -> int | None:
             return None
 
         # Passing api_key prevents mutating global stripe state
-        sub: Any = stripe.Subscription.retrieve(subscription_id, api_key=secret)
+        sub: Any = stripe_object_to_dict(
+            stripe.Subscription.retrieve(subscription_id, api_key=secret)
+        )
         items = sub.get("items", {}).get("data", [])
         if items:
             amount_cents = items[0].get("price", {}).get("unit_amount")

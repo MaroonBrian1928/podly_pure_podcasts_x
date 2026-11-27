@@ -64,3 +64,27 @@ def test_enrich_rust_users_with_stripe_is_noop_when_flag_off(
 
     assert called == []
     assert users[0]["subscription_amount_cents"] is None
+
+
+def test_fetch_subscription_amount_reads_stripe_sdk_objects(
+    monkeypatch: Any,
+) -> None:
+    import stripe
+    from stripe import StripeObject
+
+    monkeypatch.setenv("PODLY_STRIPE_BILLING_ENABLED", "true")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test")
+    billing_cache._cache.clear()
+    sub = StripeObject.construct_from(
+        {"id": "sub_obj", "items": {"data": [{"price": {"unit_amount": 700}}]}},
+        "sk_test",
+    )
+    monkeypatch.setattr(stripe.Subscription, "retrieve", lambda *_a, **_k: sub)
+
+    assert billing_cache.fetch_subscription_amount("sub_obj") == 700
+
+
+def test_stripe_object_to_dict_passes_plain_values_through() -> None:
+    plain = {"id": "x"}
+    assert billing_cache.stripe_object_to_dict(plain) is plain
+    assert billing_cache.stripe_object_to_dict(None) is None

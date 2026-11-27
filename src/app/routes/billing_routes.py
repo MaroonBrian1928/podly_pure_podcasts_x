@@ -4,6 +4,7 @@ from typing import Any
 
 from flask import Blueprint, jsonify, request
 
+from app.billing_cache import stripe_object_to_dict
 from app.extensions import db
 from app.models import User, UserFeed
 from app.writer.client import writer_client
@@ -85,8 +86,10 @@ def billing_summary() -> Any:
         and not user.stripe_subscription_id
     ):
         # Try to find an active subscription if we don't have one linked
-        subs = stripe_client.Subscription.list(
-            customer=user.stripe_customer_id, limit=1, status="active"
+        subs = stripe_object_to_dict(
+            stripe_client.Subscription.list(
+                customer=user.stripe_customer_id, limit=1, status="active"
+            )
         )
         if subs and subs.get("data"):
             sub = subs["data"][0]
@@ -114,8 +117,10 @@ def billing_summary() -> Any:
         and user.feed_subscription_status == "active"
     ):
         try:
-            sub = stripe_client.Subscription.retrieve(
-                user.stripe_subscription_id, expand=["items.data.price"]
+            sub = stripe_object_to_dict(
+                stripe_client.Subscription.retrieve(
+                    user.stripe_subscription_id, expand=["items.data.price"]
+                )
             )
             if sub and sub.get("items") and sub["items"]["data"]:
                 price_item = sub["items"]["data"][0].get("price")
@@ -191,7 +196,9 @@ def update_subscription() -> Any:
             and stripe_client is not None
         ):
             # Attach known subscription id to the user if it belongs to their customer
-            sub = stripe_client.Subscription.retrieve(requested_subscription_id)
+            sub = stripe_object_to_dict(
+                stripe_client.Subscription.retrieve(requested_subscription_id)
+            )
             if sub and sub.get("customer") == user.stripe_customer_id:
                 writer_client.action(
                     "set_user_billing_fields",
@@ -398,6 +405,7 @@ def billing_portal_session() -> Any:
 
 
 def _update_user_from_subscription(sub: Any) -> None:
+    sub = stripe_object_to_dict(sub)
     customer_id = sub.get("customer")
     if not customer_id:
         return
@@ -405,7 +413,7 @@ def _update_user_from_subscription(sub: Any) -> None:
     if not user:
         return
 
-    status = sub.get("status") if isinstance(sub, dict) else sub["status"]
+    status = sub.get("status")
 
     # For PWYW bundle, allowance is 10 if active
     feed_allowance = 10 if status in ("active", "trialing", "past_due") else 0
@@ -416,9 +424,7 @@ def _update_user_from_subscription(sub: Any) -> None:
             "stripe_customer_id": customer_id,
             "feed_allowance": feed_allowance,
             "feed_subscription_status": status,
-            "stripe_subscription_id": (
-                sub.get("id") if isinstance(sub, dict) else sub["id"]
-            ),
+            "stripe_subscription_id": sub.get("id"),
         },
         wait=True,
     )
@@ -455,7 +461,7 @@ def stripe_webhook() -> Any:
         return jsonify({"error": "INVALID_SIGNATURE"}), 400
 
     event_type = event["type"]
-    data_object = event["data"]["object"]
+    data_object = stripe_object_to_dict(event["data"]["object"])
 
     if event_type in (
         "customer.subscription.created",
