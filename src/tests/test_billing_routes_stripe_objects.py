@@ -37,3 +37,33 @@ def test_update_user_from_subscription_accepts_stripe_object(
         },
         wait=True,
     )
+
+
+def test_invalid_webhook_does_not_log_verification_details(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    from flask import Flask
+
+    secret_hint = "whsec_...cret"
+
+    def reject(*_args: Any, **_kwargs: Any) -> None:
+        raise ValueError(
+            f"No signatures found matching the expected secret {secret_hint}"
+        )
+
+    stripe_stub = SimpleNamespace(Webhook=SimpleNamespace(construct_event=reject))
+    monkeypatch.setattr(
+        billing_routes, "_get_stripe_client", lambda: (stripe_stub, None)
+    )
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_secret")
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/api/billing/stripe-webhook",
+        method="POST",
+        data=b"{}",
+        headers={"Stripe-Signature": "t=1,v1=bad"},
+    ):
+        response = billing_routes.stripe_webhook()
+
+    assert response[1] == 400
+    assert secret_hint not in caplog.text

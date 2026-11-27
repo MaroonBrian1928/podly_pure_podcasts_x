@@ -457,7 +457,8 @@ def stripe_webhook() -> Any:
         )
         logger.info("Stripe webhook received: %s", event["type"])
     except Exception as exc:  # noqa: BLE001
-        logger.error("Invalid Stripe webhook: %s", exc)
+        # Stripe's verification errors can quote part of the signing secret.
+        logger.error("Invalid Stripe webhook (%s)", type(exc).__name__)
         return jsonify({"error": "INVALID_SIGNATURE"}), 400
 
     event_type = event["type"]
