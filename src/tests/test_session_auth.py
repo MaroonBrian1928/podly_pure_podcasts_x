@@ -366,6 +366,32 @@ def _share_token(auth_app: Flask) -> tuple[int, str, str]:
     return feed_id, payload["feed_token"], payload["feed_secret"]
 
 
+@pytest.mark.parametrize("method", ["DELETE", "POST", "PUT", "PATCH"])
+def test_feed_token_never_authorizes_writes(auth_app: Flask, method: str) -> None:
+    feed_id, token_id, secret = _share_token(auth_app)
+
+    response = auth_app.test_client().open(
+        f"/feed/{feed_id}",
+        method=method,
+        query_string={"feed_token": token_id, "feed_secret": secret},
+    )
+
+    assert response.status_code == 401
+    with auth_app.app_context():
+        assert db.session.get(Feed, feed_id) is not None
+
+
+def test_feed_token_still_allows_head_requests(auth_app: Flask) -> None:
+    _feed_id, token_id, secret = _share_token(auth_app)
+
+    response = auth_app.test_client().head(
+        "/api/posts/episode-1/download",
+        query_string={"feed_token": token_id, "feed_secret": secret},
+    )
+
+    assert response.status_code == 200
+
+
 SLASH_GUID = "ozzyandkeats.podbean.com/2adb2443-7ee2-3d20-9bad-09eb1045a555"
 
 
