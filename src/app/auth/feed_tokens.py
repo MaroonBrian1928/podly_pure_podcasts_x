@@ -24,19 +24,21 @@ class FeedTokenAuthResult:
     user: AuthenticatedUser
     feed_id: int | None
     token: FeedAccessToken
-    # Feed of the resource this request was authorized for, when the path
-    # names one; episode handlers serve the post from this feed.
+    # Feed and GUID of the resource this request was authorized for, when the
+    # path names one; episode handlers serve exactly that post.
     resource_feed_id: int | None = None
+    resource_guid: str | None = None
 
 
 def _validate_token_access(
     token: FeedAccessToken, user: User, path: str
-) -> tuple[bool, int | None]:
-    """Return whether the token may access path, and the feed it was granted for.
+) -> tuple[bool, int | None, str | None]:
+    """Return whether the token may access path, and the feed and GUID granted.
 
     A GUID is unique only within a feed, so an episode path can match posts in
-    several feeds; access is granted for the first matching feed the token
-    covers, and handlers serve the post from that feed.
+    several feeds (and a legacy original-audio path can name two GUIDs); access
+    is granted for the first candidate post in a feed the token covers, and
+    handlers serve exactly that post.
     """
     # Handle Aggregate Token (feed_id is None)
     if token.feed_id is None:
@@ -44,27 +46,24 @@ def _validate_token_access(
         #    Validate that the token belongs to the requested user
         requested_user_id = _resolve_user_id_from_feed_path(path)
         if requested_user_id is not None:
-            return bool(requested_user_id == user.id), None
+            return bool(requested_user_id == user.id), None, None
 
-        # 2. If accessing a specific resource (audio/post), verify subscription
-        resource_feed_ids = _resolve_feed_ids(path)
-        if resource_feed_ids:
-            for feed_id in resource_feed_ids:
-                if _verify_subscription(user, feed_id):
-                    return True, feed_id
-            return False, None
+    any_resource = False
+    for guid, feed_ids in _resource_candidates(path):
+        if not feed_ids:
+            continue
+        any_resource = True
+        for feed_id in feed_ids:
+            if token.feed_id is not None and feed_id != token.feed_id:
+                continue
+            if _verify_subscription(user, feed_id):
+                return True, feed_id, guid
 
-        # If we can't resolve a feed ID but it's not the aggregate feed path,
-        # we might be in a generic context or invalid path.
-        # For safety, if we can't verify context, we might deny,
-        # but let's allow if it's just a token check not tied to a specific resource yet.
-        return True, None
-
-    # Handle Specific Feed Token
-    if token.feed_id not in _resolve_feed_ids(path):
-        return False, None
-
-    return _verify_subscription(user, token.feed_id), token.feed_id
+    if token.feed_id is None and not any_resource:
+        # Aggregate token on a path that names no known resource: the handler
+        # answers (typically 404) without exposing feed content.
+        return True, None, None
+    return False, None, None
 
 
 def create_feed_access_token(user: User, feed: Feed | None) -> tuple[str, str]:
@@ -97,7 +96,7 @@ def authenticate_feed_token(
     if user is None:
         return None
 
-    allowed, resource_feed_id = _validate_token_access(token, user, path)
+    allowed, resource_feed_id, resource_guid = _validate_token_access(token, user, path)
     if not allowed:
         return None
 
@@ -112,6 +111,7 @@ def authenticate_feed_token(
         feed_id=token.feed_id,
         token=token,
         resource_feed_id=resource_feed_id,
+        resource_guid=resource_guid,
     )
 
 
@@ -147,12 +147,14 @@ _API_POST_SUFFIXES = ("/download/original", "/download", "/audio")
 _LEGACY_POST_SUFFIXES = ("/original.mp3", "/chapters.json", ".mp3")
 
 
-def _resolve_post_guid(path: str) -> str | None:
-    """Extract the full post GUID from a token-protected episode path.
+def _resolve_post_guids(path: str) -> list[str]:
+    """Extract the candidate post GUIDs from a token-protected episode path.
 
     GUIDs are stored verbatim from upstream feeds and may contain ``/`` and
     ``.``; the episode routes use the ``path`` converter, so take everything
     between the route prefix and its known suffix rather than one segment.
+    ``/post/<g>/original.mp3`` names both the original audio of ``g`` and the
+    processed enclosure of ``g/original``; the latter is listed first.
     """
     for prefix, suffixes in (
         ("/api/posts/", _API_POST_SUFFIXES),
@@ -165,44 +167,51 @@ def _resolve_post_guid(path: str) -> str | None:
             if remainder.endswith(suffix) and len(remainder) > len(suffix):
                 guid = remainder[: -len(suffix)]
                 if prefix == "/post/" and suffix == "/original.mp3":
-                    guid, _ = resolve_legacy_original_guid(guid)
-                return guid
-        return None
-    return None
+                    return [f"{guid}/original", guid]
+                return [guid]
+        return []
+    return []
 
 
 def resolve_legacy_original_guid(p_guid: str) -> tuple[str, bool]:
-    """Disambiguate ``/post/<p_guid>/original.mp3``.
+    """Disambiguate ``/post/<p_guid>/original.mp3`` for the current request.
 
-    That URL is both the original-audio link for ``p_guid`` and the processed
-    enclosure (``/post/<guid>.mp3``) of an episode whose GUID ends in
-    ``/original``. The processed enclosure wins when such an episode exists.
     Returns the GUID to serve and whether the original audio was requested.
+    A feed-token request uses the GUID it was authorized for; otherwise the
+    processed enclosure of ``<p_guid>/original`` wins when such a post exists.
     """
     processed_guid = f"{p_guid}/original"
+    token_result = getattr(g, "feed_token", None)
+    authorized_guid = getattr(token_result, "resource_guid", None)
+    if authorized_guid is not None:
+        return authorized_guid, authorized_guid != processed_guid
     if Post.query.filter_by(guid=processed_guid).first() is not None:
         return processed_guid, False
     return p_guid, True
 
 
-def _resolve_feed_ids(path: str) -> list[int]:
+def _feed_ids_for_guid(guid: str) -> list[int]:
+    rows = (
+        db.session.query(Post.feed_id).filter(Post.guid == guid).order_by(Post.id).all()
+    )
+    return [int(row[0]) for row in rows]
+
+
+def _resource_candidates(path: str) -> list[tuple[str | None, list[int]]]:
     if path.startswith("/feed/"):
         remainder = path[len("/feed/") :]
         try:
-            return [int(remainder.split("/", 1)[0])]
+            return [(None, [int(remainder.split("/", 1)[0])])]
         except ValueError:
             return []
+    return [(guid, _feed_ids_for_guid(guid)) for guid in _resolve_post_guids(path)]
 
-    guid = _resolve_post_guid(path)
-    if guid is not None:
-        rows = (
-            db.session.query(Post.feed_id)
-            .filter(Post.guid == guid)
-            .order_by(Post.id)
-            .all()
-        )
-        return [int(row[0]) for row in rows]
 
+def _resolve_feed_ids(path: str) -> list[int]:
+    """Feeds holding the first resource the path names that exists."""
+    for _guid, feed_ids in _resource_candidates(path):
+        if feed_ids:
+            return feed_ids
     return []
 
 

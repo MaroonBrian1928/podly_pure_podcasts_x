@@ -33,8 +33,8 @@ def get_audio_duration_ms(file_path: str) -> int | None:
         format_info = probe["format"]
         duration_seconds = float(format_info["duration"])
         logger.debug("[FFMPEG_PROBE] Duration: %.2f seconds", duration_seconds)
-        # Rounded like the Rust sidecar's probe so chunk offsets match.
-        return round(duration_seconds * 1000)
+        # Half up, like Rust's f64::round, so both probes give the same offsets.
+        return math.floor(duration_seconds * 1000 + 0.5)
     except ffmpeg.Error as e:
         logger.error(
             "[FFMPEG_PROBE] Error probing file %s: %s",
@@ -168,15 +168,15 @@ def _clip_segments_complex(
     for start_ms, end_ms in ad_segments_ms:
         trimmed_list.extend(
             [
-                ffmpeg.input(in_path).filter(
+                ffmpeg.input(in_path)["a:0"].filter(
                     "atrim", start=last_end / 1000.0, end=start_ms / 1000.0
                 ),
-                ffmpeg.input(in_path)
+                ffmpeg.input(in_path)["a:0"]
                 .filter(
                     "atrim", start=start_ms / 1000.0, end=(start_ms + fade_ms) / 1000.0
                 )
                 .filter("afade", t="out", ss=0, d=fade_ms / 1000.0),
-                ffmpeg.input(in_path)
+                ffmpeg.input(in_path)["a:0"]
                 .filter("atrim", start=(end_ms - fade_ms) / 1000.0, end=end_ms / 1000.0)
                 .filter("afade", t="in", ss=0, d=fade_ms / 1000.0),
             ]
@@ -186,7 +186,7 @@ def _clip_segments_complex(
 
     if last_end != audio_duration_ms:
         trimmed_list.append(
-            ffmpeg.input(in_path).filter(
+            ffmpeg.input(in_path)["a:0"].filter(
                 "atrim", start=last_end / 1000.0, end=audio_duration_ms / 1000.0
             )
         )
@@ -525,7 +525,7 @@ def _trim_file_lossless(
     duration_sec = duration_ms / 1000.0
 
     (
-        ffmpeg.input(str(in_path))
+        ffmpeg.input(str(in_path))["a:0"]
         .output(
             str(out_path),
             ss=start_sec,
@@ -612,14 +612,15 @@ def _probe_audio_codec(file_path: Path) -> str | None:
 def _trim_stream(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> Any:
     """Build the stream-copy trim for one transcription chunk.
 
-    Mirrors the Rust sidecar's ``trim_file``: input-side seek, and the first
-    audio track, which is the one ``_probe_audio_codec`` named the chunk for.
+    Mirrors the Rust sidecar's ``trim_file``: the first audio track, which is
+    the one ``_probe_audio_codec`` named the chunk for, and output-side seek,
+    which cuts at the requested timestamp even in files without a seek index.
     """
     start_sec = max(start_ms, 0) / 1000.0
     duration_sec = (end_ms - start_ms) / 1000.0
     return (
-        ffmpeg.input(str(in_path), ss=start_sec, t=duration_sec)["a:0"]
-        .output(str(out_path), acodec="copy", vn=None)
+        ffmpeg.input(str(in_path))["a:0"]
+        .output(str(out_path), ss=start_sec, t=duration_sec, acodec="copy", vn=None)
         .overwrite_output()
     )
 

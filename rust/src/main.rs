@@ -5613,22 +5613,24 @@ fn trim_file(input: &Path, output: &Path, start_ms: u64, end_ms: u64) -> Result<
         return Ok(());
     }
 
+    // Mirrors `_trim_stream` in src/podcast_processor/audio.py. The first audio
+    // track is the one probe_audio_codec named the chunk for; output-side seek
+    // cuts at the requested timestamp even in files without a seek index.
     let mut command = Command::new("ffmpeg");
     command
         .arg("-y")
         .arg("-v")
         .arg("error")
-        .arg("-ss")
-        .arg(format!("{:.3}", start_ms as f64 / 1000.0))
-        .arg("-t")
-        .arg(format!("{:.3}", duration_ms as f64 / 1000.0))
         .arg("-i")
         .arg(input)
-        // The first audio track is the one probe_audio_codec named the chunk for.
         .arg("-map")
         .arg("0:a:0")
         .arg("-codec:a")
         .arg("copy")
+        .arg("-ss")
+        .arg(format!("{:.3}", start_ms as f64 / 1000.0))
+        .arg("-t")
+        .arg(format!("{:.3}", duration_ms as f64 / 1000.0))
         .arg("-vn")
         .arg(output);
     run_command(command, "ffmpeg trim")
@@ -5647,6 +5649,8 @@ fn trim_file_lossless(input: &Path, output: &Path, start_ms: u64, end_ms: u64) -
         .arg(format!("{:.3}", duration_ms as f64 / 1000.0))
         .arg("-i")
         .arg(input)
+        .arg("-map")
+        .arg("0:a:0")
         .arg("-codec:a")
         .arg("pcm_s16le")
         .arg("-vn");

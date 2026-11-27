@@ -4,6 +4,7 @@ from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from flask import Flask, g
@@ -163,7 +164,11 @@ def test_duplicate_guid_across_feeds_is_scoped_to_the_token_feed(
 
         user = cast(Any, SimpleNamespace(id=1, role="admin"))
         token = cast(Any, SimpleNamespace(feed_id=url_feed))
-        assert _validate_token_access(token, user, path) == (True, url_feed)
+        assert _validate_token_access(token, user, path) == (
+            True,
+            url_feed,
+            "episode-1",
+        )
 
         with app_with_post.test_request_context(path):
             g.feed_token = SimpleNamespace(resource_feed_id=url_feed)
@@ -199,3 +204,42 @@ def test_guid_ending_in_original_serves_its_processed_enclosure(
     original_response = client.get("/api/posts/show/ep/download/original")
     assert original_response.status_code == 200
     assert original_response.data == b"original-audio"
+
+
+def test_original_guid_in_another_feed_does_not_block_the_original_link(
+    app_with_post: Flask,
+) -> None:
+    with app_with_post.app_context():
+        url_feed = app_with_post.config["URL_FEED_ID"]
+        plain_feed = app_with_post.config["PLAIN_FEED_ID"]
+        _add_post(url_feed, "show/ep")
+        _add_post(plain_feed, "show/ep/original")
+        user = cast(Any, SimpleNamespace(id=1, role="admin"))
+        token = cast(Any, SimpleNamespace(feed_id=url_feed))
+
+        assert _validate_token_access(token, user, "/post/show/ep/original.mp3") == (
+            True,
+            url_feed,
+            "show/ep",
+        )
+
+
+def test_shared_guid_is_not_auto_processed(
+    app_with_post: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.routes import post_utils
+
+    monkeypatch.setattr(
+        post_utils.runtime_config, "autoprocess_on_download", True, raising=False
+    )
+    jobs = MagicMock()
+    monkeypatch.setattr(post_utils, "get_jobs_manager", lambda: jobs)
+    with app_with_post.app_context():
+        _add_post(app_with_post.config["URL_FEED_ID"], "episode-1")
+        post = Post.query.filter_by(guid="episode-1").first()
+        assert post is not None
+        with app_with_post.test_request_context("/post/episode-1.mp3"):
+            response = post_utils.missing_processed_audio_response(post, "episode-1")
+
+    assert response.status_code == 404
+    jobs.start_post_processing.assert_not_called()

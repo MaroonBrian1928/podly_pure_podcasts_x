@@ -258,19 +258,19 @@ def test_trim_file_uses_stream_copy_for_transcription_chunks() -> None:
         Path("input.mp3"), Path("chunk.m4a"), 1_000, 2_500
     )
 
-    # Same arguments as the Rust sidecar's trim_file: input-side seek and the
-    # first audio track, so both split paths cut identical chunks.
+    # Same arguments as the Rust sidecar's trim_file: the first audio track and
+    # output-side seek, so both split paths cut identical chunks.
     assert stream.get_args() == [
-        "-ss",
-        "1.0",
-        "-t",
-        "1.5",
         "-i",
         "input.mp3",
         "-map",
         "0:a:0",
         "-acodec",
         "copy",
+        "-ss",
+        "1.0",
+        "-t",
+        "1.5",
         "-vn",
         "chunk.m4a",
         "-y",
@@ -279,8 +279,13 @@ def test_trim_file_uses_stream_copy_for_transcription_chunks() -> None:
 
 def test_trim_file_lossless_uses_pcm_wav_intermediate(monkeypatch) -> None:
     output_calls = []
+    selected_streams = []
 
     class FakeFfmpegStream:
+        def __getitem__(self, stream_spec):
+            selected_streams.append(stream_spec)
+            return self
+
         def output(self, *args, **kwargs):
             output_calls.append((args, kwargs))
             return self
@@ -299,6 +304,8 @@ def test_trim_file_lossless_uses_pcm_wav_intermediate(monkeypatch) -> None:
 
     _trim_file_lossless(Path("input.mp3"), Path("segment.wav"), 1_000, 2_500)
 
+    # Cuts use the first audio track, the one transcription was split from.
+    assert selected_streams == ["a:0"]
     assert output_calls == [
         (
             ("segment.wav",),
