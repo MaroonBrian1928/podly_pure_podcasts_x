@@ -68,13 +68,15 @@ def _segments() -> list[TranscriptSegment]:
     ]
 
 
-def _pending_call(config: Config, prompt: str = "prompt") -> ModelCall:
+def _pending_call(
+    config: Config, prompt: str = "prompt", first_seq: int = 0, last_seq: int = 1
+) -> ModelCall:
     call = ModelCall(
         post_id=1,
         model_name=config.llm_model,
         prompt=prompt,
-        first_segment_sequence_num=0,
-        last_segment_sequence_num=1,
+        first_segment_sequence_num=first_seq,
+        last_segment_sequence_num=last_seq,
         status="pending",
     )
     db.session.add(call)
@@ -518,3 +520,63 @@ def test_find_existing_processed_audio_can_ignore_unrecorded_files(
         )
         == recorded
     )
+
+
+@pytest.mark.parametrize(
+    ("duration_ms", "fails"), [(5_000, False), (45_000, True), (None, True)]
+)
+def test_long_chunk_without_segments_is_an_error(
+    duration_ms: int | None, fails: bool
+) -> None:
+    from podcast_processor import transcribe
+
+    with patch.object(transcribe, "get_audio_duration_ms", return_value=duration_ms):
+        if fails:
+            with pytest.raises(ValueError, match="no segments"):
+                transcribe.raise_if_chunk_untranscribed("chunk.m4a", [])
+        else:
+            transcribe.raise_if_chunk_untranscribed("chunk.m4a", [])
+        transcribe.raise_if_chunk_untranscribed("chunk.m4a", [object()])
+
+
+def test_ad_mark_skipped_for_a_replaced_answer_is_restored(
+    config: Config, app: Flask
+) -> None:
+    from podcast_processor.model_output import (
+        AdSegmentPrediction,
+        AdSegmentPredictionList,
+    )
+
+    with app.app_context():
+        classifier = AdClassifier(config=config, db_session=db.session)
+        segments = _segments()
+        for segment in segments:
+            db.session.add(segment)
+        later = _pending_call(config, prompt="later chunk", first_seq=1, last_seq=2)
+        earlier = _pending_call(config, prompt="earlier chunk")
+        db.session.add(
+            Identification(
+                transcript_segment_id=2,
+                model_call_id=later.id,
+                label="ad",
+                confidence=0.9,
+            )
+        )
+        db.session.commit()
+
+        classifier._create_identifications(
+            prediction_list=AdSegmentPredictionList(
+                ad_segments=[AdSegmentPrediction(segment_offset=10.0, confidence=0.95)]
+            ),
+            current_chunk_db_segments=segments,
+            model_call=earlier,
+        )
+        db.session.query(Identification).filter_by(model_call_id=later.id).delete()
+        db.session.commit()
+
+        classifier._restore_deferred_marks()
+
+        marks = (
+            db.session.query(Identification).filter_by(transcript_segment_id=2).all()
+        )
+        assert [(m.model_call_id, m.label) for m in marks] == [(earlier.id, "ad")]

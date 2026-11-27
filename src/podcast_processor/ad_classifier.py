@@ -172,6 +172,10 @@ class AdClassifier:
         # zero-ad runs (see PodcastProcessor zero-ads guard).
         self.had_parse_error = False
         self._adaptive_input_token_limit: int | None = None
+        # Ad marks skipped because another call already marked the segment.
+        # That call's marks can be deleted later in the run when its stored
+        # answer turns out stale, so these are re-checked after the chunk loop.
+        self._deferred_marks: list[dict[str, Any]] = []
 
         # Initialize cue detector for neighbor expansion
         self.cue_detector = CueDetector()
@@ -225,6 +229,7 @@ class AdClassifier:
         # Reset the parse-error signal at the top of every classification run
         # so a flag from a prior post can't leak into this one's outcome.
         self.had_parse_error = False
+        self._deferred_marks = []
 
         self.logger.info(
             f"Starting ad classification for post {post.id} with {len(transcript_segments)} segments."
@@ -268,6 +273,8 @@ class AdClassifier:
                         "Breaking to avoid infinite loop."
                     )
                     break
+
+            self._restore_deferred_marks()
 
             # Expand neighbors using bulk operations
             # NOTE: Use self.db_session.query() instead of self.identification_query
@@ -1259,6 +1266,14 @@ class AdClassifier:
             matched_segments.append(matched_segment)
 
             if self._segment_has_ad_identification(matched_segment.id):
+                self._deferred_marks.append(
+                    {
+                        "transcript_segment_id": matched_segment.id,
+                        "model_call_id": model_call.id,
+                        "label": "ad",
+                        "confidence": adjusted_confidence,
+                    }
+                )
                 self.logger.debug(
                     "Segment %s for post %s already has an ad identification; skipping new record.",
                     matched_segment.id,
@@ -1366,6 +1381,22 @@ class AdClassifier:
                 matched_segment = ts_segment
                 min_diff = diff
         return matched_segment
+
+    def _restore_deferred_marks(self) -> None:
+        """Insert skipped ad marks whose segment no longer has any ad mark."""
+        restore: dict[int, dict[str, Any]] = {}
+        for mark in self._deferred_marks:
+            segment_id = int(mark["transcript_segment_id"])
+            if segment_id in restore or self._segment_has_ad_identification(segment_id):
+                continue
+            restore[segment_id] = mark
+        self._deferred_marks = []
+        if restore:
+            self.logger.info(
+                "Restoring %s ad marks whose earlier marks came from replaced answers",
+                len(restore),
+            )
+            self._insert_identifications_batched(list(restore.values()))
 
     def _segment_has_ad_identification(self, transcript_segment_id: int) -> bool:
         """Check if a transcript segment already has an ad identification.

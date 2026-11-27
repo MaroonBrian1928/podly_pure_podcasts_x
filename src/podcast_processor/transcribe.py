@@ -14,7 +14,7 @@ from groq import Groq
 # pulling in openai (~566 modules) for runs that use a different transcriber.
 from pydantic import BaseModel
 
-from podcast_processor.audio import split_audio
+from podcast_processor.audio import get_audio_duration_ms, split_audio
 from shared.config import GroqWhisperConfig, RemoteWhisperConfig
 
 
@@ -24,6 +24,22 @@ def _finite_or_none(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+# A chunk this long that comes back without speech is treated as a failed
+# transcription: its audio would otherwise never be classified.
+MAX_SILENT_CHUNK_MS = 30_000
+
+
+def raise_if_chunk_untranscribed(chunk_path: Path | str, segments: list[Any]) -> None:
+    if segments:
+        return
+    duration_ms = get_audio_duration_ms(str(chunk_path))
+    if duration_ms is None or duration_ms > MAX_SILENT_CHUNK_MS:
+        raise ValueError(
+            f"Transcription of {chunk_path} returned no segments "
+            f"({duration_ms} ms of audio)"
+        )
 
 
 class WordTimestamp(BaseModel):
@@ -248,6 +264,7 @@ class OpenAIWhisperTranscriber(Transcriber):
                 total_chunks,
                 len(segments),
             )
+            raise_if_chunk_untranscribed(chunk_path, segments)
             all_segments.extend(self.add_offset_to_segments(segments, offset))
             if progress_callback is not None:
                 # Best-effort: never let a UI-only progress hook fail the
@@ -515,6 +532,7 @@ class GroqWhisperTranscriber(Transcriber):
                 total_chunks,
                 len(segments),
             )
+            raise_if_chunk_untranscribed(chunk_path, segments)
             all_segments.extend(self.add_offset_to_segments(segments, offset))
             if progress_callback is not None:
                 try:
