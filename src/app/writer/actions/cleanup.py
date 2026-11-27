@@ -20,6 +20,7 @@ from app.models import (
     TranscriptSegment,
 )
 from shared.processing_paths import (
+    adopts_unrecorded_processed_audio,
     find_existing_processed_audio_path,
     get_processed_audio_path_candidates,
 )
@@ -57,11 +58,13 @@ def cleanup_missing_audio_paths_action(params: dict[str, Any]) -> int:
 
     # Resolve feed titles in one query rather than lazy-loading (and fully
     # hydrating) a Feed per post.
-    feed_titles: dict[int, str | None] = dict(
-        db.session.query(Feed.id, Feed.title)
+    feed_rows = (
+        db.session.query(Feed.id, Feed.title, Feed.ad_detection_strategy)
         .filter(Feed.id.in_({post.feed_id for post in inconsistent_posts}))
         .all()
     )
+    feed_titles: dict[int, str | None] = {row[0]: row[1] for row in feed_rows}
+    feed_strategies: dict[int, str | None] = {row[0]: row[2] for row in feed_rows}
 
     count = 0
     for post in inconsistent_posts:
@@ -71,6 +74,9 @@ def cleanup_missing_audio_paths_action(params: dict[str, Any]) -> int:
             unprocessed_audio_path=post.unprocessed_audio_path,
             feed_title=feed_titles.get(post.feed_id),
             post_title=post.title,
+            allow_unrecorded=adopts_unrecorded_processed_audio(
+                feed_strategies.get(post.feed_id)
+            ),
         )
         if existing_processed_path:
             resolved_processed_path = str(existing_processed_path)

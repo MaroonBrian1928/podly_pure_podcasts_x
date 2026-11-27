@@ -14,6 +14,14 @@ from shared.config import RemoteWhisperConfig
 from shared.test_utils import create_standard_test_config
 
 
+@pytest.fixture(autouse=True)
+def _skip_transcript_coverage_check():
+    # These tests use a placeholder audio path; transcript coverage is covered
+    # in test_classification_completeness.py.
+    with patch.object(PodcastProcessor, "_ensure_transcript_covers_audio"):
+        yield
+
+
 def test_llm_chapter_fallback_tagging_disabled_skips_resolver_and_writer() -> None:
     config = create_standard_test_config()
     config.enable_llm_chapter_fallback_tagging = False

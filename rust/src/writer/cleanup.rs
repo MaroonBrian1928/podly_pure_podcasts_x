@@ -56,6 +56,7 @@ struct CleanupPost {
     guid: String,
     title: String,
     feed_title: Option<String>,
+    feed_strategy: Option<String>,
     unprocessed: Option<String>,
     processed: Option<String>,
 }
@@ -64,7 +65,8 @@ fn cleanup_missing_audio_paths(transaction: &Transaction<'_>) -> RpcActionResult
     let posts = transaction
         .prepare(
             "SELECT post.id,post.guid,post.title,feed.title,
-                    post.unprocessed_audio_path,post.processed_audio_path
+                    post.unprocessed_audio_path,post.processed_audio_path,
+                    feed.ad_detection_strategy
              FROM post LEFT JOIN feed ON feed.id=post.feed_id
              WHERE post.whitelisted AND (
                 post.unprocessed_audio_path IS NOT NULL OR post.processed_audio_path IS NOT NULL
@@ -77,6 +79,7 @@ fn cleanup_missing_audio_paths(transaction: &Transaction<'_>) -> RpcActionResult
                 guid: row.get(1)?,
                 title: row.get(2)?,
                 feed_title: row.get(3)?,
+                feed_strategy: row.get(6)?,
                 unprocessed: row.get(4)?,
                 processed: row.get(5)?,
             })
@@ -380,6 +383,7 @@ fn load_cleanup_post(transaction: &Transaction<'_>, post_id: i64) -> Result<Clea
                     guid: row.get(1)?,
                     title: row.get(2)?,
                     feed_title: row.get(3)?,
+                    feed_strategy: None,
                     unprocessed: row.get(4)?,
                     processed: row.get(5)?,
                 })
@@ -388,8 +392,16 @@ fn load_cleanup_post(transaction: &Transaction<'_>, post_id: i64) -> Result<Clea
         .map_err(database_error)
 }
 
+/// Mirrors `find_existing_processed_audio_path` with `adopts_unrecorded_processed_audio`
+/// in src/shared/processing_paths.py: for LLM ad detection only the recorded
+/// path counts, since an unrecorded file may come from an incomplete run.
 fn find_existing_processed_audio(post: &CleanupPost) -> Option<PathBuf> {
-    processed_audio_candidates(post).into_iter().find(|path| {
+    let candidates = if post.feed_strategy.as_deref().unwrap_or("llm") == "llm" {
+        post.processed.iter().map(PathBuf::from).collect()
+    } else {
+        processed_audio_candidates(post)
+    };
+    candidates.into_iter().find(|path| {
         path.metadata()
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
     })
@@ -521,7 +533,8 @@ mod tests {
     fn schema(connection: &Connection) {
         connection
             .execute_batch(
-                "CREATE TABLE feed(id INTEGER PRIMARY KEY,title TEXT);
+                "CREATE TABLE feed(id INTEGER PRIMARY KEY,title TEXT,
+                    ad_detection_strategy VARCHAR(20) NOT NULL DEFAULT 'llm');
                  CREATE TABLE post(
                     id INTEGER PRIMARY KEY,feed_id INTEGER,guid TEXT NOT NULL,title TEXT NOT NULL,
                     whitelisted BOOLEAN NOT NULL,unprocessed_audio_path TEXT,
@@ -556,7 +569,7 @@ mod tests {
                     skipped_jobs INTEGER NOT NULL,context_json JSON,counters_reset_at DATETIME,
                     created_at DATETIME,updated_at DATETIME
                  );
-                 INSERT INTO feed VALUES (1,'A Feed');
+                 INSERT INTO feed(id,title) VALUES (1,'A Feed');
                  INSERT INTO post VALUES (
                     1,1,'guid','A Post',1,'/missing/input.mp3','/missing/output.mp3',
                     42,'chapters','[]','[[1.0,2.0]]',300.5,'recorded','[]','[]','2026-01-01'

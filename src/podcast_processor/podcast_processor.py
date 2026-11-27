@@ -59,6 +59,7 @@ from podcast_processor.transcription_manager import TranscriptionManager
 from shared.config import Config
 from shared.processing_paths import (
     ProcessingPaths,
+    adopts_unrecorded_processed_audio,
     find_existing_processed_audio_path,
     get_job_unprocessed_path,
     get_srv_root,
@@ -329,7 +330,9 @@ class PodcastProcessor:
             try:
                 if os.path.exists(
                     processed_audio_path
-                ) and self._rediscovered_output_is_trusted(post, processed_audio_path):
+                ) and adopts_unrecorded_processed_audio(
+                    getattr(post.feed, "ad_detection_strategy", None)
+                ):
                     self.logger.info(f"Audio already processed: {post}")
                     # Update the database with the processed audio path
                     self._remove_unprocessed_audio(post)
@@ -1345,6 +1348,9 @@ class PodcastProcessor:
         post_description = post.description
 
         # Step 3: Classify ad segments
+        self._ensure_transcript_covers_audio(
+            post, transcript_segments, unprocessed_audio_path
+        )
         self._classify_ad_segments(post, job, transcript_segments)
         self._raise_if_cancelled(job, 3, cancel_callback)
 
@@ -1567,25 +1573,43 @@ class PodcastProcessor:
             .one()
         )
 
-    def _rediscovered_output_is_trusted(self, post: Post, path: str) -> bool:
-        """Whether a processed file found on disk, but not recorded on the post,
-        may be published.
+    def _ensure_transcript_covers_audio(
+        self,
+        post: Post,
+        transcript_segments: list[Any],
+        audio_path: str | None,
+    ) -> None:
+        """Fail when a long stretch of the audio has no transcript.
 
-        Rejected when the post has classification calls that did not succeed:
-        the file may come from a run whose ad detection was incomplete.
+        Audio without transcript is never classified, so its ads would be
+        published. Catches a transcription chunk that came back empty and a
+        reused transcript that no longer matches a fresh download.
         """
-        counts = self._get_llm_classification_model_call_counts(int(post.id))
-        if counts is not None and counts.total > counts.successful:
-            self.logger.warning(
-                "Ignoring processed audio found at %s for post %s: %s of %s "
-                "classification calls did not succeed.",
-                path,
-                post.id,
-                counts.total - counts.successful,
-                counts.total,
+        if not transcript_segments or not audio_path:
+            return
+        duration_ms = get_audio_duration_ms(audio_path)
+        if duration_ms is None:
+            raise ProcessorException(
+                f"Could not read the duration of {audio_path} to check transcript "
+                "coverage."
             )
-            return False
-        return True
+        covered_to = 0.0
+        worst_gap = (0.0, 0.0)  # (seconds, starting at)
+        for start, end in sorted(
+            (float(s.start_time), float(s.end_time)) for s in transcript_segments
+        ):
+            if start - covered_to > worst_gap[0]:
+                worst_gap = (start - covered_to, covered_to)
+            covered_to = max(covered_to, end)
+        tail = duration_ms / 1000.0 - covered_to
+        if tail > worst_gap[0]:
+            worst_gap = (tail, covered_to)
+        if worst_gap[0] > MAX_UNTRANSCRIBED_GAP_SECONDS:
+            raise ProcessorException(
+                f"Transcript for post {post.id} leaves {worst_gap[0]:.0f}s of audio "
+                f"from {worst_gap[1]:.0f}s untranscribed, so its ads could not be "
+                "identified; refusing to publish the episode."
+            )
 
     def _get_latest_llm_classification_error(self, post_id: int) -> str | None:
         session = getattr(self, "db_session", None)
@@ -2445,14 +2469,12 @@ class PodcastProcessor:
             unprocessed_audio_path=post.unprocessed_audio_path,
             feed_title=getattr(post.feed, "title", None),
             post_title=post.title,
+            allow_unrecorded=adopts_unrecorded_processed_audio(
+                getattr(post.feed, "ad_detection_strategy", None)
+            ),
         )
         if existing_processed_path:
             processed_path_str = str(existing_processed_path)
-            if (
-                post.processed_audio_path != processed_path_str
-                and not self._rediscovered_output_is_trusted(post, processed_path_str)
-            ):
-                return False
             if post.processed_audio_path != processed_path_str:
                 self.logger.info(
                     "Found existing processed audio for post '%s' at '%s'. "
@@ -2489,6 +2511,11 @@ class PodcastProcessor:
                 raise RuntimeError(getattr(result, "error", "Failed to update post"))
 
         return False
+
+
+# Longest stretch of audio without transcript that processing accepts. Long
+# music beds are allowed; a dropped transcription chunk is not.
+MAX_UNTRANSCRIBED_GAP_SECONDS = 600.0
 
 
 class ProcessorException(Exception):

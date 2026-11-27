@@ -5,7 +5,10 @@ from app.extensions import db as _db
 from app.models import Post, ProcessingJob
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
-from shared.processing_paths import find_existing_processed_audio_path
+from shared.processing_paths import (
+    adopts_unrecorded_processed_audio,
+    find_existing_processed_audio_path,
+)
 
 
 class JobManager:
@@ -165,6 +168,9 @@ class JobManager:
             unprocessed_audio_path=post.unprocessed_audio_path,
             feed_title=getattr(post.feed, "title", None),
             post_title=post.title,
+            allow_unrecorded=adopts_unrecorded_processed_audio(
+                getattr(post.feed, "ad_detection_strategy", None)
+            ),
         )
         if existing_processed_path:
             resolved_processed_path = str(existing_processed_path)

@@ -41,6 +41,7 @@ from podcast_processor.llm_model_call_utils import (
 from podcast_processor.model_output import (
     AdSegmentPredictionList,
     clean_and_parse_model_output,
+    has_complete_root_object,
     has_trailing_prediction_object,
 )
 from podcast_processor.prompt import (
@@ -105,6 +106,14 @@ class InvalidClassificationOutputError(Exception):
 
 class ClassificationRefusedError(Exception):
     """The provider withheld the answer (content filter); not retried."""
+
+
+class ClassificationOutputTruncatedError(Exception):
+    """The answer hit the output token limit.
+
+    Resending the same prompt would hit it again, so the chunk is rebuilt
+    with fewer segments instead.
+    """
 
 
 class AdClassifier:
@@ -361,6 +370,20 @@ class AdClassifier:
                     post=classify_params.post,
                 )
                 break
+            except ClassificationOutputTruncatedError as exc:
+                if consumed_segments <= 1:
+                    raise ClassificationIncompleteError(
+                        f"Classification of a single segment for post "
+                        f"{classify_params.post.id} exceeds the output token limit."
+                    ) from exc
+                max_new_segments = max(1, consumed_segments // 2)
+                self.logger.warning(
+                    "Classification of %s segments for post %s hit the output "
+                    "token limit; rebuilding the chunk with at most %s new segments",
+                    consumed_segments,
+                    classify_params.post.id,
+                    max_new_segments,
+                )
             except LLMRequestTooLargeError as exc:
                 if consumed_segments <= 1:
                     raise
@@ -485,12 +508,16 @@ class AdClassifier:
                 "Provider withheld the classification (finish_reason=content_filter)."
             )
         if finish_reason == "length":
-            raise InvalidClassificationOutputError(
+            raise ClassificationOutputTruncatedError(
                 "Classification was cut off at the output token limit "
                 "(finish_reason=length)."
             )
         if not content or not content.strip():
             raise InvalidClassificationOutputError("Classification response was empty.")
+        if not has_complete_root_object(content):
+            raise InvalidClassificationOutputError(
+                "Classification response is not a complete JSON object."
+            )
         if has_trailing_prediction_object(content):
             raise InvalidClassificationOutputError(
                 "Classification response holds more than one prediction object."
@@ -563,6 +590,23 @@ class AdClassifier:
         )
         if not res or not res.success:
             raise RuntimeError(getattr(res, "error", "Failed to update ModelCall"))
+        stale_identification_ids = [
+            int(row[0])
+            for row in self.db_session.query(Identification.id)
+            .filter(Identification.model_call_id == model_call.id)
+            .all()
+        ]
+        if stale_identification_ids:
+            # Ads marked from the replaced answer must not survive it.
+            res = writer_client.action(
+                "replace_identifications",
+                {"delete_ids": stale_identification_ids, "new_identifications": []},
+                wait=True,
+            )
+            if not res or not res.success:
+                raise RuntimeError(
+                    getattr(res, "error", "Failed to delete stale identifications")
+                )
         model_call.prompt = user_prompt_str
         model_call.status = "pending"
         model_call.response = None
@@ -624,6 +668,20 @@ class AdClassifier:
                 or self._adaptive_input_token_limit is not None
             ) and not self._validate_token_limit(user_prompt_str, system_prompt):
                 token_limit_trimmed = True
+                if new_segment_count == 1 and capped_overlap:
+                    # The carried-over context alone can push a single new
+                    # segment past the limit; classify it without overlap
+                    # rather than failing the same request on every run.
+                    self.logger.warning(
+                        "Segment at transcript index %s for post %s exceeds the "
+                        "token limit with %s overlap segments; dropping the overlap.",
+                        base_segments[0].sequence_num,
+                        post.id,
+                        len(capped_overlap),
+                    )
+                    capped_overlap = []
+                    new_segment_count = min(max_new_segments, len(remaining_segments))
+                    continue
                 if new_segment_count == 1:
                     self.logger.warning(
                         "Even single segment at transcript index %s exceeds token limit "
@@ -1338,7 +1396,12 @@ class AdClassifier:
         if isinstance(error, InvalidClassificationOutputError):
             return True
         if isinstance(
-            error, (ClassificationRefusedError, ClassificationIncompleteError)
+            error,
+            (
+                ClassificationRefusedError,
+                ClassificationIncompleteError,
+                ClassificationOutputTruncatedError,
+            ),
         ):
             return False
         return LLMErrorClassifier.is_retryable_error(error)

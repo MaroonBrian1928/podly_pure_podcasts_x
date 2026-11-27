@@ -20,7 +20,10 @@ from app.memory_pressure import release_memory_to_os
 from app.models import Feed, JobsManagerRun, ModelCall, Post, ProcessingJob
 from app.writer.client import writer_client
 from podcast_processor.processing_status_manager import ProcessingStatusManager
-from shared.processing_paths import find_existing_processed_audio_path
+from shared.processing_paths import (
+    adopts_unrecorded_processed_audio,
+    find_existing_processed_audio_path,
+)
 
 logger = logging.getLogger("global_logger")
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "skipped"}
@@ -370,7 +373,7 @@ class JobsManager:
                     Post.processed_audio_path,
                     Post.unprocessed_audio_path,
                 ),
-                joinedload(Post.feed).load_only(Feed.title),
+                joinedload(Post.feed).load_only(Feed.title, Feed.ad_detection_strategy),
             )
             .filter(ProcessingJob.id.is_(None), Post.whitelisted.is_(True))
             .all()
@@ -384,6 +387,9 @@ class JobsManager:
                 unprocessed_audio_path=post.unprocessed_audio_path,
                 feed_title=getattr(post.feed, "title", None),
                 post_title=post.title,
+                allow_unrecorded=adopts_unrecorded_processed_audio(
+                    getattr(post.feed, "ad_detection_strategy", None)
+                ),
             )
             if existing_processed_path:
                 processed_path_str = str(existing_processed_path)
@@ -432,6 +438,9 @@ class JobsManager:
                     unprocessed_audio_path=post.unprocessed_audio_path,
                     feed_title=getattr(post.feed, "title", None),
                     post_title=post.title,
+                    allow_unrecorded=adopts_unrecorded_processed_audio(
+                        getattr(post.feed, "ad_detection_strategy", None)
+                    ),
                 )
                 if existing_processed_path:
                     return {
@@ -482,6 +491,9 @@ class JobsManager:
                 unprocessed_audio_path=post.unprocessed_audio_path,
                 feed_title=getattr(post.feed, "title", None),
                 post_title=post.title,
+                allow_unrecorded=adopts_unrecorded_processed_audio(
+                    getattr(post.feed, "ad_detection_strategy", None)
+                ),
             ):
                 response["download_url"] = f"/api/posts/{post_guid}/download"
             if job.status == "failed" and job.error_message:

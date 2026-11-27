@@ -214,4 +214,35 @@ def has_trailing_prediction_object(model_output: str) -> bool:
         return False
     root = _truncate_after_balanced_root(model_output[start_idx:])
     rest = model_output[start_idx + len(root) :]
-    return "{" in rest and '"ad_segments"' in rest
+    return "{" in rest and "ad_segments" in rest
+
+
+def has_complete_root_object(model_output: str) -> bool:
+    """True when the output contains a balanced top-level JSON object.
+
+    A cut-off answer never closes its root object; the parser would repair it
+    into whatever predictions came before the cut.
+    """
+    start_idx = model_output.find("{")
+    if start_idx < 0:
+        return False
+    depth = 0
+    in_string = False
+    escape = False
+    for ch in model_output[start_idx:]:
+        if escape:
+            escape = False
+        elif in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return True
+    return False

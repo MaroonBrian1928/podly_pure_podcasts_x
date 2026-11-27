@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -14,17 +13,29 @@ from jinja2 import Template
 from litellm.types.utils import Choices
 
 from app.extensions import db
-from app.models import ModelCall, Post, ProcessingJob, TranscriptSegment
+from app.models import (
+    Identification,
+    ModelCall,
+    Post,
+    ProcessingJob,
+    TranscriptSegment,
+)
 from podcast_processor.ad_classifier import (
     AdClassifier,
     ClassificationIncompleteError,
+    ClassificationOutputTruncatedError,
     ClassificationRefusedError,
     ClassifyException,
+    ClassifyParams,
     InvalidClassificationOutputError,
 )
 from podcast_processor.podcast_processor import PodcastProcessor, ProcessorException
 from podcast_processor.transcribe import OpenAIWhisperTranscriber
 from shared.config import Config
+from shared.processing_paths import (
+    adopts_unrecorded_processed_audio,
+    find_existing_processed_audio_path,
+)
 from shared.test_utils import create_standard_test_config
 
 VALID = '{"ad_segments": [{"segment_offset": 10.0, "confidence": 0.95}]}'
@@ -93,7 +104,8 @@ def _validator(classifier: AdClassifier) -> Any:
     [
         _response(""),
         _response(None),
-        _response('{"ad_segments": [', finish_reason="length"),
+        _response('{"ad_segments": ['),
+        _response("{'ad_segments': []} {'ad_segments': [{'segment_offset': 10.0, 'confidence': 0.9}]}"),
         _response("not json"),
         _response('{"ad_segments": []} {"ad_segments": [{"segment_offset": 10.0, "confidence": 0.9}]}'),
         _response('{"ad_segments": [{"segment_offset": 55.0, "confidence": 0.95}]}'),
@@ -126,10 +138,10 @@ def test_answers_that_stay_unusable_fail_the_call(config: Config, app: Flask) ->
     with app.app_context():
         classifier = AdClassifier(config=config, db_session=db.session)
         call = _pending_call(config)
-        cut_off = _response('{"ad_segments": [', finish_reason="length")
+        empty = _response("")
         with (
             patch("time.sleep"),
-            patch("litellm.completion", return_value=cut_off),
+            patch("litellm.completion", return_value=empty),
             pytest.raises(InvalidClassificationOutputError),
         ):
             classifier._call_model(
@@ -309,26 +321,200 @@ def test_empty_transcript_is_not_published(config: Config) -> None:
     classifier.classify.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("total", "successful", "trusted"),
-    [(3, 3, True), (3, 2, False), (0, 0, True)],
-)
-def test_rediscovered_output_requires_successful_classification(
-    config: Config, total: int, successful: int, trusted: bool
-) -> None:
-    processor = _bare_processor(config)
-    counts = SimpleNamespace(total=total, successful=successful)
-    with patch.object(
-        processor, "_get_llm_classification_model_call_counts", return_value=counts
-    ):
-        assert (
-            processor._rediscovered_output_is_trusted(
-                Post(id=1, title="t"), "/tmp/x.mp3"
-            )
-            is trusted
-        )
-
-
 def test_transcription_without_segments_is_an_error() -> None:
     with pytest.raises(ValueError, match="segments"):
         OpenAIWhisperTranscriber.extract_segments_from_transcription({"text": "hi"})
+
+
+def test_output_limit_rebuilds_the_chunk_instead_of_resending(
+    config: Config, app: Flask
+) -> None:
+    with app.app_context():
+        classifier = AdClassifier(config=config, db_session=db.session)
+        call = _pending_call(config)
+        cut_off = _response('{"ad_segments": [', finish_reason="length")
+        with (
+            patch("litellm.completion", return_value=cut_off) as llm,
+            pytest.raises(ClassificationOutputTruncatedError),
+        ):
+            classifier._call_model(
+                model_call_obj=call,
+                system_prompt="sys",
+                validate=_validator(classifier),
+            )
+        assert llm.call_count == 1
+
+        segments = [
+            TranscriptSegment(
+                id=index + 1,
+                post_id=1,
+                sequence_num=index,
+                start_time=index * 10.0,
+                end_time=index * 10.0 + 10.0,
+                text=f"segment {index}",
+            )
+            for index in range(8)
+        ]
+        params = ClassifyParams(
+            post=Post(id=1, title="t"),
+            system_prompt="sys",
+            user_prompt_template=Template("{{ transcript }}"),
+            num_segments_per_prompt=8,
+            max_overlap_segments=0,
+        )
+        chunk_sizes: list[int] = []
+
+        def process(**kwargs: Any) -> list[TranscriptSegment]:
+            chunk_sizes.append(len(kwargs["chunk_segments"]))
+            if len(chunk_sizes) == 1:
+                raise ClassificationOutputTruncatedError("cut off")
+            return []
+
+        with patch.object(classifier, "_process_chunk", side_effect=process):
+            consumed, _overlap = classifier._step(params, [], 0, segments)
+
+        assert chunk_sizes == [8, 4]
+        assert consumed == 4
+
+
+def test_single_segment_drops_overlap_to_fit_the_token_limit(
+    config: Config, app: Flask
+) -> None:
+    with app.app_context():
+        classifier = AdClassifier(config=config, db_session=db.session)
+        segments = _segments()
+        fits = {(2,): True, (1, 2): False}
+
+        def validate(prompt: str, _system: str) -> bool:
+            return fits[tuple(int(i) for i in prompt.split(","))]
+
+        with (
+            patch.object(
+                classifier,
+                "_generate_user_prompt",
+                side_effect=lambda **kw: ",".join(
+                    str(s.id) for s in kw["current_chunk_db_segments"]
+                ),
+            ),
+            patch.object(classifier, "_validate_token_limit", side_effect=validate),
+        ):
+            classifier._adaptive_input_token_limit = 100
+            chunk, _prompt, consumed, trimmed = classifier._build_chunk_payload(
+                overlap_segments=[segments[0]],
+                remaining_segments=[segments[1]],
+                total_segments=segments,
+                post=Post(id=1, title="t"),
+                system_prompt="sys",
+                user_prompt_template=Template(""),
+                max_new_segments=1,
+            )
+
+        assert [s.id for s in chunk] == [2]
+        assert consumed == 1
+        assert trimmed
+
+
+def test_replaced_answer_takes_its_ad_marks_with_it(config: Config, app: Flask) -> None:
+    with app.app_context():
+        classifier = AdClassifier(config=config, db_session=db.session)
+        call = _pending_call(config, prompt="an older prompt")
+        call.status = "success"
+        call.response = VALID
+        db.session.add(
+            TranscriptSegment(
+                id=1, post_id=1, sequence_num=0, start_time=0.0, end_time=10.0, text="a"
+            )
+        )
+        db.session.add(
+            Identification(
+                transcript_segment_id=1,
+                model_call_id=call.id,
+                label="ad",
+                confidence=0.9,
+            )
+        )
+        db.session.commit()
+
+        assert classifier._stored_response_is_stale(
+            call, "prompt", _validator(classifier)
+        )
+        assert (
+            db.session.query(Identification).filter_by(model_call_id=call.id).count()
+            == 0
+        )
+
+
+def _segment_at(start: float, end: float) -> TranscriptSegment:
+    return TranscriptSegment(
+        post_id=1, sequence_num=0, start_time=start, end_time=end, text="x"
+    )
+
+
+@pytest.mark.parametrize(
+    ("segments", "duration_ms", "ok"),
+    [
+        ([(0.0, 1800.0)], 1_800_000, True),
+        ([(0.0, 600.0), (1100.0, 1800.0)], 1_800_000, True),
+        ([(0.0, 600.0), (1300.0, 1800.0)], 1_800_000, False),
+        ([(0.0, 1200.0)], 1_900_000, False),
+        ([(700.0, 1800.0)], 1_800_000, False),
+    ],
+)
+def test_transcript_must_cover_the_audio(
+    config: Config,
+    segments: list[tuple[float, float]],
+    duration_ms: int,
+    ok: bool,
+) -> None:
+    processor = _bare_processor(config)
+    transcript = [_segment_at(start, end) for start, end in segments]
+    with patch(
+        "podcast_processor.podcast_processor.get_audio_duration_ms",
+        return_value=duration_ms,
+    ):
+        if ok:
+            processor._ensure_transcript_covers_audio(
+                Post(id=1, title="t"), transcript, "/tmp/in.mp3"
+            )
+        else:
+            with pytest.raises(ProcessorException):
+                processor._ensure_transcript_covers_audio(
+                    Post(id=1, title="t"), transcript, "/tmp/in.mp3"
+                )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "adopts"),
+    [("llm", False), (None, False), ("chapter", True), ("chapter_insert", True)],
+)
+def test_unrecorded_processed_files_are_adopted_only_without_llm_detection(
+    strategy: str | None, adopts: bool
+) -> None:
+    assert adopts_unrecorded_processed_audio(strategy) is adopts
+
+
+def test_find_existing_processed_audio_can_ignore_unrecorded_files(
+    tmp_path: Any,
+) -> None:
+    recorded = tmp_path / "recorded.mp3"
+    assert (
+        find_existing_processed_audio_path(
+            processed_audio_path=str(recorded),
+            unprocessed_audio_path=str(tmp_path / "in" / "episode.mp3"),
+            feed_title="Feed",
+            post_title="Episode",
+            allow_unrecorded=False,
+        )
+        is None
+    )
+    recorded.write_bytes(b"audio")
+    assert (
+        find_existing_processed_audio_path(
+            processed_audio_path=str(recorded),
+            unprocessed_audio_path=None,
+            feed_title=None,
+            post_title=None,
+            allow_unrecorded=False,
+        )
+        == recorded
+    )
