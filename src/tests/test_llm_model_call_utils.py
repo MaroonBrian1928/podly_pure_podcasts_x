@@ -355,6 +355,10 @@ _SAMPLING_MODEL_MAP: dict[str, dict[str, Any]] = {
         "supports_sampling_params": False,
     },
     "claude-sonnet-4-6": {"litellm_provider": "anthropic"},
+    "global.anthropic.claude-opus-4-7": {
+        "litellm_provider": "bedrock_converse",
+        "supports_sampling_params": False,
+    },
     "gemini/gemini-3-flash-preview": {
         "litellm_provider": "gemini",
         "supports_sampling_params": True,
@@ -368,6 +372,8 @@ _SAMPLING_MODEL_MAP: dict[str, dict[str, Any]] = {
         ("anthropic/claude-sonnet-5-5", False),
         ("claude-sonnet-5-5", False),
         ("anthropic/claude-sonnet-4-6", True),
+        ("bedrock/converse/global.anthropic.claude-opus-4-7", False),
+        ("bedrock/global.anthropic.claude-opus-4-7", False),
         ("gemini/gemini-3-flash-preview", True),
         ("my-local-model", True),
         (None, True),
@@ -802,3 +808,12 @@ def test_tier_retry_paces_every_provider_attempt(
         "pace",
         "call:None",
     ]
+
+
+def test_bundled_litellm_map_resolves_routed_bedrock_model() -> None:
+    assert (
+        model_supports_sampling_params(
+            "bedrock/converse/global.anthropic.claude-opus-4-7"
+        )
+        is False
+    )

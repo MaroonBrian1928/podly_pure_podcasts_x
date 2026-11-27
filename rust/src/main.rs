@@ -5624,6 +5624,9 @@ fn trim_file(input: &Path, output: &Path, start_ms: u64, end_ms: u64) -> Result<
         .arg(format!("{:.3}", duration_ms as f64 / 1000.0))
         .arg("-i")
         .arg(input)
+        // The first audio track is the one probe_audio_codec named the chunk for.
+        .arg("-map")
+        .arg("0:a:0")
         .arg("-codec:a")
         .arg("copy")
         .arg("-vn")

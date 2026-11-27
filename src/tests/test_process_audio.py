@@ -14,7 +14,6 @@ from podcast_processor.audio import (
     get_audio_duration_ms,
     overlay_beeps_with_ducking,
     split_audio,
-    trim_file,
 )
 
 TEST_FILE_DURATION = 66_048
@@ -254,38 +253,27 @@ def test_overlay_beeps_with_ducking_uses_rust_when_enabled(monkeypatch) -> None:
     assert calls[0]["vbr_quality"] == DEFAULT_VBR_QUALITY
 
 
-def test_trim_file_uses_stream_copy_for_transcription_chunks(monkeypatch) -> None:
-    output_calls = []
-
-    class FakeFfmpegStream:
-        def output(self, *args, **kwargs):
-            output_calls.append((args, kwargs))
-            return self
-
-        def overwrite_output(self):
-            return self
-
-        def run(self, *args, **kwargs):
-            return None
-
-    monkeypatch.setattr(
-        audio_module.ffmpeg,
-        "input",
-        lambda *args, **kwargs: FakeFfmpegStream(),
+def test_trim_file_uses_stream_copy_for_transcription_chunks() -> None:
+    stream = audio_module._trim_stream(
+        Path("input.mp3"), Path("chunk.m4a"), 1_000, 2_500
     )
 
-    trim_file(Path("input.mp3"), Path("chunk.mp3"), 1_000, 2_500)
-
-    assert output_calls == [
-        (
-            ("chunk.mp3",),
-            {
-                "ss": 1.0,
-                "t": 1.5,
-                "acodec": "copy",
-                "vn": None,
-            },
-        )
+    # Same arguments as the Rust sidecar's trim_file: input-side seek and the
+    # first audio track, so both split paths cut identical chunks.
+    assert stream.get_args() == [
+        "-ss",
+        "1.0",
+        "-t",
+        "1.5",
+        "-i",
+        "input.mp3",
+        "-map",
+        "0:a:0",
+        "-acodec",
+        "copy",
+        "-vn",
+        "chunk.m4a",
+        "-y",
     ]
 
 

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
-from flask import Flask
+from flask import Flask, g
 
-from app.auth.feed_tokens import _resolve_feed_id
+from app.auth.feed_tokens import (
+    _resolve_feed_ids,
+    _validate_token_access,
+    find_post_for_request,
+)
 from app.extensions import db
 from app.models import Feed, Post
 
@@ -63,7 +70,7 @@ def test_resolve_feed_id_for_url_shaped_guid_mp3(app_with_post: Flask) -> None:
     with app_with_post.app_context():
         expected = app_with_post.config["URL_FEED_ID"]
         # Decoded path the middleware sees for /post/<encoded-guid>.mp3.
-        assert _resolve_feed_id(f"/post/{URL_GUID}.mp3") == expected
+        assert _resolve_feed_ids(f"/post/{URL_GUID}.mp3") == [expected]
 
 
 def test_resolve_feed_id_for_url_shaped_guid_original_mp3(
@@ -71,14 +78,14 @@ def test_resolve_feed_id_for_url_shaped_guid_original_mp3(
 ) -> None:
     with app_with_post.app_context():
         expected = app_with_post.config["URL_FEED_ID"]
-        assert _resolve_feed_id(f"/post/{URL_GUID}/original.mp3") == expected
+        assert _resolve_feed_ids(f"/post/{URL_GUID}/original.mp3") == [expected]
 
 
 def test_resolve_feed_id_for_plain_guid_unchanged(app_with_post: Flask) -> None:
     with app_with_post.app_context():
         expected = app_with_post.config["PLAIN_FEED_ID"]
-        assert _resolve_feed_id("/post/episode-1.mp3") == expected
-        assert _resolve_feed_id("/post/episode-1/original.mp3") == expected
+        assert _resolve_feed_ids("/post/episode-1.mp3") == [expected]
+        assert _resolve_feed_ids("/post/episode-1/original.mp3") == [expected]
 
 
 def test_chapters_json_path_resolves_feed_and_accepts_tokens(
@@ -87,14 +94,12 @@ def test_chapters_json_path_resolves_feed_and_accepts_tokens(
     from app.auth.middleware import _is_token_protected_endpoint
 
     with app_with_post.app_context():
-        assert (
-            _resolve_feed_id(f"/post/{URL_GUID}/chapters.json")
-            == app_with_post.config["URL_FEED_ID"]
-        )
-        assert (
-            _resolve_feed_id("/post/episode-1/chapters.json")
-            == app_with_post.config["PLAIN_FEED_ID"]
-        )
+        assert _resolve_feed_ids(f"/post/{URL_GUID}/chapters.json") == [
+            app_with_post.config["URL_FEED_ID"]
+        ]
+        assert _resolve_feed_ids("/post/episode-1/chapters.json") == [
+            app_with_post.config["PLAIN_FEED_ID"]
+        ]
     assert _is_token_protected_endpoint(f"/post/{URL_GUID}/chapters.json")
     assert not _is_token_protected_endpoint("/post/episode-1/other.json")
 
@@ -129,3 +134,68 @@ def test_chapters_json_route_serves_podcasting_chapters(app_with_post: Flask) ->
         ],
     }
     assert client.get("/post/missing/chapters.json").status_code == 404
+
+
+def _add_post(feed_id: int, guid: str, **fields: object) -> Post:
+    post = Post(
+        feed_id=feed_id,
+        guid=guid,
+        download_url=f"https://example.com/{feed_id}/{guid}.mp3",
+        title=guid,
+        whitelisted=True,
+        **fields,
+    )
+    db.session.add(post)
+    db.session.commit()
+    return post
+
+
+def test_duplicate_guid_across_feeds_is_scoped_to_the_token_feed(
+    app_with_post: Flask,
+) -> None:
+    with app_with_post.app_context():
+        url_feed = app_with_post.config["URL_FEED_ID"]
+        plain_feed = app_with_post.config["PLAIN_FEED_ID"]
+        duplicate = _add_post(url_feed, "episode-1")
+        path = "/post/episode-1.mp3"
+
+        assert _resolve_feed_ids(path) == [plain_feed, url_feed]
+
+        user = cast(Any, SimpleNamespace(id=1, role="admin"))
+        token = cast(Any, SimpleNamespace(feed_id=url_feed))
+        assert _validate_token_access(token, user, path) == (True, url_feed)
+
+        with app_with_post.test_request_context(path):
+            g.feed_token = SimpleNamespace(resource_feed_id=url_feed)
+            found = find_post_for_request("episode-1")
+            assert found is not None
+            assert found.id == duplicate.id
+
+
+def test_guid_ending_in_original_serves_its_processed_enclosure(
+    app_with_post: Flask, tmp_path: Path
+) -> None:
+    from app.routes.post_routes import post_bp
+
+    app_with_post.register_blueprint(post_bp)
+    processed = tmp_path / "processed.mp3"
+    processed.write_bytes(b"processed-audio")
+    original = tmp_path / "original.mp3"
+    original.write_bytes(b"original-audio")
+    with app_with_post.app_context():
+        feed_id = app_with_post.config["PLAIN_FEED_ID"]
+        _add_post(feed_id, "show/ep", unprocessed_audio_path=str(original))
+        _add_post(feed_id, "show/ep/original", processed_audio_path=str(processed))
+
+        # The processed enclosure /post/<guid>.mp3 of "show/ep/original" is the
+        # same URL as the original-audio link of "show/ep".
+        assert _resolve_feed_ids("/post/show/ep/original.mp3") == [feed_id]
+
+    client = app_with_post.test_client()
+    response = client.get("/post/show/ep/original.mp3")
+    assert response.status_code == 200
+    assert response.data == b"processed-audio"
+
+    original_response = client.get("/api/posts/show/ep/download/original")
+    assert original_response.status_code == 200
+    assert original_response.data == b"original-audio"

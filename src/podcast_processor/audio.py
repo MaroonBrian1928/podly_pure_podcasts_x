@@ -32,9 +32,9 @@ def get_audio_duration_ms(file_path: str) -> int | None:
         probe = ffmpeg.probe(file_path)
         format_info = probe["format"]
         duration_seconds = float(format_info["duration"])
-        duration_milliseconds = duration_seconds * 1000
         logger.debug("[FFMPEG_PROBE] Duration: %.2f seconds", duration_seconds)
-        return int(duration_milliseconds)
+        # Rounded like the Rust sidecar's probe so chunk offsets match.
+        return round(duration_seconds * 1000)
     except ffmpeg.Error as e:
         logger.error(
             "[FFMPEG_PROBE] Error probing file %s: %s",
@@ -609,34 +609,33 @@ def _probe_audio_codec(file_path: Path) -> str | None:
     return None
 
 
-def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:
-    duration_ms = end_ms - start_ms
+def _trim_stream(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> Any:
+    """Build the stream-copy trim for one transcription chunk.
 
-    if duration_ms <= 0:
+    Mirrors the Rust sidecar's ``trim_file``: input-side seek, and the first
+    audio track, which is the one ``_probe_audio_codec`` named the chunk for.
+    """
+    start_sec = max(start_ms, 0) / 1000.0
+    duration_sec = (end_ms - start_ms) / 1000.0
+    return (
+        ffmpeg.input(str(in_path), ss=start_sec, t=duration_sec)["a:0"]
+        .output(str(out_path), acodec="copy", vn=None)
+        .overwrite_output()
+    )
+
+
+def trim_file(in_path: Path, out_path: Path, start_ms: int, end_ms: int) -> None:
+    if end_ms - start_ms <= 0:
         return
 
-    start_sec = max(start_ms, 0) / 1000.0
-    duration_sec = duration_ms / 1000.0
-
     logger.debug(
-        "[FFMPEG_TRIM] Trimming %s -> %s (start=%.2fs, duration=%.2fs)",
+        "[FFMPEG_TRIM] Trimming %s -> %s (start_ms=%d, end_ms=%d)",
         in_path,
         out_path,
-        start_sec,
-        duration_sec,
+        start_ms,
+        end_ms,
     )
-    (
-        ffmpeg.input(str(in_path))
-        .output(
-            str(out_path),
-            ss=start_sec,
-            t=duration_sec,
-            acodec="copy",
-            vn=None,
-        )
-        .overwrite_output()
-        .run()
-    )
+    _trim_stream(in_path, out_path, start_ms, end_ms).run()
 
 
 def split_audio(

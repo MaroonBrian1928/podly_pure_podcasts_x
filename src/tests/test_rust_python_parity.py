@@ -597,10 +597,59 @@ def test_rust_split_names_aac_chunks_like_python(
     )
     assert rust_chunks is not None, "Rust split fell back to Python"
 
+    # Pure Python path: neither the split nor the duration probe may use Rust.
     monkeypatch.setattr(audio, "try_split_audio", lambda **kwargs: None)
+    monkeypatch.setattr(audio, "try_probe_audio_duration_ms", lambda *_args: None)
     py_chunks = audio.split_audio(source, tmp_path / "py", 200_000)
 
     assert [(p.name, off) for p, off in rust_chunks] == [
         (p.name, off) for p, off in py_chunks
     ]
     assert all(p.suffix == ".m4a" and p.stat().st_size > 0 for p, _ in rust_chunks)
+    # Same cut points, not just the same reported offsets.
+    assert [audio.get_audio_duration_ms(str(p)) for p, _ in rust_chunks] == [
+        audio.get_audio_duration_ms(str(p)) for p, _ in py_chunks
+    ]
+
+
+def test_split_uses_the_probed_track_when_the_source_has_several(
+    monkeypatch: pytest.MonkeyPatch, rust_bin: Path, tmp_path: Path
+) -> None:
+    """FFmpeg's default pick is the track marked default (the MP3), but chunks
+    are named for track a:0 (FLAC); both split paths must copy that track."""
+    import subprocess
+
+    from podcast_processor import audio
+    from shared import rust_sidecar
+
+    source = tmp_path / "two_tracks.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=6",
+            "-map", "0:a", "-map", "1:a",
+            "-c:a:0", "flac", "-ac:a:0", "1",
+            "-c:a:1", "libmp3lame", "-ac:a:1", "2",
+            "-disposition:a:0", "0", "-disposition:a:1", "default",
+            str(source),
+        ],
+        check=True,
+    )  # fmt: skip
+    monkeypatch.setenv("PODLY_RUST_TOOLS_BIN", str(rust_bin))
+    monkeypatch.setenv("PODLY_RUST_AUDIO_ENABLED", "true")
+
+    rust_chunks = rust_sidecar.try_split_audio(
+        input_path=source, output_dir=tmp_path / "rust", chunk_size_bytes=50_000
+    )
+    assert rust_chunks is not None, "Rust split fell back to Python"
+
+    monkeypatch.setattr(audio, "try_split_audio", lambda **kwargs: None)
+    monkeypatch.setattr(audio, "try_probe_audio_duration_ms", lambda *_args: None)
+    py_chunks = audio.split_audio(source, tmp_path / "py", 50_000)
+
+    for chunks in (rust_chunks, py_chunks):
+        assert len(chunks) > 1
+        for path, _offset in chunks:
+            assert path.suffix == ".flac"
+            assert audio._probe_audio_codec(path) == "flac"

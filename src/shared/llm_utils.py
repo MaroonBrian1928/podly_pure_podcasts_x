@@ -50,10 +50,11 @@ def model_supports_sampling_params(model_name: str | None) -> bool:
     import litellm
 
     model_cost = getattr(litellm, "model_cost", None) or {}
-    candidates = [model_name]
-    if "/" in model_name:
-        # "anthropic/claude-sonnet-5-5" is keyed as "claude-sonnet-5-5".
-        candidates.append(model_name.split("/", 1)[1])
+    # Route prefixes can stack ("bedrock/converse/global.anthropic.claude-opus-4-7"
+    # is keyed as "global.anthropic.claude-opus-4-7"), so try the full name and
+    # then each suffix after a "/", longest first.
+    parts = model_name.split("/")
+    candidates = ["/".join(parts[index:]) for index in range(len(parts))]
     for candidate in candidates:
         entry = model_cost.get(candidate)
         if isinstance(entry, dict):
