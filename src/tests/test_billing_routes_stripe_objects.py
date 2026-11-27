@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -56,14 +57,22 @@ def test_invalid_webhook_does_not_log_verification_details(
         billing_routes, "_get_stripe_client", lambda: (stripe_stub, None)
     )
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_secret")
+    # global_logger does not propagate under pytest, so caplog must attach
+    # to it directly.
+    billing_logger = logging.getLogger("global_logger")
+    billing_logger.addHandler(caplog.handler)
     app = Flask(__name__)
-    with app.test_request_context(
-        "/api/billing/stripe-webhook",
-        method="POST",
-        data=b"{}",
-        headers={"Stripe-Signature": "t=1,v1=bad"},
-    ):
-        response = billing_routes.stripe_webhook()
+    try:
+        with app.test_request_context(
+            "/api/billing/stripe-webhook",
+            method="POST",
+            data=b"{}",
+            headers={"Stripe-Signature": "t=1,v1=bad"},
+        ):
+            response = billing_routes.stripe_webhook()
+    finally:
+        billing_logger.removeHandler(caplog.handler)
 
     assert response[1] == 400
+    assert "Invalid Stripe webhook (ValueError)" in caplog.text
     assert secret_hint not in caplog.text
