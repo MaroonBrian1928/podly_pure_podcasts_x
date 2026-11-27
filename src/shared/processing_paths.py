@@ -90,14 +90,21 @@ def find_existing_processed_audio_path(
     unprocessed_audio_path: str | None,
     feed_title: str | None,
     post_title: str | None,
+    allow_unrecorded: bool = True,
 ) -> Path | None:
-    """Return the first non-empty processed-audio file found across path variants."""
-    candidates = get_processed_audio_path_candidates(
-        processed_audio_path=processed_audio_path,
-        unprocessed_audio_path=unprocessed_audio_path,
-        feed_title=feed_title,
-        post_title=post_title,
-    )
+    """Return the first non-empty processed-audio file found across path variants.
+
+    With allow_unrecorded=False only the path recorded on the post counts.
+    """
+    if allow_unrecorded:
+        candidates = get_processed_audio_path_candidates(
+            processed_audio_path=processed_audio_path,
+            unprocessed_audio_path=unprocessed_audio_path,
+            feed_title=feed_title,
+            post_title=post_title,
+        )
+    else:
+        candidates = [Path(processed_audio_path)] if processed_audio_path else []
     for candidate in candidates:
         try:
             if (
@@ -109,6 +116,16 @@ def find_existing_processed_audio_path(
         except OSError:
             continue
     return None
+
+
+def adopts_unrecorded_processed_audio(ad_detection_strategy: str | None) -> bool:
+    """Whether a processed file found on disk, but not recorded on the post, may
+    be published.
+
+    Not for LLM ad detection: such a file may come from a run whose
+    classification was incomplete, so the episode is processed again.
+    """
+    return (ad_detection_strategy or "llm") != "llm"
 
 
 def get_job_unprocessed_path(post_guid: str, job_id: str, post_title: str) -> Path:

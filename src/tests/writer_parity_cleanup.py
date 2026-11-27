@@ -31,6 +31,15 @@ WRITER_DIFFERENTIAL_CASES = (
         "semantics": "legacy_title_path_recovery",
     },
     {
+        "case_id": "cleanup_missing_audio_paths_llm_feed_ignores_unrecorded_file",
+        "operation": "action",
+        "action": "cleanup_missing_audio_paths",
+        "owner": "cleanup_missing_audio_paths",
+        "owner_group": "cleanup",
+        "source": "src/app/writer/actions/cleanup.py:cleanup_missing_audio_paths_action",
+        "semantics": "llm_feed_unrecorded_file_is_not_adopted",
+    },
+    {
         "case_id": "cleanup_missing_audio_paths_preserves_valid_paths",
         "operation": "action",
         "action": "cleanup_missing_audio_paths",
@@ -270,7 +279,10 @@ def _seed_backend(  # noqa: PLR0912 - scenario-specific isolated fixture setup
     input_path, processed_path, srv_root = _paths(backend)
     missing_input = backend.data_in / "intentionally-missing-input.mp3"
     stale_processed = backend.data_srv / "intentionally-missing-processed.mp3"
-    if case_id == "cleanup_missing_audio_paths_recover_and_requeue":
+    if case_id in {
+        "cleanup_missing_audio_paths_recover_and_requeue",
+        "cleanup_missing_audio_paths_llm_feed_ignores_unrecorded_file",
+    }:
         # Rust and Python both search the sanitized feed directory for a
         # processed copy derived from the unprocessed basename.
         derived_path = srv_root / "Parity_feed_one" / missing_input.name
@@ -345,6 +357,16 @@ def _seed_backend(  # noqa: PLR0912 - scenario-specific isolated fixture setup
         )
         if case_id == "cleanup_missing_audio_paths_ignores_unwhitelisted":
             connection.execute("UPDATE post SET whitelisted=0 WHERE id=?", (_POST_ID,))
+        if case_id in {
+            "cleanup_missing_audio_paths_recover_and_requeue",
+            "cleanup_missing_audio_paths_legacy_title_candidate",
+        }:
+            # Unrecorded files are adopted only outside LLM ad detection.
+            connection.execute(
+                """UPDATE feed SET ad_detection_strategy='chapter'
+                   WHERE id=(SELECT feed_id FROM post WHERE id=?)""",
+                (_POST_ID,),
+            )
         # Keep each supported Whisper-recognition predicate independent from
         # the others: exact prompt, model name containing "whisper", and the
         # local_ model prefix. The classifier row must still be deleted.
@@ -390,6 +412,7 @@ def _seed_backend(  # noqa: PLR0912 - scenario-specific isolated fixture setup
         if case_id in {
             "cleanup_missing_audio_paths_recover_and_requeue",
             "cleanup_missing_audio_paths_legacy_title_candidate",
+            "cleanup_missing_audio_paths_llm_feed_ignores_unrecorded_file",
             "cleanup_missing_audio_paths_preserves_valid_paths",
         }:
             connection.execute(
@@ -772,6 +795,12 @@ def assert_writer_cleanup_parity(  # noqa: PLR0912 - action-specific parity bran
         assert python_post["processed_audio_path"].endswith(
             "Parity feed one/Integral duration episode.mp3"
         )
+        latest = max(python_jobs, key=lambda row: row["created_at"])
+        assert latest["status"] == "pending"
+    elif case_id == "cleanup_missing_audio_paths_llm_feed_ignores_unrecorded_file":
+        assert observation["python_data"] == 1
+        assert python_post["unprocessed_audio_path"] is None
+        assert python_post["processed_audio_path"] is None
         latest = max(python_jobs, key=lambda row: row["created_at"])
         assert latest["status"] == "pending"
     elif case_id == "cleanup_missing_audio_paths_preserves_valid_paths":

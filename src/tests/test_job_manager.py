@@ -7,8 +7,12 @@ from app.job_manager import JobManager
 from app.models import Feed, Post
 
 
-def _create_feed(title: str = "Test Feed") -> Feed:
-    feed = Feed(title=title, rss_url="https://example.com/feed.xml")
+def _create_feed(title: str = "Test Feed", ad_detection_strategy: str = "llm") -> Feed:
+    feed = Feed(
+        title=title,
+        rss_url="https://example.com/feed.xml",
+        ad_detection_strategy=ad_detection_strategy,
+    )
     db.session.add(feed)
     db.session.commit()
     return feed
@@ -43,7 +47,8 @@ def test_load_and_validate_post_skips_when_processed_audio_exists_via_fallback(
 ) -> None:
     monkeypatch.setenv("PODLY_PODCAST_DATA_DIR", str(tmp_path))
 
-    feed = _create_feed("My Feed")
+    # Unrecorded files are adopted only outside LLM ad detection.
+    feed = _create_feed("My Feed", ad_detection_strategy="chapter")
     unprocessed_name = "episode.mp3"
     resolved_processed = tmp_path / "srv" / "My_Feed" / unprocessed_name
     resolved_processed.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +89,42 @@ def test_load_and_validate_post_skips_when_processed_audio_exists_via_fallback(
         {"processed_audio_path": str(resolved_processed)},
         wait=True,
     )
+
+
+def test_load_and_validate_post_reprocesses_unrecorded_file_for_llm_feed(
+    app, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PODLY_PODCAST_DATA_DIR", str(tmp_path))
+
+    feed = _create_feed("My Feed")
+    unprocessed_name = "episode.mp3"
+    found_on_disk = tmp_path / "srv" / "My_Feed" / unprocessed_name
+    found_on_disk.parent.mkdir(parents=True, exist_ok=True)
+    found_on_disk.write_bytes(b"audio")
+
+    post = _create_post(
+        feed_id=feed.id,
+        guid="post-guid",
+        title="Episode",
+        download_url="https://example.com/episode.mp3",
+        processed_audio_path=None,
+        unprocessed_audio_path=str(
+            tmp_path / "in" / "jobs" / "post-guid" / unprocessed_name
+        ),
+    )
+
+    manager = JobManager(
+        post.guid,
+        status_manager=mock.MagicMock(),
+        logger_obj=mock.MagicMock(),
+        run_id=None,
+    )
+    with mock.patch("app.job_manager.writer_client.update") as mock_update:
+        loaded_post, early_result = manager._load_and_validate_post()
+
+    assert early_result is None
+    assert loaded_post is not None
+    mock_update.assert_not_called()
 
 
 def test_load_and_validate_post_does_not_skip_when_db_path_is_stale(
