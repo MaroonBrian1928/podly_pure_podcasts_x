@@ -116,10 +116,10 @@ python-version = "3.14"
 include = ["src"]
 
 [tool.ty.rules]
-unresolved-attribute = "warn"
+missing-attribute = "warn"
 invalid-argument-type = "warn"
-invalid-return-type = "warn"
-invalid-method-override = "warn"
+invalid-explicit-return = "warn"
+incompatible-method-override = "warn"
 invalid-assignment = "warn"
 no-matching-overload = "warn"
 not-subscriptable = "warn"
