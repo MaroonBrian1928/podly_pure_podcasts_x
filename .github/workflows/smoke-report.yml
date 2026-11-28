@@ -30,7 +30,7 @@ jobs:
       group: smoke-report-${{ github.event.workflow_run.head_sha }}
     steps:
       - name: Checkout default branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           sparse-checkout: .github/scripts
           persist-credentials: false
@@ -47,7 +47,7 @@ jobs:
 
       - name: Download report artifact
         if: steps.artifact.outputs.found == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: smoke-report
           path: ${{ runner.temp }}/smoke-report
